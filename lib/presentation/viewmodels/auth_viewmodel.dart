@@ -14,6 +14,7 @@ export 'view_state.dart';
 class AuthViewModel extends SafeChangeNotifier {
   final AuthRepository _authRepository;
   final NotificationService _notificationService;
+  StreamSubscription<UserModel?>? _authSubscription;
 
   AuthViewModel({
     required AuthRepository authRepository,
@@ -35,31 +36,29 @@ class AuthViewModel extends SafeChangeNotifier {
     safeNotifyListeners();
   }
 
+  // Subscribes to the Firebase auth state stream.
+  // Fires immediately with the current auth state, then again on every change
+  // (sign-in, sign-out, token revocation). The router re-evaluates its redirect
+  // on every notifyListeners call, so navigation is always in sync.
   Future<void> initialize() async {
     _setState(ViewState.loading);
-    try {
-      final result = await _authRepository.getCurrentUser();
-      result.when(
-        success: (user) {
-          _user = user;
-          if (user != null) {
-            ErrorHandler.setUser(user.uid);
-            // Register FCM token for the already-authenticated user.
-            unawaited(_notificationService.initialize(user.uid));
-          }
-          _setState(ViewState.loaded);
-        },
-        failure: (error) {
-          _error = error;
-          _setState(ViewState.error);
-          AppLogger.error('Initialize failed', error: error, tag: 'AuthVM');
-        },
-      );
-    } catch (e, st) {
-      ErrorHandler.handle(e, st);
-      _error = AppException.unexpected(e.toString());
-      _setState(ViewState.error);
-    }
+    _authSubscription = _authRepository.userModelStream.listen(
+      (user) {
+        _user = user;
+        _error = null;
+        if (user != null) {
+          ErrorHandler.setUser(user.uid);
+          unawaited(_notificationService.initialize(user.uid));
+        }
+        _setState(user != null ? ViewState.loaded : ViewState.idle);
+      },
+      onError: (Object e, StackTrace st) {
+        ErrorHandler.handle(e, st);
+        _error = AppException.unexpected(e.toString());
+        _setState(ViewState.error);
+        AppLogger.error('Auth stream error', error: e, tag: 'AuthVM');
+      },
+    );
   }
 
   Future<void> signInWithGoogle() async {
@@ -70,10 +69,8 @@ class AuthViewModel extends SafeChangeNotifier {
         success: (user) {
           _user = user;
           _error = null;
-          ErrorHandler.setUser(user.uid);
-          ErrorHandler.logBreadcrumb('user_signed_in', metadata: {'uid': user.uid});
-          // Register FCM token for the freshly signed-in user.
-          unawaited(_notificationService.initialize(user.uid));
+          ErrorHandler.logBreadcrumb('user_signed_in',
+              metadata: {'uid': user.uid});
           _setState(ViewState.loaded);
         },
         failure: (error) {
@@ -89,18 +86,48 @@ class AuthViewModel extends SafeChangeNotifier {
     }
   }
 
+  Future<void> signInWithEmail(String email, String password) async {
+    _setState(ViewState.loading);
+    try {
+      final result = await _authRepository.signInWithEmail(email, password);
+      result.when(
+        success: (user) {
+          _user = user;
+          _error = null;
+          ErrorHandler.logBreadcrumb('user_signed_in_email',
+              metadata: {'uid': user.uid});
+          _setState(ViewState.loaded);
+        },
+        failure: (error) {
+          _error = error;
+          _setState(ViewState.error);
+          AppLogger.error('Email sign-in failed',
+              error: error, tag: 'AuthVM');
+        },
+      );
+    } catch (e, st) {
+      ErrorHandler.handle(e, st);
+      _error = AppException.unexpected(e.toString());
+      _setState(ViewState.error);
+    }
+  }
+
   Future<void> signOut() async {
-    // Clear local state immediately — app navigates to LoginScreen right away.
     _user = null;
     _error = null;
     ErrorHandler.logBreadcrumb('user_signed_out');
     _setState(ViewState.idle);
-    // Revoke tokens in background; failures are silent (user is already logged out locally).
     unawaited(_authRepository.signOut());
   }
 
   void clearError() {
     _error = null;
     safeNotifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
   }
 }

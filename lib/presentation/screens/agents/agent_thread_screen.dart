@@ -5,11 +5,11 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/glass_card.dart';
 import '../../../data/models/agent.dart';
 import '../../../data/services/analytics_service.dart';
 import '../../viewmodels/agent_viewmodel.dart';
 import '../../viewmodels/auth_viewmodel.dart';
-import '../../viewmodels/view_state.dart';
 import '../../widgets/chat_history_drawer.dart';
 import '../../widgets/chat_message_list.dart';
 import '../../widgets/error_display.dart';
@@ -37,13 +37,9 @@ class _SuggestionPillsRow extends StatelessWidget {
           final pill = pills[i];
           return GestureDetector(
             onTap: () => onTap(pill),
-            child: Container(
+            child: FauxGlassCard(
+              borderRadius: 20,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: AppColors.divider),
-              ),
               child: Text(
                 pill,
                 style: const TextStyle(
@@ -148,9 +144,9 @@ class _AgentThreadScreenState extends State<AgentThreadScreen> {
 
         return Scaffold(
           key: _scaffoldKey,
-          backgroundColor: AppColors.background,
+          backgroundColor: AppColors.deepBackground,
           appBar: AppBar(
-            backgroundColor: AppColors.surface,
+            backgroundColor: Colors.transparent,
             elevation: 0,
             leading: IconButton(
               icon: const Icon(Icons.menu_rounded,

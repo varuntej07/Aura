@@ -187,6 +187,66 @@ class FirebaseAuthService {
     }
   }
 
+  Future<Result<User>> signInWithEmailAndPassword(
+      String email, String password) async {
+    final auth = _auth;
+    if (auth == null) {
+      return Result.failure(
+          AppException.unexpected('Firebase not configured.'));
+    }
+    try {
+      final credential = await auth.signInWithEmailAndPassword(
+          email: email, password: password);
+      final user = credential.user;
+      if (user == null) {
+        return Result.failure(
+            AppException.authFailed(Exception('No user returned.')));
+      }
+      AppLogger.info('Email sign-in successful',
+          tag: 'FirebaseAuthService', metadata: {'uid': user.uid});
+      return Result.success(user);
+    } on FirebaseAuthException catch (e, st) {
+      // If credentials don't exist, try creating a new account.
+      if (e.code == 'user-not-found' ||
+          e.code == 'invalid-credential' ||
+          e.code == 'INVALID_LOGIN_CREDENTIALS') {
+        return _createUserWithEmail(email, password);
+      }
+      AppLogger.error('Email sign-in failed',
+          error: e, stackTrace: st, tag: 'FirebaseAuthService');
+      return Result.failure(AppException.authFailed(e, st));
+    } catch (e, st) {
+      return Result.failure(AppException.authFailed(e, st));
+    }
+  }
+
+  Future<Result<User>> _createUserWithEmail(
+      String email, String password) async {
+    final auth = _auth;
+    if (auth == null) {
+      return Result.failure(
+          AppException.unexpected('Firebase not configured.'));
+    }
+    try {
+      final credential = await auth.createUserWithEmailAndPassword(
+          email: email, password: password);
+      final user = credential.user;
+      if (user == null) {
+        return Result.failure(
+            AppException.authFailed(Exception('No user returned.')));
+      }
+      AppLogger.info('Email account created',
+          tag: 'FirebaseAuthService', metadata: {'uid': user.uid});
+      return Result.success(user);
+    } on FirebaseAuthException catch (e, st) {
+      AppLogger.error('Email sign-up failed',
+          error: e, stackTrace: st, tag: 'FirebaseAuthService');
+      return Result.failure(AppException.authFailed(e, st));
+    } catch (e, st) {
+      return Result.failure(AppException.authFailed(e, st));
+    }
+  }
+
   Future<Result<void>> signOut() async {
     final auth = _auth;
     try {

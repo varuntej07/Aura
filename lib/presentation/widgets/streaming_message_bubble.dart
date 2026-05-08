@@ -116,13 +116,18 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
         margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: colorScheme.surfaceContainerHighest,
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0x14FFFFFF), Color(0x08FFFFFF)],
+          ),
           borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(4),
-            topRight: Radius.circular(16),
-            bottomLeft: Radius.circular(16),
-            bottomRight: Radius.circular(16),
+            topRight: Radius.circular(18),
+            bottomLeft: Radius.circular(18),
+            bottomRight: Radius.circular(18),
           ),
+          border: Border.all(color: Color(0x1AFFFFFF), width: 1),
         ),
         child: widget.streamingText.isEmpty
             ? _buildLoadingLabel(theme)
@@ -148,21 +153,27 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
         ),
         const SizedBox(width: 8),
         if (isToolMessage)
-          Text(
-            label,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontStyle: FontStyle.italic,
-            ),
-          )
-        else
-          FadeTransition(
-            opacity: _fadeAnimation,
+          Flexible(
             child: Text(
               label,
+              overflow: TextOverflow.ellipsis,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
                 fontStyle: FontStyle.italic,
+              ),
+            ),
+          )
+        else
+          Flexible(
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontStyle: FontStyle.italic,
+                ),
               ),
             ),
           ),

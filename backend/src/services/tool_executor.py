@@ -413,6 +413,33 @@ def fetch_due_reminders() -> list[dict[str, Any]]:
     return results
 
 
+def claim_reminder_for_processing(user_id: str, reminder_id: str) -> bool:
+    """Atomically claim a pending reminder for processing.
+
+    Uses a Firestore transaction to flip status from "pending" → "processing".
+    Returns True if this caller claimed it, False if another tick already did.
+    Intentionally synchronous — called via asyncio.to_thread from the scheduler.
+    """
+    db = admin_firestore()
+    ref = db.collection("users").document(user_id).collection("reminders").document(reminder_id)
+    transaction = db.transaction()
+
+    @fs.transactional
+    def _claim(txn, doc_ref):
+        snap = doc_ref.get(transaction=txn)
+        if not snap.exists:
+            return False
+        if (snap.to_dict() or {}).get("status") != "pending":
+            return False
+        txn.update(doc_ref, {
+            "status": "processing",
+            "processing_at": datetime.now(timezone.utc).isoformat(),
+        })
+        return True
+
+    return _claim(transaction, ref)
+
+
 def mark_reminder_fired(user_id: str, reminder_id: str) -> None:
     """Intentionally synchronous — called via asyncio.to_thread from the scheduler."""
     db = admin_firestore()

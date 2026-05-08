@@ -80,10 +80,10 @@ class _RemindersViewState extends State<_RemindersView> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.background,
+      backgroundColor: AppColors.deepBackground,
       appBar: AppBar(
         title: const Text('Reminders'),
-        backgroundColor: AppColors.background,
+        backgroundColor: AppColors.deepBackground,
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
         leading: IconButton(
@@ -292,14 +292,18 @@ class _ReminderTileState extends State<_ReminderTile> {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         decoration: BoxDecoration(
-          color: _showAsCompleted
-              ? AppColors.surface.withValues(alpha: 0.55)
-              : AppColors.surface,
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.white.withValues(alpha: _showAsCompleted ? 0.04 : 0.10),
+              Colors.white.withValues(alpha: _showAsCompleted ? 0.01 : 0.04),
+            ],
+          ),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: _showAsCompleted
-                ? AppColors.border.withValues(alpha: 0.45)
-                : AppColors.border,
+            color: Colors.white
+                .withValues(alpha: _showAsCompleted ? 0.06 : 0.14),
           ),
         ),
         child: Row(

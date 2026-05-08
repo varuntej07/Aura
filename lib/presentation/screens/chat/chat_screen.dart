@@ -88,7 +88,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
         return Scaffold(
           key: _scaffoldKey,
-          backgroundColor: AppColors.background,
+          backgroundColor: AppColors.deepBackground,
           appBar: AppBar(
             backgroundColor: AppColors.surface,
             elevation: 0,

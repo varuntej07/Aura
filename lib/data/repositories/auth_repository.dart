@@ -20,6 +20,18 @@ class AuthRepository {
 
   Stream<User?> get authStateStream => _authService.authStateStream;
 
+  // Maps the raw Firebase auth stream to UserModel? so AuthViewModel
+  // doesn't need to import firebase_auth directly.
+  Stream<UserModel?> get userModelStream =>
+      _authService.authStateStream.asyncMap((firebaseUser) async {
+        if (firebaseUser == null) return null;
+        final result = await getCurrentUser();
+        return result.when(
+          success: (user) => user,
+          failure: (_) => null,
+        );
+      });
+
   User? get currentFirebaseUser => _authService.currentUser;
 
   Future<Result<UserModel>> signInWithGoogle() async {
@@ -132,6 +144,16 @@ class AuthRepository {
         }
         return Result.failure(error);
       },
+    );
+  }
+
+  Future<Result<UserModel>> signInWithEmail(
+      String email, String password) async {
+    final authResult =
+        await _authService.signInWithEmailAndPassword(email, password);
+    return authResult.when(
+      success: (user) async => _getOrCreateUser(user),
+      failure: (error) => Future.value(Result.failure(error)),
     );
   }
 

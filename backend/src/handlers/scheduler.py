@@ -12,7 +12,7 @@ from typing import Any
 from ..lib.logger import logger
 from ..services.notification_rewriter import rewrite_reminder_notification
 from ..services.notification_service import send_notification
-from ..services.tool_executor import fetch_due_reminders, mark_reminder_fired
+from ..services.tool_executor import fetch_due_reminders, claim_reminder_for_processing, mark_reminder_fired
 
 
 def _json(status: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -49,6 +49,16 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             data: dict[str, Any] = item["data"]
 
             try:
+                # Atomically claim the reminder before any slow work (model call, FCM).
+                # If another scheduler tick already claimed it, skip — prevents duplicate fires.
+                claimed = await asyncio.to_thread(claim_reminder_for_processing, user_id, reminder_id)
+                if not claimed:
+                    logger.info("Reminder already claimed by concurrent tick, skipping", {
+                        "user_id": user_id,
+                        "reminder_id": reminder_id,
+                    })
+                    continue
+
                 raw_message = str(data.get("message", "Reminder due now"))
                 body = await rewrite_reminder_notification(raw_message)
 

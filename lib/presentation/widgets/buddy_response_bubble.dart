@@ -4,6 +4,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/app_colors.dart';
+import '../../core/theme/glass_card.dart';
 import '../../data/models/chat_message_model.dart';
 import 'flash_alert.dart';
 import 'reminder_card.dart';
@@ -108,28 +109,33 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
               isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             // ── Message content ──────────────────────────────────────────
-            Container(
+            FauxGlassCard(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: isUser
-                    ? AppColors.accent.withValues(alpha: 0.15)
-                    : isError
-                        ? AppColors.errorSurface
-                        : AppColors.surface,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(18),
-                  topRight: const Radius.circular(18),
-                  bottomLeft: Radius.circular(isUser ? 18 : 4),
-                  bottomRight: Radius.circular(isUser ? 4 : 18),
-                ),
-                border: Border.all(
-                  color: isUser
-                      ? AppColors.accent.withValues(alpha: 0.3)
-                      : isError
-                          ? AppColors.error.withValues(alpha: 0.3)
-                          : AppColors.border,
-                ),
-              ),
+              borderRadius: 18,
+              borderColor: isUser
+                  ? AppColors.accent.withValues(alpha: 0.30)
+                  : isError
+                      ? AppColors.error.withValues(alpha: 0.25)
+                      : AppColors.glassBorderDim,
+              gradient: isUser
+                  ? LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        AppColors.accent.withValues(alpha: 0.20),
+                        AppColors.accent.withValues(alpha: 0.08),
+                      ],
+                    )
+                  : isError
+                      ? LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            AppColors.error.withValues(alpha: 0.12),
+                            AppColors.error.withValues(alpha: 0.05),
+                          ],
+                        )
+                      : null,
               child: _isEditing
                   ? _buildEditField()
                   : isUser

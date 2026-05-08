@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/glass_card.dart';
 import '../../../data/local/app_database.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/chat_repository.dart';
@@ -48,7 +49,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       final uid = context.read<AuthViewModel>().user?.uid;
       final vm = context.read<HomeViewModel>();
 
-      // Engagement taps → fresh Buddy chat with pre-loaded context
       vm.onEngagementTap = (payload) {
         context.push(
           '/chat/new',
@@ -60,7 +60,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       };
 
-      // Agent nudge taps -> the specific agent's chat thread
       vm.onAgentNudgeTap = (payload) {
         context.push(
           '/agents/${payload.agentId}',
@@ -96,7 +95,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
-      backgroundColor: AppColors.background,
+      backgroundColor: Colors.transparent,
       drawer: _ChatDrawer(
         onNewChat: () {
           Navigator.of(context).pop();
@@ -108,30 +107,30 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         },
       ),
       body: SafeArea(
+        bottom: false,
         child: Column(
           children: [
-            // Top bar — hamburger only
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               child: Row(
                 children: [
-                  _IconButton(
+                  GlassIconButton(
                     icon: Icons.menu_rounded,
                     onTap: () => _scaffoldKey.currentState?.openDrawer(),
                   ),
                   const Spacer(),
-                  _IconButton(
+                  GlassIconButton(
                     icon: Icons.settings_outlined,
                     onTap: () => Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                      MaterialPageRoute(
+                          builder: (_) => const SettingsScreen()),
                     ),
                   ),
                 ],
               ),
             ),
 
-            // Transcript overlay — only visible during an active voice session
             Consumer<HomeViewModel>(
               builder: (_, vm, __) {
                 if (!vm.hasActiveSession) return const SizedBox.shrink();
@@ -141,7 +140,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
             const Spacer(),
 
-            // Centered mic button
             Consumer<HomeViewModel>(
               builder: (_, vm, __) => _VoiceButton(
                 micState: vm.micState,
@@ -152,7 +150,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               ),
             ),
 
-            const SizedBox(height: 64),
+            SizedBox(height: MediaQuery.of(context).viewPadding.bottom + 96),
           ],
         ),
       ),
@@ -160,7 +158,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 }
 
-// ── Voice button ─────────────────────────────────────────────────────────────
+// Voice button
 
 class _VoiceButton extends StatelessWidget {
   final MicState micState;
@@ -223,7 +221,8 @@ class _VoiceButton extends StatelessWidget {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: _color.withValues(
-                              alpha: (1 - rippleAnimation.value + 1).clamp(0, 0.25),
+                              alpha: (1 - rippleAnimation.value + 1)
+                                  .clamp(0, 0.25),
                             ),
                           ),
                         ),
@@ -272,7 +271,7 @@ class _VoiceButton extends StatelessWidget {
   }
 }
 
-// ── Voice status card ─────────────────────────────────────────────────────────
+// Voice status card
 
 class _VoiceStatusCard extends StatelessWidget {
   final HomeViewModel vm;
@@ -285,21 +284,21 @@ class _VoiceStatusCard extends StatelessWidget {
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOut,
       child: hasTranscript
-          ? Container(
-              margin: const EdgeInsets.fromLTRB(20, 4, 20, 0),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: AppColors.surface,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                    color: AppColors.accent.withValues(alpha: 0.2)),
-              ),
-              child: Text(
-                vm.liveTranscript,
-                style: const TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 14,
-                  height: 1.5,
+          ? Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
+              child: FauxGlassCard(
+                borderRadius: 14,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                borderColor:
+                    AppColors.accent.withValues(alpha: 0.25),
+                child: Text(
+                  vm.liveTranscript,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 14,
+                    height: 1.5,
+                  ),
                 ),
               ),
             )
@@ -308,7 +307,7 @@ class _VoiceStatusCard extends StatelessWidget {
   }
 }
 
-// ── Drawer ────────────────────────────────────────────────────────────────────
+// Drawer
 
 class _ChatDrawer extends StatelessWidget {
   final VoidCallback onNewChat;
@@ -319,71 +318,166 @@ class _ChatDrawer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Drawer(
-      backgroundColor: AppColors.surface,
+      backgroundColor: AppColors.deepBackground,
       child: SafeArea(
-        child: Column(
-          children: [
-            // Profile row
-            Consumer<AuthViewModel>(
-              builder: (_, authVm, __) => Padding(
-                padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: AppColors.accent.withValues(alpha: 0.15),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.person_rounded,
-                          color: AppColors.accent, size: 22),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            authVm.user?.displayName ?? 'User',
-                            style: const TextStyle(
-                              color: AppColors.textPrimary,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+        child: Consumer<AuthViewModel>(
+          builder: (_, authVm, __) {
+            final isLoggedIn = authVm.user != null;
+
+            return Column(
+              children: [
+                // Profile / sign-in header
+                if (isLoggedIn)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: AppColors.accent.withValues(alpha: 0.15),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color: AppColors.glassBorderDim, width: 1),
                           ),
-                          if ((authVm.user?.email ?? '').isNotEmpty)
-                            Text(
-                              authVm.user!.email!,
-                              style: const TextStyle(
-                                  color: AppColors.textTertiary, fontSize: 12),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                          child: const Icon(Icons.person_rounded,
+                              color: AppColors.accent, size: 22),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                authVm.user?.displayName ?? 'User',
+                                style: const TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              if ((authVm.user?.email ?? '').isNotEmpty)
+                                Text(
+                                  authVm.user!.email!,
+                                  style: const TextStyle(
+                                      color: AppColors.textTertiary,
+                                      fontSize: 12),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                            ],
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            authVm.signOut();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: AppColors.error.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                  color:
+                                      AppColors.error.withValues(alpha: 0.3),
+                                  width: 1),
                             ),
+                            child: const Text(
+                              'Sign Out',
+                              style: TextStyle(
+                                color: AppColors.error,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 32, 20, 24),
+                    child: GestureDetector(
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        context.push('/login');
+                      },
+                      child: FauxGlassCard(
+                        borderRadius: 14,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        borderColor: AppColors.accent.withValues(alpha: 0.4),
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            AppColors.accent.withValues(alpha: 0.18),
+                            AppColors.accent.withValues(alpha: 0.08),
+                          ],
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.login_rounded,
+                                color: AppColors.accent, size: 18),
+                            SizedBox(width: 8),
+                            Text(
+                              'Sign In',
+                              style: TextStyle(
+                                color: AppColors.accent,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                const Divider(color: AppColors.divider, height: 1),
+
+                if (isLoggedIn) ...[
+                  ListTile(
+                    leading: const Icon(Icons.add_rounded,
+                        color: AppColors.accent),
+                    title: const Text('New Chat',
+                        style: TextStyle(
+                            color: AppColors.textPrimary, fontSize: 14)),
+                    onTap: onNewChat,
+                  ),
+                  const Divider(color: AppColors.divider, height: 1),
+                  Expanded(
+                    child: _SessionList(onSelectSession: onSelectSession),
+                  ),
+                ] else
+                  Expanded(
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.chat_bubble_outline_rounded,
+                              color: AppColors.textTertiary, size: 40),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'Sign in to see your chat history',
+                            style: TextStyle(
+                              color: AppColors.textTertiary,
+                              fontSize: 13,
+                            ),
+                          ),
                         ],
                       ),
                     ),
-                  ],
-                ),
-              ),
-            ),
-            const Divider(color: AppColors.divider, height: 1),
-            ListTile(
-              leading:
-                  const Icon(Icons.add_rounded, color: AppColors.accent),
-              title: const Text('New Chat',
-                  style: TextStyle(
-                      color: AppColors.textPrimary, fontSize: 14)),
-              onTap: onNewChat,
-            ),
-            const Divider(color: AppColors.divider, height: 1),
-            // Recent Buddy chat sessions (agentId IS NULL)
-            Expanded(
-              child: _SessionList(onSelectSession: onSelectSession),
-            ),
-          ],
+                  ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -458,9 +552,7 @@ class _SessionListState extends State<_SessionList> {
             itemCount: _sessions.length,
             itemBuilder: (_, i) {
               final s = _sessions[i];
-              final label = s.title?.isNotEmpty == true
-                  ? s.title!
-                  : 'Chat ${i + 1}';
+              final label = s.title?.isNotEmpty == true ? s.title! : 'Chat ${i + 1}';
               return ListTile(
                 leading: const Icon(Icons.chat_bubble_outline_rounded,
                     color: AppColors.textTertiary, size: 18),
@@ -491,32 +583,5 @@ class _SessionListState extends State<_SessionList> {
     if (diff.inDays == 1) return 'Yesterday';
     if (diff.inDays < 7) return '${diff.inDays} days ago';
     return '${dt.month}/${dt.day}/${dt.year}';
-  }
-}
-
-// ── Reusable icon button ──────────────────────────────────────────────────────
-
-class _IconButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _IconButton({required this.icon, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        width: 40,
-        height: 40,
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Icon(icon, color: AppColors.textPrimary, size: 22),
-      ),
-    );
   }
 }

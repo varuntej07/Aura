@@ -36,6 +36,7 @@ dependencies:
   sqlite3_flutter_libs:
   go_router:
   in_app_purchase:
+  google_fonts:
 
 dev_dependencies:
   flutter_test:

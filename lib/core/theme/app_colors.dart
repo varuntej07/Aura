@@ -31,6 +31,15 @@ class AppColors {
   static const divider = Color(0xFF2A2A2A);
   static const border = Color(0xFF333333);
 
+  // Glass morphism
+  static const deepBackground = Color(0xFF080812);
+  static const glassWhiteFill = Color(0x1FFFFFFF);
+  static const glassBorderLight = Color(0x33FFFFFF);
+  static const glassBorderDim = Color(0x1AFFFFFF);
+  static const glassHighlight = Color(0x0DFFFFFF);
+  static const glassOrb1 = Color(0x1A6C63FF);
+  static const glassOrb2 = Color(0x15223880);
+
   // Mic states
   static const micIdle = accent;
   static const micListening = Color(0xFF44BBFF);

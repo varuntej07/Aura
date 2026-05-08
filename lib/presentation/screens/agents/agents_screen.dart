@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/glass_card.dart';
 import '../../../data/models/agent.dart';
 import '../../viewmodels/connectors_viewmodel.dart';
 import '../../viewmodels/dietary_profile_viewmodel.dart';
@@ -60,48 +61,62 @@ class _AgentsScreenState extends State<AgentsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.background,
-        elevation: 0,
-        title: const Text(
-          'Agents',
-          style: TextStyle(
-            color: AppColors.textPrimary,
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {},
-        backgroundColor: const Color(0xFF00D4AA),
-        child: const Icon(Icons.add, color: Colors.white),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-        child: GridView.builder(
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            mainAxisSpacing: 28,
-            crossAxisSpacing: 16,
-            childAspectRatio: 0.82,
-          ),
-          itemCount: kAgents.length,
-          itemBuilder: (context, i) {
-            final agent = kAgents[i];
-            return _AgentTile(
-              agent: agent,
-              onTap: () => _handleAgentTap(context, agent),
-            );
-          },
+      backgroundColor: Colors.transparent,
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 20, 24, 4),
+              child: const Text(
+                'Agents',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.8,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
+              child: const Text(
+                'Specialized AI for every domain',
+                style: TextStyle(
+                  color: AppColors.textTertiary,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+            Expanded(
+              child: GridView.builder(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 100),
+                gridDelegate:
+                    const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  mainAxisSpacing: 20,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 0.82,
+                ),
+                itemCount: kAgents.length,
+                itemBuilder: (context, i) {
+                  final agent = kAgents[i];
+                  return _AgentTile(
+                    agent: agent,
+                    onTap: () => _handleAgentTap(context, agent),
+                  );
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-// ── Agent tile ────────────────────────────────────────────────────────────────
+// Agent tile
 
 class _AgentTile extends StatelessWidget {
   final Agent agent;
@@ -118,24 +133,28 @@ class _AgentTile extends StatelessWidget {
         children: [
           Hero(
             tag: 'agent-icon-${agent.id}',
-            child: Container(
-              width: 76,
-              height: 76,
-              decoration: BoxDecoration(
-                color: agent.color,
-                borderRadius: BorderRadius.circular(18),
-                boxShadow: [
-                  BoxShadow(
-                    color: agent.color.withValues(alpha: 0.35),
-                    blurRadius: 12,
-                    offset: const Offset(0, 5),
-                  ),
+            child: FauxGlassCard(
+              borderRadius: 22,
+              padding: const EdgeInsets.all(0),
+              borderColor: agent.color.withValues(alpha: 0.35),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  agent.color.withValues(alpha: 0.25),
+                  agent.color.withValues(alpha: 0.12),
                 ],
               ),
-              child: Icon(agent.icon, color: Colors.white, size: 34),
+              child: SizedBox(
+                width: 76,
+                height: 76,
+                child: Center(
+                  child: Icon(agent.icon, color: Colors.white, size: 32),
+                ),
+              ),
             ),
           ),
-          const SizedBox(height: 7),
+          const SizedBox(height: 8),
           Text(
             agent.name,
             style: const TextStyle(

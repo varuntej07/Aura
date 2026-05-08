@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/glass_card.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/settings_viewmodel.dart';
 import '../../widgets/error_display.dart';
@@ -29,108 +32,150 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        title: const Text('Settings'),
-        backgroundColor: AppColors.background,
-        foregroundColor: AppColors.textPrimary,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, size: 18),
-          onPressed: () => Navigator.pop(context),
-        ),
-      ),
-      body: Consumer2<SettingsViewModel, AuthViewModel>(
-        builder: (context, settingsVm, authVm, _) {
-          if (settingsVm.state == ViewState.idle) {
-            return const FullScreenLoader();
-          }
-
-          final settings = settingsVm.settings;
-          final user = authVm.user;
-
-          return ListView(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+      backgroundColor: Colors.transparent,
+      body: AmbientBackground(
+        child: SafeArea(
+          child: Column(
             children: [
-              if (settingsVm.error != null)
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: ErrorDisplay(
-                    error: settingsVm.error!,
-                    onDismiss: settingsVm.clearError,
-                  ),
-                ),
-
-              _SectionHeader('Voice'),
-              _ToggleTile(
-                title: 'Wake Word',
-                subtitle: 'Activate with "Hey Buddy"',
-                value: settings?.wakeWordEnabled ?? false,
-                onChanged: (v) => settingsVm.toggleWakeWord(v),
-              ),
-              _ToggleTile(
-                title: 'Voice Responses',
-                subtitle: 'Read responses aloud (TTS)',
-                value: settings?.ttsEnabled ?? true,
-                onChanged: (v) => settingsVm.toggleTts(v),
-              ),
-
-              _SectionHeader('Reminders'),
-              _ReminderLeadTile(
-                minutes: settings?.defaultReminderLeadMinutes ?? 10,
-                onChanged: (v) => settingsVm.setReminderLeadMinutes(v),
-              ),
-              _NavTile(
-                icon: Icons.notifications_outlined,
-                title: 'View Reminders',
-                subtitle: 'See all scheduled and past reminders',
-                onTap: () => Navigator.push(
-                  context,
-                  RemindersScreen.route(context),
-                ),
-              ),
-
-              _SectionHeader('Account'),
-              if (user != null) ...[
-                _InfoTile(label: 'Name', value: user.displayName),
-                _InfoTile(label: 'Email', value: user.email),
-              ],
-
-              const SizedBox(height: 8),
+              // Top bar
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: _SignOutButton(
-                  onTap: () => context.read<AuthViewModel>().signOut(),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 20, vertical: 12),
+                child: Row(
+                  children: [
+                    GlassIconButton(
+                      icon: Icons.arrow_back_ios_new,
+                      onTap: () => Navigator.pop(context),
+                      iconSize: 17,
+                    ),
+                    const SizedBox(width: 14),
+                    const Text(
+                      'Settings',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.5,
+                      ),
+                    ),
+                  ],
                 ),
               ),
 
-              const SizedBox(height: 24),
-              Center(
-                child: Text(
-                  'Aura v1.0.0',
-                  style: const TextStyle(
-                    color: AppColors.textTertiary,
-                    fontSize: 12,
-                  ),
+              // Body
+              Expanded(
+                child: Consumer2<SettingsViewModel, AuthViewModel>(
+                  builder: (context, settingsVm, authVm, _) {
+                    if (settingsVm.state == ViewState.loading) {
+                      return const FullScreenLoader();
+                    }
+
+                    final settings = settingsVm.settings;
+                    final user = authVm.user;
+
+                    return ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
+                      children: [
+                        if (settingsVm.error != null)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: ErrorDisplay(
+                              error: settingsVm.error!,
+                              onDismiss: settingsVm.clearError,
+                            ),
+                          ),
+
+                        // ── Voice ───────────────────────────────────────────
+                        _SectionLabel('Voice'),
+                        _GlassToggleTile(
+                          title: 'Wake Word',
+                          subtitle: 'Activate with "Hey Buddy"',
+                          value: settings?.wakeWordEnabled ?? false,
+                          onChanged: settingsVm.toggleWakeWord,
+                        ),
+                        const SizedBox(height: 8),
+                        _GlassToggleTile(
+                          title: 'Voice Responses',
+                          subtitle: 'Read responses aloud (TTS)',
+                          value: settings?.ttsEnabled ?? true,
+                          onChanged: settingsVm.toggleTts,
+                        ),
+
+                        // ── Reminders ────────────────────────────────────────
+                        _SectionLabel('Reminders'),
+                        _GlassReminderLeadTile(
+                          minutes:
+                              settings?.defaultReminderLeadMinutes ?? 10,
+                          onChanged: settingsVm.setReminderLeadMinutes,
+                        ),
+                        const SizedBox(height: 8),
+                        _GlassNavTile(
+                          icon: Icons.notifications_outlined,
+                          title: 'View Reminders',
+                          subtitle: 'See all scheduled reminders',
+                          onTap: () => Navigator.push(
+                            context,
+                            RemindersScreen.route(context),
+                          ),
+                        ),
+
+                        // Subscription
+                        _SectionLabel('Subscription'),
+                        _GlassNavTile(
+                          icon: Icons.star_outline_rounded,
+                          title: 'Upgrade Plan',
+                          subtitle: 'View plans and manage subscription',
+                          onTap: () => context.push('/paywall'),
+                        ),
+
+                        // Account
+                        _SectionLabel('Account'),
+                        if (user != null) ...[
+                          _GlassInfoTile(
+                              label: 'Name', value: user.displayName),
+                          const SizedBox(height: 8),
+                          _GlassInfoTile(
+                              label: 'Email', value: user.email),
+                        ],
+                        const SizedBox(height: 20),
+                        _GlassSignOutButton(
+                          onTap: () =>
+                              context.read<AuthViewModel>().signOut(),
+                        ),
+
+                        const SizedBox(height: 28),
+                        Center(
+                          child: Text(
+                            'Aura v1.0.0',
+                            style: const TextStyle(
+                              color: AppColors.textTertiary,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
-              const SizedBox(height: 24),
             ],
-          );
-        },
+          ),
+        ),
       ),
     );
   }
 }
 
-class _SectionHeader extends StatelessWidget {
+// Section label
+
+class _SectionLabel extends StatelessWidget {
   final String title;
-  const _SectionHeader(this.title);
+  const _SectionLabel(this.title);
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
+      padding: const EdgeInsets.fromLTRB(4, 24, 4, 8),
       child: Text(
         title.toUpperCase(),
         style: const TextStyle(
@@ -144,13 +189,15 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _ToggleTile extends StatelessWidget {
+// Toggle tile
+
+class _GlassToggleTile extends StatelessWidget {
   final String title;
   final String subtitle;
   final bool value;
   final ValueChanged<bool> onChanged;
 
-  const _ToggleTile({
+  const _GlassToggleTile({
     required this.title,
     required this.subtitle,
     required this.value,
@@ -159,46 +206,43 @@ class _ToggleTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
+    return FauxGlassCard(
+      borderRadius: 16,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       child: SwitchListTile(
         title: Text(
           title,
-          style: const TextStyle(color: AppColors.textPrimary, fontSize: 15),
+          style: const TextStyle(
+              color: AppColors.textPrimary, fontSize: 15),
         ),
         subtitle: Text(
           subtitle,
-          style: const TextStyle(color: AppColors.textTertiary, fontSize: 13),
+          style: const TextStyle(
+              color: AppColors.textTertiary, fontSize: 13),
         ),
         value: value,
         onChanged: onChanged,
         activeThumbColor: AppColors.accent,
+        activeTrackColor: AppColors.accent.withValues(alpha: 0.3),
       ),
     );
   }
 }
 
-class _ReminderLeadTile extends StatelessWidget {
+//  Reminder lead tile
+
+class _GlassReminderLeadTile extends StatelessWidget {
   final int minutes;
   final ValueChanged<int> onChanged;
 
-  const _ReminderLeadTile({required this.minutes, required this.onChanged});
+  const _GlassReminderLeadTile(
+      {required this.minutes, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
+    return FauxGlassCard(
+      borderRadius: 16,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -207,7 +251,8 @@ class _ReminderLeadTile extends StatelessWidget {
             children: [
               const Text(
                 'Default reminder lead time',
-                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+                style: TextStyle(
+                    color: AppColors.textPrimary, fontSize: 15),
               ),
               Text(
                 '$minutes min',
@@ -219,11 +264,10 @@ class _ReminderLeadTile extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 8),
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
               activeTrackColor: AppColors.accent,
-              inactiveTrackColor: AppColors.border,
+              inactiveTrackColor: AppColors.glassBorderDim,
               thumbColor: AppColors.accent,
               overlayColor: AppColors.accentGlow,
             ),
@@ -241,13 +285,15 @@ class _ReminderLeadTile extends StatelessWidget {
   }
 }
 
-class _NavTile extends StatelessWidget {
+// Nav tile
+
+class _GlassNavTile extends StatelessWidget {
   final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
-  const _NavTile({
+  const _GlassNavTile({
     required this.icon,
     required this.title,
     required this.subtitle,
@@ -258,17 +304,20 @@ class _NavTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      child: FauxGlassCard(
+        borderRadius: 16,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.border),
-        ),
         child: Row(
           children: [
-            Icon(icon, size: 20, color: AppColors.accent),
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppColors.accent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 18, color: AppColors.accent),
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -277,26 +326,19 @@ class _NavTile extends StatelessWidget {
                   Text(
                     title,
                     style: const TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 15,
-                    ),
+                        color: AppColors.textPrimary, fontSize: 15),
                   ),
                   const SizedBox(height: 2),
                   Text(
                     subtitle,
                     style: const TextStyle(
-                      color: AppColors.textTertiary,
-                      fontSize: 13,
-                    ),
+                        color: AppColors.textTertiary, fontSize: 13),
                   ),
                 ],
               ),
             ),
-            const Icon(
-              Icons.chevron_right,
-              size: 18,
-              color: AppColors.textTertiary,
-            ),
+            const Icon(Icons.chevron_right,
+                size: 18, color: AppColors.textTertiary),
           ],
         ),
       ),
@@ -304,32 +346,31 @@ class _NavTile extends StatelessWidget {
   }
 }
 
-class _InfoTile extends StatelessWidget {
+// Info tile
+
+class _GlassInfoTile extends StatelessWidget {
   final String label;
   final String value;
 
-  const _InfoTile({required this.label, required this.value});
+  const _GlassInfoTile({required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+    return FauxGlassCard(
+      borderRadius: 16,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
       child: Row(
         children: [
           Text(
             label,
-            style: const TextStyle(color: AppColors.textTertiary, fontSize: 14),
+            style: const TextStyle(
+                color: AppColors.textTertiary, fontSize: 14),
           ),
           const Spacer(),
           Text(
             value,
-            style: const TextStyle(color: AppColors.textPrimary, fontSize: 14),
+            style: const TextStyle(
+                color: AppColors.textPrimary, fontSize: 14),
           ),
         ],
       ),
@@ -337,22 +378,27 @@ class _InfoTile extends StatelessWidget {
   }
 }
 
-class _SignOutButton extends StatelessWidget {
-  final VoidCallback onTap;
+//  Sign-out button 
 
-  const _SignOutButton({required this.onTap});
+class _GlassSignOutButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _GlassSignOutButton({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        height: 52,
-        decoration: BoxDecoration(
-          color: AppColors.errorSurface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.error.withValues(alpha: 0.4)),
+      child: FauxGlassCard(
+        borderRadius: 16,
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        borderColor: AppColors.error.withValues(alpha: 0.3),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppColors.error.withValues(alpha: 0.10),
+            AppColors.error.withValues(alpha: 0.04),
+          ],
         ),
         child: const Center(
           child: Text(

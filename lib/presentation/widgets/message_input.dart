@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_colors.dart';
+import '../../core/theme/glass_card.dart';
 import 'aura_text_field.dart';
 
 /// Text input bar at the bottom of any chat screen.
@@ -61,8 +62,15 @@ class _MessageInputState extends State<MessageInput> {
     return RepaintBoundary(
       child: Container(
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-        decoration: const BoxDecoration(
-          border: Border(top: BorderSide(color: AppColors.divider)),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0x00080812), Color(0xCC080812)],
+          ),
+          border: Border(
+              top: BorderSide(
+                  color: AppColors.glassBorderDim, width: 0.5)),
         ),
         child: Row(
           children: [
