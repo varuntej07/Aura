@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../logging/app_logger.dart';
+
 import '../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../data/repositories/chat_repository.dart';
 import '../../data/services/backend_api_service.dart';
@@ -32,14 +34,26 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
       final auth = context.read<AuthViewModel>();
       final isReady =
           auth.state != ViewState.idle && auth.state != ViewState.loading;
+      final isLoggedIn = auth.isAuthenticated;
+      final location = state.matchedLocation;
+
+      AppLogger.info(
+        'Router redirect: location=$location authState=${auth.state} isReady=$isReady isLoggedIn=$isLoggedIn',
+        tag: 'Router',
+      );
 
       if (!isReady) return null;
 
-      final isLoggedIn = auth.isAuthenticated;
-      final isOnLogin = state.matchedLocation == '/login';
+      final isOnLogin = location == '/login';
 
-      if (!isLoggedIn && !isOnLogin) return '/login';
-      if (isLoggedIn && isOnLogin) return '/home';
+      if (!isLoggedIn && !isOnLogin) {
+        AppLogger.info('Router: -> /login (not authenticated)', tag: 'Router');
+        return '/login';
+      }
+      if (isLoggedIn && isOnLogin) {
+        AppLogger.info('Router: -> /home (authenticated, leaving login)', tag: 'Router');
+        return '/home';
+      }
       return null;
     },
     routes: [

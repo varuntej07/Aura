@@ -7,9 +7,18 @@ import '../../../core/theme/glass_card.dart';
 import '../../../data/local/app_database.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/chat_repository.dart';
+import '../../../data/services/backend_api_service.dart';
+import '../../../data/services/chat_backup_service.dart';
+import '../../../data/services/chat_session_manager.dart';
+import '../../../data/services/feedback_service.dart';
+import '../../../core/network/connectivity_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/home_viewmodel.dart';
+import '../../viewmodels/text_chat_viewmodel.dart';
+import '../chat/embedded_chat_panel.dart';
 import '../settings/settings_screen.dart';
+
+enum _HomeMode { voice, chat }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -24,6 +33,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   late final Animation<double> _breathAnimation;
   late final AnimationController _rippleController;
   late final Animation<double> _rippleAnimation;
+  late final PageController _pageController;
+  _HomeMode _mode = _HomeMode.voice;
 
   @override
   void initState() {
@@ -44,6 +55,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _rippleAnimation = Tween<double>(begin: 1.0, end: 1.5).animate(
       CurvedAnimation(parent: _rippleController, curve: Curves.easeOut),
     );
+    _pageController = PageController();
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final uid = context.read<AuthViewModel>().user?.uid;
@@ -77,18 +89,43 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   void dispose() {
     _breathController.dispose();
     _rippleController.dispose();
+    _pageController.dispose();
     super.dispose();
   }
 
-  String get _uid => context.read<AuthViewModel>().user?.uid ?? 'anonymous';
-
   Future<void> _handleMicTap() async {
+    final authVm = context.read<AuthViewModel>();
+    if (authVm.user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Sign in to use voice'),
+          action: SnackBarAction(
+            label: 'Sign In',
+            onPressed: () => context.go('/login'),
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     final vm = context.read<HomeViewModel>();
     if (vm.hasActiveSession) {
       await vm.endSession();
     } else {
-      await vm.startSession(_uid);
+      await vm.startSession(authVm.user!.uid);
     }
+  }
+
+  void _setMode(_HomeMode mode) {
+    if (_mode == mode) return;
+    setState(() => _mode = mode);
+    _pageController.animateToPage(
+      mode.index,
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   @override
@@ -118,7 +155,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     icon: Icons.menu_rounded,
                     onTap: () => _scaffoldKey.currentState?.openDrawer(),
                   ),
-                  const Spacer(),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Center(
+                      child: _HomeModeSwitch(
+                        mode: _mode,
+                        onChanged: _setMode,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 14),
                   GlassIconButton(
                     icon: Icons.settings_outlined,
                     onTap: () => Navigator.push(
@@ -130,30 +176,171 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                 ],
               ),
             ),
-
-            Consumer<HomeViewModel>(
-              builder: (_, vm, __) {
-                if (!vm.hasActiveSession) return const SizedBox.shrink();
-                return _VoiceStatusCard(vm: vm);
-              },
-            ),
-
-            const Spacer(),
-
-            Consumer<HomeViewModel>(
-              builder: (_, vm, __) => _VoiceButton(
-                micState: vm.micState,
-                voiceStatus: vm.voiceStatus,
-                breathAnimation: _breathAnimation,
-                rippleAnimation: _rippleAnimation,
-                onTap: _handleMicTap,
+            Expanded(
+              child: PageView(
+                controller: _pageController,
+                onPageChanged: (index) {
+                  setState(() => _mode = _HomeMode.values[index]);
+                },
+                children: [
+                  _VoicePanel(
+                    breathAnimation: _breathAnimation,
+                    rippleAnimation: _rippleAnimation,
+                    onMicTap: _handleMicTap,
+                  ),
+                  ChangeNotifierProvider(
+                    create: (context) => TextChatViewModel(
+                      backendService: context.read<BackendApiService>(),
+                      chatRepository: context.read<ChatRepository>(),
+                      chatBackupService: context.read<ChatBackupService>(),
+                      feedbackService: context.read<FeedbackService>(),
+                      connectivityService: context.read<ConnectivityService>(),
+                      chatSessionManager: context.read<ChatSessionManager>(),
+                    ),
+                    child: const EmbeddedChatPanel(),
+                  ),
+                ],
               ),
             ),
-
-            SizedBox(height: MediaQuery.of(context).viewPadding.bottom + 96),
           ],
         ),
       ),
+    );
+  }
+}
+
+class _HomeModeSwitch extends StatelessWidget {
+  final _HomeMode mode;
+  final ValueChanged<_HomeMode> onChanged;
+
+  const _HomeModeSwitch({
+    required this.mode,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 176,
+      child: FauxGlassCard(
+        borderRadius: 24,
+        padding: const EdgeInsets.all(4),
+        borderColor: AppColors.glassBorderDim,
+        child: Row(
+          children: [
+            _HomeModeButton(
+              label: 'Voice',
+              selected: mode == _HomeMode.voice,
+              onTap: () => onChanged(_HomeMode.voice),
+            ),
+            _HomeModeButton(
+              label: 'Text',
+              selected: mode == _HomeMode.chat,
+              onTap: () => onChanged(_HomeMode.chat),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeModeButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _HomeModeButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+          height: 38,
+          decoration: BoxDecoration(
+            color: selected
+                ? AppColors.accent.withValues(alpha: 0.18)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(18),
+            border: selected
+                ? Border.all(
+                    color: AppColors.accent.withValues(alpha: 0.35),
+                    width: 1,
+                  )
+                : null,
+          ),
+          child: Center(
+            child: AnimatedDefaultTextStyle(
+              duration: const Duration(milliseconds: 200),
+              style: TextStyle(
+                color: selected ? AppColors.accentLight : AppColors.textTertiary,
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
+              child: Text(label),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VoicePanel extends StatelessWidget {
+  final Animation<double> breathAnimation;
+  final Animation<double> rippleAnimation;
+  final VoidCallback onMicTap;
+
+  const _VoicePanel({
+    required this.breathAnimation,
+    required this.rippleAnimation,
+    required this.onMicTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomReserve = MediaQuery.of(context).viewPadding.bottom + 110;
+
+    return Consumer<HomeViewModel>(
+      builder: (_, vm, __) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              bottom: bottomReserve + 132,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 2, 20, 12),
+                  child: _VoiceStatusCard(vm: vm),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: bottomReserve,
+              child: Center(
+                child: _VoiceButton(
+                  micState: vm.micState,
+                  voiceStatus: vm.voiceStatus,
+                  breathAnimation: breathAnimation,
+                  rippleAnimation: rippleAnimation,
+                  onTap: onMicTap,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -185,12 +372,12 @@ class _VoiceButton extends StatelessWidget {
 
   String get _label {
     return switch (voiceStatus) {
-      VoiceSessionStatus.connecting => 'Connecting…',
-      VoiceSessionStatus.ready => 'Tap to speak',
-      VoiceSessionStatus.listening => 'Listening…',
-      VoiceSessionStatus.processing => 'Processing…',
-      VoiceSessionStatus.speaking => 'Speaking…',
-      _ => 'Tap to talk',
+      VoiceSessionStatus.connecting => 'Connecting...',
+      VoiceSessionStatus.ready => 'Listening',
+      VoiceSessionStatus.listening => 'Listening',
+      VoiceSessionStatus.processing => 'Thinking',
+      VoiceSessionStatus.speaking => 'Speaking',
+      _ => 'Start voice',
     };
   }
 
@@ -273,36 +460,125 @@ class _VoiceButton extends StatelessWidget {
 
 // Voice status card
 
-class _VoiceStatusCard extends StatelessWidget {
+class _VoiceStatusCard extends StatefulWidget {
   final HomeViewModel vm;
   const _VoiceStatusCard({required this.vm});
 
   @override
+  State<_VoiceStatusCard> createState() => _VoiceStatusCardState();
+}
+
+class _VoiceStatusCardState extends State<_VoiceStatusCard> {
+  final _scrollController = ScrollController();
+
+  @override
+  void didUpdateWidget(covariant _VoiceStatusCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.vm.voiceTranscript.length != oldWidget.vm.voiceTranscript.length ||
+        widget.vm.liveTranscript != oldWidget.vm.liveTranscript) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final hasTranscript = vm.liveTranscript.trim().isNotEmpty;
+    final entries = widget.vm.voiceTranscript;
+    final hasTranscript = entries.isNotEmpty;
+    if (hasTranscript) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    }
     return AnimatedSize(
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOut,
       child: hasTranscript
           ? Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
-              child: FauxGlassCard(
-                borderRadius: 14,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                borderColor:
-                    AppColors.accent.withValues(alpha: 0.25),
-                child: Text(
-                  vm.liveTranscript,
-                  style: const TextStyle(
-                    color: AppColors.textPrimary,
-                    fontSize: 14,
-                    height: 1.5,
+              padding: const EdgeInsets.fromLTRB(30, 8, 30, 0),
+              child: ShaderMask(
+                shaderCallback: (bounds) {
+                  return LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.transparent,
+                      Colors.white,
+                      Colors.white,
+                      Colors.transparent,
+                    ],
+                    stops: const [0, 0.12, 0.86, 1],
+                  ).createShader(bounds);
+                },
+                blendMode: BlendMode.dstIn,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.46,
+                  ),
+                  child: ListView.separated(
+                    controller: _scrollController,
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.symmetric(vertical: 22),
+                    itemCount: entries.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 14),
+                    itemBuilder: (_, index) {
+                      return _VoiceTranscriptLine(entry: entries[index]);
+                    },
                   ),
                 ),
               ),
             )
           : const SizedBox.shrink(),
+    );
+  }
+}
+
+class _VoiceTranscriptLine extends StatelessWidget {
+  final VoiceTranscriptEntry entry;
+
+  const _VoiceTranscriptLine({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final isUser = entry.role == VoiceTranscriptRole.user;
+    final isTool = entry.role == VoiceTranscriptRole.tool;
+    final color = isUser
+        ? Colors.white.withValues(alpha: 0.96)
+        : isTool
+            ? AppColors.accentLight.withValues(alpha: 0.72)
+            : Colors.white.withValues(alpha: 0.78);
+
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 180),
+      opacity: entry.isFinal ? 1 : 0.64,
+      child: Text(
+        entry.text,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: color,
+          fontSize: isTool ? 13 : 16,
+          height: 1.5,
+          fontWeight: isUser ? FontWeight.w600 : FontWeight.w500,
+          fontStyle: isTool ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
     );
   }
 }
@@ -406,7 +682,7 @@ class _ChatDrawer extends StatelessWidget {
                     child: GestureDetector(
                       onTap: () {
                         Navigator.of(context).pop();
-                        context.push('/login');
+                        context.go('/login');
                       },
                       child: FauxGlassCard(
                         borderRadius: 14,
@@ -461,7 +737,7 @@ class _ChatDrawer extends StatelessWidget {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.chat_bubble_outline_rounded,
+                          const Icon(Icons.history_rounded,
                               color: AppColors.textTertiary, size: 40),
                           const SizedBox(height: 12),
                           const Text(
@@ -554,8 +830,6 @@ class _SessionListState extends State<_SessionList> {
               final s = _sessions[i];
               final label = s.title?.isNotEmpty == true ? s.title! : 'Chat ${i + 1}';
               return ListTile(
-                leading: const Icon(Icons.chat_bubble_outline_rounded,
-                    color: AppColors.textTertiary, size: 18),
                 title: Text(
                   label,
                   style: const TextStyle(

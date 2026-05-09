@@ -142,18 +142,10 @@ class EmptyChatPlaceholder extends StatelessWidget {
     }
 
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.chat_bubble_outline_rounded,
-              color: AppColors.textTertiary, size: 40),
-          const SizedBox(height: 16),
-          Text(
-            'Start a conversation with $agentName',
-            style: const TextStyle(color: AppColors.textTertiary, fontSize: 14),
-            textAlign: TextAlign.center,
-          ),
-        ],
+      child: Text(
+        'Start a conversation with $agentName',
+        style: const TextStyle(color: AppColors.textTertiary, fontSize: 14),
+        textAlign: TextAlign.center,
       ),
     );
   }

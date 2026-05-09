@@ -67,6 +67,14 @@ class VoiceSessionService {
           _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
           _cleanupRoom();
         })
+        ..on<ParticipantConnectedEvent>((e) {
+          AppLogger.info('Remote participant joined room', tag: _tag,
+              metadata: {'identity': e.participant.identity, 'sid': e.participant.sid});
+        })
+        ..on<ParticipantDisconnectedEvent>((e) {
+          AppLogger.info('Remote participant left room', tag: _tag,
+              metadata: {'identity': e.participant.identity});
+        })
         ..on<ParticipantAttributesChanged>((e) {
           if (e.participant is RemoteParticipant) {
             final agentState = e.attributes['lk.agent.state'];
@@ -78,30 +86,32 @@ class VoiceSessionService {
             }
           }
         })
+        ..on<TrackSubscribedEvent>((e) {
+          if (e.track is RemoteAudioTrack) {
+            (e.track as RemoteAudioTrack).start();
+            AppLogger.info('Remote audio track started', tag: _tag);
+          }
+        })
+        ..on<TrackUnsubscribedEvent>((e) {
+          if (e.track is RemoteAudioTrack) {
+            (e.track as RemoteAudioTrack).stop();
+          }
+        })
         ..on<TranscriptionEvent>((e) {
-          if (e.participant is RemoteParticipant) {
-            for (final seg in e.segments) {
-              if (seg.isFinal) {
-                _eventsController.add(VoiceServerEvent(
-                  type: 'assistant.text.final',
-                  text: seg.text,
-                  sessionId: roomName,
-                ));
-              } else {
-                _eventsController.add(VoiceServerEvent(
-                  type: 'assistant.text.delta',
-                  text: seg.text,
-                  sessionId: roomName,
-                ));
-              }
+          for (final seg in e.segments) {
+            final isAssistant = e.participant is RemoteParticipant;
+            final role = isAssistant ? 'assistant' : 'user';
+            _eventsController.add(VoiceServerEvent(
+              type: '$role.text.${seg.isFinal ? 'final' : 'delta'}',
+              text: seg.text,
+              sessionId: roomName,
+            ));
+            if (seg.isFinal && !isAssistant) {
+              AppLogger.info('Voice user transcript final', tag: _tag);
             }
           }
         })
-        ..on<RoomEvent>((e) {
-          if (e is DataReceivedEvent) {
-            _handleDataMessage(e.data);
-          }
-        });
+        ..on<DataReceivedEvent>((e) => _handleDataMessage(e.data));
 
       await _room!.connect(
         lkUrl,

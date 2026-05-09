@@ -240,6 +240,42 @@ class _GlassReminderLeadTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return _ReminderLeadSlider(minutes: minutes, onChanged: onChanged);
+  }
+}
+
+class _ReminderLeadSlider extends StatefulWidget {
+  final int minutes;
+  final ValueChanged<int> onChanged;
+
+  const _ReminderLeadSlider({
+    required this.minutes,
+    required this.onChanged,
+  });
+
+  @override
+  State<_ReminderLeadSlider> createState() => _ReminderLeadSliderState();
+}
+
+class _ReminderLeadSliderState extends State<_ReminderLeadSlider> {
+  late int _draftMinutes;
+
+  @override
+  void initState() {
+    super.initState();
+    _draftMinutes = widget.minutes;
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReminderLeadSlider oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.minutes != oldWidget.minutes && widget.minutes != _draftMinutes) {
+      _draftMinutes = widget.minutes;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return FauxGlassCard(
       borderRadius: 16,
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
@@ -255,7 +291,7 @@ class _GlassReminderLeadTile extends StatelessWidget {
                     color: AppColors.textPrimary, fontSize: 15),
               ),
               Text(
-                '$minutes min',
+                '$_draftMinutes min',
                 style: const TextStyle(
                   color: AppColors.accent,
                   fontSize: 14,
@@ -272,11 +308,19 @@ class _GlassReminderLeadTile extends StatelessWidget {
               overlayColor: AppColors.accentGlow,
             ),
             child: Slider(
-              value: minutes.toDouble(),
+              value: _draftMinutes.toDouble(),
               min: 1,
               max: 60,
               divisions: 59,
-              onChanged: (v) => onChanged(v.round()),
+              onChanged: (v) {
+                setState(() => _draftMinutes = v.round());
+              },
+              onChangeEnd: (v) {
+                final committedMinutes = v.round();
+                if (committedMinutes != widget.minutes) {
+                  widget.onChanged(committedMinutes);
+                }
+              },
             ),
           ),
         ],

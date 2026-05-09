@@ -28,6 +28,7 @@ class ChatRepository {
     try {
       final rows = await (_db.select(_db.chatSessions)
             ..where((t) => t.agentId.isNull())
+            ..where((t) => t.messageCount.isBiggerThanValue(0))
             ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
             ..limit(limit))
           .get();
@@ -63,6 +64,7 @@ class ChatRepository {
       } else {
         query.where((t) => t.agentId.equals(agentId));
       }
+      query.where((t) => t.messageCount.isBiggerThanValue(0));
       query.orderBy([(t) => OrderingTerm.desc(t.updatedAt)]);
       final rows = await query.get();
       return Result.success(rows);

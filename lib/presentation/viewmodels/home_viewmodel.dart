@@ -30,6 +30,8 @@ class HomeViewModel extends SafeChangeNotifier {
   VoiceSessionStatus _voiceStatus = VoiceSessionStatus.disconnected;
   AppException? _error;
   String _liveTranscript = ''; // assistant text streamed during a voice session
+  final List<VoiceTranscriptEntry> _voiceTranscript = [];
+  int _voiceTranscriptSequence = 0;
   String? _currentVoiceChatSessionId; // Drift session for persisting voice messages
   String? _currentUserId;
 
@@ -53,19 +55,20 @@ class HomeViewModel extends SafeChangeNotifier {
         _notificationService.agentNudgeTapStream.listen(_onAgentNudgeTap);
   }
 
-  // ── Getters ────────────────────────────────────────────────────────────────
+  // Getters 
 
   MicState get micState => _micState;
   VoiceSessionStatus get voiceStatus => _voiceStatus;
   AppException? get error => _error;
   String get liveTranscript => _liveTranscript;
+  List<VoiceTranscriptEntry> get voiceTranscript => List.unmodifiable(_voiceTranscript);
 
   bool get hasActiveSession =>
       _voiceStatus != VoiceSessionStatus.disconnected &&
       _voiceStatus != VoiceSessionStatus.ended &&
       _voiceStatus != VoiceSessionStatus.error;
 
-  // ── Voice session lifecycle ────────────────────────────────────────────────
+  // Voice session lifecycle 
 
   Future<void> initWakeWord(String userId) async {
     _currentUserId = userId;
@@ -81,6 +84,7 @@ class HomeViewModel extends SafeChangeNotifier {
     _voiceStatus = VoiceSessionStatus.connecting;
     _micState = MicState.listening;
     _liveTranscript = '';
+    _voiceTranscript.clear();
     safeNotifyListeners();
 
     // Create a Drift session to persist voice messages so they appear in
@@ -140,7 +144,7 @@ class HomeViewModel extends SafeChangeNotifier {
     safeNotifyListeners();
   }
 
-  // ── Private ────────────────────────────────────────────────────────────────
+  // Private 
 
   void _onEngagementTap(EngagementTapPayload payload) {
     onEngagementTap?.call(payload);
@@ -174,15 +178,56 @@ class HomeViewModel extends SafeChangeNotifier {
 
       case 'assistant.text.delta':
         _voiceStatus = VoiceSessionStatus.speaking;
-        _liveTranscript += event.text ?? '';
+        _liveTranscript = event.text ?? '';
+        _upsertTranscript(
+          role: VoiceTranscriptRole.assistant,
+          text: _liveTranscript,
+          isFinal: false,
+        );
         safeNotifyListeners();
 
       case 'assistant.text.final':
         final text = (event.text ?? _liveTranscript).trim();
         if (text.isNotEmpty) unawaited(_saveVoiceMessage(text, isUser: false));
+        _upsertTranscript(
+          role: VoiceTranscriptRole.assistant,
+          text: text,
+          isFinal: true,
+        );
         _liveTranscript = '';
         _voiceStatus = VoiceSessionStatus.ready;
         safeNotifyListeners();
+
+      case 'user.text.delta':
+        _voiceStatus = VoiceSessionStatus.listening;
+        _micState = MicState.listening;
+        _upsertTranscript(
+          role: VoiceTranscriptRole.user,
+          text: event.text ?? '',
+          isFinal: false,
+        );
+        safeNotifyListeners();
+
+      case 'user.text.final':
+        final text = (event.text ?? '').trim();
+        if (text.isNotEmpty) unawaited(_saveVoiceMessage(text, isUser: true));
+        _upsertTranscript(
+          role: VoiceTranscriptRole.user,
+          text: text,
+          isFinal: true,
+        );
+        _voiceStatus = VoiceSessionStatus.processing;
+        _micState = MicState.processing;
+        safeNotifyListeners();
+
+      case 'tool_thinking':
+      case 'tool.call':
+      case 'tool_call':
+        final text = (event.message ?? event.text ?? event.toolName ?? '').trim();
+        if (text.isNotEmpty) {
+          _appendTranscript(role: VoiceTranscriptRole.tool, text: text);
+          safeNotifyListeners();
+        }
 
       case 'error':
         _error = AppException.unexpected(event.message ?? 'Voice session error.');
@@ -193,11 +238,58 @@ class HomeViewModel extends SafeChangeNotifier {
       case 'session.ended':
         if (_liveTranscript.trim().isNotEmpty) {
           unawaited(_saveVoiceMessage(_liveTranscript.trim(), isUser: false));
+          _upsertTranscript(
+            role: VoiceTranscriptRole.assistant,
+            text: _liveTranscript.trim(),
+            isFinal: true,
+          );
         }
         _liveTranscript = '';
         _resetVoiceState();
         safeNotifyListeners();
     }
+  }
+
+  void _upsertTranscript({
+    required VoiceTranscriptRole role,
+    required String text,
+    required bool isFinal,
+  }) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
+    final lastIndex = _voiceTranscript.length - 1;
+    if (lastIndex >= 0) {
+      final last = _voiceTranscript[lastIndex];
+      if (last.role == role && !last.isFinal) {
+        _voiceTranscript[lastIndex] = last.copyWith(
+          text: trimmed,
+          isFinal: isFinal,
+        );
+        return;
+      }
+    }
+
+    _voiceTranscript.add(VoiceTranscriptEntry(
+      id: '${DateTime.now().microsecondsSinceEpoch}-${_voiceTranscriptSequence++}',
+      role: role,
+      text: trimmed,
+      isFinal: isFinal,
+    ));
+  }
+
+  void _appendTranscript({
+    required VoiceTranscriptRole role,
+    required String text,
+  }) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    _voiceTranscript.add(VoiceTranscriptEntry(
+      id: '${DateTime.now().microsecondsSinceEpoch}-${_voiceTranscriptSequence++}',
+      role: role,
+      text: trimmed,
+      isFinal: true,
+    ));
   }
 
   Future<void> _saveVoiceMessage(String text, {required bool isUser}) async {

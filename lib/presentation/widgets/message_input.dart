@@ -14,6 +14,7 @@ class MessageInput extends StatefulWidget {
   final void Function(String text) onSend;
   final VoidCallback? onStop;
   final TextEditingController? controller;
+  final double extraBottomPadding;
 
   const MessageInput({
     super.key,
@@ -22,6 +23,7 @@ class MessageInput extends StatefulWidget {
     this.hint = 'Message…',
     this.onStop,
     this.controller,
+    this.extraBottomPadding = 0,
   });
 
   @override
@@ -61,7 +63,7 @@ class _MessageInputState extends State<MessageInput> {
   Widget build(BuildContext context) {
     return RepaintBoundary(
       child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+        padding: EdgeInsets.fromLTRB(16, 8, 16, 16 + widget.extraBottomPadding),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
             begin: Alignment.topCenter,

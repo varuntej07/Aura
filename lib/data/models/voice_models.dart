@@ -9,6 +9,38 @@ enum VoiceSessionStatus {
   error,
 }
 
+enum VoiceTranscriptRole {
+  user,
+  assistant,
+  tool,
+}
+
+class VoiceTranscriptEntry {
+  final String id;
+  final VoiceTranscriptRole role;
+  final String text;
+  final bool isFinal;
+
+  const VoiceTranscriptEntry({
+    required this.id,
+    required this.role,
+    required this.text,
+    required this.isFinal,
+  });
+
+  VoiceTranscriptEntry copyWith({
+    String? text,
+    bool? isFinal,
+  }) {
+    return VoiceTranscriptEntry(
+      id: id,
+      role: role,
+      text: text ?? this.text,
+      isFinal: isFinal ?? this.isFinal,
+    );
+  }
+}
+
 class VoiceServerEvent {
   final String type;
   final String? sessionId;

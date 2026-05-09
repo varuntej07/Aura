@@ -22,10 +22,12 @@ class AuthRepository {
 
   // Maps the raw Firebase auth stream to UserModel? so AuthViewModel
   // doesn't need to import firebase_auth directly.
+  // Uses _getOrCreateUser so the stream never emits null while a Firestore
+  // doc is still being created (race condition on first sign-in).
   Stream<UserModel?> get userModelStream =>
       _authService.authStateStream.asyncMap((firebaseUser) async {
         if (firebaseUser == null) return null;
-        final result = await getCurrentUser();
+        final result = await _getOrCreateUser(firebaseUser);
         return result.when(
           success: (user) => user,
           failure: (_) => null,

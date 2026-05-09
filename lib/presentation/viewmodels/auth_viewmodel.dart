@@ -44,13 +44,22 @@ class AuthViewModel extends SafeChangeNotifier {
     _setState(ViewState.loading);
     _authSubscription = _authRepository.userModelStream.listen(
       (user) {
+        AppLogger.info(
+          'Auth stream emitted: ${user != null ? 'user=${user.uid}' : 'null (logged out)'}',
+          tag: 'AuthVM',
+        );
         _user = user;
         _error = null;
         if (user != null) {
           ErrorHandler.setUser(user.uid);
           unawaited(_notificationService.initialize(user.uid));
         }
-        _setState(user != null ? ViewState.loaded : ViewState.idle);
+        final nextState = user != null ? ViewState.loaded : ViewState.idle;
+        AppLogger.info(
+          'Auth state -> $nextState',
+          tag: 'AuthVM',
+        );
+        _setState(nextState);
       },
       onError: (Object e, StackTrace st) {
         ErrorHandler.handle(e, st);
@@ -62,11 +71,13 @@ class AuthViewModel extends SafeChangeNotifier {
   }
 
   Future<void> signInWithGoogle() async {
+    AppLogger.info('signInWithGoogle: starting', tag: 'AuthVM');
     _setState(ViewState.loading);
     try {
       final result = await _authRepository.signInWithGoogle();
       result.when(
         success: (user) {
+          AppLogger.info('signInWithGoogle: success uid=${user.uid}', tag: 'AuthVM');
           _user = user;
           _error = null;
           ErrorHandler.logBreadcrumb('user_signed_in',
@@ -74,9 +85,9 @@ class AuthViewModel extends SafeChangeNotifier {
           _setState(ViewState.loaded);
         },
         failure: (error) {
+          AppLogger.error('signInWithGoogle: failed', error: error, tag: 'AuthVM');
           _error = error;
           _setState(ViewState.error);
-          AppLogger.error('Sign-in failed', error: error, tag: 'AuthVM');
         },
       );
     } catch (e, st) {
@@ -87,11 +98,13 @@ class AuthViewModel extends SafeChangeNotifier {
   }
 
   Future<void> signInWithEmail(String email, String password) async {
+    AppLogger.info('signInWithEmail: starting', tag: 'AuthVM');
     _setState(ViewState.loading);
     try {
       final result = await _authRepository.signInWithEmail(email, password);
       result.when(
         success: (user) {
+          AppLogger.info('signInWithEmail: success uid=${user.uid}', tag: 'AuthVM');
           _user = user;
           _error = null;
           ErrorHandler.logBreadcrumb('user_signed_in_email',
@@ -99,10 +112,9 @@ class AuthViewModel extends SafeChangeNotifier {
           _setState(ViewState.loaded);
         },
         failure: (error) {
+          AppLogger.error('signInWithEmail: failed', error: error, tag: 'AuthVM');
           _error = error;
           _setState(ViewState.error);
-          AppLogger.error('Email sign-in failed',
-              error: error, tag: 'AuthVM');
         },
       );
     } catch (e, st) {

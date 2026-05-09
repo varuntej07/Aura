@@ -108,39 +108,43 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
           crossAxisAlignment:
               isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            // ── Message content ──────────────────────────────────────────
-            FauxGlassCard(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              borderRadius: 18,
-              borderColor: isUser
-                  ? AppColors.accent.withValues(alpha: 0.30)
-                  : isError
-                      ? AppColors.error.withValues(alpha: 0.25)
-                      : AppColors.glassBorderDim,
-              gradient: isUser
-                  ? LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        AppColors.accent.withValues(alpha: 0.20),
-                        AppColors.accent.withValues(alpha: 0.08),
-                      ],
-                    )
-                  : isError
-                      ? LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            AppColors.error.withValues(alpha: 0.12),
-                            AppColors.error.withValues(alpha: 0.05),
-                          ],
-                        )
-                      : null,
-              child: _isEditing
-                  ? _buildEditField()
-                  : isUser
-                      ? _buildUserContent(msg)
-                      : _buildAssistantContent(msg, isError),
+            // Message content 
+            GestureDetector(
+              onLongPress: isUser ? _startEditing : null,
+              child: FauxGlassCard(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                borderRadius: 18,
+                borderColor: isUser
+                    ? AppColors.accent.withValues(alpha: 0.30)
+                    : isError
+                        ? AppColors.error.withValues(alpha: 0.25)
+                        : AppColors.glassBorderDim,
+                gradient: isUser
+                    ? LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          AppColors.accent.withValues(alpha: 0.20),
+                          AppColors.accent.withValues(alpha: 0.08),
+                        ],
+                      )
+                    : isError
+                        ? LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              AppColors.error.withValues(alpha: 0.12),
+                              AppColors.error.withValues(alpha: 0.05),
+                            ],
+                          )
+                        : null,
+                child: _isEditing
+                    ? _buildEditField()
+                    : isUser
+                        ? _buildUserContent(msg)
+                        : _buildAssistantContent(msg, isError),
+              ),
             ),
 
             // ── Action row ──────────────────────────────────────────────
@@ -151,7 +155,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     );
   }
 
-  // ── User message: selectable text ───────────────────────────────────────
+  // User message: selectable text
 
   Widget _buildUserContent(ChatMessageModel msg) {
     return SelectableText(
@@ -164,7 +168,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     );
   }
 
-  // ── Assistant message: markdown or error ────────────────────────────────
+  // Assistant message: markdown or error 
 
   Widget _buildAssistantContent(ChatMessageModel msg, bool isError) {
     if (isError) {
@@ -220,7 +224,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     );
   }
 
-  // ── Inline edit field ───────────────────────────────────────────────────
+  //  Inline edit field
 
   Widget _buildEditField() {
     return Column(
@@ -268,63 +272,52 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     );
   }
 
-  // ── Action row (icons below the bubble) ─────────────────────────────────
+  //  Action row (icons below the bubble)
 
   Widget _buildActionRow(ChatMessageModel msg, bool isUser, bool isError) {
     final actions = <Widget>[];
 
-    if (isUser) {
-      // User bubble: edit (always), retry (only if this query failed to send)
+    if (isUser) return const SizedBox.shrink();
+
+    actions.add(_ActionIcon(
+      icon: Icons.content_copy_outlined,
+      onTap: _copyToClipboard,
+      tooltip: 'Copy',
+    ));
+
+    // Retry only on error responses
+    if (isError && widget.onRetry != null) {
       actions.add(_ActionIcon(
-        icon: Icons.edit_outlined,
-        onTap: _startEditing,
-        tooltip: 'Edit',
+        icon: Icons.refresh_outlined,
+        onTap: () => widget.onRetry!(msg.id),
+        tooltip: 'Retry',
       ));
-      // Show retry on user message if the next message is an error response
-      // (handled by the parent via isLastAssistantMessage logic — not needed here)
-    } else {
-      // Assistant bubble: copy (always)
-      actions.add(_ActionIcon(
-        icon: Icons.content_copy_outlined,
-        onTap: _copyToClipboard,
-        tooltip: 'Copy',
-      ));
-
-      // Retry only on error responses
-      if (isError && widget.onRetry != null) {
-        actions.add(_ActionIcon(
-          icon: Icons.refresh_outlined,
-          onTap: () => widget.onRetry!(msg.id),
-          tooltip: 'Retry',
-        ));
-      }
-
-      // Feedback only on successful responses
-      if (!isError && widget.onFeedback != null) {
-        final isLiked = msg.feedback == MessageFeedback.liked;
-        final isDisliked = msg.feedback == MessageFeedback.disliked;
-
-        actions.add(_ActionIcon(
-          icon: isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
-          onTap: () => widget.onFeedback!(
-            msg.id,
-            isLiked ? null : MessageFeedback.liked,
-          ),
-          tooltip: 'Like',
-          color: isLiked ? AppColors.accent : null,
-        ));
-        actions.add(_ActionIcon(
-          icon: isDisliked ? Icons.thumb_down : Icons.thumb_down_outlined,
-          onTap: () => widget.onFeedback!(
-            msg.id,
-            isDisliked ? null : MessageFeedback.disliked,
-          ),
-          tooltip: 'Dislike',
-          color: isDisliked ? AppColors.error : null,
-        ));
-      }
     }
 
+    // Feedback only on successful responses
+    if (!isError && widget.onFeedback != null) {
+      final isLiked = msg.feedback == MessageFeedback.liked;
+      final isDisliked = msg.feedback == MessageFeedback.disliked;
+
+      actions.add(_ActionIcon(
+        icon: isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+        onTap: () => widget.onFeedback!(
+          msg.id,
+          isLiked ? null : MessageFeedback.liked,
+        ),
+        tooltip: 'Like',
+        color: isLiked ? AppColors.accent : null,
+      ));
+      actions.add(_ActionIcon(
+        icon: isDisliked ? Icons.thumb_down : Icons.thumb_down_outlined,
+        onTap: () => widget.onFeedback!(
+          msg.id,
+          isDisliked ? null : MessageFeedback.disliked,
+        ),
+        tooltip: 'Dislike',
+        color: isDisliked ? AppColors.error : null,
+      ));
+    }
     if (actions.isEmpty) return const SizedBox.shrink();
 
     return Padding(
@@ -339,7 +332,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     );
   }
 
-  // ── Markdown theme ──────────────────────────────────────────────────────
+  //  Markdown theme
 
   MarkdownStyleSheet _markdownStyleSheet() {
     return MarkdownStyleSheet(
@@ -406,7 +399,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
   }
 }
 
-// ── Reusable icon button ──────────────────────────────────────────────────
+//  Reusable icon button 
 
 class _ActionIcon extends StatelessWidget {
   final IconData icon;

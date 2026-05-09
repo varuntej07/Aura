@@ -89,6 +89,7 @@ class _ChatScreenState extends State<ChatScreen> {
         return Scaffold(
           key: _scaffoldKey,
           backgroundColor: AppColors.deepBackground,
+          resizeToAvoidBottomInset: true,
           appBar: AppBar(
             backgroundColor: AppColors.surface,
             elevation: 0,
@@ -162,6 +163,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     _scrollToBottom();
                   },
                   onStop: vm.stopGeneration,
+                  extraBottomPadding: 16,
                 ),
               ],
             ),

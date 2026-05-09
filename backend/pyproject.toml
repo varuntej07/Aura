@@ -17,7 +17,7 @@ dependencies = [
     "python-dotenv>=1.0",
 
     # LiveKit — voice pipeline (STT: Deepgram, LLM: Anthropic, TTS: Cartesia, VAD: Silero)
-    "livekit-agents[deepgram,anthropic,cartesia,silero]>=1.0",
+    "livekit-agents[deepgram,anthropic,cartesia,silero,google]>=1.0",
     "livekit-api>=0.7",
 
     # Anthropic Claude
