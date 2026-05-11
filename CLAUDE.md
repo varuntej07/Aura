@@ -37,6 +37,37 @@ The extractor always passes the user's previous query (`prev_user_query` field) 
 current message to Gemini Flash, which decides when prior context is needed — no hardcoded
 heuristics. Failed extractions are swallowed silently so the chat stream is never affected.
 
+## UI System
+
+The app uses a glass morphism design system defined in `lib/core/theme/`.
+
+**`app_colors.dart`** — All color constants including glass-specific ones:
+- `deepBackground` (`0xFF080812`) — base dark background
+- `glassWhiteFill`, `glassBorderLight`, `glassBorderDim`, `glassHighlight` — glass surface layers
+- `glassOrb1`, `glassOrb2` — ambient background gradient orb colors
+
+**`glass_card.dart`** — Four UI primitives:
+- `GlassCard` — real `BackdropFilter` blur (σ=12). Use only on static, non-scrolling elements. Always wrapped in `RepaintBoundary`.
+- `FauxGlassCard` — gradient + border only, no blur. Use everywhere inside scroll lists, message bubbles, tiles, pills.
+- `GlassIconButton` — circular glass button with real blur. Use for icon buttons in app bars.
+- `AmbientBackground` — `Stack` with two radial gradient orbs over `deepBackground`. Wrap entire screens that need the glass effect to have something to blur.
+
+Performance rule: never put `BackdropFilter` inside a `ListView` or `GridView`. Use `FauxGlassCard` there instead.
+
+**AppShell** (`lib/presentation/screens/app_shell.dart`) — wraps child in `AmbientBackground`, uses `extendBody: true` so content flows under the floating nav bar. The floating glass nav bar is ~58px tall. Screens that scroll to the bottom must add `SizedBox(height: MediaQuery.of(context).viewPadding.bottom + 96)` at the bottom to avoid content being hidden.
+
+## Auth
+
+`AuthViewModel` uses a stream subscription to `authRepository.userModelStream` (backed by Firebase `authStateChanges()`). Auth state updates reactively — no polling. The router's `refreshListenable: authViewModel` handles redirects automatically.
+
+Sign-in supports Google and Email/Password. Email sign-in auto-creates an account on `user-not-found`.
+
+The home screen drawer checks `authVm.user != null` and shows a sign-in button when unauthenticated, hiding the session list.
+
+## Paywall
+
+`/paywall` route renders `PaywallScreen` with three tiers: Free, Monthly (`aura_starter_monthly`), Annual (`aura_starter_annual`). Calls `SubscriptionViewModel.purchaseStarter(annual: bool)`.
+
 ## Run
 
 Backend API:
@@ -63,6 +94,14 @@ Production backend URL:
 
 ```text
 https://juno-backend-620715294422.us-central1.run.app
+```
+
+Aura app legal pages (hosted on varuntej.dev portfolio):
+
+```text
+https://varuntej.dev/aura
+https://varuntej.dev/aura/privacy-policy
+https://varuntej.dev/aura/terms-of-service
 ```
 
 ## Reliability Notes
