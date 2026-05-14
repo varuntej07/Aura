@@ -64,6 +64,24 @@ Sign-in supports Google and Email/Password. Email sign-in auto-creates an accoun
 
 The home screen drawer checks `authVm.user != null` and shows a sign-in button when unauthenticated, hiding the session list.
 
+## Onboarding
+
+New accounts are stamped `onboarding_complete: false` in Firestore at creation. Existing accounts without the field default to `true` so they are never shown the flow.
+
+The router redirect enforces onboarding before any authenticated screen: if `AuthViewModel.needsOnboarding` is true, any route redirects to `/onboarding`.
+
+**Flow:** `/onboarding` (`OnboardingScreen` — 5-slide PageView) → pushes `AuraConsentScreen` (age gate + Aura consent toggle).
+
+`AuraConsentScreen` writes all three fields atomically via `OnboardingRepository.saveOnboardingResult`:
+- `onboarding_complete: true`
+- `date_of_birth: ISO date`
+- `aura_consent_granted: bool` (forced false for users under 18)
+- `aura_consent_timestamp: ISO datetime`
+
+After a successful write, it calls `AuthViewModel.markOnboardingComplete()` (updates in-memory model) and then `context.go('/home')` explicitly. The screen was pushed via `Navigator.push`, not GoRouter, so explicit navigation is required to clear the mixed stack correctly.
+
+`backend/src/services/user_aura_extractor.py` reads `users/{uid}.aura_consent_granted` before every extraction and returns early if not granted. This is the GDPR gate — behavioural profiling only runs with explicit opt-in.
+
 ## Paywall
 
 `/paywall` route renders `PaywallScreen` with three tiers: Free, Monthly (`aura_starter_monthly`), Annual (`aura_starter_annual`). Calls `SubscriptionViewModel.purchaseStarter(annual: bool)`.
@@ -176,3 +194,23 @@ If you notice something worth fixing elsewhere, mention it in a note.
 Do not touch it. Ever.
 
 Before deleting any file, overwriting existing code, dropping database records, removing dependencies, or making any change that cannot be trivially undone, stop completely. List exactly what will be affected. Ask for explicit confirmation. Only proceed after I say yes in the current message.
+
+## Skill routing
+
+When the user's request matches an available skill, ALWAYS invoke it using the Skill
+tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
+The skill has specialized workflows that produce better results than ad-hoc answers.
+
+Key routing rules:
+- Product ideas, "is this worth building", brainstorming -> invoke office-hours
+- Bugs, errors, "why is this broken", 500 errors -> invoke investigate
+- Ship, deploy, push, create PR -> invoke ship
+- QA, test the site, find bugs -> invoke qa
+- Code review, check my diff -> invoke review
+- Update docs after shipping -> invoke document-release
+- Weekly retro -> invoke retro
+- Design system, brand -> invoke design-consultation
+- Visual audit, design polish -> invoke design-review
+- Architecture review -> invoke plan-eng-review
+- Save progress, checkpoint, resume -> invoke checkpoint
+- Code quality, health check -> invoke health
