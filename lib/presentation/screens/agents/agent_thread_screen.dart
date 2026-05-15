@@ -18,34 +18,56 @@ import '../reminders/reminders_screen.dart';
 
 /// Horizontally scrollable row of quick-start suggestion pills shown above the
 /// input bar. Tapping a pill writes its text into the input field.
+///
+/// The first pill is always a hardcoded "↻ Fetch latest" entry styled in the
+/// accent colour. It writes a targeted fetch query into the input field so the
+/// user can review and send it themselves.
 class _SuggestionPillsRow extends StatelessWidget {
   final List<String> pills;
+  final String agentId;
   final void Function(String pill) onTap;
 
-  const _SuggestionPillsRow({required this.pills, required this.onTap});
+  const _SuggestionPillsRow({
+    required this.pills,
+    required this.agentId,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
+    // Prepend the fetch-latest pill so it is always the first entry.
+    final allPills = ['↻ Fetch latest', ...pills];
+
     return SizedBox(
       height: 36,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        itemCount: pills.length,
+        itemCount: allPills.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (_, i) {
-          final pill = pills[i];
+          final pill = allPills[i];
+          final isFetchLatest = i == 0;
           return GestureDetector(
-            onTap: () => onTap(pill),
+            onTap: () {
+              final query = isFetchLatest
+                  ? 'Fetch latest $agentId updates'
+                  : pill;
+              onTap(query);
+            },
             child: FauxGlassCard(
               borderRadius: 20,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               child: Text(
                 pill,
-                style: const TextStyle(
-                  color: AppColors.textSecondary,
+                style: TextStyle(
+                  color: isFetchLatest
+                      ? AppColors.accent
+                      : AppColors.textSecondary,
                   fontSize: 12,
-                  fontWeight: FontWeight.w500,
+                  fontWeight: isFetchLatest
+                      ? FontWeight.w600
+                      : FontWeight.w500,
                 ),
               ),
             ),
@@ -225,6 +247,7 @@ class _AgentThreadScreenState extends State<AgentThreadScreen> {
                           isStreaming: vm.isStreaming,
                           streamingText: vm.streamingText,
                           thinkingMessage: vm.thinkingMessage,
+                          streamingContextTag: widget.agentId,
                           onRetry: vm.retryLastMessage,
                           onEdit: vm.editAndResend,
                           onFeedback: vm.setFeedback,
@@ -244,9 +267,10 @@ class _AgentThreadScreenState extends State<AgentThreadScreen> {
                       onDismiss: vm.clearError,
                     ),
                   ),
-                if (vm.suggestionPills.isNotEmpty && !vm.isStreaming)
+                if (!vm.isStreaming)
                   _SuggestionPillsRow(
                     pills: vm.suggestionPills,
+                    agentId: widget.agentId,
                     onTap: (pill) {
                       _inputController.text = pill;
                       _inputController.selection = TextSelection.collapsed(

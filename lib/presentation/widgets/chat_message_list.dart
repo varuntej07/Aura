@@ -24,6 +24,8 @@ class ChatMessageList extends StatelessWidget {
   final OnFeedback? onFeedback;
   final VoidCallback? onViewReminders;
   final void Function(String clarificationId, List<String> options)? onClarificationSubmit;
+  /// Forwarded to [StreamingMessageBubble] to select context-appropriate
+  final String? streamingContextTag;
 
   const ChatMessageList({
     super.key,
@@ -37,6 +39,7 @@ class ChatMessageList extends StatelessWidget {
     this.onFeedback,
     this.onViewReminders,
     this.onClarificationSubmit,
+    this.streamingContextTag,
   });
 
   @override
@@ -87,6 +90,7 @@ class ChatMessageList extends StatelessWidget {
               streamingText: streamingText,
               thinkingMessage: thinkingMessage,
               isLoading: true,
+              contextTag: streamingContextTag,
             );
           }
 

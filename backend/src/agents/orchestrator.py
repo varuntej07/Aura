@@ -107,8 +107,15 @@ async def _run(agent_id: str, user_id: str) -> None:
     # Step 2: Fetch fresh content
     content = await agent.fetch_data(user_config)
 
-    # Step 3: Build notification copy via LLM
-    notification = await agent.build_notification(content, user_config, interaction_history)
+    # Step 3: Judge the content — returns None if nothing is worth notifying
+    notification = await agent.build_notification(user_id, content, user_config, interaction_history)
+
+    if notification is None:
+        logger.info("agent_orchestrator: judge vetoed — no notification", {
+            "agent_id": agent_id,
+            "user_id": user_id,
+        })
+        return
 
     title = notification.get("title", agent_id)
     body = notification.get("body", "")

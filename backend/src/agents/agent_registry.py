@@ -4,7 +4,7 @@ ScheduledAgentRegistry — lazy singleton registry for all domain agents.
 Adding a new agent (e.g. WeatherAgent):
     1. Create backend/src/agents/implementations/weather_agent.py
     2. Add one lazy property here: weather → WeatherAgent
-    3. Add one entry to get("weather") in get_agent()
+    3. Add one entry to get_agent() mapping and all_agent_ids list
     That's it. Nothing else changes.
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from ..services.model_provider import ModelProvider, get_model_provider
 from .agent_base import ScheduledAgent
-from .implementations.cricket_agent import CricketAgent
+from .implementations.sports_agent import SportsAgent
 from .implementations.technews_agent import TechNewsAgent
 from .implementations.jobs_agent import JobsAgent
 from .implementations.posts_agent import PostsAgent
@@ -27,16 +27,16 @@ class ScheduledAgentRegistry:
 
     def __init__(self, models: ModelProvider) -> None:
         self._models = models
-        self._cricket: CricketAgent | None = None
+        self._sports: SportsAgent | None = None
         self._technews: TechNewsAgent | None = None
         self._jobs: JobsAgent | None = None
         self._posts: PostsAgent | None = None
 
     @property
-    def cricket(self) -> CricketAgent:
-        if self._cricket is None:
-            self._cricket = CricketAgent(self._models)
-        return self._cricket
+    def sports(self) -> SportsAgent:
+        if self._sports is None:
+            self._sports = SportsAgent(self._models)
+        return self._sports
 
     @property
     def technews(self) -> TechNewsAgent:
@@ -62,7 +62,7 @@ class ScheduledAgentRegistry:
         Raises ValueError for unknown IDs so callers fail loudly.
         """
         mapping: dict[str, ScheduledAgent] = {
-            "cricket":  self.cricket,
+            "sports":   self.sports,
             "technews": self.technews,
             "jobs":     self.jobs,
             "posts":    self.posts,
@@ -77,7 +77,7 @@ class ScheduledAgentRegistry:
 
     @property
     def all_agent_ids(self) -> list[str]:
-        return ["cricket", "technews", "jobs", "posts"]
+        return ["sports", "technews", "jobs", "posts"]
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

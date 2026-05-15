@@ -2,16 +2,71 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-const _loadingMessages = [
-  'pondering the cosmos...',
-  'grinding it all together...',
-  'consulting my inner oracle...',
-  'connecting the dots...',
-  'cooking something up...',
-  'untangling the threads...',
-  'channeling the signal...',
-  'almost got it...',
-];
+const _loadingMessagesByContext = <String, List<String>>{
+  'sports': [
+    'checking the scorecard...',
+    'scanning the pitch...',
+    'reading the match data...',
+    'pulling up the highlights...',
+    'watching the replays...',
+    'tallying the runs...',
+    'scouting the field...',
+    'checking live scores...',
+    'reviewing the innings...',
+    'running the stats...',
+  ],
+  'technews': [
+    'scanning the wire...',
+    'parsing the stack...',
+    'pulling the latest commits...',
+    'reading the changelog...',
+    'checking the release notes...',
+    'scanning hacker news...',
+    'pulling research papers...',
+    'indexing the feed...',
+    'loading the diff...',
+  ],
+  'jobs': [
+    'scanning the boards...',
+    'reading between the lines...',
+    'filtering the listings...',
+    'checking open roles...',
+    'loading the job feed...',
+    'reviewing the postings...',
+    'searching the market...',
+    'ranking the matches...',
+  ],
+  'posts': [
+    'drafting your voice...',
+    'finding the angle...',
+    'sharpening the take...',
+    'writing the hook...',
+    'warming up the keyboard...',
+    'finding the right words...',
+    'crafting the draft...',
+  ],
+  'default': [
+    'working on it...',
+    'thinking it through...',
+    'connecting the dots...',
+    'cooking something up...',
+    'untangling the threads...',
+    'reading the room...',
+    'pulling it together...',
+    'almost there...',
+    'running it through...',
+    'locking in...',
+    'picking up the signal...',
+    'in the zone...',
+    'on it...',
+    'processing...',
+    'just a moment...',
+  ],
+};
+
+List<String> _messagesForContext(String? contextTag) =>
+    _loadingMessagesByContext[contextTag] ??
+    _loadingMessagesByContext['default']!;
 
 /// Shown while a streaming SSE response is in progress.
 ///
@@ -27,11 +82,17 @@ class StreamingMessageBubble extends StatefulWidget {
   final String? thinkingMessage;
   final bool isLoading;
 
+  /// Selects the loading message set for the current screen context.
+  /// Matches keys in [_loadingMessagesByContext]: 'sports', 'technews',
+  /// 'jobs', 'posts'. Null falls back to the default general set.
+  final String? contextTag;
+
   const StreamingMessageBubble({
     super.key,
     required this.streamingText,
     required this.isLoading,
     this.thinkingMessage,
+    this.contextTag,
   });
 
   @override
@@ -73,13 +134,12 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
     _rotateTimer?.cancel();
     _rotateTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) async {
       if (!mounted) return;
-      // Fade out
+      final messages = _messagesForContext(widget.contextTag);
       await _fadeController.reverse();
       if (!mounted) return;
       setState(() {
-        _loadingIndex = (_loadingIndex + 1) % _loadingMessages.length;
+        _loadingIndex = (_loadingIndex + 1) % messages.length;
       });
-      // Fade in
       await _fadeController.forward();
     });
   }
@@ -136,7 +196,8 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
   }
 
   Widget _buildLoadingLabel(ThemeData theme) {
-    final label = widget.thinkingMessage ?? _loadingMessages[_loadingIndex];
+    final messages = _messagesForContext(widget.contextTag);
+    final label = widget.thinkingMessage ?? messages[_loadingIndex % messages.length];
     final isToolMessage = widget.thinkingMessage != null;
 
     return Row(

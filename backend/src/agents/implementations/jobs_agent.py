@@ -31,6 +31,7 @@ class JobsAgent(ScheduledAgent):
 
     async def build_notification(
         self,
+        user_id: str,
         content: list[dict[str, Any]],
         user_config: dict[str, Any],
         interaction_history: list[dict[str, Any]],

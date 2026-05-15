@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from datetime import datetime, timezone
 from typing import Any
 
 from ...services.model_provider import ModelProvider
+from ..data_fetchers.web_search import web_search
 from ..agent_base import ScheduledAgent
-from ..data_fetchers.hackernews import fetch_top_stories
-from ..data_fetchers.arxiv_papers import fetch_recent_papers
+
+_DEFAULT_TECH_INTERESTS = ["AI", "ML", "startups", "open source"]
+_DAILY_NOTIFICATION_LIMIT = 2
+_SIGNIFICANCE_THRESHOLD = 8
+_RELEVANCE_THRESHOLD = 7
 
 
 class TechNewsAgent(ScheduledAgent):
     """
-    BytePulse — surfaces top HN stories + fresh arXiv papers.
-    Tone: sharp, no-hype tech lens. Flags what matters, skips the noise.
+    BytePulse — monitors tech and AI news via web search and judges whether
+    anything is worth notifying the user about.
+
+    Judge criteria (all must hold to send a notification):
+      - Significance ≥ 8/10: major model release, acquisition, regulatory ruling,
+        breakthrough result — blog posts and minor updates do not qualify
+      - Relevance ≥ 7/10: matches user's stated interests
+      - Novel: not already covered in today's notifications
+      - Daily cap: max 2 notifications per day
     """
 
     def __init__(self, models: ModelProvider) -> None:
@@ -22,82 +36,128 @@ class TechNewsAgent(ScheduledAgent):
         return "technews"
 
     async def fetch_data(self, user_config: dict[str, Any]) -> list[dict[str, Any]]:
-        categories = user_config.get("arxiv_categories", ["cs.LG", "cs.AI"])
-        hn_stories, papers = await __import__("asyncio").gather(
-            fetch_top_stories(limit=8),
-            fetch_recent_papers(categories=categories, max_results=5),
+        """
+        Runs two parallel web searches — a broad tech news sweep and an
+        interest-specific query — and returns combined grounded text.
+        """
+        interests: list[str] = user_config.get("interests", _DEFAULT_TECH_INTERESTS)
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        queries = _build_search_queries(interests, current_date)
+
+        results = await asyncio.gather(
+            *[web_search(q, uid="technews_agent") for q in queries],
+            return_exceptions=True,
         )
-        return [*hn_stories, *papers]
+
+        combined_text = "\n\n".join(
+            r for r in results if isinstance(r, str) and r.strip()
+        )
+        if not combined_text:
+            return []
+
+        return [{"text": combined_text, "source": "web_search", "queries": queries}]
 
     async def build_notification(
         self,
+        user_id: str,
         content: list[dict[str, Any]],
         user_config: dict[str, Any],
-        interaction_history: list[dict[str, Any]],
-    ) -> dict[str, str]:
+        interaction_history: list[dict[str, Any]],  # noqa: ARG002 — judge uses state, not history
+    ) -> dict[str, str] | None:
+        """
+        Judges the fetched content with a single LLM call. Returns a notification
+        payload if something passes all criteria, or None to skip.
+        """
         if not content:
-            return {
-                "title": "BytePulse",
-                "body": "Feed is quiet today. Check back later.",
-                "opening_chat_message": "Nothing major dropped today — want me to search a specific topic?",
-            }
+            return None
 
-        interests = user_config.get("interests", ["AI", "ML", "startups"])
-        engagement_summary = _summarize_feedback(interaction_history)
+        state = await self.load_agent_state(user_id)
+        if state["daily_count"] >= _DAILY_NOTIFICATION_LIMIT:
+            return None
 
-        prompt = f"""You are BytePulse, a sharp tech analyst who cuts through hype.
+        interests: list[str] = user_config.get("interests", _DEFAULT_TECH_INTERESTS)
+        raw_text: str = content[0].get("text", "")
+        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-User's interests: {', '.join(interests)}
-Recent engagement: {engagement_summary}
-
-Latest tech content:
-{_format_content(content)}
-
-Generate a push notification with this JSON structure:
-{{
-  "title": "<max 50 chars, punchy>",
-  "body": "<max 100 chars, specific — name the actual story or paper>",
-  "opening_chat_message": "<1-2 sentences to kick off a tech conversation, no fluff>"
-}}
-
-Rules:
-- Name the actual story, paper, or company — no generic filler
-- If there's a genuinely surprising or important story, lead with that
-- Match interests when possible
-- Return ONLY valid JSON, no markdown.
-"""
-        result = await self._models.cheap(
-            prompt,
-            system="You are BytePulse, a sharp tech analyst. Output valid JSON only.",
+        verdict = await self._run_judge(
+            raw_text=raw_text,
+            interests=interests,
+            seen_today=state["seen_today"],
+            daily_count=state["daily_count"],
+            current_date=current_date,
         )
-        return _parse_notification_json(result)
+
+        if verdict is None or verdict.get("decision") == "NO":
+            return None
+
+        event_fingerprint = verdict.get("event_fingerprint", f"technews_{current_date}_{state['daily_count']}")
+        await self.save_agent_state(user_id, event_fingerprint)
+
+        return {
+            "title": verdict.get("title", "BytePulse"),
+            "body": verdict.get("body", ""),
+            "opening_chat_message": verdict.get("opening_chat_message", ""),
+        }
+
+    async def _run_judge(
+        self,
+        raw_text: str,
+        interests: list[str],
+        seen_today: list[str],
+        daily_count: int,
+        current_date: str,
+    ) -> dict[str, Any] | None:
+        seen_summary = ", ".join(seen_today) if seen_today else "nothing yet"
+        prompt = f"""You are the tech news intelligence judge for Buddy, a personal assistant app.
+
+                User interests: {", ".join(interests)}
+                Already notified today: {seen_summary}
+                Notifications sent today: {daily_count}/{_DAILY_NOTIFICATION_LIMIT}
+                Current date: {current_date}
+
+                Latest tech news (live web fetch):
+                {raw_text[:3000]}
+
+                Your job: decide if anything here is worth interrupting the user for.
+
+                Approve ONLY if ALL of the following hold:
+                1. Significance ≥ {_SIGNIFICANCE_THRESHOLD}/10 — major model release (GPT-5, Gemini 2, Claude 4), billion-dollar acquisition, landmark regulation, a paper with concrete breakthrough numbers. Opinion pieces, minor updates, and "company announces plans" do NOT qualify.
+                2. Relevance ≥ {_RELEVANCE_THRESHOLD}/10 — directly matches the user's stated interests above.
+                3. Novel — not the same story or event already covered in today's earlier notifications.
+
+                Don't make user feel bad for sending news that is not relevant or significant. Only if its virally worthy enough. 
+
+                If something passes, return this JSON:
+                {{
+                "title": "<max 50 chars, sharp and catchy, name the actual thing>",
+                "body": "<max 100 chars — be specific: name the model, company, or number>",
+                "opening_chat_message": "<1-2 sentences to open the chat thread with real facts, no hype>",
+                "event_fingerprint": "<short unique string identifying this specific story, e.g. 'openai_gpt5_release'>"
+                }}
+
+                If nothing qualifies, return exactly:
+                {{"decision": "NO"}}
+
+                STRICTLY return JSON only. No markdown. No em-dashes. No explanation outside the JSON.
+                """
+
+        raw = await self._models.cheap(
+            prompt,
+            system="You are user's friend who loves to share tech news with friends. Output valid JSON only.",
+        )
+        return _parse_judge_response(raw)
 
 
-def _summarize_feedback(recent: list[dict]) -> str:
-    if not recent:
-        return "No history yet"
-    tapped = sum(1 for r in recent if r.get("user_action") == "tapped")
-    total = len(recent)
-    return f"{tapped}/{total} recent nudges engaged with"
+# Helpers
+def _build_search_queries(interests: list[str], current_date: str) -> list[str]:
+    top_interests = " ".join(interests[:2])
+    return [
+        f"top AI ML tech news breakthroughs across the world today {current_date}",
+        f"{top_interests} major announcement release today {current_date}",
+    ]
 
 
-def _format_content(content: list[dict]) -> str:
-    lines = []
-    for item in content[:8]:
-        source = item.get("source", "")
-        if source == "hackernews":
-            score = item.get("score", "")
-            score_str = f" ({score} pts)" if score else ""
-            lines.append(f"HN: {item.get('title', '')}{score_str}")
-        elif source == "arxiv":
-            lines.append(f"arXiv: {item.get('title', '')} — {item.get('summary', '')[:120]}")
-        else:
-            lines.append(f"- {item.get('title', item.get('headline', ''))}")
-    return "\n".join(lines) or "No content"
-
-
-def _parse_notification_json(raw: Any) -> dict[str, str]:
-    import json
+def _parse_judge_response(raw: Any) -> dict[str, Any] | None:
     try:
         if isinstance(raw, dict):
             return raw
@@ -106,8 +166,4 @@ def _parse_notification_json(raw: Any) -> dict[str, str]:
             text = text.split("```")[1].lstrip("json").strip()
         return json.loads(text)
     except Exception:
-        return {
-            "title": "BytePulse",
-            "body": "Big things are moving in tech. Tap to catch up.",
-            "opening_chat_message": "Got some interesting tech stories — want the highlights?",
-        }
+        return None

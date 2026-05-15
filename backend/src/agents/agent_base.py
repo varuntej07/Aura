@@ -1,34 +1,42 @@
 """
-Base class for all scheduled domain agents (cricket, tech news, jobs, posts).
-Each agent fetches fresh content, generates a push notification, and processes
-user feedback to improve future nudges.
+Base class for all scheduled domain agents (sports, tech news, jobs, posts).
+Each agent fetches fresh content, runs a judge LLM call, and — only if the
+judge approves — sends a push notification.
+
+Subclasses implement:
+  - fetch_data(user_config)                     -> raw content items
+  - build_notification(user_id, ...)            -> notification dict or None
+  - agent_id property                           -> unique string identifier
+
+The base provides:
+  - load_user_config(user_id)                   -> Firestore agent_config doc
+  - load_interaction_history(user_id, limit)    -> last N interactions
+  - save_interaction(...)                        -> write interaction record
+  - load_agent_state(user_id)                   -> dedup + daily count state
+  - save_agent_state(user_id, event_fingerprint) -> persist post-notification state
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Any
 
 from google.cloud import firestore as fs
-from datetime import datetime, timezone
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
+
+_TODAY_FORMAT = "%Y-%m-%d"
 
 
 class ScheduledAgent(ABC):
     """
     Abstract base for all scheduled domain agents.
 
-    Subclasses implement:
-      - fetch_data(user_config)      -> raw content items
-      - build_notification(...)      -> title + body + opening_chat_message
-      - agent_id property            -> unique string identifier
-
-    The base provides:
-      - load_user_config()           -> Firestore agent_config/{agent_id}
-      - load_interaction_history()       -> last N interactions from agent_memory
-      - save_interaction()           -> write interaction after user reply
+    The judge pattern: build_notification returns None when the agent decides
+    the content is not worth notifying the user. The orchestrator skips FCM
+    when it receives None — no notification is sent.
     """
 
     @property
@@ -37,19 +45,23 @@ class ScheduledAgent(ABC):
 
     @abstractmethod
     async def fetch_data(self, user_config: dict[str, Any]) -> list[dict[str, Any]]:
-        """Fetch fresh content items. No LLM calls here — pure data."""
+        """Fetch fresh content. No LLM calls here — pure data retrieval."""
         ...
 
     @abstractmethod
     async def build_notification(
         self,
+        user_id: str,
         content: list[dict[str, Any]],
         user_config: dict[str, Any],
         interaction_history: list[dict[str, Any]],
-    ) -> dict[str, str]:
+    ) -> dict[str, str] | None:
         """
-        Call the LLM to produce a push notification.
-        Must return: {"title": str, "body": str, "opening_chat_message": str}
+        Judge the fetched content and, if worthy, produce a push notification.
+
+        Returns a notification dict:
+            {"title": str, "body": str, "opening_chat_message": str}
+        or None if the judge decides nothing is worth notifying.
         """
         ...
 
@@ -130,3 +142,59 @@ class ScheduledAgent(ABC):
             f"Agent {self.agent_id}: interaction saved",
             {"user_id": user_id, "action": user_action, "topic": content_topic},
         )
+
+    async def load_agent_state(self, user_id: str) -> dict[str, Any]:
+        """
+        Returns:
+            seen_today: list of event fingerprint strings notified today
+            daily_count: int, how many notifications sent today
+            daily_date: str, YYYY-MM-DD of the current day window
+        State resets automatically when daily_date doesn't match today.
+        """
+        import asyncio
+        today = datetime.now(timezone.utc).strftime(_TODAY_FORMAT)
+
+        def _read() -> dict[str, Any]:
+            snap = self._agent_state_ref(user_id).get()
+            if not snap.exists:
+                return {"seen_today": [], "daily_count": 0, "daily_date": today}
+            data = snap.to_dict() or {}
+            if data.get("daily_date") != today:
+                return {"seen_today": [], "daily_count": 0, "daily_date": today}
+            return {
+                "seen_today": data.get("seen_today", []),
+                "daily_count": data.get("daily_count", 0),
+                "daily_date": today,
+            }
+
+        try:
+            return await asyncio.to_thread(_read)
+        except Exception as exc:
+            logger.error(f"Agent {self.agent_id}: load_agent_state failed", {"error": str(exc)})
+            today = datetime.now(timezone.utc).strftime(_TODAY_FORMAT)
+            return {"seen_today": [], "daily_count": 0, "daily_date": today}
+
+    async def save_agent_state(self, user_id: str, event_fingerprint: str) -> None:
+        """Append event_fingerprint to seen_today and increment daily_count."""
+        import asyncio
+        today = datetime.now(timezone.utc).strftime(_TODAY_FORMAT)
+
+        def _write() -> None:
+            ref = self._agent_state_ref(user_id)
+            snap = ref.get()
+            data = snap.to_dict() or {} if snap.exists else {}
+            if data.get("daily_date") != today:
+                data = {"seen_today": [], "daily_count": 0, "daily_date": today}
+            seen: list[str] = data.get("seen_today", [])
+            if event_fingerprint not in seen:
+                seen.append(event_fingerprint)
+            ref.set({
+                "seen_today": seen,
+                "daily_count": data.get("daily_count", 0) + 1,
+                "daily_date": today,
+            })
+
+        try:
+            await asyncio.to_thread(_write)
+        except Exception as exc:
+            logger.error(f"Agent {self.agent_id}: save_agent_state failed", {"error": str(exc)})
