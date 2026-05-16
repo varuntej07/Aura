@@ -5,11 +5,11 @@ All Cloud Tasks calls are synchronous (gRPC under the hood) and must be
 wrapped in asyncio.to_thread when called from async handlers.
 
 Two kinds of tasks:
-  orchestrate  → immediate, POST /internal/engage/orchestrate
+  orchestrate -> immediate, POST /internal/engage/orchestrate
                  called from nutrition.py/chat.py right before the HTTP response.
-                 Owns the full context-load → decision → copy-gen pipeline.
+                 Owns the full context-load -> decision -> copy-gen pipeline.
 
-  notify       → delayed by decision.delay_minutes, POST /internal/engage/notify
+  notify -> delayed by decision.delay_minutes, POST /internal/engage/notify
                  owns send-first, check-and-reengage, check-and-expire, expire.
 
 Task names are returned and stored in engagement_log.cloud_task_name so
@@ -90,8 +90,8 @@ class TaskScheduler:
         })
         return task_name
 
-    def schedule_agent_run(self, agent_id: str, user_id: str) -> str:
-        """Enqueue an immediate agent run task for one user.
+    def schedule_agent_run(self, agent_id: str, user_id: str, delay_seconds: int = 0) -> str:
+        """Enqueue an agent run task for one user, optionally delayed.
 
         Targets POST /internal/agents/{agent_id}/run/{user_id}.
         Returns the Cloud Task name.
@@ -99,12 +99,13 @@ class TaskScheduler:
         payload = {"agent_id": agent_id, "user_id": user_id}
         task_name = self._enqueue(
             payload=payload,
-            delay_seconds=0,
+            delay_seconds=delay_seconds,
             url_path=f"/internal/agents/{agent_id}/run/{user_id}",
         )
         logger.info("TaskScheduler: agent run enqueued", {
             "agent_id": agent_id,
             "user_id": user_id,
+            "delay_seconds": delay_seconds,
             "task_name": task_name,
         })
         return task_name
@@ -121,8 +122,7 @@ class TaskScheduler:
                 "error": str(exc),
             })
 
-    # ── Internal ──────────────────────────────────────────────────────────────
-
+    # Internal 
     def _enqueue(
         self,
         payload: dict[str, Any],
@@ -167,8 +167,7 @@ class TaskScheduler:
             self._client = tasks_v2.CloudTasksClient()
         return self._client
 
-
-# ── Module-level singleton ────────────────────────────────────────────────────
+# Module-level singleton
 
 _scheduler: TaskScheduler | None = None
 

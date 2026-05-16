@@ -55,9 +55,7 @@ class _SuggestionPillsRow extends StatelessWidget {
                   : pill;
               onTap(query);
             },
-            child: FauxGlassCard(
-              borderRadius: 20,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: FauxGlassCard.pill(
               child: Text(
                 pill,
                 style: TextStyle(

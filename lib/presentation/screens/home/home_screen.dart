@@ -7,7 +7,7 @@ import '../../../core/theme/glass_card.dart';
 import '../../../data/local/app_database.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/chat_repository.dart';
-import '../../../data/services/backend_api_service.dart';
+import '../../../data/services/chat_service_provider.dart';
 import '../../../data/services/chat_backup_service.dart';
 import '../../../data/services/chat_session_manager.dart';
 import '../../../data/services/feedback_service.dart';
@@ -92,7 +92,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     super.didChangeDependencies();
     if (!_textChatViewModelCreated) {
       _textChatViewModel = TextChatViewModel(
-        backendService: context.read<BackendApiService>(),
+        backendService: context.read<ChatServiceProvider>(),
         chatRepository: context.read<ChatRepository>(),
         chatBackupService: context.read<ChatBackupService>(),
         feedbackService: context.read<FeedbackService>(),

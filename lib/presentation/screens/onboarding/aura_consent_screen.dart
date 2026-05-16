@@ -451,9 +451,7 @@ class _WhatAuraTracksCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FauxGlassCard(
-      borderRadius: 16,
-      padding: const EdgeInsets.all(16),
+    return FauxGlassCard.section(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

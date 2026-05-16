@@ -89,12 +89,15 @@ class SportsAgent(ScheduledAgent):
             return None
 
         event_fingerprint = verdict.get("event_fingerprint", f"sports_{current_date}_{state['daily_count']}")
-        await self.save_agent_state(user_id, event_fingerprint)
 
+        # save_agent_state is intentionally NOT called here.
+        # The orchestrator calls it after confirmed FCM delivery to keep
+        # per-agent dedup state and actual send count in sync.
         return {
             "title": verdict.get("title", "SportsDesk"),
             "body": verdict.get("body", ""),
             "opening_chat_message": verdict.get("opening_chat_message", ""),
+            "event_fingerprint": event_fingerprint,
         }
 
     async def _run_judge(
@@ -125,10 +128,18 @@ class SportsAgent(ScheduledAgent):
 
             Do not make user dislike you for sending a news that's not exciting or viral.
 
+            COPY EXAMPLES — match this style exactly:
+            GOOD title: "Kohli 96* — one shot from a century vs MI"
+            GOOD body: "RCB chasing 187. Kohli and du Plessis at the crease. 12 off 8."
+            BAD title: "Cricket update!"
+            BAD body: "There's an exciting match happening. Tap to see more."
+            Rule: name the actual players, teams, and scores. If you don't have specifics, return NO.
+
             If something passes, return this JSON:
             {{
-            "title": "<max 50 chars, punchy>",
+            "title": "<max 50 chars, punchy — name the actual players or teams>",
             "body": "<max 100 chars — name the actual players, scores, or teams>",
+            "opening_chat_message": "<1-2 sentences opening the chat with real match facts, no hype>",
             "event_fingerprint": "<short unique string identifying this specific event, e.g. 'rcb_mi_may13'>"
             }}
 

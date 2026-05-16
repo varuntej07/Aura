@@ -324,9 +324,7 @@ class _GlassToggleTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FauxGlassCard(
-      borderRadius: 16,
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+    return FauxGlassCard.toggleTile(
       child: SwitchListTile(
         title: Text(
           title,
@@ -366,9 +364,7 @@ class _GlassNavTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: FauxGlassCard(
-        borderRadius: 16,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: FauxGlassCard.navTile(
         child: Row(
           children: [
             Container(
@@ -418,9 +414,7 @@ class _GlassInfoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FauxGlassCard(
-      borderRadius: 16,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+    return FauxGlassCard.navTile(
       child: Row(
         children: [
           Text(
@@ -450,18 +444,7 @@ class _GlassSignOutButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: FauxGlassCard(
-        borderRadius: 16,
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        borderColor: AppColors.error.withValues(alpha: 0.3),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            AppColors.error.withValues(alpha: 0.10),
-            AppColors.error.withValues(alpha: 0.04),
-          ],
-        ),
+      child: FauxGlassCard.destructiveButton(
         child: const Center(
           child: Text(
             'Sign Out',

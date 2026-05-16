@@ -91,12 +91,15 @@ class TechNewsAgent(ScheduledAgent):
             return None
 
         event_fingerprint = verdict.get("event_fingerprint", f"technews_{current_date}_{state['daily_count']}")
-        await self.save_agent_state(user_id, event_fingerprint)
 
+        # save_agent_state is intentionally NOT called here.
+        # The orchestrator calls it after confirmed FCM delivery to keep
+        # per-agent dedup state and actual send count in sync.
         return {
             "title": verdict.get("title", "BytePulse"),
             "body": verdict.get("body", ""),
             "opening_chat_message": verdict.get("opening_chat_message", ""),
+            "event_fingerprint": event_fingerprint,
         }
 
     async def _run_judge(
@@ -125,7 +128,14 @@ class TechNewsAgent(ScheduledAgent):
                 2. Relevance ≥ {_RELEVANCE_THRESHOLD}/10 — directly matches the user's stated interests above.
                 3. Novel — not the same story or event already covered in today's earlier notifications.
 
-                Don't make user feel bad for sending news that is not relevant or significant. Only if its virally worthy enough. 
+                Don't make user feel bad for sending news that is not relevant or significant. Only if its virally worthy enough.
+
+                COPY EXAMPLES — match this style exactly:
+                GOOD title: "OpenAI drops o3 mini — 3x cheaper, same reasoning"
+                GOOD body: "o3 mini benchmarks at GPT-4 level on MATH. Available in API today."
+                BAD title: "Big AI news!"
+                BAD body: "Something exciting happened in tech. Check it out."
+                Rule: every title must name the actual thing. Every body must contain at least one number or proper noun. If you can only write a BAD example, return NO instead.
 
                 If something passes, return this JSON:
                 {{

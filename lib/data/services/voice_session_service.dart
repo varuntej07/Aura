@@ -18,6 +18,7 @@ class VoiceSessionService {
 
   Room? _room;
   EventsListener<RoomEvent>? _listener;
+  bool _isConnecting = false;
   final StreamController<VoiceServerEvent> _eventsController =
       StreamController<VoiceServerEvent>.broadcast();
 
@@ -28,10 +29,11 @@ class VoiceSessionService {
   bool get isConnected => _room != null;
 
   Future<Result<void>> startSession(VoiceSessionConfig config) async {
-    if (_room != null) {
-      AppLogger.warning('startSession called while already connected', tag: _tag);
+    if (_room != null || _isConnecting) {
+      AppLogger.warning('startSession called while already connected or connecting', tag: _tag);
       return const Result.success(null);
     }
+    _isConnecting = true;
 
     AppLogger.info('Requesting LiveKit token', tag: _tag,
         metadata: {'userId': config.userId});
@@ -135,6 +137,8 @@ class VoiceSessionService {
           stackTrace: st,
         ),
       );
+    } finally {
+      _isConnecting = false;
     }
   }
 

@@ -15,6 +15,7 @@ import '../../data/repositories/chat_repository.dart';
 import '../../data/services/analytics_service.dart';
 import '../../data/services/backend_api_service.dart';
 import '../../data/services/chat_backup_service.dart';
+import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_session_manager.dart';
 import '../../data/services/feedback_service.dart';
 import 'view_state.dart';
@@ -25,7 +26,7 @@ export 'view_state.dart';
 /// Subclasses provide [agentId] and implement [initializeSession] for their
 /// specific session-loading strategy.
 abstract class ChatViewModel extends SafeChangeNotifier {
-  final BackendApiService _backendService;
+  final ChatServiceProvider _backendService;
   final ConnectivityService _connectivityService;
   final ChatRepository _chatRepository;
   final ChatBackupService _chatBackupService;
@@ -50,7 +51,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   bool _chatLimitReached = false;
 
   ChatViewModel({
-    required BackendApiService backendService,
+    required ChatServiceProvider backendService,
     required ConnectivityService connectivityService,
     required ChatRepository chatRepository,
     required ChatBackupService chatBackupService,

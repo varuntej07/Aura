@@ -25,8 +25,21 @@ from ..services.firebase import admin_firestore
 from ..services.notification_service import send_notification
 from .agent_registry import get_scheduled_agent_registry
 
+# Agents are staggered so at most one runs at any given time, eliminating
+# concurrent FCM races. Agents not in this map default to 0 (immediate).
+_AGENT_DISPATCH_DELAY_SECONDS: dict[str, int] = {
+    "sports": 0,
+    "technews": 3600,   # 1 h after sports
+    "posts": 7200,   # 2 h after sports
+    "jobs": 10800,   # 3 h after sports
+}
 
-# ── Fan-out: schedule one task per (agent, user) ─────────────────────────────
+# Cross-agent hard cap: at most 2 push notifications per user per day.
+# Enforced by counting today's agent_nudge_log entries — no separate counter doc needed.
+_GLOBAL_DAILY_NOTIFICATION_CAP = 2
+
+
+# Fan-out: schedule one task per (agent, user)
 
 async def orchestrate_all_agents(agent_ids: list[str] | None = None) -> dict[str, Any]:
     """
@@ -48,11 +61,12 @@ async def orchestrate_all_agents(agent_ids: list[str] | None = None) -> dict[str
     enqueued = 0
 
     for agent_id in ids_to_run:
+        delay = _AGENT_DISPATCH_DELAY_SECONDS.get(agent_id, 0)
         for user_id in user_ids:
             try:
                 await asyncio.to_thread(
                     scheduler.schedule_agent_run,
-                    agent_id, user_id,
+                    agent_id, user_id, delay,
                 )
                 enqueued += 1
             except Exception as exc:
@@ -70,7 +84,7 @@ async def orchestrate_all_agents(agent_ids: list[str] | None = None) -> dict[str
     return {"agents": ids_to_run, "users": len(user_ids), "tasks_enqueued": enqueued}
 
 
-# ── Per-agent, per-user run ───────────────────────────────────────────────────
+# Per-agent, per-user run
 
 async def run_agent_for_user(agent_id: str, user_id: str) -> None:
     """
@@ -117,11 +131,23 @@ async def _run(agent_id: str, user_id: str) -> None:
         })
         return
 
+    # Step 4: Global daily cap — count today's nudge_log entries across all agents.
+    # No separate counter doc: the nudge_log is the source of truth.
+    daily_sent = await _get_global_notifications_sent_today(user_id)
+    if daily_sent >= _GLOBAL_DAILY_NOTIFICATION_CAP:
+        logger.info("agent_orchestrator: global daily cap reached — suppressing", {
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "daily_sent": daily_sent,
+        })
+        return
+
     title = notification.get("title", agent_id)
     body = notification.get("body", "")
     opening_chat_message = notification.get("opening_chat_message", "")
+    event_fingerprint = notification.get("event_fingerprint")
 
-    # Step 4: Send FCM push with agent_id in data payload
+    # Step 5: Send FCM push with agent_id in data payload
     nudge_id = str(uuid.uuid4())
     result = await send_notification(
         user_id,
@@ -142,7 +168,13 @@ async def _run(agent_id: str, user_id: str) -> None:
         })
         return
 
-    # Step 5: Write engagement log
+    # Step 6: Persist per-agent dedup state only after confirmed FCM delivery.
+    # Agents return the fingerprint in the notification dict; they do NOT call
+    # save_agent_state themselves, which would cause state/FCM desync on cap hits.
+    if event_fingerprint:
+        await agent.save_agent_state(user_id, event_fingerprint)
+
+    # Step 7: Write engagement log (also serves as the global daily cap counter)
     await _write_nudge_log(user_id, agent_id, nudge_id, title, body, opening_chat_message)
 
     logger.info("agent_orchestrator: nudge sent", {
@@ -152,8 +184,6 @@ async def _run(agent_id: str, user_id: str) -> None:
         "tokens_reached": result.success_count,
     })
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 async def _load_active_user_ids(inactivity_days: int = 7) -> list[str]:
     """Return user IDs that have a registered FCM token seen within inactivity_days."""
@@ -185,6 +215,33 @@ async def _load_active_user_ids(inactivity_days: int = 7) -> list[str]:
     except Exception as exc:
         logger.error("agent_orchestrator: failed to load active users", {"error": str(exc)})
         return []
+
+
+async def _get_global_notifications_sent_today(user_id: str) -> int:
+    """Count push notifications already sent to this user today across all agents.
+
+    Reads agent_nudge_log — the same collection written by _write_nudge_log — so
+    there is no separate counter document to keep in sync.
+    """
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
+    today_start = datetime.now(timezone.utc).strftime("%Y-%m-%d") + "T00:00:00+00:00"
+
+    def _count() -> int:
+        db = admin_firestore()
+        docs = list(
+            db.collection("users").document(user_id)
+            .collection("agent_nudge_log")
+            .where(filter=FieldFilter("sent_at", ">=", today_start))
+            .stream()
+        )
+        return len(docs)
+
+    try:
+        return await asyncio.to_thread(_count)
+    except Exception as exc:
+        logger.error("agent_orchestrator: failed to count daily notifications", {"error": str(exc)})
+        return 0  # fail open so a Firestore hiccup doesn't silence all agents
 
 
 async def _write_nudge_log(

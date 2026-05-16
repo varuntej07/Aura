@@ -5,6 +5,7 @@ import '../../core/errors/app_exception.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_response.dart';
+import 'chat_service_provider.dart';
 
 // SSE stream events
 
@@ -133,13 +134,10 @@ class ChatResponse {
   }
 }
 
-class BackendApiService {
-  final ApiClient? _apiClient;
-  final bool _useStub;
+class BackendApiService implements ChatServiceProvider {
+  final ApiClient _apiClient;
 
-  BackendApiService({ApiClient? apiClient, bool useStub = false})
-      : _apiClient = apiClient,
-        _useStub = useStub;
+  BackendApiService({required ApiClient apiClient}) : _apiClient = apiClient;
 
   Future<Result<ChatResponse>> sendMessage(
     String message,
@@ -150,25 +148,6 @@ class BackendApiService {
     // (same UUID → upsert instead of new insert, no duplicate log entries).
     String? clientMessageId,
   }) async {
-    if (_useStub || _apiClient == null) {
-      AppLogger.info(
-        'BackendApiService stub: sendMessage',
-        tag: 'BackendApiService',
-        metadata: {
-          'message': message,
-          'history_len': history.length,
-          'sessionId': sessionId,
-        },
-      );
-      await Future.delayed(const Duration(milliseconds: 800));
-      return Result.success(
-        ChatResponse.stub(
-          'Not connected — backend endpoint not configured yet. '
-          'Your message: "$message"',
-        ),
-      );
-    }
-
     return _apiClient.post(
       '/chat',
       {
@@ -185,6 +164,7 @@ class BackendApiService {
 
   /// Streams a chat message via SSE. Yields [ChatStreamEvent] objects as they
   /// arrive; the stream completes after a [DoneEvent] or [ErrorStreamEvent].
+  @override
   Stream<ChatStreamEvent> sendMessageStream(
     String message,
     String userId, {
@@ -193,17 +173,6 @@ class BackendApiService {
     String? clientMessageId,
     String? agentId,
   }) async* {
-    if (_useStub || _apiClient == null) {
-      await Future.delayed(const Duration(milliseconds: 600));
-      const words = ['This ', 'is ', 'a ', 'stub ', 'response.'];
-      for (final w in words) {
-        yield TextDeltaEvent(w);
-        await Future.delayed(const Duration(milliseconds: 120));
-      }
-      yield DoneEvent(metadata: const {'tool_names': []});
-      return;
-    }
-
     try {
       await for (final line in _apiClient.streamPost('/chat', {
         'message': message,
@@ -271,8 +240,8 @@ class BackendApiService {
   /// Called when the user taps an engagement notification.
   /// Marks the engagement as responded on the backend so pending re-engagement
   /// Cloud Tasks are cancelled. Fire-and-forget — failures are logged, not thrown.
+  @override
   Future<void> markEngagementResponded(String engagementId) async {
-    if (_useStub || _apiClient == null) return;
     final result = await _apiClient.post(
       '/internal/engage/responded',
       {'engagement_id': engagementId},
@@ -293,11 +262,6 @@ class BackendApiService {
   }
 
   Future<Result<void>> deleteAccount() async {
-    if (_useStub || _apiClient == null) {
-      return Result.failure(
-        AppException(code: ErrorCode.unexpected, message: 'Not available in stub mode.'),
-      );
-    }
     return _apiClient.delete('/account', (json) {});
   }
 
@@ -305,16 +269,6 @@ class BackendApiService {
     String ocrText,
     String userId,
   ) async {
-    if (_useStub || _apiClient == null) {
-      AppLogger.info('BackendApiService stub: analyzeNutrition', tag: 'BackendApiService');
-      return Result.failure(
-        AppException(
-          code: ErrorCode.unexpected,
-          message: 'Nutrition analysis not yet available.',
-        ),
-      );
-    }
-
     return _apiClient.post(
       '/nutrition/analyze',
       {'ocr_text': ocrText, 'user_id': userId},

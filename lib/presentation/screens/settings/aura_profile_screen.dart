@@ -303,9 +303,7 @@ class _ProfileSection extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: FauxGlassCard(
-        borderRadius: 16,
-        padding: const EdgeInsets.all(16),
+      child: FauxGlassCard.section(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -398,9 +396,7 @@ class _InterestChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FauxGlassCard(
-      borderRadius: 20,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+    return FauxGlassCard.pill(
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

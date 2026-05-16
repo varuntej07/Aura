@@ -19,6 +19,8 @@ import '../data/services/firebase_auth_service.dart';
 import '../data/services/firestore_service.dart';
 import '../data/services/google_calendar_connector_service.dart';
 import '../data/services/backend_api_service.dart';
+import '../data/services/chat_service_provider.dart';
+import '../data/services/stub_chat_service_provider.dart';
 import '../data/services/notification_service.dart';
 import '../data/services/nutrition_scan_service.dart';
 import '../data/services/voice_session_service.dart';
@@ -54,10 +56,10 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   final chatSessionManager = ChatSessionManager(repository: chatRepository);
 
   // Remote services
-  final backendApiService = BackendApiService(
-    apiClient: apiClient,
-    useStub: !Environment.hasConfiguredApi,
-  );
+  final backendApiService = BackendApiService(apiClient: apiClient);
+  final ChatServiceProvider chatServiceProvider = Environment.hasConfiguredApi
+      ? backendApiService
+      : StubChatServiceProvider();
   final googleCalendarConnectorService = GoogleCalendarConnectorService(
     apiClient: apiClient,
     authService: firebaseAuthService,
@@ -107,6 +109,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     // Remote services
     Provider<NotificationService>.value(value: notificationService),
     Provider<BackendApiService>.value(value: backendApiService),
+    Provider<ChatServiceProvider>.value(value: chatServiceProvider),
     Provider<NutritionScanService>.value(value: nutritionScanService),
     Provider<GoogleCalendarConnectorService>.value(
       value: googleCalendarConnectorService,

@@ -72,6 +72,13 @@ class GlassCard extends StatelessWidget {
 // Gradient + shimmer border, NO backdrop blur.
 // Use in all scrolling lists, animated containers, message bubbles, suggestion
 // pills — anywhere BackdropFilter would hurt scroll performance.
+//
+// Prefer named constructors for standard roles:
+//   .pill — suggestion/tag chips
+//   .navTile — navigation and info display tiles
+//   .section — panel/section containers
+//   .toggleTile — switch/toggle wrappers
+//   .destructiveButton — sign-out / delete-account buttons
 class FauxGlassCard extends StatelessWidget {
   final Widget child;
   final double borderRadius;
@@ -89,6 +96,57 @@ class FauxGlassCard extends StatelessWidget {
     this.borderColor,
     this.gradient,
   });
+
+  const FauxGlassCard.pill({
+    super.key,
+    required this.child,
+  })  : borderRadius = 20,
+        padding = const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        margin = null,
+        borderColor = null,
+        gradient = null;
+
+  const FauxGlassCard.navTile({
+    super.key,
+    required this.child,
+  })  : borderRadius = 16,
+        padding = const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        margin = null,
+        borderColor = null,
+        gradient = null;
+
+  const FauxGlassCard.section({
+    super.key,
+    required this.child,
+  })  : borderRadius = 16,
+        padding = const EdgeInsets.all(16),
+        margin = null,
+        borderColor = null,
+        gradient = null;
+
+  const FauxGlassCard.toggleTile({
+    super.key,
+    required this.child,
+  })  : borderRadius = 16,
+        padding = const EdgeInsets.symmetric(horizontal: 4),
+        margin = null,
+        borderColor = null,
+        gradient = null;
+
+  // borderColor = AppColors.error.withValues(alpha: 0.3) = 0x4DF06060
+  // gradient colors = alpha 0.10 (0x1A) / 0.04 (0x0A)
+  const FauxGlassCard.destructiveButton({
+    super.key,
+    required this.child,
+  })  : borderRadius = 16,
+        padding = const EdgeInsets.symmetric(vertical: 16),
+        margin = null,
+        borderColor = const Color(0x4DF06060),
+        gradient = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0x1AF06060), Color(0x0AF06060)],
+        );
 
   @override
   Widget build(BuildContext context) {
