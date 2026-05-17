@@ -5,16 +5,18 @@ Called once per user per day, triggered by Cloud Tasks at 7 AM local time
 (the fan-out handler in daily_notification.py schedules these).
 
 Pipeline:
-  1. Idempotency check — skip if daily_plans/{today} already exists
-  2. Load user timezone + check daily cap
-  3. Fetch context in parallel (queries, dietary profile, recent plans)
-  4. Fetch RSS news headlines
-  5. NotificationPlannerAgent generates DailyPlan
-  6. PushNotificationAgent verifies the plan (Stage 1: hard rules, Stage 2: LLM)
-  7. If rejected → retry planner ONCE with feedback injected
-  8. If still rejected → use safe_default plan (never skips a day)
-  9. Write daily_plans/{today} to Firestore
- 10. Schedule two Cloud Tasks for morning_nudge and evening_nudge send times
+  1.  Idempotency check — skip if daily_plans/{today} already exists
+  2.  Load user timezone + check daily cap
+  3.  Fetch context in parallel (queries, dietary profile, recent plans, calendar events)
+  4.  Fetch RSS news headlines
+  5.  NotificationPlannerAgent generates DailyPlan (calendar-aware)
+  6.  PushNotificationAgent verifies the plan (Stage 1: hard rules, Stage 2: LLM)
+  7.  If rejected → retry planner ONCE with feedback injected
+  8.  If still rejected → use safe_default plan (never skips a day)
+  9.  CalendarNotificationAgent classifies today's and 3-day-ahead events
+  10. Compute meeting reminder send times, enforce global 2-hour gap constraint
+  11. Write daily_plans/{today} to Firestore (nudges + meeting reminders)
+  12. Schedule Cloud Tasks for nudges and meeting reminders
 """
 
 from __future__ import annotations
@@ -30,21 +32,31 @@ from ...lib.logger import logger
 from ...services.firebase import admin_firestore
 from ...services.model_provider import ModelProvider
 from . import rss_client
-from .models import DailyPlan, NudgePlan
+from .models import CalendarNotificationContent, DailyPlan, MeetingReminderPlan, NudgePlan
+from .calendar_notification_agent import CalendarNotificationAgent
 from .planner_agent import NotificationPlannerAgent
 from .suggestion_pills_agent import SuggestionPillsAgent
 from .verifier_agent import PushNotificationAgent
 
+MAX_DAILY_MEETING_REMINDERS = 3
+_THREE_HOURS = timedelta(hours=3)
+_TWO_HOURS = timedelta(hours=2)
 
 # Module-level agent singletons
 _models: ModelProvider | None = None
 _planner: NotificationPlannerAgent | None = None
 _verifier: PushNotificationAgent | None = None
 _suggestion_pills: SuggestionPillsAgent | None = None
+_calendar_agent: CalendarNotificationAgent | None = None
 
 
-def _get_agents() -> tuple[NotificationPlannerAgent, PushNotificationAgent, SuggestionPillsAgent]:
-    global _models, _planner, _verifier, _suggestion_pills
+def _get_agents() -> tuple[
+    NotificationPlannerAgent,
+    PushNotificationAgent,
+    SuggestionPillsAgent,
+    CalendarNotificationAgent,
+]:
+    global _models, _planner, _verifier, _suggestion_pills, _calendar_agent
     if _models is None:
         _models = ModelProvider()
     if _planner is None:
@@ -53,7 +65,9 @@ def _get_agents() -> tuple[NotificationPlannerAgent, PushNotificationAgent, Sugg
         _verifier = PushNotificationAgent(_models)
     if _suggestion_pills is None:
         _suggestion_pills = SuggestionPillsAgent(_models)
-    return _planner, _verifier, _suggestion_pills
+    if _calendar_agent is None:
+        _calendar_agent = CalendarNotificationAgent(_models)
+    return _planner, _verifier, _suggestion_pills, _calendar_agent
 
 
 # Public entry point 
@@ -90,11 +104,12 @@ async def _run(user_id: str) -> None:
         })
         return
 
-    # Step 3: Fetch context in parallel
-    queries, dietary_profile, recent_plans = await asyncio.gather(
+    # Step 3: Fetch context in parallel (calendar events included)
+    queries, dietary_profile, recent_plans, upcoming_events = await asyncio.gather(
         _fetch_last_10_queries(user_id),
         _fetch_dietary_profile(user_id),
         _fetch_last_2_daily_plans(user_id),
+        _fetch_upcoming_calendar_events(user_id, days_ahead=7),
     )
 
     topics_sent_yesterday = _extract_topics_from_plans(recent_plans)
@@ -108,12 +123,13 @@ async def _run(user_id: str) -> None:
         "dietary_profile": dietary_profile,
         "topics_sent_yesterday": topics_sent_yesterday,
         "news_items": news_items,
+        "upcoming_events": upcoming_events,
         "user_timezone": user_timezone,
         "current_local_datetime": _local_now_iso(user_timezone),
         "retry_feedback": None,
     }
 
-    planner, verifier, pills_agent = _get_agents()
+    planner, verifier, pills_agent, cal_agent = _get_agents()
 
     retry_count = 0
     rejection_feedback: str | None = None
@@ -165,31 +181,69 @@ async def _run(user_id: str) -> None:
             })
         plan = _make_safe_default_plan(news_items, user_timezone)
 
-    # Step 9: Write daily_plans/{today}
-    await _write_daily_plan(user_id, today, plan, retry_count, rejection_feedback)
+    # Step 9: CalendarNotificationAgent classifies events and generates reminder content.
+    # Runs after the daily plan is finalized so reminder scheduling doesn't affect plan quality.
+    events_today, events_three_days_away = _partition_events_for_notification_planning(
+        upcoming_events, user_timezone
+    )
+    meeting_reminders: list[MeetingReminderPlan] = []
+    try:
+        cal_batch = await cal_agent.generate_reminders(
+            events_today=events_today,
+            events_three_days_away=events_three_days_away,
+            user_timezone=user_timezone,
+        )
+        now_utc = datetime.now(timezone.utc)
+        meeting_reminders = _build_meeting_reminder_plans(
+            cal_batch.reminders, upcoming_events, now_utc, user_timezone
+        )
+    except Exception as exc:
+        logger.warn("daily_notification: calendar agent failed, no meeting reminders today", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
 
-    # Step 10: Schedule two Cloud Tasks
-    # Always recompute UTC from the validated local time, never trust LLM-generated UTC,
-    # which might contain timezone offset errors or past timestamps.
+    # Step 10: Compute send times, enforce global 2-hour gap, cap reminders.
+    # Always recompute nudge UTC from the validated local time — never trust LLM-generated UTC.
     morning_utc = _local_hhmm_to_utc(plan.morning_nudge.send_at_local_time, user_timezone)
     evening_utc = _local_hhmm_to_utc(plan.evening_nudge.send_at_local_time, user_timezone)
-    scheduled = await asyncio.gather(
+
+    reminder_send_times = [r.send_at_utc for r in meeting_reminders]
+    morning_utc, evening_utc = _apply_two_hour_gap_to_nudges(
+        morning_utc, evening_utc, reminder_send_times, user_timezone
+    )
+
+    # Step 11: Write daily_plans/{today} with nudges and meeting reminders.
+    await _write_daily_plan(user_id, today, plan, retry_count, rejection_feedback,
+                            morning_utc_override=morning_utc,
+                            evening_utc_override=evening_utc,
+                            meeting_reminders=meeting_reminders)
+
+    # Step 12: Schedule Cloud Tasks for nudges and meeting reminders.
+    nudge_tasks = await asyncio.gather(
         _schedule_nudge_send(user_id, today, "morning_nudge", morning_utc),
         _schedule_nudge_send(user_id, today, "evening_nudge", evening_utc),
     )
+    reminder_tasks = await asyncio.gather(
+        *[
+            _schedule_nudge_send(user_id, today, f"meeting_reminder_{i}", r.send_at_utc)
+            for i, r in enumerate(meeting_reminders)
+        ]
+    )
 
-    tasks_ok = all(scheduled)
+    tasks_ok = all(nudge_tasks) and all(reminder_tasks)
     logger.info("daily_notification: plan complete", {
         "user_id": user_id,
         "date": today,
         "plan_source": plan.plan_source,
         "morning_topic": plan.morning_nudge.topic,
         "evening_topic": plan.evening_nudge.topic,
+        "meeting_reminders_scheduled": len(meeting_reminders),
         "retry_count": retry_count,
         "tasks_scheduled": tasks_ok,
     })
     if not tasks_ok:
-        logger.error("daily_notification: one or more nudge tasks failed to schedule", {
+        logger.error("daily_notification: one or more tasks failed to schedule", {
             "user_id": user_id,
             "date": today,
         })
@@ -350,28 +404,37 @@ async def _write_daily_plan(
     plan: DailyPlan,
     retry_count: int,
     rejection_feedback: str | None,
+    morning_utc_override: str | None = None,
+    evening_utc_override: str | None = None,
+    meeting_reminders: list[MeetingReminderPlan] | None = None,
 ) -> None:
     def _write() -> None:
         db = admin_firestore()
+        morning_data = plan.morning_nudge.model_dump()
+        if morning_utc_override:
+            morning_data["send_at_utc"] = morning_utc_override
+        evening_data = plan.evening_nudge.model_dump()
+        if evening_utc_override:
+            evening_data["send_at_utc"] = evening_utc_override
+
         doc: dict[str, Any] = {
             "plan_date": plan_date,
             "plan_source": plan.plan_source,
-            "morning_nudge": {
-                **plan.morning_nudge.model_dump(),
-                "status": "scheduled",
-                "cloud_task_name": None,
-                "sent_at": None,
-            },
-            "evening_nudge": {
-                **plan.evening_nudge.model_dump(),
-                "status": "scheduled",
-                "cloud_task_name": None,
-                "sent_at": None,
-            },
+            "morning_nudge": {**morning_data, "status": "scheduled", "cloud_task_name": None, "sent_at": None},
+            "evening_nudge": {**evening_data, "status": "scheduled", "cloud_task_name": None, "sent_at": None},
             "rejection_feedback": rejection_feedback,
             "retry_count": retry_count,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        for i, reminder in enumerate(meeting_reminders or []):
+            doc[f"meeting_reminder_{i}"] = {
+                **reminder.model_dump(),
+                "status": "scheduled",
+                "cloud_task_name": None,
+                "sent_at": None,
+            }
+
         db.collection("users").document(user_id)\
             .collection("daily_plans").document(plan_date).set(doc)
     try:
@@ -521,3 +584,250 @@ def _local_hhmm_to_utc(hhmm: str, user_timezone: str) -> str:
     except Exception:
         # Fallback: UTC now + 1 hour
         return (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+
+# Calendar event helpers
+
+async def _fetch_upcoming_calendar_events(user_id: str, days_ahead: int = 7) -> list[dict]:
+    """Read cached calendar events from Firestore for the next N days.
+
+    Does not trigger a live sync -- relies on the scheduler tick keeping
+    calendar_events fresh via GoogleCalendarConnector.process_pending_sync_jobs.
+    Returns an empty list if the calendar integration is not connected.
+    """
+    def _fetch() -> list[dict]:
+        db = admin_firestore()
+
+        integration = (
+            db.collection("users").document(user_id)
+            .collection("integrations").document("google_calendar")
+            .get()
+        )
+        if not integration.exists or not (integration.to_dict() or {}).get("enabled"):
+            return []
+
+        now_utc = datetime.now(timezone.utc)
+        end_utc = now_utc + timedelta(days=days_ahead)
+
+        snapshot = (
+            db.collection("users").document(user_id)
+            .collection("calendar_events")
+            .where("start_at_ts", ">=", now_utc)
+            .where("start_at_ts", "<", end_utc)
+            .order_by("start_at_ts")
+            .limit(50)
+            .stream()
+        )
+
+        events: list[dict] = []
+        for doc in snapshot:
+            data = doc.to_dict() or {}
+            if str(data.get("status", "")).lower() == "cancelled":
+                continue
+            if data.get("is_all_day"):
+                continue
+            events.append({
+                "id": data.get("provider_event_id") or doc.id,
+                "title": data.get("summary") or "",
+                "description": (data.get("description") or "")[:200],
+                "start_at": data.get("start_at") or "",
+                "end_at": data.get("end_at") or "",
+                "attendee_count": len(data.get("attendees") or []),
+            })
+        return events
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        logger.warn("daily_notification: calendar events fetch failed", {"error": str(exc)})
+        return []
+
+
+def _partition_events_for_notification_planning(
+    events: list[dict],
+    user_timezone: str,
+) -> tuple[list[dict], list[dict]]:
+    """Split events into two buckets for the CalendarNotificationAgent.
+
+    Returns:
+        events_today: events whose local date equals today (three_hour_before candidates)
+        events_three_days_away: events whose local date is exactly 3 days from today
+                                (three_day_ahead candidates for high-importance events)
+    """
+    try:
+        tz = ZoneInfo(user_timezone)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    today_local = datetime.now(tz).date()
+    three_days_from_today = today_local + timedelta(days=3)
+
+    events_today: list[dict] = []
+    events_three_days_away: list[dict] = []
+
+    for event in events:
+        start_at = event.get("start_at")
+        if not start_at:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(start_at.replace("Z", "+00:00")).astimezone(tz)
+            event_date = start_dt.date()
+            if event_date == today_local:
+                events_today.append(event)
+            elif event_date == three_days_from_today:
+                events_three_days_away.append(event)
+        except Exception:
+            continue
+
+    return events_today, events_three_days_away
+
+
+def _build_meeting_reminder_plans(
+    contents: list[CalendarNotificationContent],
+    all_events: list[dict],
+    now_utc: datetime,
+    user_timezone: str,
+) -> list[MeetingReminderPlan]:
+    """Compute send_at_utc for each CalendarNotificationContent and assemble MeetingReminderPlans.
+
+    Timing rules:
+      three_hour_before: send at event_start - 3 hours. Skip if that time is already past
+                         or if the event starts in less than 3 hours (too late).
+      three_day_ahead:   send at now + 3 hours (fires ~10 AM on planning day).
+
+    After computing times, enforces the 2-hour gap between reminders by dropping the
+    lower-priority reminder when two fall within 2 hours of each other.
+    Caps the final list at MAX_DAILY_MEETING_REMINDERS.
+    """
+    event_start_map: dict[str, datetime] = {}
+    for event in all_events:
+        start_at = event.get("start_at")
+        event_id = event.get("id", "")
+        if start_at and event_id:
+            try:
+                event_start_map[event_id] = datetime.fromisoformat(
+                    start_at.replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except Exception:
+                pass
+
+    candidates: list[tuple[datetime, MeetingReminderPlan]] = []
+
+    for content in contents:
+        try:
+            if content.notification_type == "three_hour_before":
+                event_start = event_start_map.get(content.event_id)
+                if event_start is None:
+                    continue
+                send_at = event_start - _THREE_HOURS
+                if send_at <= now_utc:
+                    logger.info(
+                        "daily_notification: skipping meeting reminder, window passed",
+                        {"event_id": content.event_id, "send_at": send_at.isoformat()},
+                    )
+                    continue
+            else:
+                # three_day_ahead fires 3 hours after the 7 AM planning run (~10 AM local)
+                send_at = now_utc + _THREE_HOURS
+
+            plan = MeetingReminderPlan(
+                event_id=content.event_id,
+                event_title=content.event_title,
+                importance_tier=content.importance_tier,
+                notification_type=content.notification_type,
+                title=content.title,
+                body=content.body,
+                send_at_utc=send_at.isoformat(),
+                opening_chat_message=content.opening_chat_message,
+                quick_reply_chips=content.quick_reply_chips,
+                why_this_notification=content.why_this_notification,
+            )
+            candidates.append((send_at, plan))
+        except Exception as exc:
+            logger.warn("daily_notification: failed to build meeting reminder plan", {
+                "event_id": content.event_id,
+                "error": str(exc),
+            })
+
+    # Sort by send time, then enforce 2-hour gap between reminders.
+    # When two reminders are within 2 hours of each other, drop the medium-importance one.
+    # If same tier, drop the later one.
+    candidates.sort(key=lambda x: x[0])
+    kept: list[tuple[datetime, MeetingReminderPlan]] = []
+    for send_at, plan in candidates:
+        too_close = any(
+            abs((send_at - kept_time).total_seconds()) < _TWO_HOURS.total_seconds()
+            for kept_time, _ in kept
+        )
+        if not too_close:
+            kept.append((send_at, plan))
+        else:
+            logger.info("daily_notification: dropping meeting reminder due to 2h gap constraint", {
+                "event_id": plan.event_id,
+                "send_at": send_at.isoformat(),
+            })
+
+    result = [plan for _, plan in kept[:MAX_DAILY_MEETING_REMINDERS]]
+    return result
+
+
+def _apply_two_hour_gap_to_nudges(
+    morning_utc: str,
+    evening_utc: str,
+    reminder_send_times: list[str],
+    user_timezone: str,
+) -> tuple[str, str]:
+    """Shift morning and evening nudge times to maintain a 2-hour gap from meeting reminders.
+
+    Meeting reminder times are fixed. Nudges shift within their allowed windows
+    (morning: 08:00-12:00, evening: 17:00-21:00) to avoid conflicts.
+    If a nudge cannot fit without conflict, it stays at the window boundary closest
+    to its original time and a warning is logged.
+    """
+    if not reminder_send_times:
+        return morning_utc, evening_utc
+
+    MORNING_WINDOW_START_H = 8
+    MORNING_WINDOW_END_H = 12
+    EVENING_WINDOW_START_H = 17
+    EVENING_WINDOW_END_H = 21
+
+    try:
+        tz = ZoneInfo(user_timezone)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    def parse_dt(s: str) -> datetime:
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    def clamp_to_window(dt: datetime, start_h: int, end_h: int) -> datetime:
+        local = dt.astimezone(tz)
+        window_start = local.replace(hour=start_h, minute=0, second=0, microsecond=0)
+        window_end = local.replace(hour=end_h, minute=0, second=0, microsecond=0)
+        clamped_local = max(window_start, min(window_end, local))
+        return clamped_local.astimezone(timezone.utc)
+
+    reminder_dts = sorted([parse_dt(s) for s in reminder_send_times])
+    morning_dt = parse_dt(morning_utc)
+    evening_dt = parse_dt(evening_utc)
+
+    for reminder_dt in reminder_dts:
+        gap_seconds = (morning_dt - reminder_dt).total_seconds()
+        if abs(gap_seconds) < _TWO_HOURS.total_seconds():
+            if gap_seconds >= 0:
+                morning_dt = reminder_dt + _TWO_HOURS
+            else:
+                morning_dt = reminder_dt - _TWO_HOURS
+            morning_dt = clamp_to_window(morning_dt, MORNING_WINDOW_START_H, MORNING_WINDOW_END_H)
+
+    for reminder_dt in reminder_dts:
+        gap_seconds = (evening_dt - reminder_dt).total_seconds()
+        if abs(gap_seconds) < _TWO_HOURS.total_seconds():
+            if gap_seconds >= 0:
+                evening_dt = reminder_dt + _TWO_HOURS
+            else:
+                evening_dt = reminder_dt - _TWO_HOURS
+            evening_dt = clamp_to_window(evening_dt, EVENING_WINDOW_START_H, EVENING_WINDOW_END_H)
+
+    return morning_dt.isoformat(), evening_dt.isoformat()

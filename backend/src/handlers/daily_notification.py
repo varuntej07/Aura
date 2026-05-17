@@ -82,7 +82,9 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
     plan_date: str = body.get("plan_date", "")
     nudge_slot: str = body.get("nudge_slot", "")
 
-    if not user_id or not plan_date or nudge_slot not in ("morning_nudge", "evening_nudge"):
+    is_nudge_slot = nudge_slot in ("morning_nudge", "evening_nudge")
+    is_meeting_reminder_slot = nudge_slot.startswith("meeting_reminder_")
+    if not user_id or not plan_date or (not is_nudge_slot and not is_meeting_reminder_slot):
         logger.warn("daily_notification: send_nudge received invalid payload", {"body": body})
         return {"error": "invalid_payload", "status_code": 400}
 
@@ -124,21 +126,23 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
         "title": title,
     })
 
+    fcm_notification_type = "meeting_reminder" if is_meeting_reminder_slot else "daily_nudge"
+
     # Send via FCM
     result = await send_notification(
         user_id,
         title=title,
         body=notification_body,
         data={
-            "notification_type": "daily_nudge",
+            "notification_type": fcm_notification_type,
             "plan_date": plan_date,
             "nudge_slot": nudge_slot,
             "initial_message": opening_chat_message,
             "quick_reply_chips": json.dumps(quick_reply_chips),
         },
-        notification_type="daily_nudge",
+        notification_type=fcm_notification_type,
         priority="high",
-        collapse_key=f"daily_nudge_{nudge_slot}",
+        collapse_key=f"{fcm_notification_type}_{nudge_slot}",
     )
 
     if result.tokens_targeted == 0:
@@ -164,8 +168,12 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
     # Update the daily_plan document
     await _update_nudge_status(user_id, plan_date, nudge_slot, "sent", sent_at)
 
-    # Update engagement_guard so other systems know a notification was sent
-    await _update_engagement_guard(user_id, sent_at)
+    # Update engagement_guard. Meeting reminders have their own counter so they
+    # don't consume the daily nudge quota.
+    if is_meeting_reminder_slot:
+        await _update_meeting_reminder_engagement_guard(user_id, sent_at)
+    else:
+        await _update_engagement_guard(user_id, sent_at)
 
     logger.info("daily_notification: nudge sent", {
         "user_id": user_id,
@@ -315,6 +323,37 @@ async def _update_engagement_guard(user_id: str, last_engaged_at: str) -> None:
         await asyncio.to_thread(_update)
     except Exception as exc:
         logger.warn("daily_notification: failed to update engagement_guard", {"error": str(exc)})
+
+
+async def _update_meeting_reminder_engagement_guard(user_id: str, last_engaged_at: str) -> None:
+    """Increment meeting_reminders_sent_today in engagement_guard (separate from nudge quota)."""
+    def _update() -> None:
+        from google.cloud import firestore as fs  # type: ignore
+        db = admin_firestore()
+        guard_ref = (
+            db.collection("users").document(user_id)
+            .collection("engagement_guard").document("state")
+        )
+        today = datetime.now(timezone.utc).date().isoformat()
+
+        @fs.transactional
+        def _txn(transaction: fs.Transaction) -> None:
+            snap = guard_ref.get(transaction=transaction)
+            guard = snap.to_dict() or {} if snap.exists else {}
+            current_date = guard.get("guard_date")
+            current_count = guard.get("meeting_reminders_sent_today", 0) if current_date == today else 0
+            transaction.set(guard_ref, {
+                "last_engaged_at": last_engaged_at,
+                "guard_date": today,
+                "meeting_reminders_sent_today": current_count + 1,
+            }, merge=True)
+
+        _txn(db.transaction())
+
+    try:
+        await asyncio.to_thread(_update)
+    except Exception as exc:
+        logger.warn("daily_notification: failed to update meeting reminder engagement_guard", {"error": str(exc)})
 
 
 # Cloud Task enqueuing 

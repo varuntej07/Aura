@@ -327,7 +327,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     await _persistMessage(msg);
     _setState(ViewState.loaded);
     await _refreshSessions();
-    unawaited(_backendService.markEngagementResponded(engagementId));
+    if (engagementId.isNotEmpty) {
+      unawaited(_backendService.markEngagementResponded(engagementId));
+    }
   }
 
   // Subclass hooks

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../core/logging/app_logger.dart';
@@ -330,21 +331,30 @@ class NotificationService {
 
   /// Handle notification tap (from background or terminated state).
   void _handleNotificationTap(RemoteMessage message) {
-    final notificationType = message.data['notification_type'] as String?;
     AppLogger.info(
       'Notification tapped',
       tag: _tag,
       metadata: {
         'messageId': message.messageId,
-        'notificationType': notificationType,
+        'notificationType': message.data['notification_type'],
         'reminderId': message.data['reminder_id'],
       },
     );
+    dispatchNotificationTap(message.data);
+  }
+
+  /// Routes FCM data payloads to the correct tap stream.
+  ///
+  /// Extracted for testability — production code calls [_handleNotificationTap]
+  /// which delegates here after logging.
+  @visibleForTesting
+  void dispatchNotificationTap(Map<String, dynamic> data) {
+    final notificationType = data['notification_type'] as String?;
 
     if (notificationType == 'engagement') {
-      final engagementId = message.data['engagement_id'] as String? ?? '';
-      final initialMessage = message.data['initial_message'] as String? ?? '';
-      final agentContext = message.data['agent_context'] as String? ?? '';
+      final engagementId = data['engagement_id'] as String? ?? '';
+      final initialMessage = data['initial_message'] as String? ?? '';
+      final agentContext = data['agent_context'] as String? ?? '';
 
       if (engagementId.isNotEmpty && initialMessage.isNotEmpty) {
         _engagementTapController.add(EngagementTapPayload(
@@ -354,13 +364,23 @@ class NotificationService {
         ));
       }
     } else if (notificationType == 'agent_nudge') {
-      final agentId = message.data['agent_id'] as String? ?? '';
-      final chatOpener = message.data['opening_chat_message'] as String? ?? '';
+      final agentId = data['agent_id'] as String? ?? '';
+      final chatOpener = data['opening_chat_message'] as String? ?? '';
 
       if (agentId.isNotEmpty) {
         _agentNudgeTapController.add(AgentNudgeTapPayload(
           agentId: agentId,
           chatOpener: chatOpener,
+        ));
+      }
+    } else if (notificationType == 'daily_nudge' ||
+        notificationType == 'meeting_reminder') {
+      final initialMessage = data['initial_message'] as String? ?? '';
+      if (initialMessage.isNotEmpty) {
+        _engagementTapController.add(EngagementTapPayload(
+          engagementId: '',
+          initialMessage: initialMessage,
+          agentContext: '',
         ));
       }
     }

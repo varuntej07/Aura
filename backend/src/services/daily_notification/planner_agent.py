@@ -38,6 +38,13 @@ _SYSTEM_PROMPT = """You are Buddy, a proactive planning engine. Every morning yo
                     9. send_at_utc: convert send_at_local_time to UTC using the user's timezone
                     10. If retry_feedback is provided, read it carefully and fix exactly what it describes
 
+                    CALENDAR RULES:
+                    - Do not schedule a nudge within 30 minutes before or after any listed calendar event.
+                    - If the user has a relevant event tomorrow or later this week, reference it in nudge content
+                      where it adds genuine value. e.g. "You've got a big presentation Thursday" or "Big week ahead."
+                    - If the user has 4 or more events in the next 3 days, acknowledge the busy schedule.
+                    - Never use em-dashes in title, body, or opening_chat_message. Use commas or new sentences.
+
                     SIGNAL USAGE:
                     - If recent_queries has 3+ items with a clear pattern → build both nudges around real user behavior
                     - If recent_queries is thin (< 3 items or no pattern) → use news_items to frame a relevant
@@ -90,7 +97,7 @@ class NotificationPlannerAgent:
             DailyPlan with morning_nudge and evening_nudge.
         """
         prompt = _build_prompt(context)
-        return await self._models.cheap(
+        return await self._models.cheap(  # type: ignore[return-value]
             prompt,
             system=_SYSTEM_PROMPT,
             response_model=DailyPlan,
@@ -102,6 +109,7 @@ def _build_prompt(context: dict) -> str:
     dietary_profile: dict = context.get("dietary_profile") or {}
     topics_sent_yesterday: list[str] = context.get("topics_sent_yesterday", [])
     news_items: list[dict] = context.get("news_items", [])
+    upcoming_events: list[dict] = context.get("upcoming_events", [])
     user_timezone: str = context.get("user_timezone", "UTC")
     current_local_datetime: str = context.get("current_local_datetime", "")
     retry_feedback: str | None = context.get("retry_feedback")
@@ -126,6 +134,8 @@ def _build_prompt(context: dict) -> str:
         else "No notifications sent in the last 2 days."
     )
 
+    calendar_summary = _summarise_calendar_events(upcoming_events)
+
     prompt = f"""Plan today's two notifications for this user.
 
 Current local datetime: {current_local_datetime}
@@ -136,6 +146,9 @@ DIETARY PROFILE:
 
 RECENT QUERY HISTORY (last 10, newest first):
 {query_summary}
+
+CALENDAR (next 7 days — avoid nudge times that fall within 30 min of these events):
+{calendar_summary}
 
 RELEVANT NEWS ITEMS (use if query signal is thin):
 {news_summary}
@@ -181,3 +194,16 @@ def _summarise_news(news_items: list[dict]) -> str:
                 line += f"\n    {short_summary}"
             lines.append(line)
     return "\n".join(lines) if lines else "No news available."
+
+
+def _summarise_calendar_events(events: list[dict]) -> str:
+    if not events:
+        return "No upcoming calendar events."
+    lines = []
+    for event in events[:15]:
+        title = event.get("title") or "Untitled"
+        start = (event.get("start_at") or "")[:16].replace("T", " ")
+        attendees = event.get("attendee_count", 0)
+        attendee_note = f" ({attendees} attendees)" if attendees else ""
+        lines.append(f"  • {start}  {title}{attendee_note}")
+    return "\n".join(lines)
