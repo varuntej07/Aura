@@ -121,8 +121,7 @@ class ChatResponse {
       text: json['text'] as String? ?? '',
       intent: json['intent'] as String?,
       metadata: meta,
-      reminderPayload:
-          reminderJson != null ? ReminderPayload.fromJson(reminderJson) : null,
+      reminderPayload: reminderJson != null ? ReminderPayload.fromJson(reminderJson) : null,
     );
   }
 
@@ -162,8 +161,8 @@ class BackendApiService implements ChatServiceProvider {
     );
   }
 
-  /// Streams a chat message via SSE. Yields [ChatStreamEvent] objects as they
-  /// arrive; the stream completes after a [DoneEvent] or [ErrorStreamEvent].
+  /// Streams a chat message via SSE. Yields [ChatStreamEvent] objects as they arrive; 
+  /// the stream completes after a [DoneEvent] or [ErrorStreamEvent] is yielded.
   @override
   Stream<ChatStreamEvent> sendMessageStream(
     String message,
@@ -272,6 +271,18 @@ class BackendApiService implements ChatServiceProvider {
     return _apiClient.post(
       '/nutrition/analyze',
       {'ocr_text': ocrText, 'user_id': userId},
+      (json) => json,
+    );
+  }
+
+  /// Post one or more signal-engine events. Fire-and-forget on the server
+  /// side; the response is 202 with `{ "accepted": <int> }`.
+  Future<Result<Map<String, dynamic>>> postSignalEvents(
+    List<Map<String, dynamic>> events,
+  ) async {
+    return _apiClient.post(
+      '/events',
+      {'events': events},
       (json) => json,
     );
   }

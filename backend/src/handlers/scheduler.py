@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from ..lib.logger import logger
 from ..services.notification_rewriter import rewrite_reminder_notification
 from ..services.notification_service import send_notification
 from ..services.tool_executor import fetch_due_reminders, claim_reminder_for_processing, mark_reminder_fired
+from ..services.signal_engine.content_ingest import run_sports_ingest
 
 
 def _json(status: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -35,10 +37,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
     try:
         from ..services.google_calendar_connector import GoogleCalendarConnector
 
-        renewed_channels, synced_calendars, due = await asyncio.gather(
+        now_minute = datetime.now(timezone.utc).minute
+        sports_ingest_coro = run_sports_ingest() if now_minute % 30 == 0 else asyncio.sleep(0)
+
+        renewed_channels, synced_calendars, due, _ = await asyncio.gather(
             asyncio.to_thread(GoogleCalendarConnector.renew_expiring_channels, 10),
             asyncio.to_thread(GoogleCalendarConnector.process_pending_sync_jobs, 20),
             asyncio.to_thread(fetch_due_reminders),
+            sports_ingest_coro,
         )
 
         delivered = 0

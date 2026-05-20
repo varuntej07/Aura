@@ -7,6 +7,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
+import 'backend_api_service.dart';
 
 /// Payload emitted when the user taps a nutrition scan-ready local notification.
 class NutritionScanReadyTapPayload {
@@ -45,7 +46,7 @@ const _kAndroidChannelId = 'aura_default';
 const _kAndroidChannelName = 'Aura Notifications';
 
 /// Stable notification ID for nutrition scan local notifications.
-/// Must not collide with other local notification IDs (none exist currently).
+/// Must not collide with other local notification IDs.
 const _kNutritionScanNotificationId = 200;
 
 /// Centralized FCM notification service.
@@ -55,17 +56,19 @@ const _kNutritionScanNotificationId = 200;
 /// 2. Retrieves the FCM token and registers it with the backend.
 /// 3. Listens for token refreshes and re-registers automatically.
 /// 4. Handles foreground messages (shows a local system notification).
-/// 5. Handles background → foreground tap navigation.
+/// 5. Handles background -> foreground tap navigation.
 /// 6. Creates the Android notification channel on first launch.
 ///
-/// The service is idempotent — calling [initialize] more than once is safe.
+/// The service is idempotent so calling [initialize] more than once is safe.
 class NotificationService {
   final ApiClient _apiClient;
+  final BackendApiService? _signalEventSink;
 
-  NotificationService({required ApiClient apiClient})
-      : _apiClient = apiClient;
-
-  // ── State ─────────────────────────────────────────────────────────────────
+  NotificationService({
+    required ApiClient apiClient,
+    BackendApiService? signalEventSink,
+  })  : _apiClient = apiClient,
+        _signalEventSink = signalEventSink;
 
   bool _initialized = false;
   String? _userId;
@@ -74,36 +77,28 @@ class NotificationService {
 
   final _localNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
-  final _engagementTapController =
-      StreamController<EngagementTapPayload>.broadcast();
-  final _agentNudgeTapController =
-      StreamController<AgentNudgeTapPayload>.broadcast();
-  final _nutritionScanReadyTapController =
-      StreamController<NutritionScanReadyTapPayload>.broadcast();
+  final _engagementTapController = StreamController<EngagementTapPayload>.broadcast();
+  final _agentNudgeTapController = StreamController<AgentNudgeTapPayload>.broadcast();
+  final _nutritionScanReadyTapController = StreamController<NutritionScanReadyTapPayload>.broadcast();
 
-  /// Emits when the user taps an engagement notification.
-  Stream<EngagementTapPayload> get engagementTapStream =>
-      _engagementTapController.stream;
+  // Emits when the user taps an engagement notification.
+  Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
 
-  /// Emits when the user taps a scheduled agent nudge notification.
-  Stream<AgentNudgeTapPayload> get agentNudgeTapStream =>
-      _agentNudgeTapController.stream;
+  // Emits when the user taps a scheduled agent nudge notification.
+  Stream<AgentNudgeTapPayload> get agentNudgeTapStream => _agentNudgeTapController.stream;
 
-  /// Emits when the user taps the nutrition scan-ready local notification.
-  Stream<NutritionScanReadyTapPayload> get nutritionScanReadyTapStream =>
-      _nutritionScanReadyTapController.stream;
+  // Emits when the user taps the nutrition scan-ready local notification.
+  Stream<NutritionScanReadyTapPayload> get nutritionScanReadyTapStream => _nutritionScanReadyTapController.stream;
 
-  // ── Public API ────────────────────────────────────────────────────────────
+  // Public API
 
   /// Initialize FCM for the signed-in [userId].
-  ///
-  /// Safe to call multiple times; subsequent calls update the stored [userId]
-  /// in case the account changed (unlikely but handled).
+  /// Safe to call multiple times; subsequent calls update the stored [userId] in case the account changed.
   Future<void> initialize(String userId) async {
     _userId = userId;
 
     if (_initialized) {
-      // Already running — just ensure the current token is registered in
+      // Already running, so just ensure the current token is registered in
       // case the user signed in with a different account.
       final token = await FirebaseMessaging.instance.getToken();
       if (token != null) unawaited(_registerToken(token));
@@ -111,7 +106,7 @@ class NotificationService {
     }
     _initialized = true;
 
-    // ── 1. Request OS permission ──────────────────────────────────────────
+    // 1. Request OS permission (required for iOS 14+ and Android 13+)
     final settings = await FirebaseMessaging.instance.requestPermission(
       alert: true,
       badge: true,
@@ -137,11 +132,11 @@ class NotificationService {
       },
     );
 
-    // ── 2. Initialize local notifications plugin + create Android channel ──
+    // 2. Initialize local notifications plugin + create Android channel
     await _initializeLocalNotificationsPlugin();
     await _createAndroidChannel();
 
-    // ── 3. Get current token and register with backend ───────────────────
+    // 3. Get current token and register with backend
     final token = await FirebaseMessaging.instance.getToken();
     AppLogger.info(
       'FCM token retrieved',
@@ -150,7 +145,7 @@ class NotificationService {
     );
     if (token != null) unawaited(_registerToken(token));
 
-    // ── 4. Auto-register on token refresh ────────────────────────────────
+    // 4. Auto-register on token refresh
     await _tokenRefreshSubscription?.cancel();
     _tokenRefreshSubscription = FirebaseMessaging.instance.onTokenRefresh
         .listen((newToken) {
@@ -162,18 +157,17 @@ class NotificationService {
       unawaited(_registerToken(newToken));
     });
 
-    // ── 5. Foreground messages → show local notification ─────────────────
+    // 5. Foreground messages → show local notification
     await _foregroundSubscription?.cancel();
     _foregroundSubscription = FirebaseMessaging.onMessage.listen(
       _handleForegroundMessage,
     );
 
-    // ── 6. App opened from background via notification tap ───────────────
+    // 6. App opened from background via notification tap
     FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationTap);
 
-    // ── 7. App opened from terminated state via notification tap ─────────
-    final initialMessage =
-        await FirebaseMessaging.instance.getInitialMessage();
+    // 7. App opened from terminated state via notification tap
+    final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
     if (initialMessage != null) {
       _handleNotificationTap(initialMessage);
     }
@@ -192,12 +186,12 @@ class NotificationService {
     await _nutritionScanReadyTapController.close();
   }
 
-  // ── Public local notification API ─────────────────────────────────────────
+  // Public local notification API
 
   /// Show an immediate local system notification for nutrition scan results.
   ///
-  /// Used when the user has backgrounded the app during a scan and the result
-  /// arrives or the Q&A is awaiting their input.
+  /// Used when the user has backgrounded the app during a scan and 
+  /// the result arrives or the Q&A is awaiting their input.
   Future<void> showNutritionScanLocalNotification({
     required String title,
     required String body,
@@ -230,7 +224,7 @@ class NotificationService {
     }
   }
 
-  // ── Private helpers ───────────────────────────────────────────────────────
+  // Private helpers 
 
   Future<void> _initializeLocalNotificationsPlugin() async {
     const initSettingsAndroid = AndroidInitializationSettings('@drawable/ic_notification');
@@ -340,12 +334,85 @@ class NotificationService {
         'reminderId': message.data['reminder_id'],
       },
     );
+    _reportNotificationOpened(message.data);
     dispatchNotificationTap(message.data);
+  }
+
+  /// Public hook the chat/feed surfaces can call when the user dismisses a
+  /// notification-originated chat thread without engaging with the content.
+  Future<void> reportContentSkipped({
+    required String contentId,
+    String? category,
+  }) async {
+    await _postSignalEvents([
+      _buildEventPayload(
+        eventType: 'content_skipped',
+        contentId: contentId,
+        category: category,
+      ),
+    ]);
+  }
+
+  /// Call once per cold app open. Records the local-time slot so the engine
+  /// learns when the user reaches for the app organically.
+  Future<void> reportAppOpen() async {
+    await _postSignalEvents([
+      _buildEventPayload(eventType: 'app_open'),
+    ]);
+  }
+
+  void _reportNotificationOpened(Map<String, dynamic> data) {
+    if ((data['notification_origin'] as String?) != 'signal_engine') return;
+    final contentId = data['content_id'] as String?;
+    if (contentId == null || contentId.isEmpty) return;
+    final notificationId = data['notification_id'] as String? ?? contentId;
+    unawaited(_postSignalEvents([
+      _buildEventPayload(
+        eventType: 'notification_opened',
+        // Outcome rows are keyed on the notification_id; the backend expects
+        // it in content_id so resolve_outcome can find the right row.
+        contentId: notificationId,
+        category: data['category'] as String?,
+      ),
+    ]));
+  }
+
+  Map<String, dynamic> _buildEventPayload({
+    required String eventType,
+    String? contentId,
+    String? category,
+    int? durationMs,
+    String? searchQueryText,
+  }) {
+    final now = DateTime.now();
+    return {
+      'event_type': eventType,
+      if (contentId != null) 'content_id': contentId,
+      if (category != null) 'category': category,
+      if (durationMs != null) 'duration_ms': durationMs,
+      if (searchQueryText != null) 'search_query_text': searchQueryText,
+      'user_local_hour': now.hour,
+      'user_local_minute': now.minute,
+    };
+  }
+
+  Future<void> _postSignalEvents(List<Map<String, dynamic>> events) async {
+    final sink = _signalEventSink;
+    if (sink == null || events.isEmpty) return;
+    try {
+      await sink.postSignalEvents(events);
+    } catch (e) {
+      AppLogger.warning(
+        'Failed to post signal events',
+        tag: _tag,
+        metadata: {'eventCount': events.length, 'error': e.toString()},
+      );
+    }
   }
 
   /// Routes FCM data payloads to the correct tap stream.
   ///
-  /// Extracted for testability — production code calls [_handleNotificationTap]
+  /// Extracted for testability, production code calls [_handleNotificationTap]
   /// which delegates here after logging.
   @visibleForTesting
   void dispatchNotificationTap(Map<String, dynamic> data) {

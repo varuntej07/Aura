@@ -1,75 +1,25 @@
 """
-Daily notification handlers — three OIDC-gated internal endpoints.
-
-POST /internal/daily-notify/plan-all
-    Called by Cloud Scheduler at 6 AM UTC daily.
-    Queries Firestore for users with FCM tokens active in the last 7 days,
-    calculates per-user delay so each task fires at 7 AM local time,
-    and enqueues one Cloud Task per user.
-
-POST /internal/daily-notify/plan/{uid}
-    Called by Cloud Tasks (one per user, at their 7 AM local).
-    Runs the full planning pipeline: planner → verifier → schedule.
+Daily notification handler — OIDC-gated internal endpoint for meeting reminder delivery.
 
 POST /internal/daily-notify/send
-    Called by Cloud Tasks at the scheduled send time for each nudge.
+    Called by Cloud Tasks at the scheduled send time for each meeting reminder.
     Sends the notification via FCM and updates the daily_plans document.
+
+Note: plan-all and plan-{uid} endpoints were removed with the LLM-planner. The signal
+engine (POST /internal/signal-engine/tick) handles discovery notifications. Calendar
+reminders are still scheduled by services/daily_notification/orchestrator.py.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import time as _time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
 from ..services.notification_service import send_notification
-from ..services.daily_notification.orchestrator import run_daily_plan
-from ..config.settings import settings
-
-
-# Fan-out all active users
-async def handle_plan_all_users() -> dict[str, Any]:
-    """Triggered by Cloud Scheduler at 6 AM UTC. Fans out one task per active user."""
-    active_user_ids = await _fetch_active_user_ids()
-
-    if not active_user_ids:
-        logger.info("daily_notification: no active users found, nothing to schedule")
-        return {"scheduled": 0}
-
-    scheduled = 0
-    errors = 0
-    for user_id in active_user_ids:
-        try:
-            user_timezone = await _fetch_user_timezone(user_id)
-            delay_seconds = _seconds_until_7am_local(user_timezone)
-            await asyncio.to_thread(_enqueue_plan_task, user_id, delay_seconds)
-            scheduled += 1
-        except Exception as exc:
-            errors += 1
-            logger.warn("daily_notification: failed to enqueue plan task", {
-                "user_id": user_id,
-                "error": str(exc),
-            })
-
-    logger.info("daily_notification: fan-out complete", {
-        "total_users": len(active_user_ids),
-        "scheduled": scheduled,
-        "errors": errors,
-    })
-    return {"scheduled": scheduled, "errors": errors, "total_users": len(active_user_ids)}
-
-
-# Plan for a single user
-async def handle_plan_one_user(user_id: str) -> dict[str, Any]:
-    """Triggered by Cloud Tasks. Runs the full planning pipeline for one user."""
-    logger.info("daily_notification: starting plan for user", {"user_id": user_id})
-    await run_daily_plan(user_id)
-    return {"status": "ok", "user_id": user_id}
 
 
 # Send a scheduled notification
@@ -190,73 +140,6 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Active user discovery
-async def _fetch_active_user_ids() -> list[str]:
-    """Return user IDs with FCM tokens, skipping users inactive for 7+ days.
-
-    Activity is determined by the most recent query timestamp. Users with no
-    queries at all are assumed active (new accounts).
-    """
-    def _fetch() -> list[str]:
-        from google.cloud.firestore_v1.base_query import FieldFilter  # type: ignore
-
-        db = admin_firestore()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-
-        # All users with any FCM token, registration date is irrelevant for activity
-        token_docs = db.collection_group("fcm_tokens").stream()
-        user_ids: set[str] = set()
-        for doc in token_docs:
-            path_parts = doc.reference.path.split("/")
-            if len(path_parts) >= 2:
-                user_ids.add(path_parts[1])
-
-        if not user_ids:
-            return []
-
-        active: list[str] = []
-        for uid in user_ids:
-            recent = (
-                db.collection("users").document(uid)
-                .collection("queries")
-                .where(filter=FieldFilter("timestamp", ">=", cutoff))
-                .limit(1)
-                .stream()
-            )
-            if any(True for _ in recent):
-                active.append(uid)
-            else:
-                # No queries ever: might be a new account, so include it
-                no_queries = not any(
-                    True for _ in
-                    db.collection("users").document(uid)
-                    .collection("queries").limit(1).stream()
-                )
-                if no_queries:
-                    active.append(uid)
-
-        return active
-
-    try:
-        return await asyncio.to_thread(_fetch)
-    except Exception as exc:
-        logger.warn("daily_notification: failed to fetch active users", {"error": str(exc)})
-        return []
-
-
-async def _fetch_user_timezone(user_id: str) -> str:
-    def _fetch() -> str:
-        db = admin_firestore()
-        doc = db.collection("users").document(user_id).get()
-        if doc.exists:
-            return (doc.to_dict() or {}).get("timezone", "UTC")
-        return "UTC"
-    try:
-        return await asyncio.to_thread(_fetch)
-    except Exception:
-        return "UTC"
-
-
 # Firestore helpers
 async def _load_daily_plan(user_id: str, plan_date: str) -> dict | None:
     def _fetch() -> dict | None:
@@ -356,55 +239,3 @@ async def _update_meeting_reminder_engagement_guard(user_id: str, last_engaged_a
         logger.warn("daily_notification: failed to update meeting reminder engagement_guard", {"error": str(exc)})
 
 
-# Cloud Task enqueuing 
-def _enqueue_plan_task(user_id: str, delay_seconds: int) -> None:
-    """Enqueue a Cloud Task to call POST /internal/daily-notify/plan/{uid}."""
-    from google.cloud import tasks_v2  # type: ignore
-    from google.protobuf import timestamp_pb2  # type: ignore
-
-    client = tasks_v2.CloudTasksClient()
-    queue_path = client.queue_path(
-        settings.CLOUD_TASKS_PROJECT,
-        settings.CLOUD_TASKS_LOCATION,
-        settings.CLOUD_TASKS_QUEUE,
-    )
-
-    task: dict[str, Any] = {
-        "http_request": {
-            "http_method": tasks_v2.HttpMethod.POST,
-            "url": f"{settings.BACKEND_INTERNAL_URL}/internal/daily-notify/plan/{user_id}",
-            "headers": {"Content-Type": "application/json"},
-            "body": b"{}",
-            "oidc_token": {
-                "service_account_email": settings.SCHEDULER_SA_EMAIL,
-                "audience": settings.BACKEND_INTERNAL_URL,
-            },
-        }
-    }
-
-    if delay_seconds > 0:
-        eta = timestamp_pb2.Timestamp()
-        eta.FromSeconds(int(_time.time()) + delay_seconds)
-        task["schedule_time"] = eta
-
-    client.create_task(parent=queue_path, task=task)
-
-
-# Timezone helpers
-def _seconds_until_7am_local(user_timezone: str) -> int:
-    """Return the number of seconds from now until 7 AM in the user's timezone.
-    If 7 AM has already passed today, returns seconds until 7 AM tomorrow.
-    """
-    try:
-        tz = ZoneInfo(user_timezone)
-    except (ZoneInfoNotFoundError, Exception):
-        tz = ZoneInfo("UTC")
-
-    now_local = datetime.now(tz)
-    target = now_local.replace(hour=7, minute=0, second=0, microsecond=0)
-    if target <= now_local:
-        target += timedelta(days=1)
-
-    delay = int((target - now_local).total_seconds())
-    # Cloud Tasks minimum delay is 0, so capping at 24 hours as a safety guard
-    return max(0, min(delay, 86400))

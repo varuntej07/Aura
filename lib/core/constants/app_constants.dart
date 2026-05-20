@@ -7,7 +7,7 @@ class AppConstants {
   // Claude multi-turn with tool use + exponential backoff can take 15-30s under load.
   static const chatRequestTimeout = Duration(seconds: 45);
   static const chatStreamConnectTimeout = Duration(seconds: 10);
-  static const chatStreamIdleTimeout = Duration(seconds: 60);
+  static const chatStreamIdleTimeout = Duration(seconds: 90);
   // Nutrition scan uses Gemini Pro, now this larger model needs extra inference headroom.
   static const nutritionScanTimeout = Duration(seconds: 120);
   static const apiWriteTimeout = Duration(seconds: 30);

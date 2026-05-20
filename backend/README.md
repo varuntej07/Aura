@@ -1,45 +1,46 @@
-# Juno Backend
+# Aura Backend
 
-FastAPI backend for the Juno/Buddy mobile app, deployed on Google Cloud Run.
+FastAPI backend for the Aura/Buddy app, deployed on Google Cloud Run.
 
-## Runtime Model
+## What runs where
 
-- `src/main.py`: FastAPI HTTP API served by `uvicorn` on Cloud Run.
-- `src/agent/voice_agent.py`: LiveKit voice worker, run as a separate long-lived process.
-- `src/handlers/`: REST and scheduled endpoint logic for chat, nutrition, reminders, devices, connectors, engagement, and daily notifications.
-- `src/services/`: integrations for Claude, Gemini/Vertex AI, Firebase, Google Calendar, FCM, Cloud Tasks, and tool execution.
+- `src/main.py` — FastAPI HTTP API (uvicorn, Cloud Run)
+- `src/agent/voice_agent.py` — LiveKit voice worker, separate long-lived process
+- `src/handlers/` — endpoint logic: chat, nutrition, reminders, devices, calendar, notifications, signal engine
+- `src/services/signal_engine/` — embedding-driven notification and feed ranking layer (no LLM in scoring hot path)
+- `src/services/` — Claude, Gemini, Firebase, FCM, Google Calendar, Cloud Tasks integrations
+- `src/agents/` — scheduled data fetchers (HN, arXiv, cricket, jobs, sports web search)
 
-Voice is handled through LiveKit:
+Voice stack: LiveKit → Deepgram (STT) → Claude (reasoning) → Cartesia (TTS) → Silero VAD.
 
-- Deepgram for speech-to-text.
-- Claude for assistant reasoning.
-- Cartesia for text-to-speech.
-- Silero VAD through LiveKit Agents.
+## Run locally
 
-## Run Locally
-
-Run the HTTP API:
-
-```bash
+```powershell
 cd backend
 uvicorn src.main:app --reload --port 8000
 ```
 
-Run the voice worker in a second terminal:
+Voice worker (separate terminal):
 
-```bash
+```powershell
 cd backend
 python -m src.agent.voice_agent start
 ```
 
-The Flutter app should point `apiBaseUrl` at the FastAPI service and use LiveKit for voice sessions.
+## Deploy to Cloud Run
 
-## Deploy
-
-From the repository root:
-
-```bash
+```powershell
 gcloud run deploy juno-backend --source backend/ --region us-central1 --project juno-2ea45
 ```
 
-Cloud Run environment variables and secrets are persisted. Only pass `--set-env-vars` or `--set-secrets` when changing configuration.
+Existing secrets and env vars on the service are preserved — Cloud Run only updates what you explicitly pass.
+
+## Scheduled jobs (Cloud Scheduler)
+
+| Job | Schedule | Endpoint |
+|---|---|---|
+| `juno-reminder-tick` | every minute | `/scheduler/tick` — reminders, calendar sync, sports ingest every 30 min |
+| `juno-agents-tick` | 09:00 daily | `/internal/agents/tick` — domain agent fetches |
+| `juno-daily-notify` | configured | `/internal/daily-notify/send` — calendar meeting reminders |
+| signal engine tick | every 15 min | `/internal/signal-engine/tick` |
+| content ingest | hourly | `/internal/signal-engine/content-ingest` |

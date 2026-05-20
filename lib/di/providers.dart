@@ -64,7 +64,10 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     apiClient: apiClient,
     authService: firebaseAuthService,
   );
-  final notificationService = NotificationService(apiClient: apiClient);
+  final notificationService = NotificationService(
+    apiClient: apiClient,
+    signalEventSink: backendApiService,
+  );
   final nutritionScanService = NutritionScanService(apiClient: apiClient);
   final voiceSessionService = VoiceSessionService(
     tokenProvider: firebaseAuthService.getIdToken,
