@@ -82,6 +82,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="CARTESIA_API_KEY=cartesia-api-key:latest" \
   --set-secrets="GOOGLE_CLIENT_ID=juno-google-client-id:latest" \
   --set-secrets="GOOGLE_CLIENT_SECRET=juno-google-client-secret:latest" \
+  --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
   --set-secrets="/run/secrets/service-account.json=juno-firebase-service-account:latest" \
   --set-env-vars="GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/service-account.json" \
   --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}"

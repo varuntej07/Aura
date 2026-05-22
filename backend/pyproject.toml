@@ -17,7 +17,7 @@ dependencies = [
     "python-dotenv>=1.0",
 
     # LiveKit — voice pipeline (STT: Deepgram, LLM: Anthropic, TTS: Cartesia, VAD: Silero)
-    "livekit-agents[deepgram,anthropic,cartesia,silero,google]>=1.0",
+    "livekit-agents[deepgram,anthropic,cartesia,silero,google,turn-detector]>=1.0",
     "livekit-api>=0.7",
 
     # Anthropic Claude
@@ -39,6 +39,9 @@ dependencies = [
 
     # RSS feed parsing (daily notification news fallback)
     "feedparser>=6.0",
+
+    # MCP server SDK (FastMCP — POST /mcp endpoint for voice agent tool calls)
+    "mcp>=1.0",
 
     # Async HTTP clients for scheduled agent data fetchers
     "httpx>=0.28",

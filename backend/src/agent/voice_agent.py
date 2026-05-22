@@ -23,6 +23,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
 
@@ -43,7 +44,6 @@ from livekit.agents.voice import room_io
 from livekit.agents.voice.background_audio import (
     AudioConfig,
     BackgroundAudioPlayer,
-    BuiltinAudioClip,
 )
 from livekit.plugins import anthropic, cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -53,7 +53,9 @@ from ..lib.logger import logger
 from ..services.firebase import admin_auth, admin_firestore
 from .buddy_agent import BuddyAgent
 
-# Firebase auto-issued UIDs are 28 alphanumeric chars. 
+_FILLER_AUDIO_DIR = Path(__file__).parent / "audio"
+
+# Firebase auto-issued UIDs are 28 alphanumeric chars.
 # We refuse anything else so a malformed room name can't drive a session.
 _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 
@@ -404,7 +406,14 @@ async def entrypoint(ctx: JobContext) -> None:
             session_done.set()
 
         background_audio = BackgroundAudioPlayer(
-            thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.6),
+            thinking_sound=[
+                # Probabilities sum to 0.80, remaining 20% plays as silence.
+                # Max clip duration ~700ms, all finish before the 1200ms TTS filler.
+                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_hmm.wav"), volume=0.9, probability=0.35),
+                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_ah.wav"), volume=0.9, probability=0.20),
+                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_sure.wav"), volume=0.9, probability=0.15),
+                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_let_me_see.wav"), volume=0.9, probability=0.10),
+            ],
         )
 
         async def _shutdown_background_audio() -> None:

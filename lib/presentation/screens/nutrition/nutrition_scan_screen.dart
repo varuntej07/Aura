@@ -139,10 +139,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen>
                 ),
               NutritionScanState.error => _ErrorView(
                   message: vm.error?.message ?? 'Something went wrong.',
-                  onRetry: () {
-                    vm.reset();
-                    setState(() => _pickedImage = null);
-                  },
+                  onRetry: vm.reset,
                 ),
             };
           },

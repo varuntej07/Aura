@@ -15,6 +15,7 @@ not declared on this class. Lifecycle:
 from __future__ import annotations
 
 import asyncio
+import random
 
 from livekit import agents
 from livekit.agents import llm as lk_llm
@@ -27,9 +28,16 @@ from .voice_prompt import VOICE_PROMPT
 _FILLER_MIN_WORDS = 6
 
 # How long we let the LLM stay silent before injecting on-line presence.
-_FILLER_DELAY_S = 0.6
+# 1.2s gives background filler clips (max ~700ms) room to finish before
+# this TTS phrase fires, so the two never overlap on the wire.
+_FILLER_DELAY_S = 1.2
 
-_FILLER_PHRASES = ["mm-hmm,<break time=\"200ms\"/> one sec..."]
+_FILLER_PHRASES = [
+    "mm-hmm,<break time=\"200ms\"/> one sec...",
+    "let me check on that...",
+    "just a moment...",
+    "hmm,<break time=\"150ms\"/> let me think...",
+]
 
 
 class BuddyAgent(agents.Agent):
@@ -90,7 +98,7 @@ class BuddyAgent(agents.Agent):
 
         try:
             await self.session.say(
-                _FILLER_PHRASES[0],
+                random.choice(_FILLER_PHRASES),
                 allow_interruptions=True,
                 add_to_chat_ctx=False,
             )
