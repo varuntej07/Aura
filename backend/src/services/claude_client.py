@@ -31,8 +31,8 @@ _RETRYABLE_ERRORS = (
     anthropic.InternalServerError,   # 500 / 529
 )
 
-EXCLUDED_TOOLS_FOR_GENERAL_CHAT = {"get_user_context", "web_search"}
-EXCLUDED_TOOLS_FOR_AGENT_CHAT = {"get_user_context"}
+EXCLUDED_TOOLS_FOR_GENERAL_CHAT: set[str] = set()
+EXCLUDED_TOOLS_FOR_AGENT_CHAT: set[str] = set()
 
 # Tools that require Starter tier or above.
 # Free users only get reminder + memory + clarification tools.

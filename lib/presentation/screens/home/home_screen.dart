@@ -510,6 +510,23 @@ class _VoiceStatusCardState extends State<_VoiceStatusCard> {
   Widget build(BuildContext context) {
     final entries = widget.vm.voiceTranscript;
     final hasTranscript = entries.isNotEmpty;
+
+    if (widget.vm.voiceStatus == VoiceSessionStatus.error) {
+      final msg = widget.vm.error?.message ?? 'Could not connect. Check your network and try again.';
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(40, 20, 40, 0),
+        child: Text(
+          msg,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.error.withValues(alpha: 0.85),
+            fontSize: 13,
+            height: 1.5,
+          ),
+        ),
+      );
+    }
+
     if (hasTranscript) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_scrollController.hasClients) return;

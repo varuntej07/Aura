@@ -1,35 +1,85 @@
 """
-LiveKit voice agent using cascading architecture: 
-Deepgram STT -> Claude LLM -> Cartesia TTS pipeline.
+LiveKit voice agent using cascading architecture: STT -> LLM -> TTS
 
-The worker connects to LiveKit Cloud and waits for participant joins.
-When a Flutter client joins room "voice-{uid}", this agent starts a pipeline session.
+Pipeline plugins:
+  Deepgram Nova STT (with nova-3 -> nova-2 fallback)
+  Anthropic Claude LLM (with Gemini Flash fallback)
+  Cartesia TTS (sonic-3 -> sonic-2 fallback)
+  Silero VAD + LiveKit MultilingualModel turn detector
+
+Tools live in the FastAPI backend at POST /mcp and are pulled in via
+livekit.agents.mcp.MCPServerHTTP. The worker authenticates to /mcp with a
+Firebase ID token it derives per-session from the user's uid (Admin SDK
+custom token -> identitytoolkit exchange).
+
+The worker connects to LiveKit Cloud and waits for participant joins. When
+a Flutter client joins room "voice-{uid}", this agent starts a session.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import os
+import re
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Awaitable, Callable
+from typing import AsyncIterator
 from uuid import uuid4
 
-from livekit import agents
-from livekit.agents import AgentSession, JobContext, WorkerOptions, cli, function_tool, room_io
+import httpx
+from livekit.agents import (
+    AgentSession,
+    JobContext,
+    JobProcess,
+    TurnHandlingOptions,
+    WorkerOptions,
+    cli,
+    mcp,
+)
 from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
-from livekit.plugins import anthropic, cartesia, deepgram, google, silero
 from livekit.agents.voice import room_io
-from livekit.agents import TurnHandlingOptions
+from livekit.agents.voice.background_audio import (
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
+)
+from livekit.plugins import anthropic, cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..services.tool_executor import ToolExecutor
+from ..services.firebase import admin_auth, admin_firestore
+from .buddy_agent import BuddyAgent
 
-_TOOL = settings.VOICE_TOOL_TIMEOUT_S
+# Firebase auto-issued UIDs are 28 alphanumeric chars. 
+# We refuse anything else so a malformed room name can't drive a session.
+_FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
+
+# Hard cap on the parallel profile + memory fetch before session.start.
+# A LiveKit session can't speak its greeting until on_enter resolves, and
+# the agent feels conversational only if the first audio lands inside ~1s.
+# 1.5s is the budget that still leaves margin for STT/LLM/TTS warm-up.
+_PRE_SESSION_FETCH_TIMEOUT_S = 1.5
+
+
+def _log_voice_failure(
+    *,
+    code: str,
+    user_id: str,
+    room_name: str,
+    session_id: str | None,
+    exc: Exception,
+) -> None:
+    logger.error("VoiceSession: failure", {
+        "code": code,
+        "user_id": user_id,
+        "room": room_name,
+        "session_id": session_id,
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    })
 
 
 @asynccontextmanager
@@ -58,246 +108,182 @@ async def _voice_session_context(user_id: str, room_name: str) -> AsyncIterator[
         })
 
 
-class BuddyAgent(agents.Agent):
-    def __init__(self, user_id: str, publish_event: Callable[[dict], Awaitable[None]]) -> None:
-        super().__init__(instructions=settings.VOICE_PROMPT)
-        self._user_id = user_id
-        self._executor = ToolExecutor(user_id)
-        self._publish_event = publish_event
+def _local_time_in_zone(timezone_name: str) -> str:
+    """Format current wall-clock time in the user's timezone for the prompt."""
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        return datetime.now(ZoneInfo(timezone_name)).strftime("%-I:%M %p")
+    except Exception:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).strftime("%H:%M UTC")
 
-    def _ok(self, result: dict) -> str:
-        return json.dumps(result)
 
-    async def _thinking(self, message: str) -> None:
-        await self._publish_event({"type": "tool_thinking", "message": message})
+async def _fetch_user_profile(user_id: str) -> dict[str, str]:
+    """Return {name, timezone} from users/{uid}. Defaults fill missing fields."""
+    def _read() -> dict[str, str]:
+        doc = admin_firestore().collection("users").document(user_id).get()
+        data = doc.to_dict() or {}
+        return {
+            "name": (data.get("display_name") or data.get("name") or "").strip() or "there",
+            "timezone": (data.get("timezone") or "UTC").strip() or "UTC",
+        }
+    return await asyncio.to_thread(_read)
 
-    def _err(self, tool: str, exc: Exception) -> str:
-        logger.exception("VoiceAgent: tool error", {"tool": tool, "user_id": self._user_id, "error": str(exc)})
-        return json.dumps({"error": str(exc)})
 
-    def _timeout(self, tool: str) -> str:
-        logger.error("VoiceAgent: tool timed out", {"tool": tool, "user_id": self._user_id})
-        return json.dumps({"error": "timed out — please try again"})
-
-    # Reminders
-
-    @function_tool
-    async def set_reminder(self, message: str, delay_minutes: float, priority: str = "normal") -> str:
-        """Set a reminder for the user that fires after delay_minutes minutes."""
+async def _fetch_memory_summary(user_id: str) -> str:
+    """Top 5 recent rows from users/{uid}/memories, formatted as bullet lines."""
+    def _read() -> str:
+        coll = admin_firestore().collection("users").document(user_id).collection("memories")
         try:
-            await self._thinking("Setting the reminder.")
-            result = await asyncio.wait_for(
-                self._executor.execute("set_reminder", {"message": message, "delay_minutes": delay_minutes, "priority": priority}),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("set_reminder")
-        except Exception as exc:
-            return self._err("set_reminder", exc)
-
-    @function_tool
-    async def list_reminders(self, status_filter: str = "pending") -> str:
-        """List the user's reminders. status_filter: 'pending', 'all', 'fired', 'dismissed'."""
-        try:
-            await self._thinking("Checking reminders.")
-            result = await asyncio.wait_for(
-                self._executor.execute("list_reminders", {"status_filter": status_filter}),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("list_reminders")
-        except Exception as exc:
-            return self._err("list_reminders", exc)
-
-    @function_tool
-    async def cancel_reminder(self, reminder_id: str) -> str:
-        """Cancel (dismiss) a reminder by its ID."""
-        try:
-            await self._thinking("Canceling that reminder.")
-            result = await asyncio.wait_for(
-                self._executor.execute("cancel_reminder", {"reminder_id": reminder_id}),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("cancel_reminder")
-        except Exception as exc:
-            return self._err("cancel_reminder", exc)
-
-    # Calendar
-
-    @function_tool
-    async def create_calendar_event(
-        self,
-        title: str,
-        start_time: str,
-        end_time: str = "",
-        description: str = "",
-        location: str = "",
-    ) -> str:
-        """Create a Google Calendar event. start_time and end_time are ISO 8601 strings."""
-        try:
-            await self._thinking("Creating the calendar event.")
-            result = await asyncio.wait_for(
-                self._executor.execute("create_calendar_event", {
-                    "title": title,
-                    "start_time": start_time,
-                    "end_time": end_time or None,
-                    "description": description or None,
-                    "location": location or None,
-                }),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("create_calendar_event")
-        except Exception as exc:
-            return self._err("create_calendar_event", exc)
-
-    @function_tool
-    async def get_upcoming_events(self, hours_ahead: int = 24, limit: int = 10) -> str:
-        """Fetch upcoming Google Calendar events within the next hours_ahead hours."""
-        try:
-            await self._thinking("Checking your calendar.")
-            result = await asyncio.wait_for(
-                self._executor.execute("get_upcoming_events", {"hours_ahead": hours_ahead, "limit": limit}),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("get_upcoming_events")
-        except Exception as exc:
-            return self._err("get_upcoming_events", exc)
-
-    # Memory
-
-    @function_tool
-    async def store_memory(self, key: str, value: str, category: str) -> str:
-        """Store a memory about the user. category: 'personal', 'preference', 'fact', etc."""
-        try:
-            await self._thinking("Saving that memory.")
-            result = await asyncio.wait_for(
-                self._executor.execute("store_memory", {"key": key, "value": value, "category": category}),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("store_memory")
-        except Exception as exc:
-            return self._err("store_memory", exc)
-
-    @function_tool
-    async def query_memory(self, query: str, category_filter: str = "all") -> str:
-        """Search the user's memories. category_filter: 'all' or a specific category."""
-        try:
-            await self._thinking("Searching memory.")
-            result = await asyncio.wait_for(
-                self._executor.execute("query_memory", {"query": query, "category_filter": category_filter}),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("query_memory")
-        except Exception as exc:
-            return self._err("query_memory", exc)
-
-    # Nutrition
-
-    @function_tool
-    async def analyze_nutrition(
-        self,
-        ocr_text: str,
-        quantity: float = 1.0,
-        occasion: str = "",
-        is_cheat_meal: bool = False,
-    ) -> str:
-        """Analyze nutrition information from a food label's OCR text."""
-        try:
-            await self._thinking("Reading the nutrition label.")
-            result = await asyncio.wait_for(
-                self._executor.execute("analyze_nutrition", {
-                    "ocr_text": ocr_text,
-                    "quantity": quantity,
-                    "occasion": occasion or None,
-                    "is_cheat_meal": is_cheat_meal,
-                }),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("analyze_nutrition")
-        except Exception as exc:
-            return self._err("analyze_nutrition", exc)
-
-    # User context
-
-    @function_tool
-    async def get_user_context(
-        self,
-        include_memories: bool = True,
-        include_reminders: bool = True,
-        include_events: bool = True,
-    ) -> str:
-        """Get a snapshot of the user's memories, reminders, and upcoming calendar events."""
-        try:
-            await self._thinking("Checking your context.")
-            result = await asyncio.wait_for(
-                self._executor.execute("get_user_context", {
-                    "include_memories": include_memories,
-                    "include_reminders": include_reminders,
-                    "include_events": include_events,
-                }),
-                timeout=_TOOL,
-            )
-            return self._ok(result)
-        except asyncio.TimeoutError:
-            return self._timeout("get_user_context")
-        except Exception as exc:
-            return self._err("get_user_context", exc)
+            docs = list(coll.order_by("updated_at", direction="DESCENDING").limit(5).stream())
+        except Exception:
+            docs = list(coll.limit(5).stream())
+        if not docs:
+            return ""
+        lines: list[str] = []
+        for d in docs:
+            row = d.to_dict() or {}
+            key = str(row.get("key", "")).strip()
+            value = str(row.get("value", "")).strip()
+            if key and value:
+                lines.append(f"- {key}: {value}")
+        return "\n".join(lines)
+    return await asyncio.to_thread(_read)
 
 
-def prewarm(proc: agents.JobProcess) -> None:
+async def _mint_firebase_id_token(user_id: str) -> str:
+    """Exchange an Admin-SDK custom token for a real Firebase ID token.
+
+    The /mcp endpoint verifies tokens with admin_auth().verify_id_token, which
+    only accepts ID tokens, not custom tokens. To stay on a single auth path
+    (same as /chat) the worker mints a custom token and swaps it via the
+    identitytoolkit REST endpoint. Requires FIREBASE_WEB_API_KEY.
+    """
+    if not settings.FIREBASE_WEB_API_KEY:
+        raise RuntimeError(
+            "FIREBASE_WEB_API_KEY is not configured — voice worker cannot reach /mcp"
+        )
+
+    custom_token = admin_auth().create_custom_token(user_id)
+    if isinstance(custom_token, bytes):
+        custom_token = custom_token.decode("utf-8")
+
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken"
+        f"?key={settings.FIREBASE_WEB_API_KEY.strip()}"
+    )
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            url,
+            json={"token": custom_token, "returnSecureToken": True},
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        id_token = body.get("idToken")
+        if not isinstance(id_token, str) or not id_token:
+            raise RuntimeError("identitytoolkit response missing idToken")
+        return id_token
+
+
+def prewarm(process: JobProcess) -> None:
     logger.info("VoiceWorker: prewarming VAD model")
-    proc.userdata["vad"] = silero.VAD.load()
+    process.userdata["vad"] = silero.VAD.load()
 
 
 async def entrypoint(ctx: JobContext) -> None:
     logger.info("VoiceAgent: job dispatched", {"room": ctx.room.name})
+    candidate_user_id = ctx.room.name.removeprefix("voice-")
     try:
         await asyncio.wait_for(ctx.connect(), timeout=settings.VOICE_CONNECT_TIMEOUT_S)
     except asyncio.TimeoutError:
         logger.error("VoiceAgent: room connect timed out", {"room": ctx.room.name})
+        _log_voice_failure(
+            code="room_connect_timeout",
+            user_id=candidate_user_id,
+            room_name=ctx.room.name,
+            session_id=None,
+            exc=TimeoutError("LiveKit ctx.connect() timeout"),
+        )
         return
     except Exception as exc:
         logger.exception("VoiceAgent: room connect failed", {"room": ctx.room.name, "error": str(exc)})
+        _log_voice_failure(
+            code="room_connect_failed",
+            user_id=candidate_user_id,
+            room_name=ctx.room.name,
+            session_id=None,
+            exc=exc,
+        )
         return
 
-    user_id = ctx.room.name.removeprefix("voice-")
-    if not user_id:
-        logger.error("VoiceAgent: could not extract user_id from room name", {"room": ctx.room.name})
+    user_id = candidate_user_id
+    if not _FIREBASE_UID_RE.match(user_id):
+        logger.error("VoiceAgent: invalid uid in room name", {
+            "room": ctx.room.name, "extracted_uid": user_id,
+        })
         return
 
     async with _voice_session_context(user_id, ctx.room.name) as session_id:
-        async def publish_client_event(payload: dict) -> None:
-            try:
-                await ctx.room.local_participant.publish_data(
-                    json.dumps(payload),
-                    reliable=True,
-                    destination_identities=[user_id],
-                )
-            except Exception as exc:
-                logger.warn("VoiceSession: failed to publish client event", {
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "error": str(exc),
-                })
+        # Fetch user profile + memory summary in parallel. The hard 1.5s
+        # ceiling enforces the under-1s greeting feel: any longer and the
+        # session pauses noticeably between connect and on_enter. 
+        # On miss we fall through to neutral defaults.
+        try:
+            profile, memory_summary = await asyncio.wait_for(
+                asyncio.gather(
+                    _fetch_user_profile(user_id),
+                    _fetch_memory_summary(user_id),
+                    return_exceptions=False,
+                ),
+                timeout=_PRE_SESSION_FETCH_TIMEOUT_S,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.warn("VoiceSession: pre-session fetch failed, using defaults", {
+                "session_id": session_id, "user_id": user_id,
+                "error_type": type(exc).__name__,
+            })
+            profile = {"name": "there", "timezone": "UTC"}
+            memory_summary = ""
+
+        context_vars = {
+            "name": profile["name"],
+            "timezone": profile["timezone"],
+            "local_time": _local_time_in_zone(profile["timezone"]),
+            "memory_summary": memory_summary or "(nothing yet — first conversation)",
+        }
+
+        # Seed the chat history with a system-side note that mirrors what the prompt already says. 
+        # Keeps the model anchored on the memory across turns without round-tripping to the LLM up front.
+        chat_ctx = lk_llm.ChatContext()
+        if memory_summary:
+            chat_ctx.add_message(
+                role="system",
+                content=(
+                    "Memory of prior chats with this user:\n"
+                    f"{memory_summary}"
+                ),
+            )
+
+        # Mint a Firebase ID token so the MCP server can verify the worker.
+        # Failure is fatal for tool use so the session can still hold a
+        # conversation but tools won't work, so we log loudly and bail.
+        try:
+            firebase_id_token = await _mint_firebase_id_token(user_id)
+        except Exception as exc:
+            _log_voice_failure(
+                code="mcp_token_mint_failed",
+                user_id=user_id,
+                room_name=ctx.room.name,
+                session_id=session_id,
+                exc=exc,
+            )
+            return
 
         stt_pipeline = lk_stt.FallbackAdapter(
             [
-                deepgram.STT(model="nova-3", api_key=settings.DEEPGRAM_API_KEY),
-                deepgram.STT(model="nova-2", api_key=settings.DEEPGRAM_API_KEY),
+                deepgram.STT(model="nova-3", api_key=settings.DEEPGRAM_API_KEY.strip()),
+                deepgram.STT(model="nova-2", api_key=settings.DEEPGRAM_API_KEY.strip()),
             ],
             attempt_timeout=10.0,
             max_retry_per_stt=1,
@@ -306,43 +292,71 @@ async def entrypoint(ctx: JobContext) -> None:
 
         llm_pipeline = lk_llm.FallbackAdapter(
             [
-                anthropic.LLM(model=settings.ANTHROPIC_CHAT_MODEL, api_key=settings.ANTHROPIC_API_KEY),
-                google.LLM(model=settings.TIER_CHEAP, api_key=settings.GEMINI_API_KEY),
+                anthropic.LLM(model=settings.ANTHROPIC_CHAT_MODEL, api_key=settings.ANTHROPIC_API_KEY.strip()),
+                google.LLM(model=settings.TIER_CHEAP, api_key=settings.GEMINI_API_KEY.strip()),
             ],
-            attempt_timeout=8.0,
+            attempt_timeout=12.0,
         )
 
         tts_pipeline = lk_tts.FallbackAdapter(
             [
-                cartesia.TTS(api_key=settings.CARTESIA_API_KEY, model="sonic-3"),
-                cartesia.TTS(api_key=settings.CARTESIA_API_KEY, model="sonic-2"),
+                cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3"),
+                cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-2"),
             ],
             max_retry_per_tts=1,
         )
+
+        mcp_url = f"{settings.BACKEND_INTERNAL_URL.rstrip('/')}/mcp"
+        mcp_server = mcp.MCPServerHTTP(
+            url=mcp_url,
+            transport_type="streamable_http",
+            headers={"Authorization": f"Bearer {firebase_id_token}"},
+        )
+
+        try:
+            turn_detector = MultilingualModel()
+        except Exception as exc:
+            _log_voice_failure(
+                code="turn_detector_init_failed",
+                user_id=user_id,
+                room_name=ctx.room.name,
+                session_id=session_id,
+                exc=exc,
+            )
+            return
 
         session = AgentSession(
             stt=stt_pipeline,
             llm=llm_pipeline,
             tts=tts_pipeline,
             vad=ctx.proc.userdata["vad"],
+            turn_detection=turn_detector,
+            preemptive_generation=True,
+            mcp_servers=[mcp_server],
             turn_handling=TurnHandlingOptions(
-                turn_detection=MultilingualModel(),
                 interruption={
                     "mode": "adaptive",
-                    # "min_duration": 0.5,
-                    # "false_interruption_timeout": 2.0,
+                    "false_interruption_timeout": 2.0,
+                    "resume_false_interruption": True,
                 },
             ),
         )
 
+        buddy = BuddyAgent(
+            user_id=user_id,
+            context_vars=context_vars,
+            chat_ctx=chat_ctx,
+        )
         session_done = asyncio.Event()
 
         @session.on("agent_state_changed")
         def _on_state(ev) -> None:  # type: ignore[misc]
+            state = str(getattr(ev, "new_state", ""))
             logger.info("VoiceSession: agent_state_changed", {
                 "session_id": session_id, "user_id": user_id,
-                "state": str(ev.new_state),
+                "state": state,
             })
+            buddy.cancel_pending_filler_on_speaking(state)
 
         @session.on("user_input_transcribed")
         def _on_user_transcript(ev) -> None:  # type: ignore[misc]
@@ -370,40 +384,66 @@ async def entrypoint(ctx: JobContext) -> None:
 
         @session.on("close")
         def _on_close(ev) -> None:  # type: ignore[misc]
+            close_error = getattr(ev, "error", None)
             logger.info("VoiceSession: session close event", {
                 "session_id": session_id, "user_id": user_id,
-                "error": str(ev.error) if getattr(ev, "error", None) else None,
+                "error": str(close_error) if close_error else None,
             })
+            if close_error:
+                error_text = str(close_error).lower()
+                code = "session_runtime_failed"
+                if "tts" in error_text or "cartesia" in error_text or "audio_output" in error_text:
+                    code = "tts_pipeline_failed"
+                _log_voice_failure(
+                    code=code,
+                    user_id=user_id,
+                    room_name=ctx.room.name,
+                    session_id=session_id,
+                    exc=Exception(str(close_error)),
+                )
             session_done.set()
+
+        background_audio = BackgroundAudioPlayer(
+            thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.6),
+        )
+
+        async def _shutdown_background_audio() -> None:
+            try:
+                await background_audio.aclose()
+            except Exception as exc:
+                logger.warn("VoiceSession: background_audio aclose failed", {
+                    "session_id": session_id, "user_id": user_id,
+                    "error": str(exc),
+                })
+
+        ctx.add_shutdown_callback(_shutdown_background_audio)
 
         try:
             await session.start(
                 room=ctx.room,
-                agent=BuddyAgent(user_id=user_id, publish_event=publish_client_event),
-                # Unified RoomOptions replaces deprecated room_input_options / room_output_options
+                agent=buddy,
                 room_options=room_io.RoomOptions(
                     participant_identity=user_id,
                     audio_input=room_io.AudioInputOptions(
                         sample_rate=16000,
                         frame_size_ms=20,
-                        # Uncomment + add `from livekit.plugins import noise_cancellation` to enable BVC:
-                        # noise_cancellation=noise_cancellation.BVC(),
                     ),
                     audio_output=room_io.AudioOutputOptions(
                         sample_rate=24000,  # Cartesia output rate
                     ),
-                    # text_output=True is the default — keeps transcription working
                 ),
             )
-            # session.start() returns immediately in livekit-agents 1.5.x.
-            # Wait for the close event so the entrypoint stays alive for the
-            # full duration of the session.
+            # Background audio is started after session.start()
+            await background_audio.start(room=ctx.room, agent_session=session)
             await session_done.wait()
         except Exception as exc:
-            logger.exception("VoiceSession: session.start() failed", {
-                "session_id": session_id, "user_id": user_id,
-                "error_type": type(exc).__name__, "error": str(exc),
-            })
+            _log_voice_failure(
+                code="session_start_failed",
+                user_id=user_id,
+                room_name=ctx.room.name,
+                session_id=session_id,
+                exc=exc,
+            )
             raise
 
 
@@ -414,11 +454,16 @@ if __name__ == "__main__":
         "deepgram_configured": bool(settings.DEEPGRAM_API_KEY),
         "cartesia_configured": bool(settings.CARTESIA_API_KEY),
         "anthropic_configured": bool(settings.ANTHROPIC_API_KEY),
+        "firebase_web_api_key_configured": bool(settings.FIREBASE_WEB_API_KEY),
+        "backend_internal_url": settings.BACKEND_INTERNAL_URL,
     })
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             max_retry=3,
+            # Cloud Run injects PORT=8080 and health-checks that port.
+            # WorkerOptions defaults to 8081 in prod mode to avoid conflicts, but we make it explicit here to be sure.
+            port=int(os.environ.get("PORT", "8081")),
         )
     )

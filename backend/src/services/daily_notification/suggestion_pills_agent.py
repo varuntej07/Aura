@@ -111,7 +111,7 @@ def _build_prompt(
         ),
         "jobs": "HuntMode: a job search assistant surfacing software engineering and AI/ML roles.",
         "posts": (
-            "PostForge: a social media writing assistant drafting tweets "
+            "Tweeter: a social media writing assistant drafting tweets "
             "and posts for X/Twitter."
         ),
     }

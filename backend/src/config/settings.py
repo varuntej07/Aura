@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     LIVEKIT_API_KEY: str = ""
     LIVEKIT_API_SECRET: str = ""
 
+    # Firebase Web API key — used by the voice worker to swap an Admin-SDK
+    # custom token for a real Firebase ID token so it can call the MCP
+    # endpoint (which only accepts ID tokens, same as /chat). 
+    FIREBASE_WEB_API_KEY: str = ""
+
     # Deepgram STT
     DEEPGRAM_API_KEY: str = ""
 

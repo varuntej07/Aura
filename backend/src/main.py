@@ -37,21 +37,21 @@ from .handlers.connectors import (
     sync_google_calendar,
 )
 from .handlers.dietary_profile import handle_get_dietary_profile, handle_save_dietary_profile
-from .handlers.daily_notification import (
-    handle_plan_all_users,
-    handle_plan_one_user,
-    handle_send_nudge,
-)
+from .handlers.daily_notification import handle_send_nudge
+from .handlers.mcp import register_mcp
 from .handlers.engagement import (
     handle_engagement_notify,
     handle_engagement_orchestrate,
     handle_engagement_responded,
 )
 from .handlers.account import handle_delete_account
-from .handlers.scheduled_agents import handle_agents_tick, handle_agent_run
 from .handlers.notification_reply import handle_notification_reply_request
 from .handlers.nutrition import handle_nutrition_analyze_request, handle_nutrition_scan_request
 from .handlers.scheduler import handle_scheduler_tick
+from .handlers.signal_events import handle_signal_events
+from .handlers.signal_feed import handle_signal_feed
+from .handlers.signal_tick import handle_signal_tick
+from .handlers.signal_content_ingest import handle_signal_content_ingest
 from livekit.api import AccessToken, VideoGrants
 
 from .lib.logger import logger
@@ -59,6 +59,10 @@ from .services.gemini_client import get_gemini_client
 from .services.request_auth import decode_firebase_claims
 
 app = FastAPI(title="Juno Backend", version="1.0.0")
+
+# MCP server (POST /mcp) exposes ToolExecutor tools to the LiveKit voice worker over MCP streamable HTTP. 
+# Lifespan starts inside register_mcp via the parent app's startup/shutdown events.
+register_mcp(app)
 
 
 # Request / Response logging middleware
@@ -276,24 +280,7 @@ async def engage_notify_endpoint(
     return JSONResponse(content=result)
 
 
-# Daily notification endpoints (this is internal with Cloud Scheduler + Cloud Tasks only)
-@app.post("/internal/daily-notify/plan-all")
-async def daily_notify_plan_all_endpoint(
-    _: None = Depends(_verify_scheduler_token),
-) -> JSONResponse:
-    result = await handle_plan_all_users()
-    return JSONResponse(content=result)
-
-
-@app.post("/internal/daily-notify/plan/{user_id}")
-async def daily_notify_plan_user_endpoint(
-    user_id: str,
-    _: None = Depends(_verify_scheduler_token),
-) -> JSONResponse:
-    result = await handle_plan_one_user(user_id)
-    return JSONResponse(content=result)
-
-
+# Daily notification — meeting reminder delivery only (discovery handled by signal engine)
 @app.post("/internal/daily-notify/send")
 async def daily_notify_send_endpoint(
     request: Request,
@@ -305,23 +292,30 @@ async def daily_notify_send_endpoint(
     return JSONResponse(content=result, status_code=status_code)
 
 
-@app.post("/internal/agents/tick")
-async def agents_tick_endpoint(
-    request: Request,
+# Signal engine — user events, ranked feed, scoring tick, content ingest.
+@app.post("/events")
+async def signal_events_endpoint(request: Request) -> JSONResponse:
+    return await handle_signal_events(request)
+
+
+@app.get("/feed/recommend")
+async def signal_feed_endpoint(request: Request) -> JSONResponse:
+    return await handle_signal_feed(request)
+
+
+@app.post("/internal/signal-engine/tick")
+async def signal_engine_tick_endpoint(
     _: None = Depends(_verify_scheduler_token),
 ) -> JSONResponse:
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
-    result = await handle_agents_tick(body)
+    result = await handle_signal_tick()
     return JSONResponse(content=result)
 
 
-@app.post("/internal/agents/{agent_id}/run/{user_id}")
-async def agent_run_endpoint(
-    agent_id: str,
-    user_id: str,
+@app.post("/internal/signal-engine/content-ingest")
+async def signal_engine_content_ingest_endpoint(
     _: None = Depends(_verify_scheduler_token),
 ) -> JSONResponse:
-    result = await handle_agent_run(agent_id, user_id)
+    result = await handle_signal_content_ingest()
     return JSONResponse(content=result)
 
 

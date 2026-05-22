@@ -19,6 +19,9 @@ class VoiceSessionService {
   Room? _room;
   EventsListener<RoomEvent>? _listener;
   bool _isConnecting = false;
+  bool _didEmitSessionReady = false;
+  bool _didReceiveAssistantOutput = false;
+  bool _closingByClient = false;
   final StreamController<VoiceServerEvent> _eventsController =
       StreamController<VoiceServerEvent>.broadcast();
 
@@ -56,6 +59,8 @@ class VoiceSessionService {
 
       _listener!
         ..on<RoomConnectedEvent>((_) {
+          _didEmitSessionReady = true;
+          _closingByClient = false;
           AppLogger.info('LiveKit room connected', tag: _tag,
               metadata: {'room': roomName});
           _eventsController.add(VoiceServerEvent(
@@ -64,9 +69,31 @@ class VoiceSessionService {
           ));
         })
         ..on<RoomDisconnectedEvent>((e) {
+          final wasClientClose = _closingByClient;
+          final endedBeforeAssistantOutput = _didEmitSessionReady && !_didReceiveAssistantOutput;
+          final reason = e.reason?.toString() ?? 'unknown';
           AppLogger.info('LiveKit room disconnected', tag: _tag,
-              metadata: {'reason': e.reason?.toString()});
-          _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
+              metadata: {
+                'room': roomName,
+                'reason': reason,
+                'clientInitiated': wasClientClose,
+                'endedBeforeAssistantOutput': endedBeforeAssistantOutput,
+              });
+          if (wasClientClose) {
+            _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
+          } else if (endedBeforeAssistantOutput) {
+            _eventsController.add(VoiceServerEvent(
+              type: 'session.error',
+              message:
+                  'Voice session ended before Buddy could reply. Please try again.',
+              payload: {
+                'code': 'agent_disconnected_early',
+                'reason': reason,
+              },
+            ));
+          } else {
+            _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
+          }
           _cleanupRoom();
         })
         ..on<ParticipantConnectedEvent>((e) {
@@ -90,6 +117,7 @@ class VoiceSessionService {
         })
         ..on<TrackSubscribedEvent>((e) {
           if (e.track is RemoteAudioTrack) {
+            _didReceiveAssistantOutput = true;
             (e.track as RemoteAudioTrack).start();
             AppLogger.info('Remote audio track started', tag: _tag);
           }
@@ -103,6 +131,7 @@ class VoiceSessionService {
           for (final seg in e.segments) {
             final isAssistant = e.participant is RemoteParticipant;
             final role = isAssistant ? 'assistant' : 'user';
+            if (isAssistant) _didReceiveAssistantOutput = true;
             _eventsController.add(VoiceServerEvent(
               type: '$role.text.${seg.isFinal ? 'final' : 'delta'}',
               text: seg.text,
@@ -130,9 +159,13 @@ class VoiceSessionService {
       AppLogger.error('Failed to connect to LiveKit', error: e, stackTrace: st,
           tag: _tag, metadata: {'userId': config.userId});
       _cleanupRoom();
+      final isIceFailure = e.toString().contains('MediaConnectException') ||
+          e.toString().contains('PeerConnection');
       return Result.failure(
         AppException.unexpected(
-          'Failed to connect to the voice session.',
+          isIceFailure
+              ? 'Voice connection failed. Check your network and try again.'
+              : 'Failed to connect to the voice session.',
           error: e,
           stackTrace: st,
         ),
@@ -179,6 +212,7 @@ class VoiceSessionService {
   /// Disconnect from the room and emit session.ended.
   Future<void> close() async {
     AppLogger.info('Closing voice session', tag: _tag);
+    _closingByClient = true;
     try {
       await _room?.disconnect();
     } catch (_) {}
@@ -214,6 +248,9 @@ class VoiceSessionService {
     _listener?.dispose();
     _listener = null;
     _room = null;
+    _didEmitSessionReady = false;
+    _didReceiveAssistantOutput = false;
+    _closingByClient = false;
   }
 
   Future<Map<String, dynamic>?> _fetchLiveKitToken(String? idToken) async {
