@@ -1,3 +1,4 @@
+import '../models/chat_attachment.dart';
 import 'backend_api_service.dart';
 
 /// Abstract interface for chat/AI streaming access.
@@ -11,10 +12,11 @@ abstract class ChatServiceProvider {
   Stream<ChatStreamEvent> sendMessageStream(
     String message,
     String userId, {
-    List<Map<String, String>> history = const [],
+    List<Map<String, dynamic>> history = const [],
     String? sessionId,
     String? clientMessageId,
     String? agentId,
+    List<ChatAttachment>? attachments,
   });
 
   /// Fire-and-forget: marks an engagement notification as responded.

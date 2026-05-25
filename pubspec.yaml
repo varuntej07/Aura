@@ -30,6 +30,8 @@ dependencies:
   flutter_timezone:
   livekit_client:
   image_picker:
+  file_picker:
+  flutter_image_compress:
   permission_handler:
   drift:
   drift_flutter:
@@ -44,7 +46,7 @@ dev_dependencies:
   flutter_lints:
   drift_dev:
   build_runner:
-  mocktail: ^0.3.0
+  mocktail:
   flutter_launcher_icons:
 
 flutter_launcher_icons:

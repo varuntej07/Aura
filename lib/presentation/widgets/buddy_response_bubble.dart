@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/glass_card.dart';
+import '../../data/models/chat_attachment.dart';
 import '../../data/models/chat_message_model.dart';
 import 'flash_alert.dart';
 import 'reminder_card.dart';
@@ -155,16 +156,29 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     );
   }
 
-  // User message: selectable text
+  // User message: optional attachment previews + selectable text
 
   Widget _buildUserContent(ChatMessageModel msg) {
-    return SelectableText(
+    final attachments = msg.attachments;
+    final textWidget = SelectableText(
       msg.text,
       style: const TextStyle(
         color: AppColors.textPrimary,
         fontSize: 15,
         height: 1.5,
       ),
+    );
+
+    if (attachments == null || attachments.isEmpty) return textWidget;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _AttachmentPreviewRow(attachments: attachments),
+        const SizedBox(height: 8),
+        textWidget,
+      ],
     );
   }
 
@@ -429,6 +443,71 @@ class _ActionIcon extends StatelessWidget {
             color: color ?? AppColors.textTertiary,
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ── Attachment preview row inside sent user bubble ────────────────────────
+
+class _AttachmentPreviewRow extends StatelessWidget {
+  final List<ChatAttachment> attachments;
+
+  const _AttachmentPreviewRow({required this.attachments});
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      alignment: WrapAlignment.end,
+      children: attachments.map(_buildTile).toList(),
+    );
+  }
+
+  Widget _buildTile(ChatAttachment attachment) {
+    if (attachment.type == ChatAttachmentType.image) {
+      final previewBytes = attachment.thumbnail ?? attachment.bytes;
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.memory(
+          previewBytes,
+          width: 64,
+          height: 64,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => _docChip(attachment),
+        ),
+      );
+    }
+    return _docChip(attachment);
+  }
+
+  Widget _docChip(ChatAttachment attachment) {
+    final ext = attachment.fileName.contains('.')
+        ? attachment.fileName.split('.').last.toUpperCase()
+        : '?';
+    return Container(
+      height: 32,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.glassBorderDim),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.description_outlined, size: 14, color: AppColors.textSecondary),
+          const SizedBox(width: 4),
+          Text(
+            ext,
+            style: const TextStyle(
+              color: AppColors.textTertiary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
       ),
     );
   }

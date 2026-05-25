@@ -9,6 +9,7 @@ import '../../widgets/chat_history_drawer.dart';
 import '../../widgets/chat_message_list.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/message_input.dart';
+import '../../widgets/sign_in_gate_dialog.dart';
 import '../reminders/reminders_screen.dart';
 
 /// Full-screen Buddy text chat. Opened from the home drawer.
@@ -160,8 +161,13 @@ class _ChatScreenState extends State<ChatScreen> {
                 MessageInput(
                   isLoading: vm.state == ViewState.loading,
                   hint: 'Ask Buddy anything…',
-                  onSend: (text) {
-                    vm.sendMessage(text, _uid);
+                  allowAttachments: context.read<AuthViewModel>().user != null,
+                  onSend: (text, attachments) {
+                    if (context.read<AuthViewModel>().user == null) {
+                      showSignInGateDialog(context);
+                      return;
+                    }
+                    vm.sendMessage(text, _uid, attachments: attachments);
                     _scrollToBottom();
                   },
                   onStop: vm.stopGeneration,

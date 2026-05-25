@@ -41,6 +41,8 @@ class ChatMessages extends Table {
   TextColumn get reminderJson => text().nullable()();
   // v6: clarification payload JSON — set when assistant called ask_clarification
   TextColumn get clarificationJson => text().nullable()();
+  // v9: attachment metadata + thumbnails — JSON array, in-memory bytes not stored
+  TextColumn get attachmentJson => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -63,7 +65,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_createDatabaseConnection());
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -168,6 +170,11 @@ class AppDatabase extends _$AppDatabase {
           if (from < 8) {
             await customStatement(
               'ALTER TABLE "chat_sessions" ADD COLUMN "user_id" TEXT NOT NULL DEFAULT \'\'',
+            );
+          }
+          if (from < 9) {
+            await customStatement(
+              'ALTER TABLE "chat_messages" ADD COLUMN "attachment_json" TEXT',
             );
           }
         },

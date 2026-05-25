@@ -34,6 +34,14 @@ migrate_working_dir/
 /coverage/
 /backend/node_modules/
 /backend/dist/
+*.egg-info/
+
+# Local secrets and generated service config
+google-services.json
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+backend/service-account.json
+backend/google-oauth-calendar.json
 
 # Symbolication related
 app.*.symbols
@@ -45,3 +53,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+.gstack/
+
+node_modules/

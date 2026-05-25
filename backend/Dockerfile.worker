@@ -1,0 +1,38 @@
+# ── Install dependencies ────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+COPY src/ ./src/
+
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+
+# ── Lean runtime image ───────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+WORKDIR /app
+
+RUN groupadd -r juno && useradd -r -g juno -m juno
+
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+COPY src/ ./src/
+
+# Download the turn-detector ONNX model and Silero VAD weights into the image
+# so the worker subprocess doesn't try to fetch them at runtime.
+ENV HF_HOME=/app/.cache/huggingface
+RUN mkdir -p $HF_HOME && python -m livekit.agents download-files && chown -R juno:juno /app
+
+USER juno
+
+# Cloud Run injects PORT. WorkerOptions reads it via os.environ.get("PORT").
+# The worker binds its health/metrics HTTP server to this port so Cloud Run health checks pass. 
+The actual LiveKit WebSocket is outbound so no inbound port needed for the voice pipeline itself.
+EXPOSE 8080
+
+CMD python -m src.agent.voice_agent start

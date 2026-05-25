@@ -1,3 +1,4 @@
+import '../models/chat_attachment.dart';
 import 'backend_api_service.dart';
 import 'chat_service_provider.dart';
 
@@ -9,10 +10,11 @@ class StubChatServiceProvider implements ChatServiceProvider {
   Stream<ChatStreamEvent> sendMessageStream(
     String message,
     String userId, {
-    List<Map<String, String>> history = const [],
+    List<Map<String, dynamic>> history = const [],
     String? sessionId,
     String? clientMessageId,
     String? agentId,
+    List<ChatAttachment>? attachments,
   }) async* {
     await Future.delayed(const Duration(milliseconds: 600));
     const words = ['This ', 'is ', 'a ', 'stub ', 'response.'];

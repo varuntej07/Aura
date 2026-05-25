@@ -5,6 +5,7 @@ import '../../core/errors/app_exception.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_response.dart';
+import '../models/chat_attachment.dart';
 import 'chat_service_provider.dart';
 
 // SSE stream events
@@ -141,7 +142,7 @@ class BackendApiService implements ChatServiceProvider {
   Future<Result<ChatResponse>> sendMessage(
     String message,
     String userId, {
-    List<Map<String, String>> history = const [],
+    List<Map<String, dynamic>> history = const [],
     String? sessionId,
     // Passed as the Firestore doc ID for the query log — makes retries idempotent
     // (same UUID → upsert instead of new insert, no duplicate log entries).
@@ -161,16 +162,17 @@ class BackendApiService implements ChatServiceProvider {
     );
   }
 
-  /// Streams a chat message via SSE. Yields [ChatStreamEvent] objects as they arrive; 
+  /// Streams a chat message via SSE. Yields [ChatStreamEvent] objects as they arrive;
   /// the stream completes after a [DoneEvent] or [ErrorStreamEvent] is yielded.
   @override
   Stream<ChatStreamEvent> sendMessageStream(
     String message,
     String userId, {
-    List<Map<String, String>> history = const [],
+    List<Map<String, dynamic>> history = const [],
     String? sessionId,
     String? clientMessageId,
     String? agentId,
+    List<ChatAttachment>? attachments,
   }) async* {
     try {
       await for (final line in _apiClient.streamPost('/chat', {
@@ -180,6 +182,8 @@ class BackendApiService implements ChatServiceProvider {
         if (history.isNotEmpty) 'history': history,
         'client_message_id': ?clientMessageId,
         'agent_id': ?agentId,
+        if (attachments != null && attachments.isNotEmpty)
+          'attachments': attachments.map((a) => a.toRequestPayload()).toList(),
       })) {
         try {
           final json = jsonDecode(line) as Map<String, dynamic>;

@@ -9,6 +9,7 @@ import '../../core/errors/error_handler.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/connectivity_service.dart';
 import '../../data/local/app_database.dart';
+import '../../data/models/chat_attachment.dart';
 import '../../data/models/chat_message_model.dart';
 import '../../data/models/clarification_payload.dart';
 import '../../data/repositories/chat_repository.dart';
@@ -170,9 +171,14 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
   //  Sending messages
 
-  Future<void> sendMessage(String text, String userId) async {
+  Future<void> sendMessage(
+    String text,
+    String userId, {
+    List<ChatAttachment>? attachments,
+  }) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return;
+    final hasAttachments = attachments != null && attachments.isNotEmpty;
+    if (trimmed.isEmpty && !hasAttachments) return;
     _currentUserId = _normalizeUserId(userId);
 
     final userMsg = ChatMessageModel(
@@ -182,6 +188,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       timestamp: DateTime.now(),
       channel: ChatMessageChannel.text,
       sessionId: _currentSessionId,
+      attachments: attachments,
     );
 
     final saved = await _persistMessage(userMsg);
@@ -354,11 +361,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _streamSub = _backendService
         .sendMessageStream(
           text,
-          _currentUserId!,
+          _currentUserId ?? '',
           history: _buildHistory(exclude: userMsg),
           sessionId: _currentSessionId,
           clientMessageId: userMsg.id,
           agentId: agentId,
+          attachments: userMsg.attachments,
         )
         .listen(
       (event) {
@@ -581,14 +589,21 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     safeNotifyListeners();
   }
 
-  List<Map<String, String>> _buildHistory({ChatMessageModel? exclude}) {
+  static const _multimodalHistoryTurns = 3;
+
+  List<Map<String, dynamic>> _buildHistory({ChatMessageModel? exclude}) {
     final window = AppConstants.chatHistoryWindow;
     final source = _messages
         .where((m) => m != exclude && m.status != MessageStatus.error)
         .toList();
     final slice =
         source.length > window ? source.sublist(source.length - window) : source;
-    final turns = slice.map((m) => m.toHistoryTurn()).toList();
+
+    final turns = <Map<String, dynamic>>[];
+    for (var i = 0; i < slice.length; i++) {
+      final isRecent = i >= slice.length - _multimodalHistoryTurns;
+      turns.add(slice[i].toHistoryTurn(includeAttachments: isRecent));
+    }
 
     if (turns.isNotEmpty && turns.first['role'] == 'assistant') {
       turns.insert(0, {'role': 'user', 'content': 'Hey Buddy.'});
