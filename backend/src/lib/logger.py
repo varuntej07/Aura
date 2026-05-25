@@ -1,14 +1,18 @@
 """
-Structured logger for backend
+Structured JSON logger for backend.
 
-Every log line is emitted as:
-  TIMESTAMP  LEVEL     MESSAGE  key='value'  key2='value2'
+Every log line is a single JSON object with fields:
+  timestamp, severity, message, plus any caller-supplied metadata.
 
-Errors logged via logger.exception() automatically append the full traceback.
+Cloud Run ships stdout to Cloud Logging, which auto-parses JSON lines
+into searchable structured fields.
+
+Errors logged via logger.exception() include a `traceback` field.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -30,12 +34,19 @@ def _build_stdlib_logger() -> logging.Logger:
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(message)s"))
     lg.addHandler(handler)
-    lg.propagate = False  # Don't double-emit through root logger
+    lg.propagate = False
     lg.setLevel(_resolve_level())
     return lg
 
 
 _stdlib = _build_stdlib_logger()
+
+_LEVEL_TO_SEVERITY = {
+    "DEBUG": "DEBUG",
+    "INFO": "INFO",
+    "WARN": "WARNING",
+    "ERROR": "ERROR",
+}
 
 
 def _now() -> str:
@@ -47,16 +58,20 @@ def _emit(level: str, message: str, metadata: dict[str, Any] | None, include_tra
     if not _stdlib.isEnabledFor(log_level):
         return
 
-    extras = ""
+    record: dict[str, Any] = {
+        "timestamp": _now(),
+        "severity": _LEVEL_TO_SEVERITY.get(level, level),
+        "message": message,
+    }
     if metadata:
-        extras = "  " + "  ".join(f"{k}={v!r}" for k, v in metadata.items())
-
-    _stdlib.log(log_level, f"{_now()}  {level:<5}  {message}{extras}")
+        record.update(metadata)
 
     if include_traceback:
         tb = traceback.format_exc()
         if tb and tb.strip() != "NoneType: None":
-            _stdlib.log(log_level, tb)
+            record["traceback"] = tb.strip()
+
+    _stdlib.log(log_level, json.dumps(record, default=str))
 
 
 class Logger:
