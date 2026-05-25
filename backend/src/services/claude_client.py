@@ -59,8 +59,8 @@ class ClaudeClient:
     async def send_text_turn(
         self,
         *,
-        system_prompt: str,
-        user_text: str,
+        system_prompt: str | list[dict[str, Any]],
+        user_content: str | list[dict[str, Any]],
         history: list[dict[str, Any]] | None = None,
         is_agent: bool = False,
         user_tier: str = "pro",
@@ -70,8 +70,10 @@ class ClaudeClient:
         with no tool calls is produced (or max turns exceeded).
 
         Args:
+            user_content: The current user turn — either plain text or a list of
+                          Anthropic content blocks (for messages with attachments).
             history: Optional list of prior turns [{role, content}] to prepend
-                     before the current user_text. Enables multi-turn context
+                     before the current user turn. Enables multi-turn context
                      across HTTP requests. Must alternate user/assistant roles
                      and end before the current user turn.
             is_agent: When True, includes agent-only tools (e.g. web_search).
@@ -83,12 +85,14 @@ class ClaudeClient:
         tools = [t for t in claude_tool_definitions() if t["name"] not in excluded]
         if user_tier == "free":
             tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
+        if tools:
+            tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
 
         # Build message list: prior history + current user turn
         prior: list[dict[str, Any]] = history or []
         messages: list[dict[str, Any]] = [
             *prior,
-            {"role": "user", "content": user_text},
+            {"role": "user", "content": user_content},
         ]
         accumulated_text: list[str] = []
         tool_names_used: list[str] = []
@@ -99,7 +103,7 @@ class ClaudeClient:
         logger.info("Claude: starting conversation", {
             "model": settings.ANTHROPIC_CHAT_MODEL,
             "max_tokens": settings.ANTHROPIC_MAX_TOKENS,
-            "user_text_len": len(user_text),
+            "user_content_type": "blocks" if isinstance(user_content, list) else "text",
             "history_turns": len(prior),
         })
 
@@ -115,7 +119,7 @@ class ClaudeClient:
                     response = await self._client.messages.create(
                         model=settings.ANTHROPIC_CHAT_MODEL,
                         max_tokens=settings.ANTHROPIC_MAX_TOKENS,
-                        system=system_prompt,
+                        system=system_prompt,  # type: ignore[arg-type]
                         tools=tools,  # type: ignore[arg-type]
                         messages=messages,  # type: ignore[arg-type]
                     )
@@ -154,6 +158,8 @@ class ClaudeClient:
                 "stop_reason": response.stop_reason,
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
+                "cache_read_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+                "cache_creation_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
                 "duration_ms": turn_ms,
             })
 
@@ -235,8 +241,8 @@ class ClaudeClient:
     async def send_text_turn_stream(
         self,
         *,
-        system_prompt: str,
-        user_text: str,
+        system_prompt: str | list[dict[str, Any]],
+        user_content: str | list[dict[str, Any]],
         history: list[dict[str, Any]] | None = None,
         is_agent: bool = False,
         user_tier: str = "pro",
@@ -249,20 +255,25 @@ class ClaudeClient:
                                        "options": list[str], "multi_select": bool}
           {"type": "done",            "metadata": {...}}
           {"type": "error",           "message": str}
+
+        user_content accepts either plain text or a list of Anthropic content
+        blocks (used when the user attaches images or documents to their message).
         """
         excluded = EXCLUDED_TOOLS_FOR_AGENT_CHAT if is_agent else EXCLUDED_TOOLS_FOR_GENERAL_CHAT
         tools = [t for t in claude_tool_definitions() if t["name"] not in excluded]
         if user_tier == "free":
             tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
+        if tools:
+            tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
         prior: list[dict[str, Any]] = history or []
-        messages: list[dict[str, Any]] = [*prior, {"role": "user", "content": user_text}]
+        messages: list[dict[str, Any]] = [*prior, {"role": "user", "content": user_content}]
         tool_names_used: list[str] = []
         all_captured_tool_data: list[dict[str, Any]] = []
         text_started = False
 
         logger.info("Claude: starting stream", {
             "model": settings.ANTHROPIC_CHAT_MODEL,
-            "user_text_len": len(user_text),
+            "user_content_type": "blocks" if isinstance(user_content, list) else "text",
             "history_turns": len(prior),
         })
 
@@ -275,7 +286,7 @@ class ClaudeClient:
                         async with self._client.messages.stream(
                             model=settings.ANTHROPIC_CHAT_MODEL,
                             max_tokens=settings.ANTHROPIC_MAX_TOKENS,
-                            system=system_prompt,
+                            system=system_prompt,  # type: ignore[arg-type]
                             tools=tools,  # type: ignore[arg-type]
                             messages=messages,  # type: ignore[arg-type]
                         ) as stream:
@@ -340,6 +351,8 @@ class ClaudeClient:
                     "stop_reason": response.stop_reason,
                     "input_tokens": response.usage.input_tokens,
                     "output_tokens": response.usage.output_tokens,
+                    "cache_read_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
+                    "cache_creation_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
                 })
 
                 if response.stop_reason != "tool_use":

@@ -286,6 +286,166 @@ def _build_injected_system_prompt_suffix(
     })
     return suffix
 
+# Kept in sync with lib/data/models/attachment_validator.dart
+_SUPPORTED_IMAGE_MIME_TYPES: frozenset[str] = frozenset({
+    "image/jpeg", "image/png", "image/gif", "image/webp",
+})
+_SUPPORTED_DOCUMENT_MIME_TYPES: frozenset[str] = frozenset({
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "text/plain", "text/csv", "text/tab-separated-values", "text/html", "application/rtf",
+    "application/epub+zip",
+})
+_MAX_ATTACHMENTS_PER_REQUEST = 5
+_MAX_IMAGE_BASE64_SIZE = 7_000_000      # ~5 MB raw * 1.33 base64 overhead
+_MAX_DOCUMENT_BASE64_SIZE = 14_000_000  # ~10 MB raw * 1.33 base64 overhead
+
+
+class AttachmentRejection:
+    """Details about a rejected attachment for the 422 response."""
+
+    __slots__ = ("index", "file_name", "reason")
+
+    def __init__(self, index: int, file_name: str, reason: str) -> None:
+        self.index = index
+        self.file_name = file_name
+        self.reason = reason
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"index": self.index, "file_name": self.file_name, "reason": self.reason}
+
+
+def _validate_and_filter_attachments(
+    raw: list[Any],
+    user_id: str,
+) -> tuple[list[dict[str, Any]], list[AttachmentRejection]]:
+    """
+    Server-side trust boundary: validate attachment count, MIME type, and data size.
+    Returns (accepted, rejections). Caller should 422 when rejections is non-empty.
+    """
+    if not raw or not isinstance(raw, list):
+        return [], []
+
+    accepted: list[dict[str, Any]] = []
+    rejections: list[AttachmentRejection] = []
+
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("file_name", f"attachment_{i}"))
+
+        if len(accepted) >= _MAX_ATTACHMENTS_PER_REQUEST:
+            rejections.append(AttachmentRejection(i, file_name, "max 5 attachments per message"))
+            continue
+
+        mime = item.get("mime_type", "")
+        att_type = item.get("type", "")
+        data = item.get("data", "")
+
+        if not isinstance(data, str) or not data:
+            rejections.append(AttachmentRejection(i, file_name, "missing or empty data"))
+            continue
+
+        if att_type == "image" and mime in _SUPPORTED_IMAGE_MIME_TYPES:
+            if len(data) > _MAX_IMAGE_BASE64_SIZE:
+                rejections.append(AttachmentRejection(i, file_name, "image exceeds 5 MB"))
+                continue
+            accepted.append(item)
+        elif att_type == "document" and mime in _SUPPORTED_DOCUMENT_MIME_TYPES:
+            if len(data) > _MAX_DOCUMENT_BASE64_SIZE:
+                rejections.append(AttachmentRejection(i, file_name, "document exceeds 10 MB"))
+                continue
+            accepted.append(item)
+        else:
+            rejections.append(AttachmentRejection(i, file_name, f"unsupported type: {mime}"))
+
+    if rejections:
+        logger.warn("Chat: attachments rejected", {
+            "user_id": user_id,
+            "rejected": [r.to_dict() for r in rejections],
+        })
+
+    return accepted, rejections
+
+
+def _build_user_content(
+    message: str,
+    attachments: list[dict[str, Any]],
+) -> str | list[dict[str, Any]]:
+    """
+    Build the Anthropic user content value.
+    Returns a plain string when there are no attachments (common path).
+    Returns a content block list when attachments are present.
+    """
+    if not attachments:
+        return message
+
+    blocks: list[dict[str, Any]] = []
+    for att in attachments:
+        att_type = att.get("type")
+        mime = att.get("mime_type", "")
+        data = att.get("data", "")
+        if att_type == "image":
+            blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": data},
+            })
+        elif att_type == "document":
+            blocks.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": mime, "data": data},
+            })
+
+    if message:
+        blocks.append({"type": "text", "text": message})
+    return blocks
+
+
+def _build_system_blocks(
+    base_system_prompt: str,
+    agent_prompt: str | None,
+    aura_suffix: str,
+    local_datetime: str,
+) -> list[dict[str, Any]]:
+    """
+    Build the Anthropic system parameter as a list of TextBlockParams with
+    prompt-cache breakpoints.
+
+    Layout (stable → volatile, so the cache prefix is as long as possible):
+      Block 1: base prompt + optional agent prompt  [cache_control]  — never changes
+      Block 2: aura suffix                          [cache_control]  — stable for ~10 min
+      Block 3: current datetime                                      — not cached
+
+    Anthropic evaluates cache breakpoints in tools → system → messages order.
+    The list format is required for explicit cache_control placement; a plain
+    string only supports automatic (top-level) caching which cannot exclude the
+    volatile datetime from the cached prefix.
+    """
+    stable_text = (
+        f"{agent_prompt}\n\n---\n\n{base_system_prompt}"
+        if agent_prompt
+        else base_system_prompt
+    )
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": stable_text,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    if aura_suffix:
+        blocks.append({
+            "type": "text",
+            "text": aura_suffix,
+            "cache_control": {"type": "ephemeral"},
+        })
+    blocks.append({
+        "type": "text",
+        "text": f"Current date and time: {local_datetime}",
+    })
+    return blocks
+
 
 async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     _sse_headers = {
@@ -326,9 +486,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 )
 
     message = str(body.get("message", "")).strip()
-    if not message:
+    raw_attachments: list[Any] = body.get("attachments") or []
+    if not message and not raw_attachments:
         logger.warn("Chat: rejected — empty message", {"user_id": user_id})
-        return _sse_error_response("message is required", status_code=400, headers=_sse_headers)
+        return _sse_error_response("message or attachments required", status_code=400, headers=_sse_headers)
     if len(message) > 8_000:
         logger.warn(
             "Chat: rejected — message too long",
@@ -348,14 +509,28 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     )
 
     raw_history: list[Any] = (body.get("history") or [])[-settings.CHAT_HISTORY_WINDOW * 2 :]
-    history = [
-        {"role": str(h.get("role", "")), "content": str(h.get("content", ""))}
-        for h in raw_history
-        if isinstance(h, dict) and h.get("role") in ("user", "assistant") and h.get("content")
-    ][: settings.CHAT_HISTORY_WINDOW]
+    history: list[dict[str, Any]] = []
+    for h in raw_history:
+        if not isinstance(h, dict) or h.get("role") not in ("user", "assistant") or not h.get("content"):
+            continue
+        if len(history) >= settings.CHAT_HISTORY_WINDOW:
+            break
+        content = h["content"]
+        if isinstance(content, list):
+            history.append({"role": str(h["role"]), "content": content})
+        else:
+            history.append({"role": str(h["role"]), "content": str(content)})
 
     client_message_id: str | None = body.get("client_message_id") or None
     agent_id: str | None = body.get("agent_id") or None
+    validated_attachments, attachment_rejections = _validate_and_filter_attachments(raw_attachments, user_id)
+
+    if attachment_rejections:
+        return _sse_error_response(
+            f"Invalid attachments: {', '.join(r.file_name + ' (' + r.reason + ')' for r in attachment_rejections)}",
+            status_code=422,
+            headers=_sse_headers,
+        )
 
     prev_buddy_response: str | None = next(
         (h["content"] for h in reversed(history) if h["role"] == "assistant"),
@@ -367,16 +542,13 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         _get_user_local_datetime(user_id),
         _fetch_cached_aura_data(user_id),
     )
-    datetime_line = f"Current date and time: {local_datetime}"
     aura_suffix = _build_injected_system_prompt_suffix(aura_profile, accepted_hints, user_id)
-    agent_prompt = get_system_prompt(agent_id) if agent_id else None
-    effective_system_prompt = (
-        f"{datetime_line}\n\n{agent_prompt}\n\n---\n\n{settings.BUDDY_CHAT_SYSTEM_PROMPT}"
-        if agent_prompt
-        else f"{datetime_line}\n\n{settings.BUDDY_CHAT_SYSTEM_PROMPT}"
+    system_prompt_blocks = _build_system_blocks(
+        settings.BUDDY_CHAT_SYSTEM_PROMPT,
+        get_system_prompt(agent_id) if agent_id else None,
+        aura_suffix,
+        local_datetime,
     )
-    if aura_suffix:
-        effective_system_prompt += aura_suffix
 
     asyncio.create_task(
         log_query(
@@ -391,6 +563,8 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         extract_and_update_user_aura(user_id, message, session_id, prev_buddy_response)
     )
 
+    user_content = _build_user_content(message, validated_attachments)
+
     logger.info(
         "Chat: stream request received",
         {
@@ -399,6 +573,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             "agent_id": agent_id,
             "message_len": len(message),
             "history_turns": len(history),
+            "attachment_count": len(validated_attachments),
         },
     )
 
@@ -409,8 +584,8 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             tool_executor = ToolExecutor(user_id)
             claude = ClaudeClient(tool_executor)
             async for sse_event in claude.send_text_turn_stream(
-                system_prompt=effective_system_prompt,
-                user_text=message,
+                system_prompt=system_prompt_blocks,
+                user_content=user_content,
                 history=history,
                 is_agent=bool(agent_id),
                 user_tier=effective_tier,
