@@ -32,7 +32,7 @@ USER juno
 
 # Cloud Run injects PORT. WorkerOptions reads it via os.environ.get("PORT").
 # The worker binds its health/metrics HTTP server to this port so Cloud Run health checks pass. 
-The actual LiveKit WebSocket is outbound so no inbound port needed for the voice pipeline itself.
+# The actual LiveKit WebSocket is outbound so no inbound port needed for the voice pipeline itself.
 EXPOSE 8080
 
 CMD python -m src.agent.voice_agent start

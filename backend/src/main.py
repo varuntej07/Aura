@@ -387,6 +387,13 @@ def _check_env() -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     _check_env()
+    # Initialize Langfuse — reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST from env
+    try:
+        from langfuse import Langfuse
+        Langfuse()
+        logger.info("Langfuse initialized")
+    except Exception as exc:
+        logger.warn("Langfuse initialization failed — tracing disabled", {"error": str(exc)})
     # Pre-warm Vertex AI / Gemini so the first nutrition scan doesn't stall the event loop during SDK initialisation 
     # (vertexai.init makes gRPC + metadata service calls that can take 1-5 s on a cold instance).
     try:

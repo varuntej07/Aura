@@ -46,8 +46,8 @@ dependencies = [
     # Async HTTP clients for scheduled agent data fetchers
     "httpx>=0.28",
 
-    # LangSmith for LLM observability and tracing
-    "langsmith>=0.2",
+    # Langfuse for LLM observability and tracing
+    "langfuse>=2.0",
 
 ]
 
@@ -62,9 +62,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-filterwarnings = [
-    "ignore:langsmith.wrappers._openai_agents is deprecated",
-]
+filterwarnings = []
 
 [tool.coverage.run]
 source = ["src"]

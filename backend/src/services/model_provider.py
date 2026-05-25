@@ -30,8 +30,7 @@ import re
 from typing import Any, TypeVar, Type
 
 import anthropic
-from langsmith import traceable
-from langsmith.wrappers import wrap_anthropic
+from langfuse.decorators import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -203,7 +202,7 @@ class ModelProvider:
             return self._parse_response(raw, response_model)
         return raw
 
-    @traceable(name="gemini_call", run_type="llm")
+    @observe(name="gemini_call")
     async def _call_gemini(
         self,
         *,
@@ -332,7 +331,7 @@ class ModelProvider:
         # retry loop always returns or raises; this line is unreachable
         raise RuntimeError("ModelProvider: Gemini retry loop exited unexpectedly")
 
-    @traceable(name="anthropic_call", run_type="llm")
+    @observe(name="anthropic_call")
     async def _call_anthropic(
         self,
         *,
@@ -424,10 +423,10 @@ class ModelProvider:
 
     def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
         if self._anthropic is None:
-            self._anthropic = wrap_anthropic(anthropic.AsyncAnthropic(
+            self._anthropic = anthropic.AsyncAnthropic(
                 api_key=settings.ANTHROPIC_API_KEY,
                 timeout=_TIMEOUT_S,
-            ))
+            )
         return self._anthropic
 
     def _get_gemini_client(self) -> Any:

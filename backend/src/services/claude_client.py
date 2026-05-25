@@ -11,8 +11,7 @@ import time
 from typing import Any, AsyncIterator
 
 import anthropic
-from langsmith import traceable
-from langsmith.wrappers import wrap_anthropic
+from langfuse.decorators import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -50,12 +49,12 @@ _NARRATION_MAX_CHARS = 80
 class ClaudeClient:
     def __init__(self, tool_executor: ToolExecutor) -> None:
         self._tool_executor = tool_executor
-        self._client = wrap_anthropic(anthropic.AsyncAnthropic(
+        self._client = anthropic.AsyncAnthropic(
             api_key=settings.ANTHROPIC_API_KEY,
             timeout=_REQUEST_TIMEOUT_S,
-        ))
+        )
 
-    @traceable(name="chat_turn", run_type="chain")
+    @observe(name="chat_turn")
     async def send_text_turn(
         self,
         *,
@@ -237,7 +236,7 @@ class ClaudeClient:
             "tool_result_data": all_captured_tool_data,
         }
 
-    @traceable(name="chat_turn_stream", run_type="chain")
+    @observe(name="chat_turn_stream")
     async def send_text_turn_stream(
         self,
         *,

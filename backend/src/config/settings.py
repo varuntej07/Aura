@@ -93,11 +93,10 @@ class Settings(BaseSettings):
     # 10 messages ≈ 1k tokens per request. Tune via env var CHAT_HISTORY_WINDOW.
     CHAT_HISTORY_WINDOW: int = 10
 
-    # LangSmith tracing
-    LANGSMITH_TRACING: str = "false"
-    LANGSMITH_API_KEY: str = ""
-    LANGSMITH_PROJECT: str = "Buddy"
-    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    # Langfuse observability
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
 
     # Juno personality — text chat
     BUDDY_CHAT_SYSTEM_PROMPT: str = (

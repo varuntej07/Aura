@@ -28,7 +28,6 @@ def mock_firebase_app():
 
 
 @pytest.fixture(autouse=True)
-def disable_langsmith_tracing(monkeypatch):
-    """Disable LangSmith tracing so tests don't require a real API key."""
-    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
-    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+def disable_langfuse_tracing(monkeypatch):
+    """Disable Langfuse tracing so tests don't require real credentials."""
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")

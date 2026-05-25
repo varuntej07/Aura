@@ -9,8 +9,7 @@ import random
 
 import anthropic
 from anthropic.types import TextBlock
-from langsmith import traceable
-from langsmith.wrappers import wrap_anthropic
+from langfuse.decorators import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -32,10 +31,10 @@ _client: anthropic.AsyncAnthropic | None = None
 def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = wrap_anthropic(anthropic.AsyncAnthropic(
+        _client = anthropic.AsyncAnthropic(
             api_key=settings.ANTHROPIC_API_KEY,
             timeout=_TIMEOUT_S,
-        ))
+        )
     return _client
 
 
@@ -85,7 +84,7 @@ _SYSTEM_PROMPT = """\
     """
 
 
-@traceable(name="notification_rewrite", run_type="llm")
+@observe(name="notification_rewrite")
 async def rewrite_reminder_notification(message: str) -> str:
     """Rewrite a reminder message into engaging push notification copy """
     for attempt in range(1, _MAX_RETRIES + 1):
