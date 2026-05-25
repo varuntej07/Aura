@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 enum ErrorCode {
   // Network
   networkUnavailable,
@@ -46,35 +44,36 @@ class AppException implements Exception {
   factory AppException.networkUnavailable() {
     return const AppException(
       code: ErrorCode.networkUnavailable,
-      message: 'No internet connection. Please check your network.',
+      message: "Couldn't reach Buddy. Check your connection and try again.",
     );
   }
 
   factory AppException.unauthorized() {
     return const AppException(
       code: ErrorCode.unauthorized,
-      message: 'Authentication required. Please sign in again.',
+      message: "Sign-in didn't work. Please try again.",
     );
   }
 
   factory AppException.serverError(int statusCode, String body) {
     return AppException(
       code: ErrorCode.serverError,
-      message: 'Server error ($statusCode): $body',
+      message: "Couldn't reach your Buddy. Check your connection and try again.",
+      originalError: 'Server error ($statusCode): $body',
     );
   }
 
   factory AppException.requestTimeout() {
     return const AppException(
       code: ErrorCode.requestTimeout,
-      message: 'Request timed out. Please try again.',
+      message: "Couldn't reach your Buddy. Check your connection and try again.",
     );
   }
 
   factory AppException.firestoreRead(Object error, [StackTrace? st]) {
     return AppException(
       code: ErrorCode.firestoreReadFailed,
-      message: 'Failed to read data.',
+      message: 'Something went wrong. Try again in a moment.',
       originalError: error,
       stackTrace: st,
     );
@@ -83,7 +82,7 @@ class AppException implements Exception {
   factory AppException.firestoreWrite(Object error, [StackTrace? st]) {
     return AppException(
       code: ErrorCode.firestoreWriteFailed,
-      message: 'Failed to save data.',
+      message: 'Something went wrong. Try again in a moment.',
       originalError: error,
       stackTrace: st,
     );
@@ -92,9 +91,7 @@ class AppException implements Exception {
   factory AppException.authFailed(Object error, [StackTrace? st]) {
     return AppException(
       code: ErrorCode.authFailed,
-      message: kDebugMode
-          ? 'Sign-in failed: ${error.toString()}'
-          : 'Sign-in failed. Please try again.',
+      message: "Sign-in didn't work. Please try again.",
       originalError: error,
       stackTrace: st,
     );

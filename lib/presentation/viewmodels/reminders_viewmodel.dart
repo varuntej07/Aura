@@ -76,7 +76,7 @@ class RemindersViewModel extends SafeChangeNotifier {
         safeNotifyListeners();
       },
       failure: (error) {
-        _errorMessage = error.message;
+        _errorMessage = 'Something went wrong. Try again in a moment.';
         _state = ViewState.error;
         AppLogger.error(
           'Failed to load reminders',
@@ -106,7 +106,7 @@ class RemindersViewModel extends SafeChangeNotifier {
       },
       failure: (error) {
         _isLoadingMore = false;
-        _errorMessage = error.message;
+        _errorMessage = 'Something went wrong. Try again in a moment.';
         AppLogger.error(
           'Failed to load more reminders',
           error: error,
@@ -143,7 +143,7 @@ class RemindersViewModel extends SafeChangeNotifier {
       success: (_) {},
       failure: (error) {
         _reminders[idx] = original;
-        _errorMessage = error.message;
+        _errorMessage = 'Something went wrong. Try again in a moment.';
         AppLogger.error(
           'Failed to mark reminder complete',
           error: error,
@@ -187,7 +187,7 @@ class RemindersViewModel extends SafeChangeNotifier {
       success: (_) {},
       failure: (error) {
         _reminders[idx] = original;
-        _errorMessage = error.message;
+        _errorMessage = 'Something went wrong. Try again in a moment.';
         AppLogger.error(
           'Failed to undo reminder completion',
           error: error,

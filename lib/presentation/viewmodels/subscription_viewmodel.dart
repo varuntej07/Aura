@@ -92,7 +92,7 @@ class SubscriptionViewModel extends SafeChangeNotifier {
         tag: 'SubscriptionViewModel',
         metadata: {'productId': productId},
       );
-      _feedbackMessage = 'Product unavailable. Please try again later.';
+      _feedbackMessage = "Purchase couldn't be completed. Try again or contact support.";
       safeNotifyListeners();
       return;
     }

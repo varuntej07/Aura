@@ -272,25 +272,7 @@ class HomeViewModel extends SafeChangeNotifier {
     required String? code,
     required String? fallbackMessage,
   }) {
-    final voiceFailureCode = (code ?? '').trim().toLowerCase();
-    if (_isInfraVoiceFailureCode(voiceFailureCode)) {
-      return 'Voice service is temporarily unavailable. Please try again in a moment.';
-    }
-    if (voiceFailureCode.isNotEmpty) {
-      return 'Voice pipeline hit a temporary issue. Please retry.';
-    }
-    return fallbackMessage?.trim().isNotEmpty == true
-        ? fallbackMessage!.trim()
-        : 'Voice pipeline hit a temporary issue. Please retry.';
-  }
-
-  bool _isInfraVoiceFailureCode(String code) {
-    if (code.isEmpty) return false;
-    return code == 'mcp_token_mint_failed' ||
-        code == 'turn_detector_init_failed' ||
-        code == 'session_start_failed' ||
-        code == 'session_runtime_failed' ||
-        code == 'agent_disconnected_early';
+    return "Couldn't start the voice call. Check your connection and try again.";
   }
 
   void _updateOrInsertTranscriptEntry({

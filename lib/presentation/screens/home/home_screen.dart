@@ -512,7 +512,7 @@ class _VoiceStatusCardState extends State<_VoiceStatusCard> {
     final hasTranscript = entries.isNotEmpty;
 
     if (widget.vm.voiceStatus == VoiceSessionStatus.error) {
-      final msg = widget.vm.error?.message ?? 'Could not connect. Check your network and try again.';
+      final msg = widget.vm.error?.message ?? "Couldn't start the voice call. Check your connection and try again.";
       return Padding(
         padding: const EdgeInsets.fromLTRB(40, 20, 40, 0),
         child: Text(

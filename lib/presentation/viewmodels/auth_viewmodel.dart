@@ -78,7 +78,7 @@ class AuthViewModel extends SafeChangeNotifier {
       },
       onError: (Object e, StackTrace st) {
         ErrorHandler.handle(e, st);
-        _error = AppException.unexpected(e.toString());
+        _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
         _setState(ViewState.error);
         AppLogger.error('Auth stream error', error: e, tag: 'AuthVM');
       },
@@ -107,7 +107,7 @@ class AuthViewModel extends SafeChangeNotifier {
       );
     } catch (e, st) {
       ErrorHandler.handle(e, st);
-      _error = AppException.unexpected(e.toString());
+      _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
       _setState(ViewState.error);
     }
   }
@@ -134,7 +134,7 @@ class AuthViewModel extends SafeChangeNotifier {
       );
     } catch (e, st) {
       ErrorHandler.handle(e, st);
-      _error = AppException.unexpected(e.toString());
+      _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
       _setState(ViewState.error);
     }
   }
@@ -177,7 +177,7 @@ class AuthViewModel extends SafeChangeNotifier {
       failure: (error) {
         AppLogger.error('deleteAccount failed', error: error, tag: 'AuthVM');
         _setState(ViewState.loaded);
-        return error.message;
+        return 'Something went wrong. Try again in a moment.';
       },
     );
   }

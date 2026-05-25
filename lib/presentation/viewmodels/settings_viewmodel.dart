@@ -71,7 +71,7 @@ class SettingsViewModel extends SafeChangeNotifier {
       );
     } catch (e, st) {
       ErrorHandler.handle(e, st);
-      _error = AppException.unexpected(e.toString());
+      _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
       _setState(ViewState.error);
     }
   }

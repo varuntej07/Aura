@@ -83,15 +83,22 @@ class ErrorHandler {
   static String userMessage(AppException e) {
     switch (e.code) {
       case ErrorCode.networkUnavailable:
-        return 'No internet connection.';
       case ErrorCode.requestTimeout:
-        return 'Request timed out. Try again.';
-      case ErrorCode.unauthorized:
-        return 'Session expired. Please sign in again.';
       case ErrorCode.serverError:
-        return 'Something went wrong on our end. Try again.';
-      default:
-        return e.message;
+        return "Couldn't reach Buddy. Check your connection and try again.";
+      case ErrorCode.unauthorized:
+      case ErrorCode.authFailed:
+      case ErrorCode.authCancelled:
+      case ErrorCode.authTokenExpired:
+        return "Sign-in didn't work. Please try again.";
+      case ErrorCode.firestoreReadFailed:
+      case ErrorCode.firestoreWriteFailed:
+      case ErrorCode.documentNotFound:
+      case ErrorCode.notFound:
+      case ErrorCode.forbidden:
+      case ErrorCode.unexpected:
+      case ErrorCode.unknown:
+        return 'Something went wrong. Try again in a moment.';
     }
   }
 }

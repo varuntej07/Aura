@@ -138,7 +138,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen>
                   },
                 ),
               NutritionScanState.error => _ErrorView(
-                  message: vm.error?.message ?? 'Something went wrong.',
+                  message: 'Something went wrong. Try again in a moment.',
                   onRetry: vm.reset,
                 ),
             };

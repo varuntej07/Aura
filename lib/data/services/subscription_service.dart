@@ -133,7 +133,7 @@ class SubscriptionService extends ChangeNotifier {
       await InAppPurchase.instance.buyNonConsumable(purchaseParam: params);
     } catch (e, st) {
       AppLogger.error('Purchase initiation failed', error: e, stackTrace: st, tag: _tag);
-      _errorMessage = 'Could not start purchase. Please try again.';
+      _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
       notifyListeners();
     }
   }
@@ -146,7 +146,7 @@ class SubscriptionService extends ChangeNotifier {
       await InAppPurchase.instance.restorePurchases();
     } catch (e, st) {
       AppLogger.error('Restore failed', error: e, stackTrace: st, tag: _tag);
-      _errorMessage = 'Restore failed. Please try again.';
+      _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
       _setLoading(false);
       notifyListeners();
     }
@@ -183,7 +183,7 @@ class SubscriptionService extends ChangeNotifier {
             'productId': purchase.productID,
             'error': purchase.error?.message ?? 'unknown',
           });
-          _errorMessage = purchase.error?.message ?? 'Purchase failed.';
+          _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
           await InAppPurchase.instance.completePurchase(purchase);
           notifyListeners();
 

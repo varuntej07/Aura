@@ -614,18 +614,16 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   static String _friendlyError(AppException error) {
     final msg = error.message.toLowerCase();
     if (msg.contains('overloaded') || msg.contains('529')) {
-      return 'The AI service is temporarily overloaded. Please retry in a moment.';
+      return "Your Buddy is busy right now. Try again in a moment.";
     }
-    if (msg.contains('timeout') || msg.contains('timed out')) {
-      return 'The request timed out. Check your connection and retry.';
-    }
-    if (msg.contains('network') || msg.contains('connection')) {
-      return 'Network error. Check your internet connection and retry.';
+    if (msg.contains('timeout') || msg.contains('timed out') ||
+        msg.contains('network') || msg.contains('connection')) {
+      return "Couldn't reach your Buddy. Check your connection and try again.";
     }
     if (msg.contains('rate limit') || msg.contains('429')) {
-      return 'Too many requests. Please wait a moment and retry.';
+      return "You've hit your daily message limit. Upgrade to Pro for unlimited chat.";
     }
-    return 'Something went wrong. Please try again.';
+    return 'Something went wrong. Try again in a moment.';
   }
 
   static String? _normalizeUserId(String? id) {
