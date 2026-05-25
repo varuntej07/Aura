@@ -26,7 +26,7 @@ Handlers live in `backend/src/handlers`.
 
 Backend services live in `backend/src/services`.
 
-Scheduled domain agents live in `backend/src/agents`.
+Scheduled domain agents live in `backend/src/agents`. These agents only fetch data (`fetch_data`). Notification sending is handled by the signal engine, not the agents.
 
 Voice runs through `backend/src/agent/voice_agent.py` as a separate LiveKit worker.
 
@@ -36,6 +36,26 @@ Profile documents live in the `UserAura/{uid}` Firestore collection.
 The extractor always passes the user's previous query (`prev_user_query` field) alongside the
 current message to Gemini Flash, which decides when prior context is needed — no hardcoded
 heuristics. Failed extractions are swallowed silently so the chat stream is never affected.
+
+## Signal Engine
+
+`backend/src/services/signal_engine/` is the notification and feed ranking layer.
+Full architecture in `backend/docs/signal_engine.md`.
+
+**How it works:** A content pool (`content_candidates/`) holds embeddings (768-dim, `gemini-embedding-001`) fetched by data fetchers. A per-user signal store (`users/{uid}/signal_store/state`) tracks a user vector, time-slot open rates, category affinities, and fatigue. Every 15 min, `scoring_loop.run_tick()` scores candidates with pure math, and only the top candidate above threshold gets one Gemini Flash call to frame the copy before FCM send.
+
+**Endpoints:**
+- `POST /events` — Flutter reports user events (taps, dismissals, skips, app opens). Updates user vector via EMA.
+- `GET /feed/recommend` — ranked content feed for in-app display.
+- `POST /internal/signal-engine/tick` — Cloud Scheduler every 15 min. Runs scoring and sends notifications.
+- `POST /internal/signal-engine/content-ingest` — Cloud Scheduler hourly. Pulls HN/arXiv/ESPN Cricinfo RSS into the pool.
+- Sports ingest (cricbuzz live + web-searched leagues) runs inside `/scheduler/tick` every 30 min via a `minute % 30 == 0` gate — no separate scheduler job needed.
+
+**`/scheduler/tick` runs every minute** (`juno-reminder-tick` Cloud Scheduler job). Use `minute % N == 0` gating inside `handlers/scheduler.py` to piggyback any periodic work at N-minute intervals without creating new scheduler jobs.
+
+**Out of scope for the signal engine:** calendar meeting reminders and the post-nutrition-scan engagement chain. These stay on their existing LLM paths.
+
+`backend/src/services/daily_notification/orchestrator.py`  only runs the calendar reminder pipeline 
 
 ## UI System
 
@@ -95,7 +115,11 @@ cd backend
 uvicorn src.main:app --reload --port 8000
 ```
 
-Voice worker:
+Voice worker (run `download-files` once before first use to fetch Silero VAD + MultilingualModel ONNX files):
+
+```powershell
+python -m backend.src.agent.voice_agent download-files
+```
 
 ```powershell
 cd backend
@@ -112,6 +136,12 @@ Production backend URL:
 
 ```text
 https://juno-backend-620715294422.us-central1.run.app
+```
+
+Deploy backend + voice worker to Cloud Run (from repo root, requires Git Bash):
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" backend/deploy.sh juno-2ea45 us-central1
 ```
 
 Aura app legal pages (hosted on varuntej.dev portfolio):
@@ -131,6 +161,63 @@ Keep `.env`, service account JSON, OAuth client JSON, and platform Google servic
 The backend depends on several external services: Firebase, Anthropic, Gemini, LiveKit, Deepgram, Cartesia, Google Calendar, Cloud Scheduler, Cloud Tasks, and FCM. Treat every integration as optional at development time and make failures explicit.
 
 The Flutter and Dart analyzer commands timed out in this environment during review. Recheck locally before relying on the current app state.
+
+## Stream Contract
+
+Real-time data is exposed as `Stream<T>` via `async*` generators — cold and recreated per subscription.
+
+`StreamController.broadcast()` is allowed only when events fire to multiple independent subscribers
+(e.g. FCM notifications in `NotificationService`, LiveKit room events in `VoiceSessionService`).
+Every broadcast `StreamController` must be closed in a `dispose()` method.
+
+Do not use `StreamController` as a push mechanism for single-subscriber UI streams — use an `async*`
+generator instead.
+
+## Service State Contract
+
+Services (`lib/data/services/`, `lib/data/repositories/`) may hold **lifecycle state**: connection
+handles, auth user ID, platform stream subscriptions, initialization flags.
+
+Services must **not** store per-request transient state as instance fields (e.g. saving a
+`_currentRequestId` while a call is in flight). All request context lives in the call frame —
+local variables and the `Future`/`Stream` chain — not on the service instance.
+
+## Service Interface Pattern
+
+Chat/AI streaming access goes through `abstract class ChatServiceProvider`
+(`lib/data/services/chat_service_provider.dart`).
+
+`BackendApiService` (production) and `StubChatServiceProvider` (dev) both implement it.
+Selection happens at DI time in `lib/di/providers.dart` — no `_useStub` flags or conditional
+branches inside production service implementations.
+
+Non-chat backend calls (`deleteAccount`, `analyzeNutrition`) remain on `BackendApiService` directly.
+Only `ChatViewModel` and its subclasses depend on `ChatServiceProvider`.
+
+## Widget Purity
+
+Widgets in `lib/presentation/widgets/` are purely presentational. They must not call
+`context.read<T>()`, `context.watch<T>()`, `context.select()`, or `Provider.of<T>()`.
+
+All data and callbacks are passed via constructor parameters.
+
+Only screens in `lib/presentation/screens/` read from Provider.
+
+## Component Presets
+
+`FauxGlassCard` named constructors must be used for all standard visual configurations.
+Do not configure raw `borderRadius`/`padding` inline at callsites when a preset matches
+the semantic role of the card.
+
+Available presets (defined in `lib/core/theme/glass_card.dart`):
+- `FauxGlassCard.pill` — suggestion pills, interest/tag chips
+- `FauxGlassCard.navTile` — navigation and info display tiles
+- `FauxGlassCard.section` — panel/section containers with padding
+- `FauxGlassCard.toggleTile` — switch/toggle wrappers
+- `FauxGlassCard.destructiveButton` — sign-out / delete-account buttons
+
+Custom gradient or dynamic border color (e.g. per-agent color, per-message state) may still
+use the default constructor.
 
 ## Naming Conventions
 
