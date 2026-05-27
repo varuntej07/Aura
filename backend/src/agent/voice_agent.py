@@ -22,9 +22,10 @@ import asyncio
 import os
 import re
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC
 from pathlib import Path
-from typing import AsyncIterator
 from uuid import uuid4
 
 import httpx
@@ -117,8 +118,8 @@ def _local_time_in_zone(timezone_name: str) -> str:
         from datetime import datetime
         return datetime.now(ZoneInfo(timezone_name)).strftime("%-I:%M %p")
     except Exception:
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).strftime("%H:%M UTC")
+        from datetime import datetime
+        return datetime.now(UTC).strftime("%H:%M UTC")
 
 
 async def _fetch_user_profile(user_id: str) -> dict[str, str]:
@@ -198,7 +199,7 @@ async def entrypoint(ctx: JobContext) -> None:
     candidate_user_id = ctx.room.name.removeprefix("voice-")
     try:
         await asyncio.wait_for(ctx.connect(), timeout=settings.VOICE_CONNECT_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("VoiceAgent: room connect timed out", {"room": ctx.room.name})
         _log_voice_failure(
             code="room_connect_timeout",
@@ -240,7 +241,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 ),
                 timeout=_PRE_SESSION_FETCH_TIMEOUT_S,
             )
-        except (asyncio.TimeoutError, Exception) as exc:
+        except (TimeoutError, Exception) as exc:
             logger.warn("VoiceSession: pre-session fetch failed, using defaults", {
                 "session_id": session_id, "user_id": user_id,
                 "error_type": type(exc).__name__,

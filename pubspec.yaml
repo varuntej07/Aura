@@ -39,6 +39,7 @@ dependencies:
   go_router:
   in_app_purchase:
   google_fonts:
+  posthog_flutter:
 
 dev_dependencies:
   flutter_test:

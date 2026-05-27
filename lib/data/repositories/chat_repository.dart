@@ -223,18 +223,21 @@ class ChatRepository {
 
   Future<Result<List<ChatMessageModel>>> loadMessages(
     String sessionId, {
-    int limit = 50,
+    // Fetch the 200 newest messages by querying descending then reversing so
+    // callers receive chronological order. Ascending + limit would return the
+    // oldest 200 for long sessions, giving _buildHistory stale context.
+    int limit = 200,
   }) async {
     try {
       final rows = await (_db.select(_db.chatMessages)
             ..where((t) => t.sessionId.equals(sessionId))
             ..orderBy([
-              (t) => OrderingTerm.asc(t.sequence),
-              (t) => OrderingTerm.asc(t.timestamp),
+              (t) => OrderingTerm.desc(t.sequence),
+              (t) => OrderingTerm.desc(t.timestamp),
             ])
             ..limit(limit))
           .get();
-      return Result.success(rows.map(_rowToModel).toList());
+      return Result.success(rows.reversed.map(_rowToModel).toList());
     } catch (e, st) {
       return Result.failure(
         AppException.unexpected(

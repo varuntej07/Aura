@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..lib.logger import logger
@@ -79,7 +79,7 @@ async def handle_save_dietary_profile(event: dict[str, Any]) -> dict[str, Any]:
     if not sanitized:
         return _json(400, {"error": "No valid profile fields provided"})
 
-    sanitized["updated_at"] = datetime.now(timezone.utc).isoformat()
+    sanitized["updated_at"] = datetime.now(UTC).isoformat()
 
     try:
         ref = _profile_ref(user_id)

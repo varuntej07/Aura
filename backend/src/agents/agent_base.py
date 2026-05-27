@@ -19,7 +19,7 @@ The base provides:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud import firestore as fs
@@ -133,7 +133,7 @@ class ScheduledAgent(ABC):
             "content_topic": content_topic,
             "user_action": user_action,
             "user_reply": user_reply,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         await asyncio.to_thread(
             lambda: self._interactions_ref(user_id).add(doc)
@@ -152,7 +152,7 @@ class ScheduledAgent(ABC):
         State resets automatically when daily_date doesn't match today.
         """
         import asyncio
-        today = datetime.now(timezone.utc).strftime(_TODAY_FORMAT)
+        today = datetime.now(UTC).strftime(_TODAY_FORMAT)
 
         def _read() -> dict[str, Any]:
             snap = self._agent_state_ref(user_id).get()
@@ -171,13 +171,13 @@ class ScheduledAgent(ABC):
             return await asyncio.to_thread(_read)
         except Exception as exc:
             logger.error(f"Agent {self.agent_id}: load_agent_state failed", {"error": str(exc)})
-            today = datetime.now(timezone.utc).strftime(_TODAY_FORMAT)
+            today = datetime.now(UTC).strftime(_TODAY_FORMAT)
             return {"seen_today": [], "daily_count": 0, "daily_date": today}
 
     async def save_agent_state(self, user_id: str, event_fingerprint: str) -> None:
         """Append event_fingerprint to seen_today and increment daily_count."""
         import asyncio
-        today = datetime.now(timezone.utc).strftime(_TODAY_FORMAT)
+        today = datetime.now(UTC).strftime(_TODAY_FORMAT)
 
         def _write() -> None:
             ref = self._agent_state_ref(user_id)

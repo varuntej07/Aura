@@ -91,6 +91,86 @@ class ChatBackupService {
     }
   }
 
+  /// Pull messages for a single session from Firestore when Drift has none locally.
+  ///
+  /// Called from ChatViewModel._loadSession before loadMessages so that a user
+  /// opening an old thread on a fresh install (or after a cache clear) gets their
+  /// full history back instead of an empty chat that forgets prior context.
+  ///
+  /// Uses localCount == 0 as the trigger, not session.messageCount, because
+  /// deleteMessage and deleteMessagesAfter never decrement messageCount (counter
+  /// drift makes that field unreliable as a completeness signal).
+  Future<bool> restoreSessionMessagesIfEmpty(
+    String userId,
+    String sessionId,
+  ) async {
+    final firestore = _firestore;
+    if (userId.isEmpty || firestore == null) return false;
+
+    final localCount = await _localMessageCountForSession(sessionId);
+    if (localCount > 0) return false;
+
+    try {
+      final snap = await firestore
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .doc(sessionId)
+          .collection('messages')
+          .orderBy('sequence')
+          .get();
+
+      if (snap.docs.isEmpty) return false;
+
+      await _db.transaction(() async {
+        for (final doc in snap.docs) {
+          final d = doc.data();
+          await _db.into(_db.chatMessages).insertOnConflictUpdate(
+            ChatMessagesCompanion.insert(
+              id: doc.id,
+              sessionId: sessionId,
+              content: (d['text'] as String?) ?? '',
+              isUser: (d['role'] as String?) == 'user',
+              channel: (d['channel'] as String?) ?? 'text',
+              timestamp: _toDateTime(d['created_at']) ?? DateTime.now(),
+              sequence: Value((d['sequence'] as num?)?.toInt() ?? 0),
+            ),
+          );
+        }
+      });
+
+      AppLogger.info(
+        'Restored session messages from Firestore backup',
+        tag: 'ChatBackupService',
+        metadata: {
+          'userId': userId,
+          'sessionId': sessionId,
+          'messageCount': snap.docs.length,
+        },
+      );
+      return true;
+    } catch (e, st) {
+      AppLogger.error(
+        'Failed to restore session messages from backup',
+        error: e,
+        stackTrace: st,
+        tag: 'ChatBackupService',
+        metadata: {'userId': userId, 'sessionId': sessionId},
+      );
+      return false;
+    }
+  }
+
+  /// Count messages stored locally in Drift for a specific session.
+  Future<int> _localMessageCountForSession(String sessionId) async {
+    final countExpr = _db.chatMessages.id.count();
+    final query = _db.selectOnly(_db.chatMessages)
+      ..addColumns([countExpr])
+      ..where(_db.chatMessages.sessionId.equals(sessionId));
+    final row = await query.getSingle();
+    return row.read(countExpr) ?? 0;
+  }
+
   Future<bool> restoreFromBackupIfLocalEmpty(String userId) async {
     final firestore = _firestore;
     if (userId.isEmpty || firestore == null) {

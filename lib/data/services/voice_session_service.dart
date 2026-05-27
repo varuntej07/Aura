@@ -10,11 +10,13 @@ import '../../core/logging/app_logger.dart';
 import '../../core/network/api_response.dart';
 import '../models/voice_models.dart';
 import 'analytics_service.dart';
+import 'posthog_analytics_service.dart';
 
 const _tag = 'VoiceSession';
 
 class VoiceSessionService {
   final Future<String?> Function() _tokenProvider;
+  final PostHogAnalyticsService _postHogAnalyticsService;
 
   Room? _room;
   EventsListener<RoomEvent>? _listener;
@@ -22,11 +24,15 @@ class VoiceSessionService {
   bool _didEmitSessionReady = false;
   bool _didReceiveAssistantOutput = false;
   bool _closingByClient = false;
+  final Stopwatch _sessionStopwatch = Stopwatch();
   final StreamController<VoiceServerEvent> _eventsController =
       StreamController<VoiceServerEvent>.broadcast();
 
-  VoiceSessionService({required Future<String?> Function() tokenProvider})
-      : _tokenProvider = tokenProvider;
+  VoiceSessionService({
+    required Future<String?> Function() tokenProvider,
+    required PostHogAnalyticsService postHogAnalyticsService,
+  })  : _tokenProvider = tokenProvider,
+        _postHogAnalyticsService = postHogAnalyticsService;
 
   Stream<VoiceServerEvent> get events => _eventsController.stream;
   bool get isConnected => _room != null;
@@ -61,8 +67,11 @@ class VoiceSessionService {
         ..on<RoomConnectedEvent>((_) {
           _didEmitSessionReady = true;
           _closingByClient = false;
+          _sessionStopwatch.reset();
+          _sessionStopwatch.start();
           AppLogger.info('LiveKit room connected', tag: _tag,
               metadata: {'room': roomName});
+          unawaited(_postHogAnalyticsService.trackEvent('voice_session_started'));
           _eventsController.add(VoiceServerEvent(
             type: 'session.ready',
             sessionId: roomName,
@@ -213,6 +222,11 @@ class VoiceSessionService {
   Future<void> close() async {
     AppLogger.info('Closing voice session', tag: _tag);
     _closingByClient = true;
+    _sessionStopwatch.stop();
+    unawaited(_postHogAnalyticsService.trackEvent(
+      'voice_session_ended',
+      properties: {'duration_seconds': _sessionStopwatch.elapsed.inSeconds},
+    ));
     try {
       await _room?.disconnect();
     } catch (_) {}

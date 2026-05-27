@@ -15,6 +15,7 @@ class TextChatViewModel extends ChatViewModel {
     required super.chatBackupService,
     required super.feedbackService,
     required super.chatSessionManager,
+    required super.postHogAnalyticsService,
   });
 
   @override

@@ -16,7 +16,7 @@ All errors are caught and logged — a single failure never blocks other users.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..lib.logger import logger
@@ -122,7 +122,7 @@ async def _load_active_user_ids(inactivity_days: int = 7) -> list[str]:
     """Return user IDs that have a registered FCM token seen within inactivity_days."""
     from google.cloud.firestore_v1.base_query import FieldFilter
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=inactivity_days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=inactivity_days)).isoformat()
 
     def _fetch() -> list[str]:
         db = admin_firestore()

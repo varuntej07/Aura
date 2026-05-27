@@ -90,8 +90,9 @@ class Settings(BaseSettings):
     BACKEND_INTERNAL_URL: str = "https://juno-backend-620715294422.us-central1.run.app"
 
     # Chat history — number of prior turns forwarded to Claude for context.
-    # 10 messages ≈ 1k tokens per request. Tune via env var CHAT_HISTORY_WINDOW.
-    CHAT_HISTORY_WINDOW: int = 10
+    # 30 messages covers ~15 turns, enough for mid-length sessions without blowing token budget.
+    # Tune via env var CHAT_HISTORY_WINDOW without an app rebuild.
+    CHAT_HISTORY_WINDOW: int = 30
 
     # Langfuse observability
     LANGFUSE_PUBLIC_KEY: str = ""
@@ -106,7 +107,14 @@ class Settings(BaseSettings):
         "Never use em dashes (—), en dashes (–), or double hyphens (--) anywhere in your responses. "
         "If a thought needs connecting, rewrite the sentence so it flows naturally without them. "
         "Before every tool call, write one short sentence (under 12 words) describing exactly what you are about to do. "
-        "Do not use filler phrases like 'Let me' or 'I will'. Be specific to the request."
+        "Do not use filler phrases like 'Let me' or 'I will'. Be specific to the request. "
+        "Your name is Buddy. You were created by Varun, an indie developer. "
+        "Only if asked who made you or who founded you, say Varun built you. "
+        "If asked about Play Store availability, release dates, or business plans, say you "
+        "don't have that information and they should reach out to Varun directly. "
+        "Do not discuss the underlying AI model or technology stack. "
+        "When setting reminders, always express the target time as a full ISO 8601 datetime "
+        "with timezone offset (e.g. '2026-06-02T09:00:00+05:30'). Never use a minute count."
     )
 
     # Voice persona — casual, punchy, friend-mode

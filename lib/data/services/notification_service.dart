@@ -8,6 +8,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import 'backend_api_service.dart';
+import 'posthog_analytics_service.dart';
 
 /// Payload emitted when the user taps a nutrition scan-ready local notification.
 class NutritionScanReadyTapPayload {
@@ -63,12 +64,15 @@ const _kNutritionScanNotificationId = 200;
 class NotificationService {
   final ApiClient _apiClient;
   final BackendApiService? _signalEventSink;
+  final PostHogAnalyticsService _postHogAnalyticsService;
 
   NotificationService({
     required ApiClient apiClient,
     BackendApiService? signalEventSink,
+    required PostHogAnalyticsService postHogAnalyticsService,
   })  : _apiClient = apiClient,
-        _signalEventSink = signalEventSink;
+        _signalEventSink = signalEventSink,
+        _postHogAnalyticsService = postHogAnalyticsService;
 
   bool _initialized = false;
   String? _userId;
@@ -334,6 +338,10 @@ class NotificationService {
         'reminderId': message.data['reminder_id'],
       },
     );
+    unawaited(_postHogAnalyticsService.trackEvent(
+      'notification_tapped',
+      properties: {'notification_type': message.data['notification_type']},
+    ));
     _reportNotificationOpened(message.data);
     dispatchNotificationTap(message.data);
   }

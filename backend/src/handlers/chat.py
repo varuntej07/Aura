@@ -18,7 +18,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -71,9 +71,9 @@ async def _get_user_local_datetime(uid: str) -> str:
 
     tz_str = await asyncio.to_thread(_fetch)
     try:
-        tz = ZoneInfo(tz_str) if tz_str else timezone.utc
+        tz = ZoneInfo(tz_str) if tz_str else UTC
     except (ZoneInfoNotFoundError, Exception):
-        tz = timezone.utc
+        tz = UTC
 
     now = datetime.now(tz)
     return now.strftime("%A, %-d %B %Y %H:%M %Z")
@@ -136,7 +136,7 @@ def _get_aura_cache_lock(uid: str) -> asyncio.Lock:
 async def _fetch_cached_aura_data(
     uid: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     cached = _aura_cache.get(uid)
     if cached and (now - cached["fetched_at"]).total_seconds() < _AURA_CACHE_TTL_SECONDS:
@@ -472,7 +472,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     # Claude client for tool-level gating regardless of environment.
     effective_tier = "pro"
     if settings.is_production:
-        from ..services.entitlement import get_user_effective_tier, check_and_increment_daily_chat_usage
+        from ..services.entitlement import (
+            check_and_increment_daily_chat_usage,
+            get_user_effective_tier,
+        )
         effective_tier = await get_user_effective_tier(user_id)
         if effective_tier == "free":
             allowed, _ = await check_and_increment_daily_chat_usage(user_id)

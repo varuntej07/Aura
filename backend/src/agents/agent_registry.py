@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from ..services.model_provider import ModelProvider, get_model_provider
 from .agent_base import ScheduledAgent
-from .implementations.sports_agent import SportsAgent
-from .implementations.technews_agent import TechNewsAgent
 from .implementations.jobs_agent import JobsAgent
 from .implementations.posts_agent import PostsAgent
+from .implementations.sports_agent import SportsAgent
+from .implementations.technews_agent import TechNewsAgent
 
 
 class ScheduledAgentRegistry:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..lib.logger import logger
@@ -113,7 +113,7 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
         })
         return {"error": "fcm_delivery_failed", "status_code": 500}
 
-    sent_at = datetime.now(timezone.utc).isoformat()
+    sent_at = datetime.now(UTC).isoformat()
 
     # Update the daily_plan document
     await _update_nudge_status(user_id, plan_date, nudge_slot, "sent", sent_at)
@@ -186,7 +186,7 @@ async def _update_engagement_guard(user_id: str, last_engaged_at: str) -> None:
             db.collection("users").document(user_id)
             .collection("engagement_guard").document("state")
         )
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
 
         @fs.transactional
         def _txn(transaction: fs.Transaction) -> None:
@@ -217,7 +217,7 @@ async def _update_meeting_reminder_engagement_guard(user_id: str, last_engaged_a
             db.collection("users").document(user_id)
             .collection("engagement_guard").document("state")
         )
-        today = datetime.now(timezone.utc).date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
 
         @fs.transactional
         def _txn(transaction: fs.Transaction) -> None:

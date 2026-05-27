@@ -8,6 +8,7 @@ import '../../data/models/user_model.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/services/backend_api_service.dart';
 import '../../data/services/notification_service.dart';
+import '../../data/services/posthog_analytics_service.dart';
 import 'view_state.dart';
 
 export 'view_state.dart';
@@ -16,15 +17,18 @@ class AuthViewModel extends SafeChangeNotifier {
   final AuthRepository _authRepository;
   final NotificationService _notificationService;
   final BackendApiService _backendApiService;
+  final PostHogAnalyticsService _postHogAnalyticsService;
   StreamSubscription<UserModel?>? _authSubscription;
 
   AuthViewModel({
     required AuthRepository authRepository,
     required NotificationService notificationService,
     required BackendApiService backendApiService,
+    required PostHogAnalyticsService postHogAnalyticsService,
   })  : _authRepository = authRepository,
         _notificationService = notificationService,
-        _backendApiService = backendApiService;
+        _backendApiService = backendApiService,
+        _postHogAnalyticsService = postHogAnalyticsService;
 
   ViewState _state = ViewState.idle;
   UserModel? _user;
@@ -68,6 +72,7 @@ class AuthViewModel extends SafeChangeNotifier {
         if (user != null) {
           ErrorHandler.setUser(user.uid);
           unawaited(_notificationService.initialize(user.uid));
+          unawaited(_postHogAnalyticsService.identifyUser(user.uid));
         }
         final nextState = user != null ? ViewState.loaded : ViewState.idle;
         AppLogger.info(
@@ -156,6 +161,7 @@ class AuthViewModel extends SafeChangeNotifier {
     _user = null;
     _error = null;
     ErrorHandler.logBreadcrumb('user_signed_out');
+    unawaited(_postHogAnalyticsService.reset());
     _setState(ViewState.idle);
     unawaited(_authRepository.signOut());
   }

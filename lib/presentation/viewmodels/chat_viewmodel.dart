@@ -19,6 +19,7 @@ import '../../data/services/chat_backup_service.dart';
 import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_session_manager.dart';
 import '../../data/services/feedback_service.dart';
+import '../../data/services/posthog_analytics_service.dart';
 import 'view_state.dart';
 
 export 'view_state.dart';
@@ -33,6 +34,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   final ChatBackupService _chatBackupService;
   final FeedbackService _feedbackService;
   final ChatSessionManager _sessionManager;
+  final PostHogAnalyticsService postHogAnalytics;
   final _uuid = const Uuid();
 
   StreamSubscription<ConnectivityStatus>? _connectivitySub;
@@ -58,12 +60,14 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     required ChatBackupService chatBackupService,
     required FeedbackService feedbackService,
     required ChatSessionManager chatSessionManager,
+    required PostHogAnalyticsService postHogAnalyticsService,
   })  : _backendService = backendService,
         _connectivityService = connectivityService,
         _chatRepository = chatRepository,
         _chatBackupService = chatBackupService,
         _feedbackService = feedbackService,
-        _sessionManager = chatSessionManager {
+        _sessionManager = chatSessionManager,
+        postHogAnalytics = postHogAnalyticsService {
     _connectivitySub = _connectivityService.statusStream.listen((status) {
       _isOffline = status == ConnectivityStatus.disconnected;
       safeNotifyListeners();
@@ -427,6 +431,10 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             _setState(ViewState.loaded);
             ErrorHandler.logBreadcrumb('message_sent');
             unawaited(AnalyticsService.logMessageSent(agentId ?? 'general'));
+            unawaited(postHogAnalytics.trackEvent(
+              'chat_message_sent',
+              properties: {'agent_type': agentId ?? 'general'},
+            ));
 
           case ChatLimitReachedEvent():
             _isStreaming = false;
@@ -496,6 +504,16 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       }
     }
     _sessionTitleSet = session?.title != null;
+
+    // If Drift has no messages for this session, attempt a Firestore restore before
+    // loading. Covers: fresh install, cache cleared, or any other Drift data loss.
+    // Skipped when messages already exist locally so normal sessions have no extra cost.
+    if (_currentUserId != null) {
+      await _chatBackupService.restoreSessionMessagesIfEmpty(
+        _currentUserId!,
+        sessionId,
+      );
+    }
 
     final result = await _chatRepository.loadMessages(sessionId);
     result.when(

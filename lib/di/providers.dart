@@ -23,6 +23,7 @@ import '../data/services/chat_service_provider.dart';
 import '../data/services/stub_chat_service_provider.dart';
 import '../data/services/notification_service.dart';
 import '../data/services/nutrition_scan_service.dart';
+import '../data/services/posthog_analytics_service.dart';
 import '../data/services/voice_session_service.dart';
 import '../data/services/wake_word_service.dart';
 import '../data/services/subscription_service.dart';
@@ -55,6 +56,9 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   );
   final chatSessionManager = ChatSessionManager(repository: chatRepository);
 
+  // Analytics
+  final postHogAnalyticsService = PostHogAnalyticsService();
+
   // Remote services
   final backendApiService = BackendApiService(apiClient: apiClient);
   final ChatServiceProvider chatServiceProvider = Environment.hasConfiguredApi
@@ -67,16 +71,19 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   final notificationService = NotificationService(
     apiClient: apiClient,
     signalEventSink: backendApiService,
+    postHogAnalyticsService: postHogAnalyticsService,
   );
   final nutritionScanService = NutritionScanService(apiClient: apiClient);
   final voiceSessionService = VoiceSessionService(
     tokenProvider: firebaseAuthService.getIdToken,
+    postHogAnalyticsService: postHogAnalyticsService,
   );
 
   final wakeWordService = WakeWordService();
   final subscriptionService = SubscriptionService(
     firestoreService: firestoreService,
     authService: firebaseAuthService,
+    postHogAnalyticsService: postHogAnalyticsService,
   );
 
   // Domain repositories
@@ -93,9 +100,13 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   );
   final onboardingRepository = OnboardingRepository(
     firestoreService: firestoreService,
+    postHogAnalyticsService: postHogAnalyticsService,
   );
 
   return [
+    // Analytics
+    Provider<PostHogAnalyticsService>.value(value: postHogAnalyticsService),
+
     // Infrastructure
     Provider<FirebaseAuthService>.value(value: firebaseAuthService),
     Provider<FirestoreService>.value(value: firestoreService),
@@ -134,6 +145,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
         authRepository: authRepository,
         notificationService: notificationService,
         backendApiService: backendApiService,
+        postHogAnalyticsService: postHogAnalyticsService,
       ),
     ),
     ChangeNotifierProvider<HomeViewModel>(

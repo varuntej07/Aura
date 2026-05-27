@@ -1,12 +1,19 @@
+import 'dart:async';
+
 import '../services/firestore_service.dart';
+import '../services/posthog_analytics_service.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/logging/app_logger.dart';
 
 class OnboardingRepository {
   final FirestoreService _firestoreService;
+  final PostHogAnalyticsService _postHogAnalyticsService;
 
-  OnboardingRepository({required FirestoreService firestoreService})
-      : _firestoreService = firestoreService;
+  OnboardingRepository({
+    required FirestoreService firestoreService,
+    required PostHogAnalyticsService postHogAnalyticsService,
+  })  : _firestoreService = firestoreService,
+        _postHogAnalyticsService = postHogAnalyticsService;
 
   /// Writes the onboarding result atomically. Called once at the end of the
   /// consent screen. On success the caller should update AuthViewModel in
@@ -33,6 +40,10 @@ class OnboardingRepository {
           'Onboarding complete: uid=$uid consent=$auraConsentGranted',
           tag: 'OnboardingRepository',
         );
+        unawaited(_postHogAnalyticsService.trackEvent(
+          'onboarding_completed',
+          properties: {'aura_consent_granted': auraConsentGranted},
+        ));
         return true;
       },
       failure: (error) {

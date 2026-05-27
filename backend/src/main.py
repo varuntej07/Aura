@@ -20,15 +20,16 @@ import json
 import time
 import uuid
 
-from google.auth.transport.requests import Request as GoogleRequest
-from google.oauth2.id_token import verify_oauth2_token
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2.id_token import verify_oauth2_token
+from livekit.api import AccessToken, VideoGrants
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
+from .handlers.account import handle_delete_account
 from .handlers.chat import handle_chat_stream
-from .handlers.devices import register_device
 from .handlers.connectors import (
     connect_google_calendar,
     disconnect_google_calendar,
@@ -36,24 +37,22 @@ from .handlers.connectors import (
     google_calendar_webhook,
     sync_google_calendar,
 )
-from .handlers.dietary_profile import handle_get_dietary_profile, handle_save_dietary_profile
 from .handlers.daily_notification import handle_send_nudge
-from .handlers.mcp import register_mcp
+from .handlers.devices import register_device
+from .handlers.dietary_profile import handle_get_dietary_profile, handle_save_dietary_profile
 from .handlers.engagement import (
     handle_engagement_notify,
     handle_engagement_orchestrate,
     handle_engagement_responded,
 )
-from .handlers.account import handle_delete_account
+from .handlers.mcp import register_mcp
 from .handlers.notification_reply import handle_notification_reply_request
 from .handlers.nutrition import handle_nutrition_analyze_request, handle_nutrition_scan_request
 from .handlers.scheduler import handle_scheduler_tick
+from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
 from .handlers.signal_feed import handle_signal_feed
 from .handlers.signal_tick import handle_signal_tick
-from .handlers.signal_content_ingest import handle_signal_content_ingest
-from livekit.api import AccessToken, VideoGrants
-
 from .lib.logger import logger
 from .services.gemini_client import get_gemini_client
 from .services.request_auth import decode_firebase_claims

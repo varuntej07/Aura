@@ -10,6 +10,7 @@ import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_backup_service.dart';
 import '../../data/services/chat_session_manager.dart';
 import '../../data/services/feedback_service.dart';
+import '../../data/services/posthog_analytics_service.dart';
 import '../../core/network/connectivity_service.dart';
 import '../../presentation/screens/app_shell.dart';
 import '../../presentation/screens/agents/agents_screen.dart';
@@ -117,6 +118,7 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
                 feedbackService: context.read<FeedbackService>(),
                 connectivityService: context.read<ConnectivityService>(),
                 chatSessionManager: context.read<ChatSessionManager>(),
+                postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
                 suggestionPillsRepository:
                     context.read<AgentSuggestionPillsRepository>(),
               ),
@@ -144,6 +146,7 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
                 feedbackService: context.read<FeedbackService>(),
                 connectivityService: context.read<ConnectivityService>(),
                 chatSessionManager: context.read<ChatSessionManager>(),
+                postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
               ),
               child: const ChatScreen(),
             ),

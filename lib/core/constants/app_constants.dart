@@ -26,8 +26,9 @@ class AppConstants {
   static const maxResponseHistoryItems = 50;
 
   // Chat history window sent to backend for multi-turn context.
-  // 10 messages ≈ 1k tokens — tunable without touching other code.
-  static const chatHistoryWindow = 10;
+  // 30 messages covers ~15 turns at roughly 3k tokens per request.
+  // Matches CHAT_HISTORY_WINDOW in backend/src/config/settings.py.
+  static const chatHistoryWindow = 30;
 
   // Firestore collections
   static const memoriesCollection = 'memories';

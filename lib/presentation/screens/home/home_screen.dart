@@ -11,6 +11,7 @@ import '../../../data/services/chat_service_provider.dart';
 import '../../../data/services/chat_backup_service.dart';
 import '../../../data/services/chat_session_manager.dart';
 import '../../../data/services/feedback_service.dart';
+import '../../../data/services/posthog_analytics_service.dart';
 import '../../../core/network/connectivity_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/home_viewmodel.dart';
@@ -98,6 +99,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         feedbackService: context.read<FeedbackService>(),
         connectivityService: context.read<ConnectivityService>(),
         chatSessionManager: context.read<ChatSessionManager>(),
+        postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
       );
       _textChatViewModelCreated = true;
     }

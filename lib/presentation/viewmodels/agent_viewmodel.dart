@@ -24,6 +24,7 @@ class AgentViewModel extends ChatViewModel {
     required super.chatBackupService,
     required super.feedbackService,
     required super.chatSessionManager,
+    required super.postHogAnalyticsService,
     required AgentSuggestionPillsRepository suggestionPillsRepository,
   })  : _agentId = agentId,
         _suggestionPillsRepository = suggestionPillsRepository;
@@ -46,6 +47,10 @@ class AgentViewModel extends ChatViewModel {
     await super.initializeSession();
     unawaited(_fetchAndLoadSuggestionPills());
     _maybeInjectNudgeOpener();
+    unawaited(postHogAnalytics.trackEvent(
+      'agent_thread_opened',
+      properties: {'agent_type': _agentId},
+    ));
   }
 
   void _maybeInjectNudgeOpener() {
