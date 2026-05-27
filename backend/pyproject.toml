@@ -49,9 +49,6 @@ dependencies = [
     # Langfuse for LLM observability and tracing
     "langfuse>=4.0",
 
-    # Cricket live scores (graceful fallback if unavailable)
-    "cricbuzz-python>=3.0",
-
 ]
 
 [project.optional-dependencies]
