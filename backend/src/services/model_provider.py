@@ -27,10 +27,10 @@ from __future__ import annotations
 import asyncio
 import random
 import re
-from typing import Any, TypeVar, Type
+from typing import Any, TypeVar
 
 import anthropic
-from langfuse.decorators import observe
+from langfuse import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -98,7 +98,7 @@ class ModelProvider:
         prompt: str,
         *,
         system: str | None = None,
-        response_model: Type[T] | None = None,
+        response_model: type[T] | None = None,
         temperature: float = 0.7,
     ) -> str | T:
         """Cheap and fast. Use for: notification copy, summaries, classification.
@@ -120,7 +120,7 @@ class ModelProvider:
         *,
         system: str | None = None,
         tools: list[dict] | None = None,
-        response_model: Type[T] | None = None,
+        response_model: type[T] | None = None,
         temperature: float = 0.5,
     ) -> str | T:
         """Mid-tier reasoning. Use for: tool-calling background tasks, structured
@@ -143,7 +143,7 @@ class ModelProvider:
         system: str | None = None,
         tools: list[dict] | None = None,
         history: list[dict] | None = None,
-        response_model: Type[T] | None = None,
+        response_model: type[T] | None = None,
         temperature: float = 0.7,
     ) -> str | T:
         """Full reasoning. Use for: main chat, complex multi-turn, high-stakes output.
@@ -169,7 +169,7 @@ class ModelProvider:
         system: str | None,
         tools: list[dict] | None = None,
         history: list[dict] | None = None,
-        response_model: Type[T] | None,
+        response_model: type[T] | None,
         temperature: float,
     ) -> str | T:
         provider = _infer_provider(model_id)
@@ -258,7 +258,7 @@ class ModelProvider:
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_TIMEOUT_S)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if attempt == _MAX_RETRIES:
                     if fallback_chain:
                         return await _use_next_in_chain(
@@ -368,7 +368,7 @@ class ModelProvider:
                 )
                 text_blocks = [b.text for b in response.content if b.type == "text"]
                 return " ".join(text_blocks).strip()
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if attempt == _MAX_RETRIES:
                     logger.exception("ModelProvider: Anthropic timeout after retries", {
                         "model": model_id,
@@ -406,7 +406,7 @@ class ModelProvider:
         # retry loop always returns or raises; this line is unreachable
         raise RuntimeError("ModelProvider: Anthropic retry loop exited unexpectedly")
 
-    def _parse_response(self, raw: str, response_model: Type[T]) -> T:
+    def _parse_response(self, raw: str, response_model: type[T]) -> T:
         """Parse raw LLM text into a Pydantic model. Strips markdown fences."""
         cleaned = _strip_fences(raw)
         try:

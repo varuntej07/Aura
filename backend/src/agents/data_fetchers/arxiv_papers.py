@@ -11,7 +11,7 @@ import httpx
 
 from ...lib.logger import logger
 
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 NS = "{http://www.w3.org/2005/Atom}"
 
 
@@ -26,7 +26,7 @@ async def fetch_recent_papers(
     cats = categories or ["cs.LG", "cs.AI"]
     search_query = " OR ".join(f"cat:{c}" for c in cats)
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             r = await client.get(
                 ARXIV_API_URL,
                 params={
