@@ -1,4 +1,4 @@
-package com.juno.juno_app
+package com.varundevs.aura
 
 import io.flutter.embedding.android.FlutterActivity
 
