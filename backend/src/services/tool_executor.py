@@ -227,21 +227,29 @@ class ToolExecutor:
             start_dt = datetime.fromisoformat(start_time)
             end_time = (start_dt + timedelta(minutes=30)).isoformat()
 
-        body: dict[str, Any] = {
-            "summary": title,
-            "start": {"dateTime": start_time},
-            "end": {"dateTime": end_time},
-        }
-        if inp.get("description"):
-            body["description"] = inp["description"]
-        if inp.get("location"):
-            body["location"] = inp["location"]
-
         def _create() -> ToolResult:
             connector = GoogleCalendarConnector(self._user_id)
             status = connector.get_status()
             if not status.get("enabled"):
                 return {"configured": False, "message": "Google Calendar is not configured."}
+
+            # Google Calendar API: when dateTime has no UTC offset, the API falls back to the 
+            # calendar's default timezone unless we pass timeZone explicitly. 
+            # We always pass it so a naive datetime from the LLM lands at the right wall-clock hour for this user.
+            cal_tz = status.get("calendar_time_zone") or "UTC"
+            start_block: dict[str, Any] = {"dateTime": start_time, "timeZone": cal_tz}
+            end_block: dict[str, Any] = {"dateTime": end_time, "timeZone": cal_tz}
+
+            body: dict[str, Any] = {
+                "summary": title,
+                "start": start_block,
+                "end": end_block,
+            }
+            if inp.get("description"):
+                body["description"] = inp["description"]
+            if inp.get("location"):
+                body["location"] = inp["location"]
+
             cal = connector.calendar_client()
             event = cal.events().insert(calendarId="primary", body=body).execute()
             connector.cache_api_events([event])

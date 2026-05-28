@@ -633,6 +633,28 @@ class GoogleCalendarConnector:
         tz = ZoneInfo(tz_name)
         now_local = _utc_now().astimezone(tz)
 
+        if (range_name or "").strip().lower() == "recent":
+            snapshot = (
+                self._events_ref()
+                .order_by("start_at_ts", direction=fs.Query.DESCENDING)
+                .limit(max(limit, 1))
+                .stream()
+            )
+            events: list[dict[str, Any]] = []
+            for doc in snapshot:
+                data = doc.to_dict() or {}
+                if str(data.get("status", "")).lower() == "cancelled":
+                    continue
+                events.append({
+                    "id": data.get("provider_event_id") or doc.id,
+                    "title": data.get("summary"),
+                    "start_time": data.get("start_at"),
+                    "end_time": data.get("end_at"),
+                    "location": data.get("location"),
+                    "status": data.get("status"),
+                })
+            return {"configured": True, "events": events, "range": "recent"}
+
         if start_time and end_time:
             range_start = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(UTC)
             range_end = datetime.fromisoformat(end_time.replace("Z", "+00:00")).astimezone(UTC)

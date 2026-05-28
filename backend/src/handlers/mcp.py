@@ -133,11 +133,19 @@ async def create_calendar_event(
 
 @mcp_server.tool()
 async def get_upcoming_events(
-    range_name: str = "",
-    hours_ahead: int = 24,
+    range_name: str = "recent",
+    hours_ahead: int = 0,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """Fetch upcoming Google Calendar events. range_name: 'today', 'tomorrow', 'this_week' (preferred over hours_ahead)."""
+    """Fetch the user's calendar events from Firestore.
+
+    range_name:
+      - 'recent' (default) — most recent events by start time, past or future.
+        Use when the user asks open-ended things like 'what's on my calendar',
+        'any meetings', 'what do I have coming up'.
+      - 'today', 'tomorrow', 'this_week' — only when the user gives an explicit
+        timeframe in those words.
+    """
     return await _run_tool("get_upcoming_events", {"range_name": range_name, "hours_ahead": hours_ahead, "limit": limit})
 
 

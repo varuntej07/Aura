@@ -25,7 +25,6 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -42,10 +41,6 @@ from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
 from livekit.agents.voice import room_io
-from livekit.agents.voice.background_audio import (
-    AudioConfig,
-    BackgroundAudioPlayer,
-)
 from livekit.plugins import anthropic, cartesia, deepgram, google, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -55,19 +50,16 @@ from ..services.firebase import admin_auth, admin_firestore
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
 
-_FILLER_AUDIO_DIR = Path(__file__).parent / "audio"
-
 # Firebase auto-issued UIDs are 28 alphanumeric chars.
 # We refuse anything else so a malformed room name can't drive a session.
 _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 
-# Spoken before each tool call fires so the user hears on-line presence during the HTTP round-trip.
-# Keys match the MCP tool names exactly. Missing entries fall back to silence (the 1.2s generic filler).
+# Spoken in parallel with each MCP tool round-trip so the user hears on-line feedback that the agent is working on it.
 _TOOL_THINKING_PHRASES: dict[str, str] = {
     "get_upcoming_events": "Alright pulling up your calendar right now!",
     "create_calendar_event": "Cool, adding that to your calendar now!",
     "set_reminder": "Gotcha, setting that reminder for you!",
-    "cancel_reminder": "Heard that,taking care of that reminder now...",
+    "cancel_reminder": "Heard that, taking care of that reminder now...",
     "list_reminders": "pulling up your reminders for you!",
     "store_memory": "Ah huh, got it, I'll keep that in mind!",
     "query_memory": "thinking through what I remember about you...",
@@ -136,6 +128,17 @@ def _local_time_in_zone(timezone_name: str) -> str:
     except Exception:
         from datetime import datetime
         return datetime.now(UTC).strftime("%H:%M UTC")
+
+
+def _local_date_in_zone(timezone_name: str) -> str:
+    """Format today's date in the user's timezone for the prompt (e.g. 'Thursday, 28 May 2026')."""
+    try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime
+        return datetime.now(ZoneInfo(timezone_name)).strftime("%A, %-d %B %Y")
+    except Exception:
+        from datetime import datetime
+        return datetime.now(UTC).strftime("%A, %-d %B %Y UTC")
 
 
 async def _fetch_user_profile(user_id: str) -> dict[str, str]:
@@ -320,6 +323,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "name": profile["name"],
             "timezone": profile["timezone"],
             "local_time": _local_time_in_zone(profile["timezone"]),
+            "local_date": _local_date_in_zone(profile["timezone"]),
             "memory_summary": memory_summary or "(nothing yet — first conversation)",
             "last_session_context": last_session_summary,
             "last_session_at": last_session_at,
@@ -433,7 +437,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 "session_id": session_id, "user_id": user_id,
                 "state": state,
             })
-            buddy.cancel_pending_filler_on_speaking(state)
 
         @session.on("user_input_transcribed")
         def _on_user_transcript(ev) -> None:  # type: ignore[misc]
@@ -466,9 +469,9 @@ async def entrypoint(ctx: JobContext) -> None:
                     "timestamp": datetime.now(UTC).isoformat(),
                 })
 
-            # Fire a per-tool phrase as soon as the LLM generates a tool call,
-            # before the MCP round-trip completes. Cancels the generic 1.2s filler
-            # so the two never stack.
+            # Fire a per-tool phrase in parallel with the MCP round-trip.
+            # Gated on agent_state == "thinking" at fire-time so a phrase never
+            # lands on top of the model's actual reply if the tool returns fast.
             tool_calls = getattr(item, "tool_calls", None) or []
             if tool_calls:
                 tool_name = getattr(tool_calls[0], "name", "") or ""
@@ -476,9 +479,12 @@ async def entrypoint(ctx: JobContext) -> None:
                     session_tool_calls.append(tool_name)
                 phrase = _TOOL_THINKING_PHRASES.get(tool_name)
                 if phrase:
-                    buddy.cancel_pending_filler()
-
-                    async def _speak_tool_phrase(p: str = phrase) -> None:
+                    async def _speak_tool_phrase(p: str = phrase, name: str = tool_name) -> None:
+                        if str(getattr(session, "agent_state", "")) != "thinking":
+                            logger.info("VoiceSession: tool phrase skipped (not thinking)", {
+                                "session_id": session_id, "user_id": user_id, "tool": name,
+                            })
+                            return
                         try:
                             await session.say(p, allow_interruptions=True, add_to_chat_ctx=False)
                         except Exception as exc:
@@ -532,28 +538,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             session_done.set()
 
-        background_audio = BackgroundAudioPlayer(
-            thinking_sound=[
-                # Probabilities sum to 0.80, remaining 20% plays as silence.
-                # Max clip duration ~700ms, all finish before the 1200ms TTS filler.
-                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_hmm.wav"), volume=0.9, probability=0.35),
-                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_ah.wav"), volume=0.9, probability=0.20),
-                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_sure.wav"), volume=0.9, probability=0.15),
-                AudioConfig(str(_FILLER_AUDIO_DIR / "filler_let_me_see.wav"), volume=0.9, probability=0.10),
-            ],
-        )
-
-        async def _shutdown_background_audio() -> None:
-            try:
-                await background_audio.aclose()
-            except Exception as exc:
-                logger.warn("VoiceSession: background_audio aclose failed", {
-                    "session_id": session_id, "user_id": user_id,
-                    "error": str(exc),
-                })
-
-        ctx.add_shutdown_callback(_shutdown_background_audio)
-
         try:
             await session.start(
                 room=ctx.room,
@@ -569,8 +553,6 @@ async def entrypoint(ctx: JobContext) -> None:
                     ),
                 ),
             )
-            # Background audio is started after session.start()
-            await background_audio.start(room=ctx.room, agent_session=session)
             await session_done.wait()
 
             session_end_iso = datetime.now(UTC).isoformat()
