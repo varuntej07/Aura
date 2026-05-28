@@ -23,12 +23,14 @@ Discovery handshake:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from contextvars import ContextVar
 from typing import Any
 
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -53,36 +55,60 @@ def _executor_for_request() -> ToolExecutor:
 
 # streamable_http_path="/" so when this app is mounted at /mcp on the parent
 # FastAPI the wire URL is exactly /mcp (the MCP TS spec defaults).
-mcp_server = FastMCP("juno-voice-tools", streamable_http_path="/")
+#
+# DNS rebinding protection is disabled because Cloud Run routes requests with
+# Host: <run-url>, which FastMCP's default allowlist (127.0.0.1/localhost) rejects with 421. 
+# The Firebase _FirebaseAuthMiddleware below already authenticates every request with a verified ID token, 
+# making DNS rebinding protection redundant here.
+mcp_server = FastMCP(
+    "juno-voice-tools",
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+
+# Hard cap for every tool call from the voice worker.
+# /mcp is voice-only; 8s fits a calendar API sync while keeping the call feeling alive.
+_VOICE_TOOL_TIMEOUT_S = 8.0
+
+
+async def _run_tool(tool_name: str, args: dict) -> dict:
+    """Execute a tool with a voice-appropriate timeout. Returns a user_message error dict on failure."""
+    try:
+        return await asyncio.wait_for(
+            _executor_for_request().execute(tool_name, args),
+            timeout=_VOICE_TOOL_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warn("MCP: tool timed out", {"tool": tool_name})
+        _TIMEOUT_MESSAGES = {
+            "get_upcoming_events": "Your calendar is taking too long to respond. Try again in a moment.",
+            "create_calendar_event": "Couldn't reach your calendar in time. Try again.",
+            "get_user_context": "That's taking too long. Try again in a moment.",
+        }
+        return {
+            "error": True,
+            "user_message": _TIMEOUT_MESSAGES.get(tool_name, "That took too long. Try again in a moment."),
+        }
 
 
 # Reminders ---------------------------------------------------------------
 
 @mcp_server.tool()
-async def set_reminder(message: str, delay_minutes: float, priority: str = "normal") -> dict[str, Any]:
-    """Set a reminder for the user that fires after delay_minutes minutes."""
-    return await _executor_for_request().execute(
-        "set_reminder",
-        {"message": message, "delay_minutes": delay_minutes, "priority": priority},
-    )
+async def set_reminder(message: str, scheduled_at: str, priority: str = "normal") -> dict[str, Any]:
+    """Set a reminder. scheduled_at must be ISO 8601 with timezone offset (e.g. '2026-06-02T09:00:00+05:30')."""
+    return await _run_tool("set_reminder", {"message": message, "scheduled_at": scheduled_at, "priority": priority})
 
 
 @mcp_server.tool()
 async def list_reminders(status_filter: str = "pending") -> dict[str, Any]:
     """List the user's reminders. status_filter: 'pending', 'all', 'fired', 'dismissed'."""
-    return await _executor_for_request().execute(
-        "list_reminders",
-        {"status_filter": status_filter},
-    )
+    return await _run_tool("list_reminders", {"status_filter": status_filter})
 
 
 @mcp_server.tool()
 async def cancel_reminder(reminder_id: str) -> dict[str, Any]:
     """Cancel (dismiss) a reminder by its ID."""
-    return await _executor_for_request().execute(
-        "cancel_reminder",
-        {"reminder_id": reminder_id},
-    )
+    return await _run_tool("cancel_reminder", {"reminder_id": reminder_id})
 
 
 # Calendar ----------------------------------------------------------------
@@ -96,7 +122,7 @@ async def create_calendar_event(
     location: str = "",
 ) -> dict[str, Any]:
     """Create a Google Calendar event. start_time and end_time are ISO 8601 strings."""
-    return await _executor_for_request().execute("create_calendar_event", {
+    return await _run_tool("create_calendar_event", {
         "title": title,
         "start_time": start_time,
         "end_time": end_time or None,
@@ -106,12 +132,13 @@ async def create_calendar_event(
 
 
 @mcp_server.tool()
-async def get_upcoming_events(hours_ahead: int = 24, limit: int = 10) -> dict[str, Any]:
-    """Fetch upcoming Google Calendar events within the next hours_ahead hours."""
-    return await _executor_for_request().execute(
-        "get_upcoming_events",
-        {"hours_ahead": hours_ahead, "limit": limit},
-    )
+async def get_upcoming_events(
+    range_name: str = "",
+    hours_ahead: int = 24,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Fetch upcoming Google Calendar events. range_name: 'today', 'tomorrow', 'this_week' (preferred over hours_ahead)."""
+    return await _run_tool("get_upcoming_events", {"range_name": range_name, "hours_ahead": hours_ahead, "limit": limit})
 
 
 # Memory ------------------------------------------------------------------
@@ -119,19 +146,13 @@ async def get_upcoming_events(hours_ahead: int = 24, limit: int = 10) -> dict[st
 @mcp_server.tool()
 async def store_memory(key: str, value: str, category: str) -> dict[str, Any]:
     """Store a memory about the user. category: 'personal', 'preference', 'fact', etc."""
-    return await _executor_for_request().execute(
-        "store_memory",
-        {"key": key, "value": value, "category": category},
-    )
+    return await _run_tool("store_memory", {"key": key, "value": value, "category": category})
 
 
 @mcp_server.tool()
 async def query_memory(query: str, category_filter: str = "all") -> dict[str, Any]:
     """Search the user's memories. category_filter: 'all' or a specific category."""
-    return await _executor_for_request().execute(
-        "query_memory",
-        {"query": query, "category_filter": category_filter},
-    )
+    return await _run_tool("query_memory", {"query": query, "category_filter": category_filter})
 
 
 # Nutrition ---------------------------------------------------------------
@@ -144,7 +165,7 @@ async def analyze_nutrition(
     is_cheat_meal: bool = False,
 ) -> dict[str, Any]:
     """Analyze nutrition information from a food label's OCR text."""
-    return await _executor_for_request().execute("analyze_nutrition", {
+    return await _run_tool("analyze_nutrition", {
         "ocr_text": ocr_text,
         "quantity": quantity,
         "occasion": occasion or None,
@@ -161,7 +182,7 @@ async def get_user_context(
     include_events: bool = True,
 ) -> dict[str, Any]:
     """Get a snapshot of the user's memories, reminders, and upcoming calendar events."""
-    return await _executor_for_request().execute("get_user_context", {
+    return await _run_tool("get_user_context", {
         "include_memories": include_memories,
         "include_reminders": include_reminders,
         "include_events": include_events,

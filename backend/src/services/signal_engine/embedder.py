@@ -81,7 +81,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_TIMEOUT_S)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if attempt == _MAX_RETRIES:
                 logger.exception("embedder: timed out after retries", {
                     "batch_size": len(texts),

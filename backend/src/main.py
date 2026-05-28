@@ -28,6 +28,7 @@ from livekit.api import AccessToken, VideoGrants
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
+from .agents.orchestrator import orchestrate_all_agents, run_agent_for_user
 from .handlers.account import handle_delete_account
 from .handlers.chat import handle_chat_stream
 from .handlers.connectors import (
@@ -256,6 +257,25 @@ async def scheduler_tick_endpoint(
 ) -> JSONResponse:
     result = await handle_scheduler_tick()
     return _handler_response(result)
+
+
+# Domain agents — fan-out tick + per-user run (called by Cloud Tasks)
+@app.post("/internal/agents/tick")
+async def agents_tick_endpoint(
+    _: None = Depends(_verify_scheduler_token),
+) -> JSONResponse:
+    result = await orchestrate_all_agents()
+    return JSONResponse(content=result)
+
+
+@app.post("/internal/agents/{agent_id}/run/{user_id}")
+async def agents_run_endpoint(
+    agent_id: str,
+    user_id: str,
+    _: None = Depends(_verify_scheduler_token),
+) -> JSONResponse:
+    await run_agent_for_user(agent_id, user_id)
+    return JSONResponse(content={"ok": True})
 
 
 # Engagement endpoints (internal — Cloud Tasks only)

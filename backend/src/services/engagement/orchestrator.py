@@ -17,24 +17,22 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud import firestore as fs  # type: ignore
 from google.cloud.firestore_v1.base_query import FieldFilter  # type: ignore
-
-from langfuse.decorators import observe
+from langfuse import observe
 
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
 from .agent_registry import get_agent_registry
 from .decision_engine import (
-    decide,
-    MIN_HOURS_BETWEEN_REACTIVE_NOTIFICATIONS,
     MAX_DAILY_PROACTIVE_NOTIFICATIONS,
+    MIN_HOURS_BETWEEN_REACTIVE_NOTIFICATIONS,
+    decide,
 )
 from .task_scheduler import get_task_scheduler
-
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -62,7 +60,7 @@ async def _orchestrate(
     trigger_event: str,
     trigger_payload: dict[str, Any],
 ) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Step 1: Load context in parallel
     nutrition_logs, dietary_profile, engagement_guard, memories, user_timezone = await asyncio.gather(
@@ -252,7 +250,7 @@ async def _load_recent_nutrition_logs(user_id: str, days: int = 30) -> list[dict
     def _fetch() -> list[dict]:
         db = admin_firestore()
         from datetime import timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         docs = (
             db.collection("users").document(user_id)
             .collection("nutrition_logs")

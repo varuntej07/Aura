@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ...lib.logger import logger
 from ..firebase import admin_firestore
@@ -110,4 +110,4 @@ async def _load_user_local_now(user_id: str) -> datetime:
     try:
         return datetime.now(ZoneInfo(tz_name))
     except (ZoneInfoNotFoundError, Exception):
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

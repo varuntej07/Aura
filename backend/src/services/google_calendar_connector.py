@@ -606,6 +606,7 @@ class GoogleCalendarConnector:
         end_time: str | None,
         limit: int,
         hours_ahead: int | None = None,
+        skip_live_sync: bool = False,
     ) -> dict[str, Any]:
         source = self._load_source()
         integration = self._load_integration()
@@ -614,8 +615,10 @@ class GoogleCalendarConnector:
 
         last_synced_at = _parse_iso(source.get("last_synced_at"))
         pending_sync = bool(source.get("pending_sync"))
-        if pending_sync or last_synced_at is None or (
-            _utc_now() - last_synced_at > timedelta(minutes=settings.CALENDAR_SYNC_STALE_MINUTES)
+        if not skip_live_sync and (
+            pending_sync or last_synced_at is None or (
+                _utc_now() - last_synced_at > timedelta(minutes=settings.CALENDAR_SYNC_STALE_MINUTES)
+            )
         ):
             try:
                 self._sync_calendar(reason="chat_query_refresh")
@@ -671,6 +674,7 @@ class GoogleCalendarConnector:
 
         snapshot = (
             self._events_ref()
+            .where("start_at_ts", ">=", range_start)
             .where("start_at_ts", "<", range_end)
             .order_by("start_at_ts")
             .limit(max(limit, 1) * 4)
@@ -793,3 +797,89 @@ class GoogleCalendarConnector:
                     "error": str(exc),
                 })
         return renewed
+
+    @classmethod
+    def sync_all_connected_users(cls, max_workers: int = 5) -> dict[str, Any]:
+        """Periodic fallback sync for all users with connected calendars.
+
+        Called every 30 minutes from the scheduler tick as a reliability backstop
+        when Google push notifications are missed, watch channels expire undetected,
+        or deliveries are dropped (which Google explicitly documents as possible).
+
+        Uses incremental sync via sync_token — lightweight delta fetch, not a full
+        re-download. On first call or after a 410 token invalidation, falls back
+        to a full sync automatically (handled inside _sync_calendar).
+
+        Errors are fully isolated per user. One failure never blocks others.
+        OAuth revocations mark the integration as disabled so the user sees a
+        reconnect prompt in-app rather than silently getting stale data forever.
+
+        Returns a summary dict for logging in the scheduler tick.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        db = admin_firestore()
+
+        # google_calendar_channels holds one doc per connected user (including
+        # users whose channel has expired but was never replaced — they are the
+        # ones who most need a fallback sync). Dedup by user_id.
+        channel_docs = list(db.collection(CHANNELS_COLLECTION).stream())
+        user_ids: list[str] = list({
+            uid
+            for doc in channel_docs
+            if (uid := str((doc.to_dict() or {}).get("user_id", "")).strip())
+        })
+
+        if not user_ids:
+            return {"users_attempted": 0, "users_synced": 0, "users_skipped": 0, "users_failed": 0}
+
+        synced = 0
+        skipped = 0
+        failed = 0
+
+        def _sync_one(user_id: str) -> str:
+            try:
+                connector = cls(user_id)
+                integration = connector._load_integration()
+                if not integration.get("enabled"):
+                    return "skipped"
+                connector._sync_calendar(reason="periodic_fallback")
+                return "synced"
+            except Exception as exc:
+                error_str = str(exc)
+                # OAuth revoked or token permanently expired — disable the integration
+                # so the user is prompted to reconnect rather than seeing stale data.
+                if any(kw in error_str.lower() for kw in ("invalid_grant", "token has been expired or revoked", "token_revoked")):
+                    try:
+                        cls(user_id)._integration_ref().set(
+                            {"enabled": False, "last_error": f"OAuth revoked — please reconnect: {error_str[:200]}"},
+                            merge=True,
+                        )
+                    except Exception:
+                        pass
+                logger.error("GoogleCalendarConnector.sync_all_connected_users: per-user sync failed", {
+                    "user_id": user_id,
+                    "error": error_str,
+                })
+                return "failed"
+
+        effective_workers = min(max_workers, len(user_ids))
+        with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+            futures = {pool.submit(_sync_one, uid): uid for uid in user_ids}
+            for future in as_completed(futures):
+                outcome = future.result()
+                if outcome == "synced":
+                    synced += 1
+                elif outcome == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+
+        summary = {
+            "users_attempted": len(user_ids),
+            "users_synced": synced,
+            "users_skipped": skipped,
+            "users_failed": failed,
+        }
+        logger.info("GoogleCalendarConnector.sync_all_connected_users: complete", summary)
+        return summary

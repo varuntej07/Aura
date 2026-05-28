@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ValidationError
@@ -205,7 +205,7 @@ def _merge_profile(
 
     # Always advance the previous query pointer and timestamp regardless of skip.
     profile["prev_user_query"] = current_message
-    profile["last_updated"] = datetime.now(timezone.utc).isoformat()
+    profile["last_updated"] = datetime.now(UTC).isoformat()
 
     if insight.extraction_skipped:
         return profile
@@ -319,7 +319,7 @@ async def _write_turn_signal_to_firestore(
     document = {
         "turn_id": turn_id,
         "session_id": session_id or "unknown",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "buddy_response_snippet": prev_buddy_response[:300],
         "next_state_snippet": current_message[:300],
         "score": insight.turn_score,
@@ -355,7 +355,7 @@ async def _write_accepted_hint_with_cap(
 ) -> None:
     from .firebase import admin_firestore
 
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
 
     def _put_hint() -> bool:
         db = admin_firestore()

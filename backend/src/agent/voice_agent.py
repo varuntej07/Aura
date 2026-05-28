@@ -24,7 +24,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -52,6 +52,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..services.firebase import admin_auth, admin_firestore
+from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
 
 _FILLER_AUDIO_DIR = Path(__file__).parent / "audio"
@@ -59,6 +60,21 @@ _FILLER_AUDIO_DIR = Path(__file__).parent / "audio"
 # Firebase auto-issued UIDs are 28 alphanumeric chars.
 # We refuse anything else so a malformed room name can't drive a session.
 _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
+
+# Spoken before each tool call fires so the user hears on-line presence during the HTTP round-trip.
+# Keys match the MCP tool names exactly. Missing entries fall back to silence (the 1.2s generic filler).
+_TOOL_THINKING_PHRASES: dict[str, str] = {
+    "get_upcoming_events": "Alright pulling up your calendar right now!",
+    "create_calendar_event": "Cool, adding that to your calendar now!",
+    "set_reminder": "Gotcha, setting that reminder for you!",
+    "cancel_reminder": "Heard that,taking care of that reminder now...",
+    "list_reminders": "pulling up your reminders for you!",
+    "store_memory": "Ah huh, got it, I'll keep that in mind!",
+    "query_memory": "thinking through what I remember about you...",
+    "analyze_nutrition": "having a closer look at that...",
+    "get_user_context": "pulling up your details for this!",
+    "web_search": "surfing the web for you right now!",
+}
 
 # Hard cap on the parallel profile + memory fetch before session.start.
 # A LiveKit session can't speak its greeting until on_enter resolves, and
@@ -155,6 +171,37 @@ async def _fetch_memory_summary(user_id: str) -> str:
     return await asyncio.to_thread(_read)
 
 
+async def _fetch_last_session_summary(user_id: str) -> dict[str, str]:
+    """Read users/{uid}/voice_session_state/latest. Returns {summary, last_session_at} or empty."""
+    def _read() -> dict[str, str]:
+        doc = (
+            admin_firestore()
+            .collection("users").document(user_id)
+            .collection("voice_session_state").document("latest")
+            .get()
+        )
+        data = doc.to_dict() or {}
+        return {
+            "summary": str(data.get("summary", "")),
+            "last_session_at": str(data.get("last_session_at", "")),
+        }
+    return await asyncio.to_thread(_read)
+
+
+async def _fetch_archive_context(user_id: str) -> dict[str, str]:
+    """Read users/{uid}/voice_session_state/archive. Returns {archive_summary} or empty."""
+    def _read() -> dict[str, str]:
+        doc = (
+            admin_firestore()
+            .collection("users").document(user_id)
+            .collection("voice_session_state").document("archive")
+            .get()
+        )
+        data = doc.to_dict() or {}
+        return {"archive_summary": str(data.get("archive_summary", ""))}
+    return await asyncio.to_thread(_read)
+
+
 async def _mint_firebase_id_token(user_id: str) -> str:
     """Exchange an Admin-SDK custom token for a real Firebase ID token.
 
@@ -228,32 +275,55 @@ async def entrypoint(ctx: JobContext) -> None:
         return
 
     async with _voice_session_context(user_id, ctx.room.name) as session_id:
-        # Fetch user profile + memory summary in parallel. The hard 1.5s
-        # ceiling enforces the under-1s greeting feel: any longer and the
-        # session pauses noticeably between connect and on_enter. 
-        # On miss we fall through to neutral defaults.
+        # Fetch user profile, memory, last session, and archive in parallel.
+        # The hard 1.5s ceiling enforces the under-1s greeting feel.
+        # Each fetch defaults independently on failure.
         try:
-            profile, memory_summary = await asyncio.wait_for(
+            fetch_results = await asyncio.wait_for(
                 asyncio.gather(
                     _fetch_user_profile(user_id),
                     _fetch_memory_summary(user_id),
-                    return_exceptions=False,
+                    _fetch_last_session_summary(user_id),
+                    _fetch_archive_context(user_id),
+                    return_exceptions=True,
                 ),
                 timeout=_PRE_SESSION_FETCH_TIMEOUT_S,
             )
-        except (TimeoutError, Exception) as exc:
-            logger.warn("VoiceSession: pre-session fetch failed, using defaults", {
+        except TimeoutError:
+            logger.warn("VoiceSession: pre-session fetch timed out, using defaults", {
                 "session_id": session_id, "user_id": user_id,
-                "error_type": type(exc).__name__,
             })
-            profile = {"name": "there", "timezone": "UTC"}
-            memory_summary = ""
+            fetch_results = [
+                {"name": "there", "timezone": "UTC"},
+                "",
+                {"summary": "", "last_session_at": ""},
+                {"archive_summary": ""},
+            ]
+
+        profile = fetch_results[0] if not isinstance(fetch_results[0], BaseException) else {"name": "there", "timezone": "UTC"}
+        memory_summary = fetch_results[1] if not isinstance(fetch_results[1], BaseException) else ""
+        last_session = fetch_results[2] if not isinstance(fetch_results[2], BaseException) else {"summary": "", "last_session_at": ""}
+        archive_data = fetch_results[3] if not isinstance(fetch_results[3], BaseException) else {"archive_summary": ""}
+
+        for i, r in enumerate(fetch_results):
+            if isinstance(r, BaseException):
+                logger.warn("VoiceSession: pre-session fetch failed", {
+                    "session_id": session_id, "user_id": user_id,
+                    "index": i, "error": str(r),
+                })
+
+        last_session_summary = last_session.get("summary", "") if isinstance(last_session, dict) else ""
+        last_session_at = last_session.get("last_session_at", "") if isinstance(last_session, dict) else ""
+        archive_context = archive_data.get("archive_summary", "") if isinstance(archive_data, dict) else ""
 
         context_vars = {
             "name": profile["name"],
             "timezone": profile["timezone"],
             "local_time": _local_time_in_zone(profile["timezone"]),
             "memory_summary": memory_summary or "(nothing yet — first conversation)",
+            "last_session_context": last_session_summary,
+            "last_session_at": last_session_at,
+            "archive_context": archive_context,
         }
 
         # Seed the chat history with a system-side note that mirrors what the prompt already says. 
@@ -309,7 +379,7 @@ async def entrypoint(ctx: JobContext) -> None:
             max_retry_per_tts=1,
         )
 
-        mcp_url = f"{settings.BACKEND_INTERNAL_URL.rstrip('/')}/mcp"
+        mcp_url = f"{settings.BACKEND_INTERNAL_URL.rstrip('/')}/mcp/"
         mcp_server = mcp.MCPServerHTTP(
             url=mcp_url,
             transport_type="streamable_http",
@@ -351,6 +421,10 @@ async def entrypoint(ctx: JobContext) -> None:
             chat_ctx=chat_ctx,
         )
         session_done = asyncio.Event()
+        session_turns: list[dict] = []
+        session_tool_calls: list[str] = []
+        session_start_iso = datetime.now(UTC).isoformat()
+        session_start_mono = time.monotonic()
 
         @session.on("agent_state_changed")
         def _on_state(ev) -> None:  # type: ignore[misc]
@@ -367,22 +441,74 @@ async def entrypoint(ctx: JobContext) -> None:
                 "session_id": session_id, "user_id": user_id,
                 "text": ev.transcript, "is_final": ev.is_final,
             })
+            if ev.is_final and ev.transcript:
+                session_turns.append({
+                    "role": "user",
+                    "text": ev.transcript,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                })
 
         @session.on("conversation_item_added")
         def _on_conversation_item(ev) -> None:  # type: ignore[misc]
             item = getattr(ev, "item", None)
-            if item and getattr(item, "role", None) == "assistant":
+            if item is None:
+                return
+
+            if getattr(item, "role", None) == "assistant":
                 content = getattr(item, "text_content", None) or str(item)
                 logger.info("VoiceSession: agent response", {
                     "session_id": session_id, "user_id": user_id,
                     "text_preview": str(content)[:120],
                 })
+                session_turns.append({
+                    "role": "assistant",
+                    "text": str(content)[:500],
+                    "timestamp": datetime.now(UTC).isoformat(),
+                })
+
+            # Fire a per-tool phrase as soon as the LLM generates a tool call,
+            # before the MCP round-trip completes. Cancels the generic 1.2s filler
+            # so the two never stack.
+            tool_calls = getattr(item, "tool_calls", None) or []
+            if tool_calls:
+                tool_name = getattr(tool_calls[0], "name", "") or ""
+                if tool_name:
+                    session_tool_calls.append(tool_name)
+                phrase = _TOOL_THINKING_PHRASES.get(tool_name)
+                if phrase:
+                    buddy.cancel_pending_filler()
+
+                    async def _speak_tool_phrase(p: str = phrase) -> None:
+                        try:
+                            await session.say(p, allow_interruptions=True, add_to_chat_ctx=False)
+                        except Exception as exc:
+                            logger.warn("VoiceSession: tool phrase failed", {
+                                "session_id": session_id, "user_id": user_id, "error": str(exc),
+                            })
+
+                    asyncio.create_task(
+                        _speak_tool_phrase(),
+                        name=f"tool-phrase-{tool_name}-{session_id[:8]}",
+                    )
+                    logger.info("VoiceSession: tool thinking phrase", {
+                        "session_id": session_id, "user_id": user_id,
+                        "tool": tool_name,
+                    })
 
         @session.on("session_usage_updated")
         def _on_usage(ev) -> None:  # type: ignore[misc]
             logger.info("VoiceSession: usage updated", {
                 "session_id": session_id, "user_id": user_id,
                 "usage": str(ev),
+            })
+
+        @session.on("error")
+        def _on_session_error(ev) -> None:  # type: ignore[misc]
+            error = getattr(ev, "error", None) or ev
+            logger.error("VoiceSession: AgentSession runtime error", {
+                "session_id": session_id, "user_id": user_id,
+                "error_type": type(error).__name__,
+                "error": str(error),
             })
 
         @session.on("close")
@@ -446,6 +572,21 @@ async def entrypoint(ctx: JobContext) -> None:
             # Background audio is started after session.start()
             await background_audio.start(room=ctx.room, agent_session=session)
             await session_done.wait()
+
+            session_end_iso = datetime.now(UTC).isoformat()
+            elapsed_ms = int((time.monotonic() - session_start_mono) * 1000)
+            asyncio.create_task(
+                run_post_session_pipeline(
+                    user_id=user_id,
+                    session_id=session_id,
+                    turns=session_turns,
+                    started_at=session_start_iso,
+                    ended_at=session_end_iso,
+                    duration_ms=elapsed_ms,
+                    tool_calls=session_tool_calls,
+                ),
+                name=f"voice-post-session-{session_id[:8]}",
+            )
         except Exception as exc:
             _log_voice_failure(
                 code="session_start_failed",
@@ -459,6 +600,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
 if __name__ == "__main__":
     logger.info("VoiceWorker: starting", {
+        "pid": os.getpid(),
         "livekit_url": settings.LIVEKIT_URL,
         "livekit_configured": settings.livekit_configured,
         "deepgram_configured": bool(settings.DEEPGRAM_API_KEY),

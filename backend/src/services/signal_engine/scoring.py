@@ -11,7 +11,7 @@ Constants tunable per docs/signal_engine.md.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .feature_store import TIME_SLOTS_PER_DAY
 
@@ -78,9 +78,9 @@ def time_slot_open_score(
 
 def freshness_decay(freshness_ts: datetime, now: datetime | None = None) -> float:
     """0.5 ** (age_hours / half_life). Floored at a small positive value."""
-    current = now or datetime.now(timezone.utc)
+    current = now or datetime.now(UTC)
     if freshness_ts.tzinfo is None:
-        freshness_ts = freshness_ts.replace(tzinfo=timezone.utc)
+        freshness_ts = freshness_ts.replace(tzinfo=UTC)
     age_seconds = max(0.0, (current - freshness_ts).total_seconds())
     age_hours = age_seconds / 3600.0
     return max(0.01, 0.5 ** (age_hours / FRESHNESS_HALF_LIFE_HOURS))
@@ -95,9 +95,9 @@ def fatigue_penalty(
     base = min(1.0, sends_today / float(DAILY_HARD_CAP))
     if last_notification_at is None:
         return base
-    current = now or datetime.now(timezone.utc)
+    current = now or datetime.now(UTC)
     if last_notification_at.tzinfo is None:
-        last_notification_at = last_notification_at.replace(tzinfo=timezone.utc)
+        last_notification_at = last_notification_at.replace(tzinfo=UTC)
     hours_since = (current - last_notification_at).total_seconds() / 3600.0
     if hours_since < RECENCY_FATIGUE_WINDOW_HOURS:
         base += RECENCY_FATIGUE_KICK

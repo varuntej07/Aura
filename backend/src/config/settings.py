@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     VOICE_TOOL_TIMEOUT_S: float = 5.0      # per-tool Firestore call budget
     VOICE_CONNECT_TIMEOUT_S: float = 10.0  # LiveKit room.connect() budget
 
+    # Chat tool timeout — longer than voice because text chat can tolerate a Google Calendar sync
+    CHAT_TOOL_TIMEOUT_S: float = 20.0
+
     # Voice gateway
     VOICE_GATEWAY_PORT: int = 8000
     VOICE_GATEWAY_HOST: str = "0.0.0.0"

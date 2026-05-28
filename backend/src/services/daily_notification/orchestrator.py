@@ -19,16 +19,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime, timezone, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from langfuse.decorators import observe
+from zoneinfo import ZoneInfo
+
+from langfuse import observe
 
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
 from ...services.model_provider import ModelProvider
-from .models import CalendarNotificationContent, MeetingReminderPlan
 from .calendar_notification_agent import CalendarNotificationAgent
+from .models import CalendarNotificationContent, MeetingReminderPlan
 from .suggestion_pills_agent import SuggestionPillsAgent
 
 MAX_DAILY_MEETING_REMINDERS = 3
@@ -99,7 +100,7 @@ async def _run(user_id: str) -> None:
             events_three_days_away=events_three_days_away,
             user_timezone=user_timezone,
         )
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         meeting_reminders = _build_meeting_reminder_plans(
             cal_batch.reminders, upcoming_events, now_utc, user_timezone
         )
@@ -196,7 +197,7 @@ async def _write_calendar_plan(
         doc: dict[str, Any] = {
             "plan_date": plan_date,
             "plan_source": "calendar_only",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         for i, reminder in enumerate(meeting_reminders):
             doc[f"meeting_reminder_{i}"] = {
@@ -246,9 +247,9 @@ async def _schedule_nudge_send(
         try:
             send_dt = datetime.fromisoformat(send_at_utc)
             if send_dt.tzinfo is None:
-                send_dt = send_dt.replace(tzinfo=timezone.utc)
+                send_dt = send_dt.replace(tzinfo=UTC)
         except ValueError:
-            send_dt = datetime.now(timezone.utc) + timedelta(hours=1)
+            send_dt = datetime.now(UTC) + timedelta(hours=1)
 
         eta = timestamp_pb2.Timestamp()
         eta.FromSeconds(int(send_dt.timestamp()))
@@ -314,7 +315,7 @@ async def _fetch_upcoming_calendar_events(user_id: str, days_ahead: int = 7) -> 
         if not integration.exists or not (integration.to_dict() or {}).get("enabled"):
             return []
 
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         end_utc = now_utc + timedelta(days=days_ahead)
 
         snapshot = (
@@ -415,7 +416,7 @@ def _build_meeting_reminder_plans(
             try:
                 event_start_map[event_id] = datetime.fromisoformat(
                     start_at.replace("Z", "+00:00")
-                ).astimezone(timezone.utc)
+                ).astimezone(UTC)
             except Exception:
                 pass
 

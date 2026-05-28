@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timedelta, timezone
+import zoneinfo
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -15,17 +16,42 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from .firebase import admin_firestore, admin_messaging
+from .firebase import admin_firestore
 from .google_calendar_connector import GoogleCalendarConnector
 
 ToolResult = dict[str, Any]
 
-TOOL_TIMEOUT_S = settings.VOICE_TOOL_TIMEOUT_S
+TOOL_TIMEOUT_S = settings.CHAT_TOOL_TIMEOUT_S
 
 
 # runs sync functions with timeout
 async def _run(fn, *args, **kwargs):
     return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=TOOL_TIMEOUT_S)
+
+
+async def _get_user_timezone(uid: str) -> str:
+    """Return the IANA timezone string stored on the user's Firestore profile.
+
+    Used as a fallback when the model gives a naive datetime string (no offset).
+    Reads the same 'timezone' field that the chat handler uses for local_datetime injection.
+    Returns 'UTC' on any failure so the caller always gets a usable value.
+    """
+    def _fetch() -> str | None:
+        try:
+            snap = admin_firestore().collection("users").document(uid).get()
+            d = snap.to_dict()
+            return d.get("timezone") if d else None
+        except Exception:
+            return None
+
+    tz_str = await asyncio.to_thread(_fetch)
+    if not tz_str:
+        return "UTC"
+    try:
+        zoneinfo.ZoneInfo(tz_str)
+        return tz_str
+    except zoneinfo.ZoneInfoNotFoundError:
+        return "UTC"
 
 
 class ToolExecutor:
@@ -83,6 +109,21 @@ class ToolExecutor:
                 "result_keys": list(result.keys()) if isinstance(result, dict) else "non-dict",
             })
             return result
+        except asyncio.TimeoutError:
+            _ms = int((_time.monotonic() - _start) * 1000)
+            logger.warn(f"Tool: {tool_name} timed out", {
+                "user_id": self._user_id,
+                "duration_ms": _ms,
+            })
+            return {"error": True, "user_message": "That took too long. Try again in a moment."}
+        except ValueError as exc:
+            _ms = int((_time.monotonic() - _start) * 1000)
+            logger.warn(f"Tool: {tool_name} validation error", {
+                "user_id": self._user_id,
+                "duration_ms": _ms,
+                "error": str(exc),
+            })
+            return {"error": True, "user_message": str(exc)}
         except Exception as exc:
             _ms = int((_time.monotonic() - _start) * 1000)
             logger.exception(f"Tool: {tool_name} FAILED", {
@@ -90,25 +131,43 @@ class ToolExecutor:
                 "duration_ms": _ms,
                 "error": str(exc),
             })
-            raise
+            return {"error": True, "user_message": "Something went wrong. Try again in a bit."}
 
     # Reminders
     async def _set_reminder(self, inp: dict[str, Any]) -> ToolResult:
         message = str(inp.get("message", "")).strip()
-        delay_minutes = inp.get("delay_minutes")
+        scheduled_at_str = str(inp.get("scheduled_at", "")).strip()
         priority = str(inp.get("priority", "normal"))
 
         if not message:
             raise ValueError("message is required")
-        if not isinstance(delay_minutes, (int, float)) or delay_minutes <= 0:
-            raise ValueError("delay_minutes must be a positive number")
+        if not scheduled_at_str:
+            raise ValueError("scheduled_at is required")
 
-        trigger_at = (
-            datetime.now(timezone.utc) + timedelta(minutes=float(delay_minutes))
-        ).isoformat()
+        # Parse the ISO 8601 datetime provided by the model.
+        try:
+            scheduled_at = datetime.fromisoformat(scheduled_at_str)
+        except ValueError:
+            raise ValueError(f"scheduled_at must be an ISO 8601 datetime, got: {scheduled_at_str!r}")
+
+        # If the model omitted the timezone offset, fall back to the user's stored timezone
+        # rather than silently treating the time as UTC, which would fire at the wrong hour.
+        if scheduled_at.tzinfo is None:
+            tz_str = await _get_user_timezone(self._user_id)
+            scheduled_at = scheduled_at.replace(tzinfo=zoneinfo.ZoneInfo(tz_str))
+
+        # Always normalize to UTC before storing. trigger_at is queried with Firestore
+        # string comparison, so consistent UTC format is required for correct ordering.
+        trigger_at_dt = scheduled_at.astimezone(UTC)
+
+        if trigger_at_dt <= datetime.now(UTC):
+            raise ValueError("scheduled_at must be in the future")
+
+        # Store as UTC ISO string so the scheduler comparison is lexically correct.
+        trigger_at = trigger_at_dt.isoformat()
 
         reminder_id = str(uuid4())
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         data = {
             "id": reminder_id,
@@ -148,7 +207,7 @@ class ToolExecutor:
         if not reminder_id:
             raise ValueError("reminder_id is required")
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         ref = self._reminders_ref().document(reminder_id)
         await _run(lambda: ref.update({
             "status": "dismissed",
@@ -199,11 +258,12 @@ class ToolExecutor:
         def _fetch() -> ToolResult:
             connector = GoogleCalendarConnector(self._user_id)
             return connector.query_events(
-                range_name=str(inp.get("range", "")).strip() or None,
+                range_name=str(inp.get("range_name", "")).strip() or None,
                 start_time=str(inp.get("start_time", "")).strip() or None,
                 end_time=str(inp.get("end_time", "")).strip() or None,
                 limit=int(inp.get("limit", 10) or 10),
                 hours_ahead=int(inp.get("hours_ahead", 24) or 24),
+                skip_live_sync=True,
             )
 
         return await _run(_fetch)
@@ -217,7 +277,7 @@ class ToolExecutor:
         if not key or not value or not category:
             raise ValueError("key, value, and category are required")
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         def _upsert() -> str:
             existing = list(
@@ -296,7 +356,7 @@ class ToolExecutor:
         recommendation = "moderate" if ("high sugar" in concerns or "high sodium" in concerns) else "eat"
 
         log_id = str(uuid4())
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         log_data = {
             "ocr_text": ocr_text,
             "occasion": inp.get("occasion"),
@@ -375,7 +435,7 @@ class ToolExecutor:
         if not agent_id or not setting:
             return {"error": "agent_id and setting are required"}
         ref = self._user_ref().collection("agent_config").document(agent_id)
-        await _run(lambda: ref.set({setting: value, "updated_at": datetime.now(timezone.utc).isoformat()}, merge=True))
+        await _run(lambda: ref.set({setting: value, "updated_at": datetime.now(UTC).isoformat()}, merge=True))
         return {"status": "updated", "agent_id": agent_id, "setting": setting, "value": value}
 
     async def _get_agent_config(self, inp: dict[str, Any]) -> ToolResult:
@@ -394,7 +454,7 @@ def fetch_due_reminders() -> list[dict[str, Any]]:
     Intentionally synchronous — called via asyncio.to_thread from the scheduler.
     """                 
     db = admin_firestore()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
 
     docs = (
         db.collection_group("reminders")
@@ -433,7 +493,7 @@ def claim_reminder_for_processing(user_id: str, reminder_id: str) -> bool:
             return False
         txn.update(doc_ref, {
             "status": "processing",
-            "processing_at": datetime.now(timezone.utc).isoformat(),
+            "processing_at": datetime.now(UTC).isoformat(),
         })
         return True
 
@@ -443,7 +503,7 @@ def claim_reminder_for_processing(user_id: str, reminder_id: str) -> bool:
 def mark_reminder_fired(user_id: str, reminder_id: str) -> None:
     """Intentionally synchronous — called via asyncio.to_thread from the scheduler."""
     db = admin_firestore()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     db.collection("users").document(user_id).collection("reminders").document(reminder_id).update({
         "status": "fired",
         "fired_at": now_iso,

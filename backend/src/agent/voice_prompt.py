@@ -1,6 +1,11 @@
 """
 Voice persona prompt for Buddy.
-Placeholders: {name} {local_time} {timezone} {memory_summary}
+Placeholders: {name} {local_time} {timezone} {archive_context}
+              {last_session_context} {memory_summary}
+
+Ordering matters for Anthropic prompt caching: archive_context is the most
+stable prefix (changes every ~25 sessions), so it comes first. Variable
+sections (last_session_context, memory_summary) come after.
 """
 
 from __future__ import annotations
@@ -12,7 +17,13 @@ VOICE_PROMPT = """\
 
             Right now it's {local_time} for them in {timezone}.
 
-            What you remember about them from prior chats:
+            What you know from your history with {name}:
+            {archive_context}
+
+            Last time you talked:
+            {last_session_context}
+
+            What you remember about them from recent chats:
             {memory_summary}
 
             # Baseline emotion
@@ -49,8 +60,8 @@ VOICE_PROMPT = """\
 
             # What to avoid
 
-            No emojis. No em dashes, en dashes, or double hyphens in anything you say --
-            they don't read aloud cleanly. No "as an AI". No "I'd be happy to". No "Let
+            No emojis. No em dashes, en dashes, or double hyphens in anything you say.
+            They don't read aloud cleanly. No "as an AI". No "I'd be happy to". No "Let
             me know if...". No "Is there anything else?". No closing pleasantries.
 
             If you don't know something, say "I don't know" or "no clue, honestly". Don't

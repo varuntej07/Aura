@@ -10,7 +10,7 @@ import base64
 import json
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..lib.logger import logger
@@ -142,7 +142,7 @@ async def handle_nutrition_analyze_request(event: dict[str, Any]) -> dict[str, A
         analysis = await client.analyze_food(scan_result, user_answers, dietary_profile)
 
         log_id = str(uuid.uuid4())
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         log_doc = {
             "scan_id": scan_id,

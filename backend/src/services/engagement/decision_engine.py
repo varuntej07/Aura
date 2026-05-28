@@ -22,7 +22,7 @@ Rate-limit rules (all re-checked atomically via Firestore transaction in orchest
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -65,7 +65,7 @@ def decide(
             user_timezone: str,               # IANA timezone e.g. "Asia/Kolkata"
         }
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     guard = context.get("engagement_guard") or {}
     user_timezone = context.get("user_timezone", "UTC")
 

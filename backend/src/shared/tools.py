@@ -10,15 +10,19 @@ from typing import Any
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "set_reminder",
-        "description": "Create a time-delayed reminder for the user.",
+        "description": "Schedule a reminder for the user at a specific date and time.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "message": {"type": "string", "description": "What to remind the user about."},
-                "delay_minutes": {
-                    "type": "integer",
-                    "description": "How many minutes from now to send the reminder.",
-                    "minimum": 1,
+                # Include the timezone offset so the server can normalize to UTC correctly.
+                "scheduled_at": {
+                    "type": "string",
+                    "description": (
+                        "When to send the reminder, as an ISO 8601 datetime string with timezone "
+                        "offset (e.g. '2026-06-02T09:00:00+05:30'). Use the current date and "
+                        "timezone from your system context to compute this."
+                    ),
                 },
                 "priority": {
                     "type": "string",
@@ -26,7 +30,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "default": "normal",
                 },
             },
-            "required": ["message", "delay_minutes"],
+            "required": ["message", "scheduled_at"],
         },
     },
     {

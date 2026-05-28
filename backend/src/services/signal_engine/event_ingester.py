@@ -20,16 +20,16 @@ holds per-request state on its functions or globals.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime
 
 from ...lib.logger import logger
 from . import content_pool, feature_store
 from .embedder import embed_text, embed_texts
 from .feature_store import (
-    SignalStoreState,
     TIME_SLOTS_PER_DAY,
     USER_VECTOR_DIMENSION,
+    SignalStoreState,
 )
 
 # Base learning rate. Negative-weighted events use the same alpha but flip sign.
@@ -169,7 +169,7 @@ async def _apply_event_inner(
     if event_type in ("notification_opened", "content_liked", "content_shared"):
         state.consecutive_no_open_ticks = 0
 
-    state.last_updated = datetime.now(timezone.utc)
+    state.last_updated = datetime.now(UTC)
     await feature_store.write_state(user_id, state)
 
 
@@ -276,7 +276,7 @@ async def refresh_user_vector_from_aura(
     the per-event EMA so that evolved interests surface within a few days even
     for completely idle users.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
     interests = await _read_top_deep_interests(user_id, top_k=10)
     if interests:
         try:
@@ -296,13 +296,14 @@ async def refresh_user_vector_from_aura(
                 "user_id": user_id,
                 "error": str(exc),
             })
-    state.last_bootstrap_at = datetime.now(timezone.utc)
+    state.last_bootstrap_at = datetime.now(UTC)
     return state
 
 
 async def _read_top_deep_interests(user_id: str, top_k: int) -> list[str]:
     """Pull deep_interest_frequencies from UserAura and return the top_k keys."""
     import asyncio
+
     from ..firebase import admin_firestore
 
     def _fetch() -> dict[str, int]:

@@ -5,7 +5,7 @@ Central query logger: Writes every user input to users/{uid}/queries/{id}.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from .logger import logger
@@ -28,7 +28,7 @@ async def log_query(
         doc: dict = {
             "text": text,
             "type": query_type,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         if session_id:
             doc["session_id"] = session_id

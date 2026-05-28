@@ -8,10 +8,11 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import anthropic
-from langfuse.decorators import observe
+from langfuse import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger

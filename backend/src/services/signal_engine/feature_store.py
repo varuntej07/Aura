@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud.firestore_v1.vector import Vector
@@ -108,7 +108,7 @@ def _encode_state(state: SignalStoreState) -> dict[str, Any]:
         "sends_today": state.sends_today,
         "sends_today_date": state.sends_today_date,
         "bootstrap_done": state.bootstrap_done,
-        "last_updated": datetime.now(timezone.utc),
+        "last_updated": datetime.now(UTC),
         "last_bootstrap_at": state.last_bootstrap_at,
         "consecutive_no_open_ticks": state.consecutive_no_open_ticks,
     }
@@ -164,7 +164,7 @@ async def append_event(
         "content_id": content_id,
         "category": category,
         "duration_ms": duration_ms,
-        "timestamp": datetime.now(timezone.utc),
+        "timestamp": datetime.now(UTC),
     }
 
     def _put() -> None:
@@ -240,7 +240,7 @@ async def resolve_outcome(
     if outcome not in {"opened", "dismissed", "timeout"}:
         raise ValueError(f"resolve_outcome: unknown outcome '{outcome}'")
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     def _update() -> dict[str, Any] | None:
         ref = (
@@ -280,9 +280,10 @@ async def list_active_user_ids(inactivity_days: int = 7) -> list[str]:
     targets the same audience as the legacy agent dispatcher.
     """
     from datetime import timedelta
+
     from google.cloud.firestore_v1.base_query import FieldFilter
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=inactivity_days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=inactivity_days)).isoformat()
 
     def _fetch() -> list[str]:
         db = admin_firestore()

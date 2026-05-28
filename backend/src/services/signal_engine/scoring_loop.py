@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -122,7 +122,7 @@ async def _score_one_user(
 
     try:
         user_timezone = await asyncio.wait_for(_load_user_timezone(user_id), timeout=5.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         user_timezone = "UTC"
 
     user_local_now = _local_now(user_timezone)
@@ -155,7 +155,7 @@ async def _score_one_user(
     recent_categories = await _load_recent_outcome_categories(user_id)
 
     scored: list[tuple[float, ScoredCandidate, dict[str, float]]] = []
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     for cand in candidates:
         if not cand.embedding:
             continue
@@ -224,7 +224,7 @@ async def _score_one_user(
         user_context = await asyncio.wait_for(
             _build_framing_context(user_id, user_local_now), timeout=5.0
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warn("signal_engine.scoring_loop: framing context timed out, using defaults", {
             "user_id": user_id,
         })
@@ -236,7 +236,7 @@ async def _score_one_user(
         framed = await asyncio.wait_for(
             frame_notification(models, best_cand, user_context), timeout=10.0
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warn("signal_engine.scoring_loop: framer LLM timed out, using fallback", {
             "user_id": user_id,
             "content_id": best_cand.content_id,
@@ -244,7 +244,7 @@ async def _score_one_user(
         framed = _safe_fallback(best_cand)
 
     notification_id = str(uuid.uuid4())
-    sent_at = datetime.now(timezone.utc)
+    sent_at = datetime.now(UTC)
     result = await send_notification(
         user_id,
         title=framed.title,
@@ -316,7 +316,7 @@ def _should_refresh_user_vector(state: feature_store.SignalStoreState) -> bool:
     if state.last_bootstrap_at is None:
         # Pre-existing user before last_bootstrap_at was introduced — refresh now.
         return True
-    age_days = (datetime.now(timezone.utc) - state.last_bootstrap_at).total_seconds() / 86400
+    age_days = (datetime.now(UTC) - state.last_bootstrap_at).total_seconds() / 86400
     return age_days >= AURA_REFRESH_INTERVAL_DAYS
 
 
@@ -363,7 +363,7 @@ def _local_now(timezone_name: str) -> datetime:
     try:
         return datetime.now(ZoneInfo(timezone_name))
     except (ZoneInfoNotFoundError, Exception):
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 async def _load_recent_outcome_categories(user_id: str) -> list[str]:
@@ -432,7 +432,7 @@ async def _build_framing_context(user_id: str, user_local_now: datetime) -> User
 async def _sweep_timeouts(user_id: str) -> int:
     """Find pending outcomes older than OUTCOME_TIMEOUT_HOURS, flip to timeout,
     and apply a small negative event so the user vector drifts away."""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=OUTCOME_TIMEOUT_HOURS)
+    cutoff = datetime.now(UTC) - timedelta(hours=OUTCOME_TIMEOUT_HOURS)
 
     def _fetch_stale() -> list[tuple[str, str]]:
         db = admin_firestore()
@@ -449,7 +449,7 @@ async def _sweep_timeouts(user_id: str) -> int:
 
     try:
         stale = await asyncio.wait_for(asyncio.to_thread(_fetch_stale), timeout=5.0)
-    except (asyncio.TimeoutError, Exception) as exc:
+    except (TimeoutError, Exception) as exc:
         logger.warn("signal_engine.scoring_loop: stale-outcome scan failed", {
             "user_id": user_id,
             "error": str(exc),

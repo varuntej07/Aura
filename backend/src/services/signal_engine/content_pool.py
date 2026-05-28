@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
@@ -65,7 +65,7 @@ class ScoredCandidate:
 def _build_content_id(source: str, url: str, title: str) -> str:
     """Stable ID derived from source + url so the same item is not embedded twice."""
     key = (url.strip() or title.strip()).lower()
-    digest = hashlib.sha256(f"{source}|{key}".encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(f"{source}|{key}".encode()).hexdigest()[:24]
     return f"{source}_{digest}"
 
 
@@ -110,7 +110,7 @@ async def add_candidates(items: list[CandidateInput]) -> int:
 
     vectors = await embed_texts([text for _, _, text in new_only])
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     written = 0
 
     def _put_batch() -> int:
@@ -190,7 +190,7 @@ async def find_nearest_for_user(
     """
     if not user_vector:
         return []
-    current_time = now or datetime.now(timezone.utc)
+    current_time = now or datetime.now(UTC)
 
     def _query() -> list[ScoredCandidate]:
         db = admin_firestore()
@@ -257,7 +257,7 @@ async def get_candidate(content_id: str) -> ScoredCandidate | None:
             body=str(data.get("body", "")),
             url=str(data.get("url", "")),
             embedding=embedding,
-            freshness_ts=data.get("freshness_ts") or datetime.now(timezone.utc),
+            freshness_ts=data.get("freshness_ts") or datetime.now(UTC),
             cosine_similarity=0.0,
         )
 

@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from ...lib.logger import logger
 from ...agents.data_fetchers.arxiv_papers import fetch_recent_papers
 from ...agents.data_fetchers.cricket_scores import fetch_live_matches, fetch_recent_results
 from ...agents.data_fetchers.hackernews import fetch_top_stories
 from ...agents.data_fetchers.web_search import web_search
+from ...lib.logger import logger
 from .content_pool import CandidateInput, add_candidates
 
 HACKERNEWS_FETCH_LIMIT = 20
@@ -78,7 +78,7 @@ class SportsSummary:
 async def run_ingest() -> IngestSummary:
     """Hourly: fetch from HN, arXiv, and ESPN Cricinfo RSS in parallel."""
     summary = IngestSummary()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     hn, arxiv, cricket = await asyncio.gather(
         _safe_fetch(fetch_top_stories(limit=HACKERNEWS_FETCH_LIMIT), "hackernews"),
@@ -114,7 +114,7 @@ async def run_ingest() -> IngestSummary:
 async def run_sports_ingest() -> SportsSummary:
     """Every 30 min: live cricket scores + web-searched league results."""
     summary = SportsSummary()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     live_matches, web_search_results = await asyncio.gather(
         _safe_fetch(fetch_live_matches(), "cricbuzz_live"),
@@ -161,7 +161,7 @@ async def _safe_fetch(coro, source_name: str) -> list[dict]:
 
 async def _safe_sports_web_search(query: str, sub_category: str) -> list[CandidateInput]:
     """One web search query -> one CandidateInput. Returns [] on any failure."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         text = await web_search(query, uid="sports_ingest")
         if not text or not text.strip():
