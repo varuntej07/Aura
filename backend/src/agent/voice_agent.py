@@ -65,7 +65,7 @@ _TOOL_THINKING_PHRASES: dict[str, str] = {
     "query_memory": "thinking through what I remember about you...",
     "analyze_nutrition": "having a closer look at that...",
     "get_user_context": "pulling up your details for this!",
-    "web_search": "surfing the web for you right now!",
+    "web_surf": "Alright, Lemme surf the web for that!",
 }
 
 # Hard cap on the parallel profile + memory fetch before session.start.

@@ -1,37 +1,15 @@
-"""Web search via Gemini 2.0 Flash with google_search grounding."""
+"""Backwards-compatible shim. The primitive moved to web_surf.py.
+
+Internal scheduled agents (sports_agent, technews_agent, signal_engine/content_ingest)
+import `web_search(query, uid) -> str` from here. Forward to the new primitive and
+return just the synthesized text so callers don't need to change.
+"""
 
 from __future__ import annotations
 
-import asyncio
-
-from ...config.settings import settings
-from ...lib.logger import logger
-
-def _search_sync(query: str, uid: str) -> str:
-    if not settings.GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY not configured — web search unavailable")
-
-    from google import genai  # type: ignore
-    from google.genai import types  # type: ignore
-
-    client = genai.Client(api_key=settings.GEMINI_API_KEY)
-    tool = types.Tool(google_search=types.GoogleSearch())
-    config = types.GenerateContentConfig(tools=[tool], temperature=1.0)
-
-    response = client.models.generate_content(
-        model=settings.GEMINI_MODEL,
-        contents=query,
-        config=config,
-    )
-    text = response.text or ""
-    logger.info("web_search OK", {"uid": uid, "query_len": len(query), "result_len": len(text)})
-    return text
+from .web_surf import web_surf as _web_surf
 
 
 async def web_search(query: str, uid: str) -> str:
-    """Call Gemini 2.0 Flash with google_search grounding and return the response text."""
-    try:
-        return await asyncio.to_thread(_search_sync, query, uid)
-    except Exception as exc:
-        logger.error("web_search failed", {"uid": uid, "query": query, "error": str(exc)})
-        raise
+    result = await _web_surf(query, uid=uid, recency="any")
+    return str(result.get("text", ""))

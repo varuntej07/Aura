@@ -87,7 +87,7 @@ class ToolExecutor:
             "ask_clarification": self._ask_clarification,
             "configure_agent": self._configure_agent,
             "get_agent_config": self._get_agent_config,
-            "web_search": self._web_search,
+            "web_surf": self._web_surf,
         }
         handler = dispatch.get(tool_name)
         if handler is None:
@@ -389,14 +389,33 @@ class ToolExecutor:
             "recommendation": recommendation,
         }
 
-    # Web search (agent-only)
-    async def _web_search(self, inp: dict[str, Any]) -> ToolResult:
-        from ..agents.data_fetchers.web_search import web_search
+    # Web surf — grounded search exposed to chat + voice
+    async def _web_surf(self, inp: dict[str, Any]) -> ToolResult:
+        from ..agents.data_fetchers.web_surf import web_surf
+        from .entitlement import (
+            check_and_increment_daily_web_surf_usage,
+            get_user_effective_tier,
+        )
+
         query = str(inp.get("query", "")).strip()
         if not query:
             raise ValueError("query is required")
-        result = await web_search(query, self._user_id)
-        return {"result": result}
+        recency = str(inp.get("recency", "any")).strip().lower() or "any"
+        if recency not in {"any", "fresh"}:
+            recency = "any"
+
+        tier = await get_user_effective_tier(self._user_id)
+        if tier == "free":
+            allowed, count = await check_and_increment_daily_web_surf_usage(self._user_id)
+            if not allowed:
+                return {
+                    "error": True,
+                    "user_message": "You've hit today's web search limit. Upgrade for unlimited.",
+                    "limit_reached": True,
+                    "count": count,
+                }
+
+        return await web_surf(query, uid=self._user_id, recency=recency)
 
     # Clarification (chat-only — returns sentinel dict, not a Firestore call)
     async def _ask_clarification(self, inp: dict[str, Any]) -> ToolResult:

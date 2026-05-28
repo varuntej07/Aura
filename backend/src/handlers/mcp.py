@@ -84,6 +84,7 @@ async def _run_tool(tool_name: str, args: dict) -> dict:
             "get_upcoming_events": "Your calendar is taking too long to respond. Try again in a moment.",
             "create_calendar_event": "Couldn't reach your calendar in time. Try again.",
             "get_user_context": "That's taking too long. Try again in a moment.",
+            "web_surf": "Couldn't reach the web in time. Try again in a sec.",
         }
         return {
             "error": True,
@@ -179,6 +180,28 @@ async def analyze_nutrition(
         "occasion": occasion or None,
         "is_cheat_meal": is_cheat_meal,
     })
+
+
+# Web surf ----------------------------------------------------------------
+
+@mcp_server.tool()
+async def web_surf(query: str, recency: str = "any") -> dict[str, Any]:
+    """Search the live web for current information, news, prices, scores, or any time-sensitive fact.
+
+    Use this when the user asks about:
+      - news, events, or anything that happened recently
+      - live data (sports scores, stock prices, weather, status pages)
+      - facts that may have changed since training (releases, rosters, regulations)
+      - things you are not certain about and need to verify
+
+    Do NOT use this for things you already know (general knowledge, math, stable facts,
+    the user's own data — that's in other tools).
+
+    query: a natural-language search query. Be specific.
+    recency: 'fresh' for time-sensitive queries (news/scores/prices). 'any' (default)
+             for stable lookups.
+    """
+    return await _run_tool("web_surf", {"query": query, "recency": recency})
 
 
 # User context ------------------------------------------------------------
