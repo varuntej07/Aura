@@ -41,11 +41,12 @@ from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
 from livekit.agents.voice import room_io
-from livekit.plugins import anthropic, cartesia, deepgram, google, silero
+from livekit.plugins import anthropic, cartesia, deepgram, google, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..services.entitlement import get_user_effective_tier
 from ..services.firebase import admin_auth, admin_firestore
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
@@ -77,6 +78,11 @@ _TOOL_THINKING_PHRASES: dict[str, str] = {
 # 1.5s is the budget that still leaves margin for STT/LLM/TTS warm-up.
 _PRE_SESSION_FETCH_TIMEOUT_S = 1.5
 
+# Region tag for per-turn voice telemetry. LiveKit Cloud picks the edge region
+# per connection and does not expose it cheaply, so we tag the deployment region
+# from the environment. Set LIVEKIT_REGION at deploy time; otherwise "unknown".
+_VOICE_TELEMETRY_REGION = os.environ.get("LIVEKIT_REGION", "unknown")
+
 
 def _log_voice_failure(
     *,
@@ -94,6 +100,57 @@ def _log_voice_failure(
         "error_type": type(exc).__name__,
         "error": str(exc),
     })
+
+
+def _log_turn_metrics(
+    *,
+    session_id: str,
+    user_id: str,
+    role: str,
+    metrics: dict,
+    tier: str,
+) -> None:
+    """Emit per-turn component latency from a ChatMessage.metrics report.
+
+    LiveKit splits per-turn telemetry across two messages: user turns carry the
+    endpointing decision and STT transcription delay; assistant turns carry LLM
+    time-to-first-token, TTS time-to-first-byte, and the end-of-utterance ->
+    first-audio (e2e) latency that owns the perceived response gap. All values
+    are converted to milliseconds. model/provider come from the per-turn
+    metadata LiveKit attaches; region/tier are session-level tags so a turn can
+    be sliced by deployment region and subscription tier later.
+    """
+    def _to_ms(seconds: object) -> int | None:
+        return int(seconds * 1000) if isinstance(seconds, (int, float)) else None
+
+    payload: dict = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "role": role,
+        "tier": tier,
+        "region": _VOICE_TELEMETRY_REGION,
+    }
+
+    if role == "user":
+        payload["endpointing_ms"] = _to_ms(metrics.get("end_of_turn_delay"))
+        payload["stt_final_ms"] = _to_ms(metrics.get("transcription_delay"))
+        stt_meta = metrics.get("stt_metadata") or {}
+        payload["stt_model"] = stt_meta.get("model_name")
+        payload["stt_provider"] = stt_meta.get("model_provider")
+    elif role == "assistant":
+        payload["llm_ttft_ms"] = _to_ms(metrics.get("llm_node_ttft"))
+        payload["tts_ttfb_ms"] = _to_ms(metrics.get("tts_node_ttfb"))
+        payload["eou_to_first_audio_ms"] = _to_ms(metrics.get("e2e_latency"))
+        llm_meta = metrics.get("llm_metadata") or {}
+        tts_meta = metrics.get("tts_metadata") or {}
+        payload["llm_model"] = llm_meta.get("model_name")
+        payload["llm_provider"] = llm_meta.get("model_provider")
+        payload["tts_model"] = tts_meta.get("model_name")
+        payload["tts_provider"] = tts_meta.get("model_provider")
+    else:
+        return
+
+    logger.info("VoiceSession: turn metrics", payload)
 
 
 @asynccontextmanager
@@ -142,6 +199,44 @@ def _local_date_in_zone(timezone_name: str) -> str:
     except Exception:
         from datetime import datetime
         return datetime.now(UTC).strftime("%A, %-d %B %Y UTC")
+
+
+# Per-session sonic-3 voice conditioning. dominant_tone (communication style) -> speech cadence. 
+# Kept conservative (0.95-1.08) because sonic-3 treats speed as guidance, not a hard multiplier,
+# and large shifts sound unnatural. speed MUST be a float for sonic-3 — the plugin raises ValueError on the string enum.
+_TONE_TO_SPEED: dict[str, float] = {
+    "terse": 1.08,
+    "playful": 1.05,
+    "casual": 1.0,
+    "formal": 1.0,
+    "verbose": 0.95,
+}
+
+# emotional_state (user affect) -> Cartesia TTSVoiceEmotion. Positive affect is mirrored; 
+# negative affect is counterbalanced (a companion should soothe, not amplify distress). 
+# neutral and any unmapped state set no emotion.
+_EMOTIONAL_STATE_TO_VOICE_EMOTION: dict[str, str] = {
+    "excited": "Excited",
+    "curious": "Curious",
+    "anticipatory": "Anticipation",
+    "anxious": "Calm",
+    "frustrated": "Calm",
+    "sad": "Sympathetic",
+}
+
+
+def _derive_voice_controls(
+    dominant_tone: str, dominant_emotion: str
+) -> tuple[float | None, str | None]:
+    """Map aura signals to (speed, emotion) for the Cartesia sonic-3 TTS.
+
+    speed is always a float or None (never the string enum) to satisfy sonic-3.
+    Returns (None, None) when both signals are absent so a profile-less user gets
+    byte-identical default-voice behavior.
+    """
+    speed = _TONE_TO_SPEED.get((dominant_tone or "").strip().lower())
+    emotion = _EMOTIONAL_STATE_TO_VOICE_EMOTION.get((dominant_emotion or "").strip().lower())
+    return speed, emotion
 
 
 async def _fetch_user_profile(user_id: str) -> dict[str, str]:
@@ -208,13 +303,19 @@ async def _fetch_archive_context(user_id: str) -> dict[str, str]:
     return await asyncio.to_thread(_read)
 
 
-async def _fetch_user_aura_summary(user_id: str) -> str:
-    """Format top behavioral signals from UserAura/{uid} as a prompt-ready block."""
-    def _read() -> str:
+async def _fetch_user_aura_profile(user_id: str) -> dict[str, str]:
+    """Read UserAura/{uid} once and return both the prompt block and raw voice signals.
+
+    Returns {summary, dominant_tone, dominant_emotion}. `summary` is the
+    prompt-ready behavioral block; `dominant_tone` is the user's communication style; 
+    `dominant_emotion` is the argmax of the accumulated `emotional_signals` frequency map (no single field stores it).
+    All default to "" when absent so a profile-less user changes nothing downstream.
+    """
+    def _read() -> dict[str, str]:
         doc = admin_firestore().collection("UserAura").document(user_id).get()
         data = doc.to_dict() or {}
         if not data:
-            return ""
+            return {"summary": "", "dominant_tone": "", "dominant_emotion": ""}
         lines: list[str] = []
 
         tone = data.get("dominant_tone", "")
@@ -243,7 +344,17 @@ async def _fetch_user_aura_summary(user_id: str) -> str:
         if avoid:
             lines.append(f"What to avoid: {'; '.join(avoid)}")
 
-        return "\n".join(f"- {line}" for line in lines)
+        emotional_signals: dict = data.get("emotional_signals", {}) or {}
+        dominant_emotion = (
+            max(emotional_signals, key=lambda k: emotional_signals[k])
+            if emotional_signals else ""
+        )
+
+        return {
+            "summary": "\n".join(f"- {line}" for line in lines),
+            "dominant_tone": str(tone or ""),
+            "dominant_emotion": str(dominant_emotion or ""),
+        }
 
     return await asyncio.to_thread(_read)
 
@@ -331,7 +442,8 @@ async def entrypoint(ctx: JobContext) -> None:
                     _fetch_memory_summary(user_id),
                     _fetch_last_session_summary(user_id),
                     _fetch_archive_context(user_id),
-                    _fetch_user_aura_summary(user_id),
+                    _fetch_user_aura_profile(user_id),
+                    get_user_effective_tier(user_id),
                     return_exceptions=True,
                 ),
                 timeout=_PRE_SESSION_FETCH_TIMEOUT_S,
@@ -345,14 +457,16 @@ async def entrypoint(ctx: JobContext) -> None:
                 "",
                 {"summary": "", "last_session_at": ""},
                 {"archive_summary": ""},
-                "",
+                {"summary": "", "dominant_tone": "", "dominant_emotion": ""},
+                "unknown",
             ]
 
         profile = fetch_results[0] if not isinstance(fetch_results[0], BaseException) else {"name": "there", "timezone": "UTC"}
         memory_summary = fetch_results[1] if not isinstance(fetch_results[1], BaseException) else ""
         last_session = fetch_results[2] if not isinstance(fetch_results[2], BaseException) else {"summary": "", "last_session_at": ""}
         archive_data = fetch_results[3] if not isinstance(fetch_results[3], BaseException) else {"archive_summary": ""}
-        user_aura_summary = fetch_results[4] if not isinstance(fetch_results[4], BaseException) else ""
+        aura_profile = fetch_results[4] if isinstance(fetch_results[4], dict) else {"summary": "", "dominant_tone": "", "dominant_emotion": ""}
+        user_tier = fetch_results[5] if isinstance(fetch_results[5], str) else "unknown"
 
         for i, r in enumerate(fetch_results):
             if isinstance(r, BaseException):
@@ -374,7 +488,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "last_session_context": last_session_summary,
             "last_session_at": last_session_at,
             "archive_context": archive_context,
-            "user_aura_profile": user_aura_summary or "",
+            "user_aura_profile": aura_profile.get("summary", ""),
         }
 
         # Seed the chat history with a system-side note that mirrors what the prompt already says. 
@@ -414,17 +528,49 @@ async def entrypoint(ctx: JobContext) -> None:
             retry_interval=0.5,
         )
 
-        llm_pipeline = lk_llm.FallbackAdapter(
-            [
-                anthropic.LLM(model=settings.ANTHROPIC_CHAT_MODEL, api_key=settings.ANTHROPIC_API_KEY.strip()),
-                google.LLM(model=settings.TIER_CHEAP, api_key=settings.GEMINI_API_KEY.strip()),
-            ],
-            attempt_timeout=10.0,
+        llm_adapters: list[lk_llm.LLM] = []
+        if settings.OPENAI_API_KEY:
+            # OpenAI caches the longest common prefix automatically (>=1024-token prefix) — no cache_control needed.
+            llm_adapters.append(
+                openai.LLM(
+                    model=settings.OPENAI_CHAT_MODEL,
+                    api_key=settings.OPENAI_API_KEY.strip(),
+                    prompt_cache_key=user_id,
+                )
+            )
+        # caching="ephemeral" stamps cache_control on the system prompt + tools 
+        # so the long voice prompt is read from cache on turn 2+ (lower TTFT).
+        llm_adapters.append(
+            anthropic.LLM(model=settings.ANTHROPIC_CHAT_MODEL, api_key=settings.ANTHROPIC_API_KEY.strip(), caching="ephemeral")
         )
+        llm_adapters.append(
+            google.LLM(model=settings.TIER_CHEAP, api_key=settings.GEMINI_API_KEY.strip())
+        )
+        llm_pipeline = lk_llm.FallbackAdapter(llm_adapters, attempt_timeout=10.0)
+
+        # Per-session voice conditioning from the behavioral profile.
+        # Only the sonic-3 primary supports generation_config speed/emotion; 
+        # the Deepgram and sonic-2 fallbacks are left unconditioned. None kwargs are
+        # omitted so a profile-less user constructs the exact default voice.
+        voice_speed, voice_emotion = _derive_voice_controls(
+            aura_profile.get("dominant_tone", ""),
+            aura_profile.get("dominant_emotion", ""),
+        )
+        sonic3_controls: dict = {}
+        if voice_speed is not None:
+            sonic3_controls["speed"] = voice_speed
+        if voice_emotion is not None:
+            sonic3_controls["emotion"] = voice_emotion
+        logger.info("VoiceSession: voice controls", {
+            "session_id": session_id, "user_id": user_id,
+            "speed": voice_speed, "emotion": voice_emotion,
+            "source_tone": aura_profile.get("dominant_tone", ""),
+            "source_emotion": aura_profile.get("dominant_emotion", ""),
+        })
 
         tts_pipeline = lk_tts.FallbackAdapter(
             [
-                cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3"),
+                cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3", **sonic3_controls),
                 deepgram.TTS(model="aura-2-andromeda-en", api_key=settings.DEEPGRAM_API_KEY.strip()),
                 cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-2"),
             ],
@@ -459,9 +605,18 @@ async def entrypoint(ctx: JobContext) -> None:
             preemptive_generation=True,
             mcp_servers=[mcp_server],
             turn_handling=TurnHandlingOptions(
+                # MultilingualModel already guards turn finality semantically, 
+                # so we lower the endpointing floor from the 0.5s default to 0.2s (~300ms faster reply)
+                endpointing={
+                    "min_delay": 0.2,
+                    "max_delay": 3.0,
+                },
                 interruption={
                     "mode": "adaptive",
-                    "false_interruption_timeout": 2.0,
+                    # Require 0.5s min duration of speech before an interruption counts, 
+                    # so backchannels ("yeah", "mm-hm") don't cut Buddy off.
+                    "min_duration": 0.5,
+                    "false_interruption_timeout": 1.5,
                     "resume_false_interruption": True,
                 },
             ),
@@ -505,7 +660,22 @@ async def entrypoint(ctx: JobContext) -> None:
             if item is None:
                 return
 
-            if getattr(item, "role", None) == "assistant":
+            role = getattr(item, "role", None)
+
+            # Per-turn component telemetry. LiveKit populates ChatMessage.metrics
+            # before this event fires (user turns: endpointing + STT; 
+            # assistant turns: LLM TTFT, TTS TTFB, EOU->first-audio)
+            metrics = getattr(item, "metrics", None)
+            if isinstance(metrics, dict) and metrics and role in ("user", "assistant"):
+                _log_turn_metrics(
+                    session_id=session_id,
+                    user_id=user_id,
+                    role=role,
+                    metrics=metrics,
+                    tier=user_tier,
+                )
+
+            if role == "assistant":
                 content = getattr(item, "text_content", None) or str(item)
                 logger.info("VoiceSession: agent response", {
                     "session_id": session_id, "user_id": user_id,
@@ -551,10 +721,26 @@ async def entrypoint(ctx: JobContext) -> None:
 
         @session.on("session_usage_updated")
         def _on_usage(ev) -> None:  # type: ignore[misc]
-            logger.info("VoiceSession: usage updated", {
-                "session_id": session_id, "user_id": user_id,
-                "usage": str(ev),
-            })
+            # Cumulative per-model token counts, re-emitted after every turn.
+            # once the session has more than one turn, input_cached_tokens must climb. If
+            # it stays 0, the long voice system prompt is being re-billed at full input price every turn.
+            usage = getattr(ev, "usage", None)
+            model_usage = getattr(usage, "model_usage", None) or []
+            for mu in model_usage:
+                if getattr(mu, "type", "") != "llm_usage":
+                    continue
+                input_tokens = getattr(mu, "input_tokens", 0)
+                cached_tokens = getattr(mu, "input_cached_tokens", 0)
+                cache_hit_pct = round(100 * cached_tokens / input_tokens, 1) if input_tokens else 0.0
+                logger.info("VoiceSession: llm usage", {
+                    "session_id": session_id, "user_id": user_id,
+                    "model": getattr(mu, "model", ""),
+                    "provider": getattr(mu, "provider", ""),
+                    "input_tokens": input_tokens,
+                    "input_cached_tokens": cached_tokens,
+                    "cache_hit_pct": cache_hit_pct,
+                    "output_tokens": getattr(mu, "output_tokens", 0),
+                })
 
         @session.on("error")
         def _on_session_error(ev) -> None:  # type: ignore[misc]

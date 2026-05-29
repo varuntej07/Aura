@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     ANTHROPIC_CHAT_MODEL: str = "claude-haiku-4-5"
     ANTHROPIC_MAX_TOKENS: int = 8096
 
+    # OpenAI (primary voice LLM; Anthropic Haiku is the fallback)
+    OPENAI_API_KEY: str = ""
+    OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
+
     # Google Calendar (optional)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
