@@ -120,7 +120,11 @@ class HomeViewModel extends SafeChangeNotifier {
   }
 
   Future<void> endSession() async {
+    final sessionId = _currentVoiceChatSessionId;
     await _voiceService.close();
+    if (sessionId != null) {
+      unawaited(_saveVoiceSessionTitle(sessionId));
+    }
     _resetVoiceState();
     safeNotifyListeners();
   }
@@ -263,6 +267,10 @@ class HomeViewModel extends SafeChangeNotifier {
           );
         }
         _liveTranscript = '';
+        final endedSessionId = _currentVoiceChatSessionId;
+        if (endedSessionId != null) {
+          unawaited(_saveVoiceSessionTitle(endedSessionId));
+        }
         _resetVoiceState();
         safeNotifyListeners();
     }
@@ -315,6 +323,22 @@ class HomeViewModel extends SafeChangeNotifier {
       text: trimmed,
       isFinal: true,
     ));
+  }
+
+  Future<void> _saveVoiceSessionTitle(String sessionId) async {
+    final title = _deriveTitleFromVoiceTranscript();
+    if (title.isEmpty) return;
+    await _chatRepository.setSessionTitle(sessionId, title, userId: _currentUserId);
+  }
+
+  String _deriveTitleFromVoiceTranscript() {
+    for (final entry in _voiceTranscript) {
+      if (entry.role == VoiceTranscriptRole.user && entry.text.trim().isNotEmpty) {
+        final text = entry.text.trim();
+        return text.length > 60 ? '${text.substring(0, 57)}...' : text;
+      }
+    }
+    return '';
   }
 
   Future<void> _saveVoiceMessage(String text, {required bool isUser}) async {

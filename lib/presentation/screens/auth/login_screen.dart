@@ -2,7 +2,6 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -299,7 +298,8 @@ class _LoginScreenState extends State<LoginScreen>
                       opacity: _nameFade,
                       child: Text(
                         'Aura',
-                        style: GoogleFonts.cormorantGaramond(
+                        style: const TextStyle(
+                          fontFamily: 'CormorantGaramond',
                           fontSize: 72,
                           fontWeight: FontWeight.w300,
                           color: Colors.white,
@@ -312,7 +312,8 @@ class _LoginScreenState extends State<LoginScreen>
                       opacity: _taglineFade,
                       child: Text(
                         'AI that remembers you',
-                        style: GoogleFonts.jetBrainsMono(
+                        style: TextStyle(
+                          fontFamily: 'JetBrainsMono',
                           fontSize: 12,
                           fontWeight: FontWeight.w400,
                           letterSpacing: 2.0,

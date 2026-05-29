@@ -362,7 +362,7 @@ class _VoicePanel extends StatelessWidget {
 
 // Voice button
 
-class _VoiceButton extends StatelessWidget {
+class _VoiceButton extends StatefulWidget {
   final MicState micState;
   final VoiceSessionStatus voiceStatus;
   final Animation<double> breathAnimation;
@@ -377,53 +377,75 @@ class _VoiceButton extends StatelessWidget {
     required this.onTap,
   });
 
-  Color get _color {
-    return switch (micState) {
-      MicState.idle => AppColors.micIdle,
-      MicState.listening => AppColors.micListening,
-      MicState.processing => AppColors.micProcessing,
-    };
-  }
+  @override
+  State<_VoiceButton> createState() => _VoiceButtonState();
+}
 
-  String get _label {
-    return switch (voiceStatus) {
-      VoiceSessionStatus.connecting => 'Connecting...',
-      VoiceSessionStatus.ready => 'Listening',
-      VoiceSessionStatus.listening => 'Listening',
-      VoiceSessionStatus.processing => 'Thinking',
-      VoiceSessionStatus.speaking => 'Speaking',
-      _ => 'Start voice',
-    };
+class _VoiceButtonState extends State<_VoiceButton> {
+  int _labelVersion = 0;
+  late String _prevLabel;
+
+  @override
+  void initState() {
+    super.initState();
+    _prevLabel = _labelOf(widget.voiceStatus);
   }
 
   @override
+  void didUpdateWidget(covariant _VoiceButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final newLabel = _labelOf(widget.voiceStatus);
+    if (newLabel != _prevLabel) {
+      _labelVersion++;
+      _prevLabel = newLabel;
+    }
+  }
+
+  String _labelOf(VoiceSessionStatus status) => switch (status) {
+        VoiceSessionStatus.connecting => 'Connecting...',
+        VoiceSessionStatus.ready => 'Listening',
+        VoiceSessionStatus.listening => 'Listening',
+        VoiceSessionStatus.processing => 'Thinking',
+        VoiceSessionStatus.speaking => 'Speaking',
+        _ => 'Start voice',
+      };
+
+  Color _colorOf(MicState state) => switch (state) {
+        MicState.idle => AppColors.micIdle,
+        MicState.listening => AppColors.micListening,
+        MicState.processing => AppColors.micProcessing,
+      };
+
+  @override
   Widget build(BuildContext context) {
+    final label = _labelOf(widget.voiceStatus);
+    final color = _colorOf(widget.micState);
     return GestureDetector(
-      onTap: onTap,
+      onTap: widget.onTap,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           AnimatedBuilder(
-            animation: Listenable.merge([breathAnimation, rippleAnimation]),
+            animation: Listenable.merge([widget.breathAnimation, widget.rippleAnimation]),
             builder: (_, _) {
-              final isActive = micState != MicState.idle;
-              final scale = isActive ? 1.0 : breathAnimation.value;
+              final isActive = widget.micState != MicState.idle;
+              final scale = isActive ? 1.0 : widget.breathAnimation.value;
               return Transform.scale(
                 scale: scale,
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
                     // Ripple ring — visible while listening
-                    if (micState == MicState.listening)
+                    if (widget.micState == MicState.listening)
                       Transform.scale(
-                        scale: rippleAnimation.value,
+                        scale: widget.rippleAnimation.value,
                         child: Container(
                           width: 100,
                           height: 100,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: _color.withValues(
-                              alpha: (1 - rippleAnimation.value + 1)
+                            color: color.withValues(
+                              alpha: (1 - widget.rippleAnimation.value + 1)
                                   .clamp(0, 0.25),
                             ),
                           ),
@@ -435,10 +457,10 @@ class _VoiceButton extends StatelessWidget {
                       height: 80,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: _color,
+                        color: color,
                         boxShadow: [
                           BoxShadow(
-                            color: _color.withValues(alpha: 0.45),
+                            color: color.withValues(alpha: 0.45),
                             blurRadius: 24,
                             spreadRadius: 4,
                           ),
@@ -459,8 +481,8 @@ class _VoiceButton extends StatelessWidget {
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 200),
             child: Text(
-              _label,
-              key: ValueKey(_label),
+              label,
+              key: ValueKey<String>('$label:$_labelVersion'),
               style: const TextStyle(
                 color: AppColors.textTertiary,
                 fontSize: 14,
@@ -679,32 +701,6 @@ class _ChatDrawer extends StatelessWidget {
                             ],
                           ),
                         ),
-                        GestureDetector(
-                          onTap: () {
-                            Navigator.of(context).pop();
-                            authVm.signOut();
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: AppColors.error.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                  color:
-                                      AppColors.error.withValues(alpha: 0.3),
-                                  width: 1),
-                            ),
-                            child: const Text(
-                              'Sign Out',
-                              style: TextStyle(
-                                color: AppColors.error,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ),
                       ],
                     ),
                   )
@@ -803,23 +799,64 @@ class _SessionList extends StatefulWidget {
 class _SessionListState extends State<_SessionList> {
   List<ChatSession> _sessions = [];
   bool _loaded = false;
+  bool _hasMore = true;
+  bool _loadingMore = false;
+  final _scrollController = ScrollController();
+
+  static const _pageSize = 25;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_loadingMore || !_hasMore) return;
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 80) {
+      _loadMore();
+    }
   }
 
   Future<void> _load() async {
     final repo = context.read<ChatRepository>();
     final uid = context.read<AuthViewModel>().user?.uid ?? '';
-    final result = await repo.loadMainSessions(userId: uid, limit: 25);
+    final result = await repo.loadMainSessions(userId: uid, limit: _pageSize);
     result.when(
       success: (s) => setState(() {
         _sessions = s;
         _loaded = true;
+        _hasMore = s.length == _pageSize;
       }),
       failure: (_) => setState(() => _loaded = true),
+    );
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore) return;
+    setState(() => _loadingMore = true);
+    final repo = context.read<ChatRepository>();
+    final uid = context.read<AuthViewModel>().user?.uid ?? '';
+    final result = await repo.loadMainSessions(
+      userId: uid,
+      limit: _pageSize,
+      offset: _sessions.length,
+    );
+    result.when(
+      success: (s) => setState(() {
+        _sessions.addAll(s);
+        _hasMore = s.length == _pageSize;
+        _loadingMore = false;
+      }),
+      failure: (_) => setState(() => _loadingMore = false),
     );
   }
 
@@ -858,8 +895,21 @@ class _SessionListState extends State<_SessionList> {
         ),
         Expanded(
           child: ListView.builder(
-            itemCount: _sessions.length,
+            controller: _scrollController,
+            itemCount: _sessions.length + (_loadingMore ? 1 : 0),
             itemBuilder: (_, i) {
+              if (i == _sessions.length) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Center(
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 1.5),
+                    ),
+                  ),
+                );
+              }
               final s = _sessions[i];
               final label = s.title?.isNotEmpty == true ? s.title! : 'Chat ${i + 1}';
               return ListTile(
