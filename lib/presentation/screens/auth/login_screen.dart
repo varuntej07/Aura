@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -154,6 +153,8 @@ class _BlackHolePainter extends CustomPainter {
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
+enum _EmailFormMode { none, signIn, signUp }
+
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -165,15 +166,18 @@ class _LoginScreenState extends State<LoginScreen>
     with TickerProviderStateMixin {
   late final AnimationController _orbitController;
   late final AnimationController _fadeController;
-  late final Animation<double> _iconFade;
   late final Animation<double> _nameFade;
   late final Animation<double> _taglineFade;
   late final Animation<double> _buttonsFade;
 
+  final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  bool _showEmailForm = false;
+  _EmailFormMode _formMode = _EmailFormMode.none;
   bool _obscurePassword = true;
+
+  String get _loadingMessage =>
+      _formMode == _EmailFormMode.signUp ? 'Creating account…' : 'Signing in…';
 
   @override
   void initState() {
@@ -186,10 +190,6 @@ class _LoginScreenState extends State<LoginScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1600),
     )..forward();
-    _iconFade = CurvedAnimation(
-      parent: _fadeController,
-      curve: const Interval(0.0, 0.4, curve: Curves.easeOut),
-    );
     _nameFade = CurvedAnimation(
       parent: _fadeController,
       curve: const Interval(0.2, 0.6, curve: Curves.easeOut),
@@ -208,16 +208,47 @@ class _LoginScreenState extends State<LoginScreen>
   void dispose() {
     _orbitController.dispose();
     _fadeController.dispose();
+    _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
 
-  void _submitEmail(BuildContext context) {
+  void _goBackToOptions(BuildContext context) {
+    _nameController.clear();
+    _emailController.clear();
+    _passwordController.clear();
+    context.read<AuthViewModel>().clearError();
+    setState(() {
+      _formMode = _EmailFormMode.none;
+      _obscurePassword = true;
+    });
+  }
+
+  void _submitSignIn(BuildContext context) {
     final email = _emailController.text.trim();
     final password = _passwordController.text;
     if (email.isEmpty || password.isEmpty) return;
     context.read<AuthViewModel>().signInWithEmail(email, password);
+  }
+
+  void _submitSignUp(BuildContext context) {
+    final name = _nameController.text.trim();
+    final email = _emailController.text.trim();
+    final password = _passwordController.text;
+    if (name.isEmpty || email.isEmpty || password.isEmpty) return;
+    context.read<AuthViewModel>().createAccountWithEmail(email, password, name);
+  }
+
+  Widget _buildPasswordToggle() {
+    return GestureDetector(
+      onTap: () => setState(() => _obscurePassword = !_obscurePassword),
+      child: Icon(
+        _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+        color: Colors.white38,
+        size: 20,
+      ),
+    );
   }
 
   @override
@@ -225,121 +256,90 @@ class _LoginScreenState extends State<LoginScreen>
     return Consumer<AuthViewModel>(
       builder: (context, vm, _) {
         if (vm.state == ViewState.loading) {
-          return const Scaffold(
-            backgroundColor: Color(0xFF04040F),
-            body: FullScreenLoader(message: 'Signing in…'),
+          return Scaffold(
+            backgroundColor: const Color(0xFF04040F),
+            body: FullScreenLoader(message: _loadingMessage),
           );
         }
 
-        final screenHeight = MediaQuery.of(context).size.height;
         final bottomPadding = MediaQuery.of(context).viewPadding.bottom;
 
         return Scaffold(
           backgroundColor: const Color(0xFF04040F),
-          resizeToAvoidBottomInset: false,
-          body: Stack(
-            fit: StackFit.expand,
+          body: Column(
             children: [
-              // Layer 1: Animated black hole canvas
-              AnimatedBuilder(
-                animation: _orbitController,
-                builder: (_, _) => CustomPaint(
-                  painter: _BlackHolePainter(_orbitController.value),
-                ),
-              ),
-
-              // Layer 2: Radial gradient overlay for contrast
-              Container(
-                decoration: BoxDecoration(
-                  gradient: RadialGradient(
-                    center: const Alignment(0.0, -0.25),
-                    radius: 0.7,
-                    colors: [
-                      Colors.transparent,
-                      const Color(0xFF04040F).withValues(alpha: 0.3),
-                      const Color(0xFF04040F).withValues(alpha: 0.8),
-                    ],
-                    stops: const [0.0, 0.5, 1.0],
-                  ),
-                ),
-              ),
-
-              // Layer 3: Depth blur strip at the orbital horizon
-              Positioned(
-                top: screenHeight * 0.36,
-                left: 0,
-                right: 0,
-                height: 80,
-                child: BackdropFilter(
-                  filter: ui.ImageFilter.blur(sigmaX: 5, sigmaY: 5),
-                  child: Container(color: Colors.transparent),
-                ),
-              ),
-
-              // Layer 4: Hero — icon, name, tagline (top 65%)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: screenHeight * 0.65,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+              // Black hole hero — fixed height at top
+              SizedBox(
+                height: 260,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    FadeTransition(
-                      opacity: _iconFade,
-                      child: const Icon(
-                        Icons.mic_none,
-                        color: Color(0xFF7C6FCD),
-                        size: 32,
+                    AnimatedBuilder(
+                      animation: _orbitController,
+                      builder: (_, _) => CustomPaint(
+                        painter: _BlackHolePainter(_orbitController.value),
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    FadeTransition(
-                      opacity: _nameFade,
-                      child: Text(
-                        'Aura',
-                        style: const TextStyle(
-                          fontFamily: 'CormorantGaramond',
-                          fontSize: 72,
-                          fontWeight: FontWeight.w300,
-                          color: Colors.white,
-                          letterSpacing: 3,
+                    Container(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: const Alignment(0.0, -0.25),
+                          radius: 0.7,
+                          colors: [
+                            Colors.transparent,
+                            const Color(0xFF04040F).withValues(alpha: 0.3),
+                            const Color(0xFF04040F).withValues(alpha: 0.8),
+                          ],
+                          stops: const [0.0, 0.5, 1.0],
                         ),
                       ),
                     ),
-                    const SizedBox(height: 6),
-                    FadeTransition(
-                      opacity: _taglineFade,
-                      child: Text(
-                        'AI that remembers you',
-                        style: TextStyle(
-                          fontFamily: 'JetBrainsMono',
-                          fontSize: 12,
-                          fontWeight: FontWeight.w400,
-                          letterSpacing: 2.0,
-                          color: Colors.white.withValues(alpha: 0.5),
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        FadeTransition(
+                          opacity: _nameFade,
+                          child: const Text(
+                            'Aura',
+                            style: TextStyle(
+                              fontFamily: 'CormorantGaramond',
+                              fontSize: 72,
+                              fontWeight: FontWeight.w300,
+                              color: Colors.white,
+                              letterSpacing: 3,
+                            ),
+                          ),
                         ),
-                      ),
+                        const SizedBox(height: 6),
+                        FadeTransition(
+                          opacity: _taglineFade,
+                          child: Text(
+                            'AI that remembers you',
+                            style: TextStyle(
+                              fontFamily: 'JetBrainsMono',
+                              fontSize: 12,
+                              fontWeight: FontWeight.w400,
+                              letterSpacing: 2.0,
+                              color: Colors.white.withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
 
-              // Layer 5: Auth buttons (bottom 35%)
-              Positioned(
-                top: screenHeight * 0.65,
-                bottom: 0,
-                left: 28,
-                right: 28,
+              // Auth form — shrinks when keyboard opens, scrollable
+              Expanded(
                 child: FadeTransition(
                   opacity: _buttonsFade,
                   child: SingleChildScrollView(
-                    physics: _showEmailForm
-                        ? const ClampingScrollPhysics()
-                        : const NeverScrollableScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(horizontal: 28),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        const SizedBox(height: 8),
                         if (vm.error != null) ...[
                           ErrorDisplay(
                             error: vm.error!,
@@ -347,27 +347,47 @@ class _LoginScreenState extends State<LoginScreen>
                           ),
                           const SizedBox(height: 12),
                         ],
-                        _GoogleSignInButton(
-                          onTap: () =>
-                              context.read<AuthViewModel>().signInWithGoogle(),
-                        ),
-                        const SizedBox(height: 16),
-                        Center(
-                          child: Text(
-                            'or',
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.28),
-                              fontSize: 13,
+
+                        // ── No email form open ─────────────────────────────
+                        if (_formMode == _EmailFormMode.none) ...[
+                          _GoogleSignInButton(
+                            onTap: () => context
+                                .read<AuthViewModel>()
+                                .signInWithGoogle(),
+                          ),
+                          const SizedBox(height: 16),
+                          Center(
+                            child: Text(
+                              'or',
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.28),
+                                fontSize: 13,
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(height: 16),
-                        if (!_showEmailForm) ...[
-                          _EmailContinueButton(
-                            onTap: () =>
-                                setState(() => _showEmailForm = true),
+                          const SizedBox(height: 16),
+                          _EmailActionButton(
+                            label: 'Sign in',
+                            icon: Icons.login_outlined,
+                            filled: false,
+                            onTap: () => setState(
+                                () => _formMode = _EmailFormMode.signIn),
                           ),
-                        ] else ...[
+                          const SizedBox(height: 10),
+                          _EmailActionButton(
+                            label: 'Create account',
+                            icon: Icons.person_add_outlined,
+                            filled: true,
+                            onTap: () => setState(
+                                () => _formMode = _EmailFormMode.signUp),
+                          ),
+
+                        // ── Sign in form ───────────────────────────────────
+                        ] else if (_formMode == _EmailFormMode.signIn) ...[
+                          _BackLink(
+                            onTap: () => _goBackToOptions(context),
+                          ),
+                          const SizedBox(height: 16),
                           _DarkTextField(
                             controller: _emailController,
                             hint: 'Email address',
@@ -380,26 +400,54 @@ class _LoginScreenState extends State<LoginScreen>
                             hint: 'Password',
                             obscureText: _obscurePassword,
                             textInputAction: TextInputAction.done,
-                            onSubmitted: (_) => _submitEmail(context),
-                            suffixIcon: GestureDetector(
-                              onTap: () => setState(
-                                  () => _obscurePassword = !_obscurePassword),
-                              child: Icon(
-                                _obscurePassword
-                                    ? Icons.visibility_off_outlined
-                                    : Icons.visibility_outlined,
-                                color: Colors.white38,
-                                size: 20,
-                              ),
-                            ),
+                            onSubmitted: (_) => _submitSignIn(context),
+                            suffixIcon: _buildPasswordToggle(),
                           ),
                           const SizedBox(height: 14),
-                          _EmailContinueButton(
-                            onTap: () => _submitEmail(context),
+                          _EmailActionButton(
                             label: 'Sign in',
                             icon: Icons.arrow_forward,
+                            filled: true,
+                            onTap: () => _submitSignIn(context),
+                          ),
+
+                        // ── Create account form ────────────────────────────
+                        ] else ...[
+                          _BackLink(
+                            onTap: () => _goBackToOptions(context),
+                          ),
+                          const SizedBox(height: 16),
+                          _DarkTextField(
+                            controller: _nameController,
+                            hint: 'Full name',
+                            keyboardType: TextInputType.name,
+                            textInputAction: TextInputAction.next,
+                          ),
+                          const SizedBox(height: 10),
+                          _DarkTextField(
+                            controller: _emailController,
+                            hint: 'Email address',
+                            keyboardType: TextInputType.emailAddress,
+                            textInputAction: TextInputAction.next,
+                          ),
+                          const SizedBox(height: 10),
+                          _DarkTextField(
+                            controller: _passwordController,
+                            hint: 'Password',
+                            obscureText: _obscurePassword,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (_) => _submitSignUp(context),
+                            suffixIcon: _buildPasswordToggle(),
+                          ),
+                          const SizedBox(height: 14),
+                          _EmailActionButton(
+                            label: 'Create account',
+                            icon: Icons.arrow_forward,
+                            filled: true,
+                            onTap: () => _submitSignUp(context),
                           ),
                         ],
+
                         const SizedBox(height: 20),
                         _LegalFooter(),
                         SizedBox(height: bottomPadding + 16),
@@ -430,7 +478,7 @@ class _GoogleSignInButton extends StatelessWidget {
         height: 52,
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.04),
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: Colors.white.withValues(alpha: 0.15),
           ),
@@ -462,17 +510,19 @@ class _GoogleSignInButton extends StatelessWidget {
   }
 }
 
-// Email button
+// Email action button — filled (accent) or outline (ghost)
 
-class _EmailContinueButton extends StatelessWidget {
+class _EmailActionButton extends StatelessWidget {
   final VoidCallback onTap;
   final String label;
   final IconData icon;
+  final bool filled;
 
-  const _EmailContinueButton({
+  const _EmailActionButton({
     required this.onTap,
-    this.label = 'Continue with Email',
-    this.icon = Icons.email_outlined,
+    required this.label,
+    required this.icon,
+    required this.filled,
   });
 
   @override
@@ -482,8 +532,13 @@ class _EmailContinueButton extends StatelessWidget {
       child: Container(
         height: 52,
         decoration: BoxDecoration(
-          color: const Color(0xFF5C6BC0).withValues(alpha: 0.85),
-          borderRadius: BorderRadius.circular(14),
+          color: filled
+              ? const Color(0xFF5C6BC0).withValues(alpha: 0.85)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: filled
+              ? null
+              : Border.all(color: Colors.white.withValues(alpha: 0.18)),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -496,6 +551,42 @@ class _EmailContinueButton extends StatelessWidget {
                 color: Colors.white,
                 fontSize: 15,
                 fontWeight: FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Back link
+
+class _BackLink extends StatelessWidget {
+  final VoidCallback onTap;
+  const _BackLink({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.arrow_back_ios,
+              size: 12,
+              color: Colors.white.withValues(alpha: 0.45),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Back',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.45),
+                fontSize: 13,
               ),
             ),
           ],
@@ -531,7 +622,7 @@ class _DarkTextField extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),

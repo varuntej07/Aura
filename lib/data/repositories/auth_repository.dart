@@ -27,7 +27,7 @@ class AuthRepository {
   Stream<UserModel?> get userModelStream =>
       _authService.authStateStream.asyncMap((firebaseUser) async {
         if (firebaseUser == null) return null;
-        final result = await _getOrCreateUser(firebaseUser);
+        final result = await _getOrCreateUser(firebaseUser, name: null);
         return result.when(
           success: (user) => user,
           failure: (_) => null,
@@ -40,13 +40,14 @@ class AuthRepository {
     final authResult = await _authService.signInWithGoogle();
     return authResult.when(
       success: (user) async {
-        return _getOrCreateUser(user);
+        return _getOrCreateUser(user, name: null);
       },
       failure: (error) => Future.value(Result.failure(error)),
     );
   }
 
-  Future<Result<UserModel>> _getOrCreateUser(User firebaseUser) async {
+  Future<Result<UserModel>> _getOrCreateUser(
+      User firebaseUser, {required String? name}) async {
     final existingResult = await _firestoreService.getDocument(
       AppConstants.usersCollection,
       firebaseUser.uid,
@@ -73,19 +74,22 @@ class AuthRepository {
       },
       failure: (error) async {
         if (error.code == ErrorCode.documentNotFound) {
-          return _createUser(firebaseUser);
+          return _createUser(firebaseUser, name: name);
         }
         return Result.failure(error);
       },
     );
   }
 
-  Future<Result<UserModel>> _createUser(User firebaseUser) async {
+  Future<Result<UserModel>> _createUser(
+      User firebaseUser, {required String? name}) async {
     final now = DateTime.now();
     final timezone = await _detectTimezone();
+    final resolvedName =
+        (name != null && name.isNotEmpty) ? name : (firebaseUser.displayName ?? 'User');
     final user = UserModel(
       uid: firebaseUser.uid,
-      displayName: firebaseUser.displayName ?? 'User',
+      displayName: resolvedName,
       email: firebaseUser.email ?? '',
       photoUrl: firebaseUser.photoURL,
       settings: UserSettings.defaults(),
@@ -155,7 +159,17 @@ class AuthRepository {
     final authResult =
         await _authService.signInWithEmailAndPassword(email, password);
     return authResult.when(
-      success: (user) async => _getOrCreateUser(user),
+      success: (user) async => _getOrCreateUser(user, name: null),
+      failure: (error) => Future.value(Result.failure(error)),
+    );
+  }
+
+  Future<Result<UserModel>> createAccountWithEmail(
+      String email, String password, String name) async {
+    final authResult =
+        await _authService.createUserWithEmailAndPassword(email, password, name);
+    return authResult.when(
+      success: (user) async => _getOrCreateUser(user, name: name),
       failure: (error) => Future.value(Result.failure(error)),
     );
   }

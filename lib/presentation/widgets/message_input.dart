@@ -269,8 +269,8 @@ class _AttachButton extends StatelessWidget {
         opacity: onTap != null ? 1.0 : 0.4,
         duration: const Duration(milliseconds: 150),
         child: Container(
-          width: 36,
-          height: 36,
+          width: 44,
+          height: 44,
           decoration: BoxDecoration(
             color: AppColors.surfaceVariant,
             shape: BoxShape.circle,
@@ -278,7 +278,7 @@ class _AttachButton extends StatelessWidget {
           ),
           child: isProcessing
               ? const Padding(
-                  padding: EdgeInsets.all(8),
+                  padding: EdgeInsets.all(12),
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
                     valueColor: AlwaysStoppedAnimation(AppColors.textSecondary),
@@ -286,7 +286,7 @@ class _AttachButton extends StatelessWidget {
                 )
               : const Icon(
                   Icons.add_rounded,
-                  size: 20,
+                  size: 22,
                   color: AppColors.textSecondary,
                 ),
         ),

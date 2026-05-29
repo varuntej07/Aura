@@ -84,7 +84,7 @@ class _AttachmentTile extends StatelessWidget {
           width: 72,
           height: 72,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _documentTile(),
+          errorBuilder: (_, _, _) => _documentTile(),
         ),
       );
     }

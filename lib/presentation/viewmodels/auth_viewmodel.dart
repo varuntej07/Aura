@@ -144,6 +144,38 @@ class AuthViewModel extends SafeChangeNotifier {
     }
   }
 
+  Future<void> createAccountWithEmail(
+      String email, String password, String name) async {
+    AppLogger.info('createAccountWithEmail: starting', tag: 'AuthVM');
+    _setState(ViewState.loading);
+    try {
+      final result =
+          await _authRepository.createAccountWithEmail(email, password, name);
+      result.when(
+        success: (user) {
+          AppLogger.info('createAccountWithEmail: success uid=${user.uid}',
+              tag: 'AuthVM');
+          _user = user;
+          _error = null;
+          ErrorHandler.logBreadcrumb('user_created_email',
+              metadata: {'uid': user.uid});
+          _setState(ViewState.loaded);
+        },
+        failure: (error) {
+          AppLogger.error('createAccountWithEmail: failed',
+              error: error, tag: 'AuthVM');
+          _error = error;
+          _setState(ViewState.error);
+        },
+      );
+    } catch (e, st) {
+      ErrorHandler.handle(e, st);
+      _error = AppException.unexpected(
+          "Something went wrong. Try again in a moment.", error: e);
+      _setState(ViewState.error);
+    }
+  }
+
   /// Called after `OnboardingRepository.saveOnboardingResult` succeeds.
   /// Updates the in-memory user so the router redirect fires immediately
   /// without waiting for the Firestore stream to re-emit.

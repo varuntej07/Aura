@@ -159,6 +159,41 @@ class MockFirebaseAuthService extends _i1.Mock
           as _i4.Future<_i5.Result<_i2.User>>);
 
   @override
+  _i4.Future<_i5.Result<_i2.User>> createUserWithEmailAndPassword(
+    String? email,
+    String? password,
+    String? name,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#createUserWithEmailAndPassword, [
+              email,
+              password,
+              name,
+            ]),
+            returnValue: _i4.Future<_i5.Result<_i2.User>>.value(
+              _i6.dummyValue<_i5.Result<_i2.User>>(
+                this,
+                Invocation.method(#createUserWithEmailAndPassword, [
+                  email,
+                  password,
+                  name,
+                ]),
+              ),
+            ),
+            returnValueForMissingStub: _i4.Future<_i5.Result<_i2.User>>.value(
+              _i6.dummyValue<_i5.Result<_i2.User>>(
+                this,
+                Invocation.method(#createUserWithEmailAndPassword, [
+                  email,
+                  password,
+                  name,
+                ]),
+              ),
+            ),
+          )
+          as _i4.Future<_i5.Result<_i2.User>>);
+
+  @override
   _i4.Future<_i5.Result<void>> signOut() =>
       (super.noSuchMethod(
             Invocation.method(#signOut, []),

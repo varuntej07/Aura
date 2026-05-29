@@ -90,7 +90,8 @@ class ErrorHandler {
       case ErrorCode.authFailed:
       case ErrorCode.authCancelled:
       case ErrorCode.authTokenExpired:
-        return "Sign-in didn't work. Please try again.";
+        // message is set at the call site with context-specific copy
+        return e.message;
       case ErrorCode.firestoreReadFailed:
       case ErrorCode.firestoreWriteFailed:
       case ErrorCode.documentNotFound:

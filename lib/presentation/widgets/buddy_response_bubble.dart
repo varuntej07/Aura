@@ -475,7 +475,7 @@ class _AttachmentPreviewRow extends StatelessWidget {
           width: 64,
           height: 64,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _docChip(attachment),
+          errorBuilder: (_, _, _) => _docChip(attachment),
         ),
       );
     }

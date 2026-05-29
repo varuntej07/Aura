@@ -168,6 +168,30 @@ void main() {
     });
   });
 
+  group('createAccountWithEmail', () {
+    test('success → loaded + user set', () async {
+      when(authRepository.createAccountWithEmail(any, any, any))
+          .thenAnswer((_) async => Result.success(_user()));
+
+      await vm.createAccountWithEmail('test@example.com', 'pw', 'Alice');
+
+      expect(vm.state, ViewState.loaded);
+      expect(vm.user?.uid, 'uid-1');
+      expect(vm.error, isNull);
+    });
+
+    test('failure → error state', () async {
+      when(authRepository.createAccountWithEmail(any, any, any))
+          .thenAnswer((_) async =>
+              Result.failure(AppException.authFailed(Exception('x'))));
+
+      await vm.createAccountWithEmail('test@example.com', 'pw', 'Alice');
+
+      expect(vm.state, ViewState.error);
+      expect(vm.error, isNotNull);
+    });
+  });
+
   group('markOnboardingComplete', () {
     test('flips onboarding flags and sets justCompletedOnboarding', () async {
       when(authRepository.signInWithGoogle())

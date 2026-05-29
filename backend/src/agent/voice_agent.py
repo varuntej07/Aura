@@ -419,12 +419,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 anthropic.LLM(model=settings.ANTHROPIC_CHAT_MODEL, api_key=settings.ANTHROPIC_API_KEY.strip()),
                 google.LLM(model=settings.TIER_CHEAP, api_key=settings.GEMINI_API_KEY.strip()),
             ],
-            attempt_timeout=12.0,
+            attempt_timeout=10.0,
         )
 
         tts_pipeline = lk_tts.FallbackAdapter(
             [
                 cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3"),
+                deepgram.TTS(model="aura-2-andromeda-en", api_key=settings.DEEPGRAM_API_KEY.strip()),
                 cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-2"),
             ],
             max_retry_per_tts=1,

@@ -28,8 +28,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     ),
     _OnboardingSlide(
       title: '14 days free.\nNo card.',
-      body:
-          'Full access to everything. After that, ₹499/month — or stay on the free plan forever.',
+      body: 'Full access to everything. After that, stay on the free plan or upgrade.',
     ),
     _OnboardingSlide(
       title: 'One quick\nsetup.',
@@ -51,7 +50,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   void _openConsentScreen() {
     Navigator.of(context).push(
-      PageRouteBuilder(
+      PageRouteBuilder<void>(
         pageBuilder: (_, animation, _) => const AuraConsentScreen(),
         transitionsBuilder: (_, animation, _, child) => SlideTransition(
           position: Tween(

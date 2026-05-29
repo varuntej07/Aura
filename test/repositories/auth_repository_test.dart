@@ -118,7 +118,7 @@ void main() {
   });
 
   group('signInWithEmail', () {
-    test('success maps to UserModel', () async {
+    test('existing user -> success, does not create Firestore doc', () async {
       when(authService.signInWithEmailAndPassword(any, any))
           .thenAnswer((_) async => Result.success(firebaseUser));
       when(firestore.getDocument<UserModel>(any, any, any))
@@ -128,6 +128,7 @@ void main() {
 
       expect(result.isSuccess, isTrue);
       expect(result.dataOrNull?.email, 'test@example.com');
+      verifyNever(firestore.setDocument<UserModel>(any, any, any, any));
     });
 
     test('failure propagates', () async {
@@ -135,6 +136,37 @@ void main() {
           .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
 
       final result = await repo.signInWithEmail('test@example.com', 'pw');
+
+      expect(result.isFailure, isTrue);
+    });
+  });
+
+  group('createAccountWithEmail', () {
+    test('new user → Firestore doc contains provided name', () async {
+      when(authService.createUserWithEmailAndPassword(any, any, any))
+          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+        (_) async => Result.failure(
+          const AppException(code: ErrorCode.documentNotFound, message: 'not found'),
+        ),
+      );
+      when(firestore.setDocument<UserModel>(any, any, any, any))
+          .thenAnswer((_) async => Result.success(_user()));
+
+      await repo.createAccountWithEmail('test@example.com', 'pw', 'Alice');
+
+      final data = verify(firestore.setDocument<UserModel>(
+        any, any, captureAny, any,
+      )).captured.single as Map<String, dynamic>;
+      expect(data['display_name'], 'Alice');
+    });
+
+    test('failure propagates', () async {
+      when(authService.createUserWithEmailAndPassword(any, any, any))
+          .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
+
+      final result =
+          await repo.createAccountWithEmail('test@example.com', 'pw', 'Alice');
 
       expect(result.isFailure, isTrue);
     });
