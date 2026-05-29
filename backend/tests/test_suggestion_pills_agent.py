@@ -15,7 +15,7 @@ class TestParsePills:
 
         raw = '["IPL today", "Points table", "Next match"]'
 
-        assert _parse_pills(raw, "cricket") == ["IPL today", "Points table", "Next match"]
+        assert _parse_pills(raw, "sports") == ["IPL today", "Points table", "Next match"]
 
     def test_strips_markdown_fences_and_filters_long_pills(self):
         from src.services.daily_notification.suggestion_pills_agent import _parse_pills
@@ -27,7 +27,7 @@ class TestParsePills:
     def test_returns_empty_on_invalid_json(self):
         from src.services.daily_notification.suggestion_pills_agent import _parse_pills
 
-        assert _parse_pills("not json", "jobs") == []
+        assert _parse_pills("not json", "technews") == []
 
 
 class TestSuggestionPillsAgent:
@@ -40,7 +40,6 @@ class TestSuggestionPillsAgent:
             side_effect=[
                 '["IPL today", "Points table", "Next match", "Top scorer"]',
                 '["AI news", "Open source", "Startup funding", "Dev tools"]',
-                '["Remote roles", "Resume tips", "Interview prep", "SWE jobs"]',
                 '["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]',
             ]
         )
@@ -61,13 +60,12 @@ class TestSuggestionPillsAgent:
                     [{"text": "find remote ml jobs"}],
                 )
 
-        assert model.cheap.call_count == 4
+        assert model.cheap.call_count == 3
         db.collection.assert_called_once_with("agent_suggestion_pills")
         db.collection.return_value.document.assert_called_once_with("uid1")
         written = doc_ref.set.call_args[0][0]
-        assert written["cricket"] == ["IPL today", "Points table", "Next match", "Top scorer"]
+        assert written["sports"] == ["IPL today", "Points table", "Next match", "Top scorer"]
         assert written["technews"] == ["AI news", "Open source", "Startup funding", "Dev tools"]
-        assert written["jobs"] == ["Remote roles", "Resume tips", "Interview prep", "SWE jobs"]
         assert written["posts"] == ["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]
         assert "updated_at" in written
 
@@ -80,7 +78,6 @@ class TestSuggestionPillsAgent:
             side_effect=[
                 "[]",
                 "[]",
-                '["Remote roles", "Resume tips", "Interview prep", "SWE jobs"]',
                 '["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]',
             ]
         )
@@ -102,6 +99,6 @@ class TestSuggestionPillsAgent:
                 )
 
         written = doc_ref.set.call_args[0][0]
-        assert set(written) >= {"jobs", "posts", "updated_at"}
-        assert "cricket" not in written
+        assert set(written) >= {"posts", "updated_at"}
+        assert "sports" not in written
         assert "technews" not in written

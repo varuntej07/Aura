@@ -37,9 +37,8 @@ class TestGetClient:
             rw._client = None
             mock_client = MagicMock()
             with patch("src.services.notification_rewriter.anthropic.AsyncAnthropic", return_value=mock_client):
-                with patch("src.services.notification_rewriter.wrap_anthropic", side_effect=lambda c: c):
-                    c1 = rw._get_client()
-                    c2 = rw._get_client()
+                c1 = rw._get_client()
+                c2 = rw._get_client()
             assert c1 is c2  # same instance returned on second call
         finally:
             rw._client = original
