@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_CHANNEL_RENEWAL_LEAD_SECONDS: int = 21600
     CALENDAR_SYNC_STALE_MINUTES: int = 5
 
+    # Brave Search API (real-time chat + voice web_surf tool)
+    BRAVE_API_KEY: str = ""
+
     # Gemini API (nutrition VLM)
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
@@ -117,7 +120,9 @@ class Settings(BaseSettings):
         "don't have that information and they should reach out to Varun directly. "
         "Do not discuss the underlying AI model or technology stack. "
         "When setting reminders, always express the target time as a full ISO 8601 datetime "
-        "with timezone offset (e.g. '2026-06-02T09:00:00+05:30'). Never use a minute count."
+        "with timezone offset (e.g. '2026-06-02T09:00:00+05:30'). Never use a minute count. "
+        "Before calling send_email, confirm the recipient, subject, and body with the user "
+        "and get a clear yes. Never send an email the user did not explicitly approve."
     )
 
     # Voice persona — casual, punchy, friend-mode
@@ -144,6 +149,10 @@ class Settings(BaseSettings):
 
     @property
     def google_calendar_configured(self) -> bool:
+        return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)
+
+    @property
+    def gmail_configured(self) -> bool:
         return bool(self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_SECRET)
 
     @property

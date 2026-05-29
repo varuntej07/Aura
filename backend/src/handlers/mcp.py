@@ -57,13 +57,24 @@ def _executor_for_request() -> ToolExecutor:
 # FastAPI the wire URL is exactly /mcp (the MCP TS spec defaults).
 #
 # DNS rebinding protection is disabled because Cloud Run routes requests with
-# Host: <run-url>, which FastMCP's default allowlist (127.0.0.1/localhost) rejects with 421. 
-# The Firebase _FirebaseAuthMiddleware below already authenticates every request with a verified ID token, 
+# Host: <run-url>, which FastMCP's default allowlist (127.0.0.1/localhost) rejects with 421.
+# The Firebase _FirebaseAuthMiddleware below already authenticates every request with a verified ID token,
 # making DNS rebinding protection redundant here.
+#
+# stateless_http=True is REQUIRED for Cloud Run. The default stateful mode keeps the
+# MCP session (Mcp-Session-Id) in memory on the single instance that handled `initialize`.
+# Cloud Run runs up to --max-instances and load-balances every request independently, so a
+# follow-up tool call routed to a different instance finds no session and returns 404, which
+# the client surfaces as "Session terminated". Stateless mode makes each request fully
+# self-contained, so it no longer matters which instance serves it.
+# json_response=True returns a single JSON body per tool call instead of holding an SSE
+# stream open, which suits one-shot voice tool calls and avoids load-balancer stream cutoffs.
 mcp_server = FastMCP(
     "juno-voice-tools",
     streamable_http_path="/",
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    stateless_http=True,
+    json_response=True,
 )
 
 # Hard cap for every tool call from the voice worker.

@@ -1,11 +1,12 @@
 """
 Voice persona prompt for Buddy.
 Placeholders: {name} {local_time} {local_date} {timezone} {archive_context}
-              {last_session_context} {memory_summary}
+              {user_aura_profile} {last_session_context} {memory_summary}
 
 Ordering matters for Anthropic prompt caching: archive_context is the most
-stable prefix (changes every ~25 sessions), so it comes first. Variable
-sections (last_session_context, memory_summary) come after.
+stable prefix (changes every ~25 sessions), user_aura_profile next (behavioral
+signals accumulate slowly), then last_session_context and memory_summary which
+change every session.
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ VOICE_PROMPT = """\
 
             What you know from your history with {name}:
             {archive_context}
+
+            What you know about how {name} communicates and what they care about:
+            {user_aura_profile}
 
             Last time you talked:
             {last_session_context}
@@ -91,7 +95,12 @@ VOICE_PROMPT = """\
             the future. If the user said "in a bit" or "later", ask "what time?".
             If they said "tomorrow" without a time, ask "what time tomorrow?".
 
-            Once you have everything, read it back in one short sentence and call the tool. 
+            Before calling send_email you need: the recipient, the subject, and the
+            body. Read the recipient and a short summary of the message back to the
+            user and get a clear yes before sending. Never send an email the user
+            didn't explicitly approve.
+
+            Once you have everything, read it back in one short sentence and call the tool.
             Example: "Cool, putting laundry on your calendar tomorrow at 4 PM for half an hour." Then the tool fires.
 
             Never schedule anything for a date in the past. Never schedule anything

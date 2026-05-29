@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
+from .user_aura_extractor import extract_and_update_user_aura
 
 _SESSION_SUMMARY_PROMPT = """\
 You are extracting structured memory from a voice conversation between a user
@@ -347,7 +348,10 @@ async def run_post_session_pipeline(
     else:
         session_count = int(results_a[1])
 
-    # Step B: persist session doc + latest summary in parallel
+    # Step B: persist session doc + latest summary + aura profile in parallel
+    user_turns_text = "\n".join(
+        t["text"] for t in turns if t.get("role") == "user" and t.get("text")
+    )
     results_b = await asyncio.gather(
         _write_session_doc(
             user_id, session_id, summary, turns,
@@ -356,6 +360,11 @@ async def run_post_session_pipeline(
         _write_latest_summary(
             user_id, summary, session_id, len(turns), duration_ms,
         ),
+        extract_and_update_user_aura(
+            uid=user_id,
+            message=user_turns_text,
+            session_id=session_id,
+        ) if user_turns_text else asyncio.sleep(0),
         return_exceptions=True,
     )
 
@@ -368,6 +377,11 @@ async def run_post_session_pipeline(
         logger.warn("VoiceSession: latest summary write failed", {
             "user_id": user_id, "session_id": session_id,
             "error": str(results_b[1]),
+        })
+    if isinstance(results_b[2], Exception):
+        logger.warn("VoiceSession: aura extraction failed", {
+            "user_id": user_id, "session_id": session_id,
+            "error": str(results_b[2]),
         })
 
     # Step C: archive check

@@ -14,7 +14,8 @@ from typing import Any
 from ...config.settings import settings
 from ...lib.logger import logger
 
-_REQUEST_TIMEOUT_S = 6.0
+_REQUEST_TIMEOUT_S = 6.0           # real-time path: chat + voice (user is waiting)
+_INGEST_REQUEST_TIMEOUT_S = 45.0   # background path: scheduled ingest (no user waiting)
 _CACHE_TTL_S = 300.0  # 5 minutes
 _CACHE_MAX_ENTRIES = 256
 
@@ -113,11 +114,14 @@ async def web_surf(
     *,
     uid: str,
     recency: str = "any",
+    timeout_s: float = _REQUEST_TIMEOUT_S,
 ) -> dict[str, Any]:
     """Grounded web search. Returns {text, sources, query, cached}.
 
     recency: 'fresh' appends today's date hint so Gemini prefers up-to-date sources.
              'any' (default) sends the query as-is.
+    timeout_s: per-attempt timeout. Defaults to the tight real-time budget; background
+               callers pass _INGEST_REQUEST_TIMEOUT_S for more headroom.
     """
     query = query.strip()
     if not query:
@@ -145,7 +149,7 @@ async def web_surf(
         try:
             text, sources = await asyncio.wait_for(
                 asyncio.to_thread(_search_sync, effective_query),
-                timeout=_REQUEST_TIMEOUT_S,
+                timeout=timeout_s,
             )
             break
         except (TimeoutError, asyncio.TimeoutError) as exc:

@@ -76,7 +76,7 @@ class ClaudeClient:
                      before the current user turn. Enables multi-turn context
                      across HTTP requests. Must alternate user/assistant roles
                      and end before the current user turn.
-            is_agent: When True, includes agent-only tools (e.g. web_search).
+            is_agent: When True, includes agent-only tools (e.g. web_surf).
 
         Returns:
             {"text": str, "tool_names": list[str]}

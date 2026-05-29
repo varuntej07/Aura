@@ -66,6 +66,9 @@ _TOOL_THINKING_PHRASES: dict[str, str] = {
     "analyze_nutrition": "having a closer look at that...",
     "get_user_context": "pulling up your details for this!",
     "web_surf": "Alright, Lemme surf the web for that!",
+    "list_emails": "checking your inbox right now!",
+    "read_email": "opening that email for you...",
+    "send_email": "alright, firing off that email now!",
 }
 
 # Hard cap on the parallel profile + memory fetch before session.start.
@@ -205,6 +208,46 @@ async def _fetch_archive_context(user_id: str) -> dict[str, str]:
     return await asyncio.to_thread(_read)
 
 
+async def _fetch_user_aura_summary(user_id: str) -> str:
+    """Format top behavioral signals from UserAura/{uid} as a prompt-ready block."""
+    def _read() -> str:
+        doc = admin_firestore().collection("UserAura").document(user_id).get()
+        data = doc.to_dict() or {}
+        if not data:
+            return ""
+        lines: list[str] = []
+
+        tone = data.get("dominant_tone", "")
+        depth = data.get("response_depth_preference", "")
+        style_parts = [p for p in [tone, depth] if p]
+        if style_parts:
+            lines.append(f"Communication style: {', '.join(style_parts)}")
+
+        interests_map: dict = data.get("deep_interest_frequencies", {})
+        top_interests = sorted(interests_map, key=lambda k: interests_map[k], reverse=True)[:3]
+        if top_interests:
+            lines.append(f"Interests: {', '.join(top_interests)}")
+
+        facts: list = data.get("explicit_facts", [])[:5]
+        if facts:
+            lines.append(f"Facts they've shared: {'; '.join(facts)}")
+
+        goals: list = data.get("inferred_goals", [])[-3:]
+        if goals:
+            lines.append(f"Current goals: {'; '.join(goals)}")
+
+        prefer: list = data.get("response_style_prefer", [])[-2:]
+        avoid: list = data.get("response_style_avoid", [])[-2:]
+        if prefer:
+            lines.append(f"What's worked well: {'; '.join(prefer)}")
+        if avoid:
+            lines.append(f"What to avoid: {'; '.join(avoid)}")
+
+        return "\n".join(f"- {line}" for line in lines)
+
+    return await asyncio.to_thread(_read)
+
+
 async def _mint_firebase_id_token(user_id: str) -> str:
     """Exchange an Admin-SDK custom token for a real Firebase ID token.
 
@@ -288,6 +331,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     _fetch_memory_summary(user_id),
                     _fetch_last_session_summary(user_id),
                     _fetch_archive_context(user_id),
+                    _fetch_user_aura_summary(user_id),
                     return_exceptions=True,
                 ),
                 timeout=_PRE_SESSION_FETCH_TIMEOUT_S,
@@ -301,12 +345,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 "",
                 {"summary": "", "last_session_at": ""},
                 {"archive_summary": ""},
+                "",
             ]
 
         profile = fetch_results[0] if not isinstance(fetch_results[0], BaseException) else {"name": "there", "timezone": "UTC"}
         memory_summary = fetch_results[1] if not isinstance(fetch_results[1], BaseException) else ""
         last_session = fetch_results[2] if not isinstance(fetch_results[2], BaseException) else {"summary": "", "last_session_at": ""}
         archive_data = fetch_results[3] if not isinstance(fetch_results[3], BaseException) else {"archive_summary": ""}
+        user_aura_summary = fetch_results[4] if not isinstance(fetch_results[4], BaseException) else ""
 
         for i, r in enumerate(fetch_results):
             if isinstance(r, BaseException):
@@ -328,6 +374,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "last_session_context": last_session_summary,
             "last_session_at": last_session_at,
             "archive_context": archive_context,
+            "user_aura_profile": user_aura_summary or "",
         }
 
         # Seed the chat history with a system-side note that mirrors what the prompt already says. 
