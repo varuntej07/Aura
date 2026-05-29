@@ -57,7 +57,9 @@ class MessageInsight(BaseModel):
                                    # comparison | troubleshooting — null if not applicable
 
     # Identity signals
-    explicit_facts: list[str]      # only clearly stated user facts — e.g. "I live in Hyderabad"
+    explicit_facts: list[str]      # durable identity/preference facts only — e.g. "I live in Hyderabad",
+                                   # "dislikes early-morning showers". NOT task params like reminder
+                                   # times, dates, deadlines, or one-off scheduling details.
     named_entities: list[str]      # people, places, apps, orgs mentioned — max 5
     inferred_goal_hints: list[str] # high-confidence goal inferences only — max 3
 
@@ -108,6 +110,23 @@ _EXTRACTION_SYSTEM_PROMPT = """\
             surface_topics: ["SGEMM"]
             deep_interests: ["CUDA kernels", "linear algebra optimization", "GPU programming"]
             domain: technical, question_type: what_is
+
+            explicit_facts captures DURABLE facts about the user -- who they are and their stable
+            preferences -- never transient task parameters. Keep identity, relationships, location,
+            job, and standing likes/dislikes. Drop reminder times, dates, deadlines, and one-off
+            scheduling details: those belong to the task being requested, not the user's profile.
+
+            "remind me to take a shower tomorrow night, want it done before 4, after lunch around 1 PM"
+            explicit_facts: []   (every detail here is a reminder parameter, not a fact about the user)
+            primary_intent: task_request, domain: personal
+
+            "I don't like taking a shower early in the morning"
+            explicit_facts: ["dislikes showering early in the morning"]
+            domain: personal
+
+            "I just got rejected after 8 rounds of interviews, 6 hours of it in person"
+            explicit_facts: ["was rejected after an 8-round interview that included a 6-hour onsite"]
+            emotional_state: sad, domain: work
 
             Turn Scoring (apply when a previous assistant response is provided):
             The current user message is the "next-state signal" -- it reveals how well Buddy responded.
@@ -168,7 +187,7 @@ def _build_extraction_prompt(
         '  "urgency": "none|low|medium|high",\n'
         '  "response_depth_preference": "wants_brief|wants_detailed|wants_step_by_step|wants_examples|wants_opinion or null",\n'
         '  "question_type": "how_to|what_is|opinion_request|recommendation|comparison|troubleshooting or null",\n'
-        '  "explicit_facts": ["only clearly stated user facts"],\n'
+        '  "explicit_facts": ["durable identity/preference facts only -- no reminder times, dates, or task params"],\n'
         '  "named_entities": ["people, places, apps, orgs -- max 5"],\n'
         '  "inferred_goal_hints": ["high-confidence goals -- max 3"],\n'
         '  "used_prev_query_context": true or false,\n'

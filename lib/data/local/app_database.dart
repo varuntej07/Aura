@@ -64,6 +64,10 @@ class ChatSyncJobs extends Table {
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_createDatabaseConnection());
 
+  /// Test-only: inject an in-memory or custom executor so unit tests can run
+  /// against a real SQLite database without touching the on-device file.
+  AppDatabase.forTesting(super.executor);
+
   @override
   int get schemaVersion => 9;
 

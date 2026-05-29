@@ -6,8 +6,12 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends gcc \
     && rm -rf /var/lib/apt/lists/*
 
+# Install third-party dependencies keyed only on pyproject.toml. A stub package lets
+# `pip install .` resolve without the real source, so editing code does NOT invalidate
+# this layer — deps reinstall only when pyproject.toml changes. The real src/ is copied
+# into the runtime stage from the build context below, not from this builder.
 COPY pyproject.toml ./
-COPY src/ ./src/
+RUN mkdir -p src && touch src/__init__.py
 
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir .

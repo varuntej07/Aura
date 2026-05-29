@@ -72,7 +72,9 @@ class ReminderPayload {
     return ReminderPayload(
       reminderId: json['reminder_id'] as String? ?? '',
       message: json['message'] as String? ?? '',
-      triggerAt: DateTime.parse(json['trigger_at'] as String),
+      triggerAt:
+          DateTime.tryParse(json['trigger_at'] as String? ?? '') ??
+              DateTime.now(),
       status: json['status'] as String? ?? 'pending',
       priority: json['priority'] as String? ?? 'normal',
     );

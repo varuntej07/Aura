@@ -248,6 +248,6 @@ class ApiClient {
     final delay = Duration(
       milliseconds: AppConstants.retryBaseDelay.inMilliseconds * (1 << attempt),
     );
-    await Future.delayed(delay);
+    await Future<void>.delayed(delay);
   }
 }

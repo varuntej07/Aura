@@ -266,197 +266,211 @@ class _LoginScreenState extends State<LoginScreen>
 
         return Scaffold(
           backgroundColor: const Color(0xFF04040F),
-          body: Column(
-            children: [
-              // Black hole hero — fixed height at top
-              SizedBox(
-                height: 260,
-                child: Stack(
-                  fit: StackFit.expand,
+          body: SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: MediaQuery.of(context).size.height,
+              ),
+              child: IntrinsicHeight(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    AnimatedBuilder(
-                      animation: _orbitController,
-                      builder: (_, _) => CustomPaint(
-                        painter: _BlackHolePainter(_orbitController.value),
+                    // Black hole hero
+                    SizedBox(
+                      height: 260,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          AnimatedBuilder(
+                            animation: _orbitController,
+                            builder: (_, _) => CustomPaint(
+                              painter: _BlackHolePainter(_orbitController.value),
+                            ),
+                          ),
+                          Container(
+                            decoration: BoxDecoration(
+                              gradient: RadialGradient(
+                                center: const Alignment(0.0, -0.25),
+                                radius: 0.7,
+                                colors: [
+                                  Colors.transparent,
+                                  const Color(0xFF04040F).withValues(alpha: 0.3),
+                                  const Color(0xFF04040F).withValues(alpha: 0.8),
+                                ],
+                                stops: const [0.0, 0.5, 1.0],
+                              ),
+                            ),
+                          ),
+                          Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              FadeTransition(
+                                opacity: _nameFade,
+                                child: const Text(
+                                  'Aura',
+                                  style: TextStyle(
+                                    fontFamily: 'CormorantGaramond',
+                                    fontSize: 72,
+                                    fontWeight: FontWeight.w300,
+                                    color: Colors.white,
+                                    letterSpacing: 3,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              FadeTransition(
+                                opacity: _taglineFade,
+                                child: const Text(
+                                  'AI that remembers you',
+                                  style: TextStyle(
+                                    fontFamily: 'JetBrainsMono',
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w400,
+                                    letterSpacing: 2.0,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
                     ),
-                    Container(
-                      decoration: BoxDecoration(
-                        gradient: RadialGradient(
-                          center: const Alignment(0.0, -0.25),
-                          radius: 0.7,
-                          colors: [
-                            Colors.transparent,
-                            const Color(0xFF04040F).withValues(alpha: 0.3),
-                            const Color(0xFF04040F).withValues(alpha: 0.8),
+
+                    // Auth form
+                    FadeTransition(
+                      opacity: _buttonsFade,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 28),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const SizedBox(height: 8),
+                            if (vm.error != null) ...[
+                              ErrorDisplay(
+                                error: vm.error!,
+                                onDismiss: vm.clearError,
+                              ),
+                              const SizedBox(height: 12),
+                            ],
+
+                            // ── No email form open ─────────────────────────────
+                            if (_formMode == _EmailFormMode.none) ...[
+                              _GoogleSignInButton(
+                                onTap: () => context
+                                    .read<AuthViewModel>()
+                                    .signInWithGoogle(),
+                              ),
+                              const SizedBox(height: 16),
+                              const Center(
+                                child: Text(
+                                  'or',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: _EmailActionButton(
+                                      label: 'Sign in',
+                                      filled: false,
+                                      onTap: () => setState(
+                                          () => _formMode = _EmailFormMode.signIn),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: _EmailActionButton(
+                                      label: 'Create account',
+                                      filled: true,
+                                      onTap: () => setState(
+                                          () => _formMode = _EmailFormMode.signUp),
+                                    ),
+                                  ),
+                                ],
+                              ),
+
+                            // ── Sign in form ───────────────────────────────────
+                            ] else if (_formMode == _EmailFormMode.signIn) ...[
+                              _BackLink(
+                                onTap: () => _goBackToOptions(context),
+                              ),
+                              const SizedBox(height: 16),
+                              _DarkTextField(
+                                controller: _emailController,
+                                hint: 'Email address',
+                                keyboardType: TextInputType.emailAddress,
+                                textInputAction: TextInputAction.next,
+                              ),
+                              const SizedBox(height: 10),
+                              _DarkTextField(
+                                controller: _passwordController,
+                                hint: 'Password',
+                                obscureText: _obscurePassword,
+                                textInputAction: TextInputAction.done,
+                                onSubmitted: (_) => _submitSignIn(context),
+                                suffixIcon: _buildPasswordToggle(),
+                              ),
+                              const SizedBox(height: 14),
+                              _EmailActionButton(
+                                label: 'Sign in',
+                                icon: Icons.arrow_forward,
+                                filled: true,
+                                onTap: () => _submitSignIn(context),
+                              ),
+
+                            // ── Create account form ────────────────────────────
+                            ] else ...[
+                              _BackLink(
+                                onTap: () => _goBackToOptions(context),
+                              ),
+                              const SizedBox(height: 16),
+                              _DarkTextField(
+                                controller: _nameController,
+                                hint: 'Full name',
+                                keyboardType: TextInputType.name,
+                                textInputAction: TextInputAction.next,
+                              ),
+                              const SizedBox(height: 10),
+                              _DarkTextField(
+                                controller: _emailController,
+                                hint: 'Email address',
+                                keyboardType: TextInputType.emailAddress,
+                                textInputAction: TextInputAction.next,
+                              ),
+                              const SizedBox(height: 10),
+                              _DarkTextField(
+                                controller: _passwordController,
+                                hint: 'Password',
+                                obscureText: _obscurePassword,
+                                textInputAction: TextInputAction.done,
+                                onSubmitted: (_) => _submitSignUp(context),
+                                suffixIcon: _buildPasswordToggle(),
+                              ),
+                              const SizedBox(height: 14),
+                              _EmailActionButton(
+                                label: 'Create account',
+                                icon: Icons.arrow_forward,
+                                filled: true,
+                                onTap: () => _submitSignUp(context),
+                              ),
+                            ],
+
+                            const SizedBox(height: 20),
+                            _LegalFooter(),
+                            SizedBox(height: bottomPadding + 16),
                           ],
-                          stops: const [0.0, 0.5, 1.0],
                         ),
                       ),
-                    ),
-                    Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        FadeTransition(
-                          opacity: _nameFade,
-                          child: const Text(
-                            'Aura',
-                            style: TextStyle(
-                              fontFamily: 'CormorantGaramond',
-                              fontSize: 72,
-                              fontWeight: FontWeight.w300,
-                              color: Colors.white,
-                              letterSpacing: 3,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        FadeTransition(
-                          opacity: _taglineFade,
-                          child: Text(
-                            'AI that remembers you',
-                            style: TextStyle(
-                              fontFamily: 'JetBrainsMono',
-                              fontSize: 12,
-                              fontWeight: FontWeight.w400,
-                              letterSpacing: 2.0,
-                              color: Colors.white.withValues(alpha: 0.5),
-                            ),
-                          ),
-                        ),
-                      ],
                     ),
                   ],
                 ),
               ),
-
-              // Auth form — shrinks when keyboard opens, scrollable
-              Expanded(
-                child: FadeTransition(
-                  opacity: _buttonsFade,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(horizontal: 28),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const SizedBox(height: 8),
-                        if (vm.error != null) ...[
-                          ErrorDisplay(
-                            error: vm.error!,
-                            onDismiss: vm.clearError,
-                          ),
-                          const SizedBox(height: 12),
-                        ],
-
-                        // ── No email form open ─────────────────────────────
-                        if (_formMode == _EmailFormMode.none) ...[
-                          _GoogleSignInButton(
-                            onTap: () => context
-                                .read<AuthViewModel>()
-                                .signInWithGoogle(),
-                          ),
-                          const SizedBox(height: 16),
-                          Center(
-                            child: Text(
-                              'or',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.28),
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          _EmailActionButton(
-                            label: 'Sign in',
-                            icon: Icons.login_outlined,
-                            filled: false,
-                            onTap: () => setState(
-                                () => _formMode = _EmailFormMode.signIn),
-                          ),
-                          const SizedBox(height: 10),
-                          _EmailActionButton(
-                            label: 'Create account',
-                            icon: Icons.person_add_outlined,
-                            filled: true,
-                            onTap: () => setState(
-                                () => _formMode = _EmailFormMode.signUp),
-                          ),
-
-                        // ── Sign in form ───────────────────────────────────
-                        ] else if (_formMode == _EmailFormMode.signIn) ...[
-                          _BackLink(
-                            onTap: () => _goBackToOptions(context),
-                          ),
-                          const SizedBox(height: 16),
-                          _DarkTextField(
-                            controller: _emailController,
-                            hint: 'Email address',
-                            keyboardType: TextInputType.emailAddress,
-                            textInputAction: TextInputAction.next,
-                          ),
-                          const SizedBox(height: 10),
-                          _DarkTextField(
-                            controller: _passwordController,
-                            hint: 'Password',
-                            obscureText: _obscurePassword,
-                            textInputAction: TextInputAction.done,
-                            onSubmitted: (_) => _submitSignIn(context),
-                            suffixIcon: _buildPasswordToggle(),
-                          ),
-                          const SizedBox(height: 14),
-                          _EmailActionButton(
-                            label: 'Sign in',
-                            icon: Icons.arrow_forward,
-                            filled: true,
-                            onTap: () => _submitSignIn(context),
-                          ),
-
-                        // ── Create account form ────────────────────────────
-                        ] else ...[
-                          _BackLink(
-                            onTap: () => _goBackToOptions(context),
-                          ),
-                          const SizedBox(height: 16),
-                          _DarkTextField(
-                            controller: _nameController,
-                            hint: 'Full name',
-                            keyboardType: TextInputType.name,
-                            textInputAction: TextInputAction.next,
-                          ),
-                          const SizedBox(height: 10),
-                          _DarkTextField(
-                            controller: _emailController,
-                            hint: 'Email address',
-                            keyboardType: TextInputType.emailAddress,
-                            textInputAction: TextInputAction.next,
-                          ),
-                          const SizedBox(height: 10),
-                          _DarkTextField(
-                            controller: _passwordController,
-                            hint: 'Password',
-                            obscureText: _obscurePassword,
-                            textInputAction: TextInputAction.done,
-                            onSubmitted: (_) => _submitSignUp(context),
-                            suffixIcon: _buildPasswordToggle(),
-                          ),
-                          const SizedBox(height: 14),
-                          _EmailActionButton(
-                            label: 'Create account',
-                            icon: Icons.arrow_forward,
-                            filled: true,
-                            onTap: () => _submitSignUp(context),
-                          ),
-                        ],
-
-                        const SizedBox(height: 20),
-                        _LegalFooter(),
-                        SizedBox(height: bottomPadding + 16),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         );
       },
@@ -478,7 +492,7 @@ class _GoogleSignInButton extends StatelessWidget {
         height: 52,
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.04),
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(26),
           border: Border.all(
             color: Colors.white.withValues(alpha: 0.15),
           ),
@@ -486,13 +500,10 @@ class _GoogleSignInButton extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: const [
-            Text(
-              'G',
-              style: TextStyle(
-                color: Color(0xFF4285F4),
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-              ),
+            Image(
+              image: AssetImage('assets/icons/google.png'),
+              width: 20,
+              height: 20,
             ),
             SizedBox(width: 12),
             Text(
@@ -515,14 +526,14 @@ class _GoogleSignInButton extends StatelessWidget {
 class _EmailActionButton extends StatelessWidget {
   final VoidCallback onTap;
   final String label;
-  final IconData icon;
+  final IconData? icon;
   final bool filled;
 
   const _EmailActionButton({
     required this.onTap,
     required this.label,
-    required this.icon,
     required this.filled,
+    this.icon,
   });
 
   @override
@@ -535,7 +546,7 @@ class _EmailActionButton extends StatelessWidget {
           color: filled
               ? const Color(0xFF5C6BC0).withValues(alpha: 0.85)
               : Colors.transparent,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(26),
           border: filled
               ? null
               : Border.all(color: Colors.white.withValues(alpha: 0.18)),
@@ -543,8 +554,10 @@ class _EmailActionButton extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, color: Colors.white, size: 18),
-            const SizedBox(width: 10),
+            if (icon != null) ...[
+              Icon(icon, color: Colors.white, size: 18),
+              const SizedBox(width: 10),
+            ],
             Text(
               label,
               style: const TextStyle(
@@ -622,7 +635,7 @@ class _DarkTextField extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(26),
         border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
@@ -635,7 +648,7 @@ class _DarkTextField extends StatelessWidget {
         style: const TextStyle(color: Colors.white, fontSize: 15),
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.35)),
+          hintStyle: const TextStyle(color: Colors.white70),
           border: InputBorder.none,
           enabledBorder: InputBorder.none,
           focusedBorder: InputBorder.none,
@@ -659,16 +672,16 @@ class _LegalFooter extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text.rich(
       TextSpan(
-        style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.28),
+        style: const TextStyle(
+          color: Colors.white,
           fontSize: 11,
         ),
         children: [
           const TextSpan(text: 'By continuing you agree to our '),
           TextSpan(
             text: 'Terms of Service',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.45),
+            style: const TextStyle(
+              color: Colors.white,
               decoration: TextDecoration.underline,
             ),
             recognizer: TapGestureRecognizer()
@@ -678,8 +691,8 @@ class _LegalFooter extends StatelessWidget {
           const TextSpan(text: '  ·  '),
           TextSpan(
             text: 'Privacy Policy',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.45),
+            style: const TextStyle(
+              color: Colors.white,
               decoration: TextDecoration.underline,
             ),
             recognizer: TapGestureRecognizer()
