@@ -18,6 +18,7 @@
 #   gcloud secrets create juno-firebase-service-account --project=<PROJECT_ID>
 #   gcloud secrets create juno-firebase-web-api-key --project=<PROJECT_ID>   # voice worker: mint ID tokens for /mcp
 #   gcloud secrets create juno-gemini-api-key --project=<PROJECT_ID>         # voice worker + signal engine LLM fallback
+#   gcloud secrets create juno-brave-api-key --project=<PROJECT_ID>          # backend: real-time web_surf (chat + voice)
 #
 # Usage:
 #   bash backend/deploy.sh juno-2ea45 us-central1
@@ -83,9 +84,13 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="GOOGLE_CLIENT_ID=juno-google-client-id:latest" \
   --set-secrets="GOOGLE_CLIENT_SECRET=juno-google-client-secret:latest" \
   --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
+  --set-secrets="BRAVE_API_KEY=juno-brave-api-key:latest" \
   --set-secrets="/run/secrets/service-account.json=juno-firebase-service-account:latest" \
+  --set-secrets="LANGFUSE_SECRET_KEY=juno-langfuse-secret-key:latest" \
   --set-env-vars="GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/service-account.json" \
-  --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}"
+  --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}" \
+  --set-env-vars="LANGFUSE_PUBLIC_KEY=pk-lf-6e4f5a36-9d31-474c-b61a-3307653b6c1d" \
+  --set-env-vars="LANGFUSE_HOST=https://hipaa.cloud.langfuse.com"
 
 # Print service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
@@ -111,7 +116,7 @@ gcloud run deploy "${WORKER_SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
   --platform=managed \
   --allow-unauthenticated \
-  --min-instances=0 \
+  --min-instances=1 \
   --max-instances=2 \
   --memory=4Gi \
   --cpu=2 \

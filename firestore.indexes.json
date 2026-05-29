@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "voice_sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "archived", "order": "ASCENDING" },
+        { "fieldPath": "started_at", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

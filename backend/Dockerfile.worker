@@ -21,12 +21,16 @@ RUN groupadd -r juno && useradd -r -g juno -m juno
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY src/ ./src/
-
 # Download the turn-detector ONNX model and Silero VAD weights into the image
 # so the worker subprocess doesn't try to fetch them at runtime.
+# Placed BEFORE `COPY src/` so editing source code doesn't invalidate this ~332MB layer 
+# it depends only on the installed livekit.agents package, not on src.
 ENV HF_HOME=/app/.cache/huggingface
-RUN mkdir -p $HF_HOME && python -m livekit.agents download-files && chown -R juno:juno /app
+RUN mkdir -p $HF_HOME && python -m livekit.agents download-files
+
+COPY src/ ./src/
+
+RUN chown -R juno:juno /app
 
 USER juno
 
@@ -35,4 +39,4 @@ USER juno
 # The actual LiveKit WebSocket is outbound so no inbound port needed for the voice pipeline itself.
 EXPOSE 8080
 
-CMD python -m src.agent.voice_agent start
+CMD ["python", "-m", "src.agent.voice_agent", "start"]
