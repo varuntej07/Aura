@@ -9,7 +9,7 @@ import random
 
 import anthropic
 from anthropic.types import TextBlock
-from langfuse.decorators import observe
+from langfuse import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger

@@ -70,7 +70,7 @@ class _NutritionScanScreenState extends State<NutritionScanScreen>
 
   void _showProfileSheet() {
     final profile = context.read<DietaryProfileViewModel>().profile;
-    showModalBottomSheet(
+    showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,

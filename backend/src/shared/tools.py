@@ -115,6 +115,62 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "list_emails",
+        "description": (
+            "List the user's recent Gmail messages (sender, subject, date, snippet). "
+            "Use when the user asks about their inbox, recent emails, or wants to find a "
+            "specific message. Returns message ids to pass to read_email for full content."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Optional Gmail search query (same syntax as the Gmail search box, "
+                        "e.g. 'from:sam is:unread newer_than:7d'). Omit for the most recent messages."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 25,
+                },
+            },
+        },
+    },
+    {
+        "name": "read_email",
+        "description": (
+            "Read the full body of one Gmail message by its id. "
+            "Call list_emails first to get the message id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Gmail message id from list_emails."},
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "send_email",
+        "description": (
+            "Send an email from the user's connected Gmail account. "
+            "Always confirm the recipient, subject, and body with the user before calling this."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email address."},
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "Plain-text body of the email."},
+            },
+            "required": ["to", "body"],
+        },
+    },
+    {
         "name": "store_memory",
         "description": "Persist a fact, preference, or habit about the user for future context.",
         "inputSchema": {
@@ -174,15 +230,22 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "web_search",
+        "name": "web_surf",
         "description": (
-            "Search the web for current information, news, facts, or anything not in your training data. "
-            "Use when the user asks about recent events, live data, or topics that benefit from up-to-date sources."
+            "Search the live web for current information, news, prices, scores, or any time-sensitive fact. "
+            "Use when the user asks about recent events, live data, or topics that benefit from up-to-date sources. "
+            "Do NOT use for things you already know or for the user's own data (other tools handle that)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "The search query to send to the web."},
+                "recency": {
+                    "type": "string",
+                    "enum": ["any", "fresh"],
+                    "default": "any",
+                    "description": "'fresh' biases toward today's sources (news, scores, prices). 'any' for stable lookups.",
+                },
             },
             "required": ["query"],
         },

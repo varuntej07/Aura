@@ -17,6 +17,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from ..config.settings import settings
 from ..lib.logger import logger
 from .firebase import admin_firestore
+from .gmail_connector import GmailConnector
 from .google_calendar_connector import GoogleCalendarConnector
 
 ToolResult = dict[str, Any]
@@ -80,6 +81,9 @@ class ToolExecutor:
             "cancel_reminder": self._cancel_reminder,
             "create_calendar_event": self._create_calendar_event,
             "get_upcoming_events": self._get_upcoming_events,
+            "list_emails": self._list_emails,
+            "read_email": self._read_email,
+            "send_email": self._send_email,
             "store_memory": self._store_memory,
             "query_memory": self._query_memory,
             "analyze_nutrition": self._analyze_nutrition,
@@ -276,6 +280,49 @@ class ToolExecutor:
 
         return await _run(_fetch)
 
+    # Gmail
+    async def _list_emails(self, inp: dict[str, Any]) -> ToolResult:
+        def _list() -> ToolResult:
+            connector = GmailConnector(self._user_id)
+            result = connector.list_recent_messages(
+                query=str(inp.get("query", "")).strip() or None,
+                limit=int(inp.get("limit", 10) or 10),
+            )
+            if not result.get("configured"):
+                return {"configured": False, "message": "Gmail is not connected."}
+            return result
+
+        return await _run(_list)
+
+    async def _read_email(self, inp: dict[str, Any]) -> ToolResult:
+        message_id = str(inp.get("message_id", "")).strip()
+        if not message_id:
+            raise ValueError("message_id is required")
+
+        def _read() -> ToolResult:
+            connector = GmailConnector(self._user_id)
+            result = connector.get_message(message_id=message_id)
+            if not result.get("configured"):
+                return {"configured": False, "message": "Gmail is not connected."}
+            return result
+
+        return await _run(_read)
+
+    async def _send_email(self, inp: dict[str, Any]) -> ToolResult:
+        to = str(inp.get("to", "")).strip()
+        body = str(inp.get("body", ""))
+        if not to:
+            raise ValueError("to is required")
+        if not body.strip():
+            raise ValueError("body is required")
+        subject = str(inp.get("subject", ""))
+
+        def _send() -> ToolResult:
+            connector = GmailConnector(self._user_id)
+            return connector.send_message(to=to, subject=subject, body=body)
+
+        return await _run(_send)
+
     # Memory
     async def _store_memory(self, inp: dict[str, Any]) -> ToolResult:
         key = str(inp.get("key", "")).strip()
@@ -389,9 +436,10 @@ class ToolExecutor:
             "recommendation": recommendation,
         }
 
-    # Web surf — grounded search exposed to chat + voice
+    # Web surf — fast Brave search exposed to chat + voice (Gemini grounding stays on
+    # the background sports ingest; the real-time path uses Brave for low latency).
     async def _web_surf(self, inp: dict[str, Any]) -> ToolResult:
-        from ..agents.data_fetchers.web_surf import web_surf
+        from ..agents.data_fetchers.brave_search import brave_search
         from .entitlement import (
             check_and_increment_daily_web_surf_usage,
             get_user_effective_tier,
@@ -415,7 +463,7 @@ class ToolExecutor:
                     "count": count,
                 }
 
-        return await web_surf(query, uid=self._user_id, recency=recency)
+        return await brave_search(query, uid=self._user_id, recency=recency)
 
     # Clarification (chat-only — returns sentinel dict, not a Firestore call)
     async def _ask_clarification(self, inp: dict[str, Any]) -> ToolResult:

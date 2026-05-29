@@ -16,13 +16,13 @@ class StubChatServiceProvider implements ChatServiceProvider {
     String? agentId,
     List<ChatAttachment>? attachments,
   }) async* {
-    await Future.delayed(const Duration(milliseconds: 600));
+    await Future<void>.delayed(const Duration(milliseconds: 600));
     const words = ['This ', 'is ', 'a ', 'stub ', 'response.'];
     for (final w in words) {
       yield TextDeltaEvent(w);
-      await Future.delayed(const Duration(milliseconds: 120));
+      await Future<void>.delayed(const Duration(milliseconds: 120));
     }
-    yield DoneEvent(metadata: const {'tool_names': []});
+    yield DoneEvent(metadata: const {'tool_names': <String>[]});
   }
 
   @override

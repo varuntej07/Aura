@@ -154,7 +154,7 @@ class _RemindersViewState extends State<_RemindersView> {
                   ),
                 ),
 
-              const SizedBox(height: 24),
+              SizedBox(height: MediaQuery.of(context).viewPadding.bottom + 96),
             ],
           );
         },
@@ -223,7 +223,7 @@ class _ReminderTileState extends State<_ReminderTile> {
   Future<void> _handleComplete() async {
     if (_completing || widget.onComplete == null) return;
     setState(() => _completing = true);
-    await Future.delayed(const Duration(milliseconds: 340));
+    await Future<void>.delayed(const Duration(milliseconds: 340));
     widget.onComplete?.call();
   }
 

@@ -34,22 +34,24 @@ class _AgentsScreenState extends State<AgentsScreen> {
       return;
     }
 
-    // Custom screens for Nutrition and Calendar
+    // Custom screens for Nutrition and Connectors
     switch (agent.id) {
       case 'nutrition':
         final profileVm = context.read<DietaryProfileViewModel>();
         if (!profileVm.nutritionAgentEnabled) {
           Navigator.of(context, rootNavigator: true).push(
-            MaterialPageRoute(builder: (_) => const DietaryOnboardingScreen()),
+            MaterialPageRoute<void>(
+              builder: (_) => const DietaryOnboardingScreen(),
+            ),
           );
         } else {
           Navigator.of(context, rootNavigator: true).push(
-            MaterialPageRoute(builder: (_) => const NutritionScanScreen()),
+            MaterialPageRoute<void>(builder: (_) => const NutritionScanScreen()),
           );
         }
-      case 'calendar':
+      case 'connectors':
         Navigator.of(context, rootNavigator: true).push(
-          MaterialPageRoute(builder: (_) => const ConnectorsScreen()),
+          MaterialPageRoute<void>(builder: (_) => const ConnectorsScreen()),
         );
     }
   }

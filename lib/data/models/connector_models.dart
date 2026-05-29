@@ -54,15 +54,50 @@ class GoogleCalendarConnectorStatus {
   }
 }
 
+class GmailConnectorStatus {
+  final bool enabled;
+  final String? emailAddress;
+  final DateTime? connectedAt;
+  final String? lastError;
+
+  const GmailConnectorStatus({
+    required this.enabled,
+    required this.emailAddress,
+    required this.connectedAt,
+    required this.lastError,
+  });
+
+  factory GmailConnectorStatus.fromJson(Map<String, dynamic> json) {
+    return GmailConnectorStatus(
+      enabled: json['enabled'] as bool? ?? false,
+      emailAddress: json['email_address'] as String?,
+      connectedAt: _parseDateTime(json['connected_at'] as String?),
+      lastError: json['last_error'] as String?,
+    );
+  }
+
+  static DateTime? _parseDateTime(String? value) {
+    if (value == null || value.isEmpty) return null;
+    return DateTime.tryParse(value);
+  }
+}
+
 class ConnectorsCatalog {
   final GoogleCalendarConnectorStatus googleCalendar;
+  final GmailConnectorStatus gmail;
 
-  const ConnectorsCatalog({required this.googleCalendar});
+  const ConnectorsCatalog({
+    required this.googleCalendar,
+    required this.gmail,
+  });
 
   factory ConnectorsCatalog.fromJson(Map<String, dynamic> json) {
     return ConnectorsCatalog(
       googleCalendar: GoogleCalendarConnectorStatus.fromJson(
         json['google_calendar'] as Map<String, dynamic>? ?? const {},
+      ),
+      gmail: GmailConnectorStatus.fromJson(
+        json['gmail'] as Map<String, dynamic>? ?? const {},
       ),
     );
   }

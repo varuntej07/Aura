@@ -12,11 +12,16 @@ from pydantic import BaseModel, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..services.gmail_connector import GmailConnector
 from ..services.google_calendar_connector import GoogleCalendarConnector
 from ..services.request_auth import resolve_user_id_from_request
 
 
 class GoogleCalendarConnectBody(BaseModel):
+    server_auth_code: str
+
+
+class GmailConnectBody(BaseModel):
     server_auth_code: str
 
 
@@ -45,10 +50,13 @@ async def get_connectors(request: Request) -> JSONResponse:
         return _unauthorized()
 
     def _load() -> dict:
-        return GoogleCalendarConnector(user_id).get_status()
+        return {
+            "google_calendar": GoogleCalendarConnector(user_id).get_status(),
+            "gmail": GmailConnector(user_id).get_status(),
+        }
 
-    status = await asyncio.to_thread(_load)
-    return JSONResponse(status_code=200, content={"google_calendar": status})
+    catalog = await asyncio.to_thread(_load)
+    return JSONResponse(status_code=200, content=catalog)
 
 
 async def connect_google_calendar(request: Request) -> JSONResponse:
@@ -112,6 +120,49 @@ async def sync_google_calendar(request: Request) -> JSONResponse:
         return JSONResponse(status_code=200, content=status)
     except Exception as exc:
         logger.exception("Google Calendar sync failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+async def connect_gmail(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    try:
+        body = GmailConnectBody.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "server_auth_code is required."})
+
+    def _connect() -> dict:
+        return GmailConnector(user_id).connect(body.server_auth_code)
+
+    try:
+        status = await asyncio.to_thread(_connect)
+        return JSONResponse(status_code=200, content=status)
+    except Exception as exc:
+        logger.exception("Gmail connect failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+async def disconnect_gmail(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    def _disconnect() -> dict:
+        return GmailConnector(user_id).disconnect()
+
+    try:
+        status = await asyncio.to_thread(_disconnect)
+        return JSONResponse(status_code=200, content=status)
+    except Exception as exc:
+        logger.exception("Gmail disconnect failed", {
             "user_id": user_id,
             "error": str(exc),
         })

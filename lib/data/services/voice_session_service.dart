@@ -20,6 +20,7 @@ class VoiceSessionService {
 
   Room? _room;
   EventsListener<RoomEvent>? _listener;
+  Timer? _agentJoinWatchdog;
   bool _isConnecting = false;
   bool _didEmitSessionReady = false;
   bool _didReceiveAssistantOutput = false;
@@ -76,6 +77,18 @@ class VoiceSessionService {
             type: 'session.ready',
             sessionId: roomName,
           ));
+          // Watchdog: if no agent joins within 20s the worker is likely scaled-down.
+          _agentJoinWatchdog = Timer(const Duration(seconds: 20), () {
+            if (_room != null && !_didReceiveAssistantOutput) {
+              AppLogger.warning('Agent join timeout — no agent joined within 20s', tag: _tag);
+              _eventsController.add(const VoiceServerEvent(
+                type: 'session.error',
+                message: "Buddy didn't connect in time. Please try again.",
+                payload: {'code': 'agent_join_timeout'},
+              ));
+              close();
+            }
+          });
         })
         ..on<RoomDisconnectedEvent>((e) {
           final wasClientClose = _closingByClient;
@@ -107,7 +120,11 @@ class VoiceSessionService {
         })
         ..on<ParticipantConnectedEvent>((e) {
           AppLogger.info('Remote participant joined room', tag: _tag,
-              metadata: {'identity': e.participant.identity, 'sid': e.participant.sid});
+              metadata: {'identity': e.participant.identity, 'kind': e.participant.kind.toString()});
+          if (e.participant.kind == ParticipantKind.AGENT) {
+            _agentJoinWatchdog?.cancel();
+            _agentJoinWatchdog = null;
+          }
         })
         ..on<ParticipantDisconnectedEvent>((e) {
           AppLogger.info('Remote participant left room', tag: _tag,
@@ -117,10 +134,18 @@ class VoiceSessionService {
           if (e.participant is RemoteParticipant) {
             final agentState = e.attributes['lk.agent.state'];
             if (agentState != null) {
+              final mappedState = _mapAgentState(agentState);
               _eventsController.add(VoiceServerEvent(
                 type: 'session.state',
-                payload: {'state': _mapAgentState(agentState)},
+                payload: {'state': mappedState},
               ));
+              if (mappedState == 'error') {
+                _eventsController.add(VoiceServerEvent(
+                  type: 'session.error',
+                  message: 'Buddy encountered an error. Please try again.',
+                  payload: {'code': 'agent_state_failed', 'agent_state': agentState},
+                ));
+              }
             }
           }
         })
@@ -253,12 +278,17 @@ class VoiceSessionService {
         return 'processing';
       case 'speaking':
         return 'speaking';
+      case 'failed':
+      case 'disconnected':
+        return 'error';
       default:
         return 'listening';
     }
   }
 
   void _cleanupRoom() {
+    _agentJoinWatchdog?.cancel();
+    _agentJoinWatchdog = null;
     _listener?.dispose();
     _listener = null;
     _room = null;

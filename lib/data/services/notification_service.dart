@@ -340,7 +340,10 @@ class NotificationService {
     );
     unawaited(_postHogAnalyticsService.trackEvent(
       'notification_tapped',
-      properties: {'notification_type': message.data['notification_type']},
+      properties: {
+        'notification_type':
+            message.data['notification_type'] as String? ?? 'unknown',
+      },
     ));
     _reportNotificationOpened(message.data);
     dispatchNotificationTap(message.data);
@@ -395,10 +398,10 @@ class NotificationService {
     final now = DateTime.now();
     return {
       'event_type': eventType,
-      if (contentId != null) 'content_id': contentId,
-      if (category != null) 'category': category,
-      if (durationMs != null) 'duration_ms': durationMs,
-      if (searchQueryText != null) 'search_query_text': searchQueryText,
+      'content_id': ?contentId,
+      'category': ?category,
+      'duration_ms': ?durationMs,
+      'search_query_text': ?searchQueryText,
       'user_local_hour': now.hour,
       'user_local_minute': now.minute,
     };

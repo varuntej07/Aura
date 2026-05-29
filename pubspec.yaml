@@ -47,6 +47,7 @@ dev_dependencies:
   drift_dev:
   build_runner:
   mocktail:
+  mockito:
   flutter_launcher_icons:
 
 flutter_launcher_icons:
@@ -73,6 +74,7 @@ flutter:
     # Placeholder: using built-in keyword until custom model is added.
     - assets/wake_word/
     - assets/fonts/
+    - assets/icons/
 
   fonts:
     - family: Outfit

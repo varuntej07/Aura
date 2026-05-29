@@ -32,7 +32,9 @@ from .agents.orchestrator import orchestrate_all_agents, run_agent_for_user
 from .handlers.account import handle_delete_account
 from .handlers.chat import handle_chat_stream
 from .handlers.connectors import (
+    connect_gmail,
     connect_google_calendar,
+    disconnect_gmail,
     disconnect_google_calendar,
     get_connectors,
     google_calendar_webhook,
@@ -373,6 +375,16 @@ async def connectors_google_calendar_sync_endpoint(request: Request) -> JSONResp
     return await sync_google_calendar(request)
 
 
+@app.post("/connectors/gmail/connect")
+async def connectors_gmail_connect_endpoint(request: Request) -> JSONResponse:
+    return await connect_gmail(request)
+
+
+@app.post("/connectors/gmail/disconnect")
+async def connectors_gmail_disconnect_endpoint(request: Request) -> JSONResponse:
+    return await disconnect_gmail(request)
+
+
 @app.post("/integrations/google-calendar/webhook", name="google_calendar_webhook")
 async def google_calendar_webhook_endpoint(request: Request) -> JSONResponse:
     return await google_calendar_webhook(request)
@@ -390,6 +402,7 @@ def _check_env() -> None:
         "CARTESIA_API_KEY": bool(settings.CARTESIA_API_KEY),
         "GOOGLE_CALENDAR": settings.google_calendar_configured,
         "GOOGLE_CALENDAR_WEBHOOK_URL": bool(settings.GOOGLE_CALENDAR_WEBHOOK_URL),
+        "GMAIL": settings.gmail_configured,
         "GEMINI_API_KEY": settings.gemini_configured,
         "GEMINI_MODEL": settings.GEMINI_MODEL,
         "ENV": settings.ENV,

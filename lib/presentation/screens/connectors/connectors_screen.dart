@@ -57,6 +57,12 @@ class _ConnectorsScreenState extends State<ConnectorsScreen> {
                 onToggle: vm.toggleGoogleCalendar,
                 onSync: vm.syncGoogleCalendar,
               ),
+              const SizedBox(height: 16),
+              _GmailCard(
+                status: vm.gmail,
+                busy: vm.isMutating,
+                onToggle: vm.toggleGmail,
+              ),
             ],
           );
         },
@@ -102,9 +108,9 @@ class _GoogleCalendarCard extends StatelessWidget {
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(
-                  Icons.calendar_month_rounded,
-                  color: Color(0xFF1A73E8),
+                child: Padding(
+                  padding: const EdgeInsets.all(5),
+                  child: Image.asset('assets/icons/google_calendar.png'),
                 ),
               ),
               const SizedBox(width: 12),
@@ -208,6 +214,107 @@ class _GoogleCalendarCard extends StatelessWidget {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  static String? _formatDateTime(DateTime? value) {
+    if (value == null) return null;
+    return DateFormat('MMM d, h:mm a').format(value.toLocal());
+  }
+}
+
+class _GmailCard extends StatelessWidget {
+  final GmailConnectorStatus status;
+  final bool busy;
+  final Future<void> Function(bool enabled) onToggle;
+
+  const _GmailCard({
+    required this.status,
+    required this.busy,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final connectedLabel = _formatDateTime(status.connectedAt);
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(5),
+                  child: Image.asset('assets/icons/gmail.png'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Gmail',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Read and send email through Buddy.',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: status.enabled,
+                onChanged: busy ? null : onToggle,
+                activeThumbColor: AppColors.accent,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _MetaRow(
+            label: 'Account',
+            value: status.emailAddress ?? 'Not connected',
+          ),
+          _MetaRow(
+            label: 'Connected',
+            value: connectedLabel ?? 'Not connected yet',
+          ),
+          if (status.lastError != null && status.lastError!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                status.lastError!,
+                style: const TextStyle(
+                  color: AppColors.warning,
+                  fontSize: 12,
+                ),
+              ),
+            ),
         ],
       ),
     );
