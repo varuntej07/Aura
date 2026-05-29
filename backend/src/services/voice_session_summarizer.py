@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from ..config.settings import settings
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
@@ -93,6 +94,16 @@ _ACTIVE_SESSION_THRESHOLD = 30
 _ARCHIVE_BATCH_SIZE = 25
 
 
+def _format_session_duration(duration_ms: int) -> str:
+    total_seconds = duration_ms // 1000
+    minutes, seconds = divmod(total_seconds, 60)
+    if minutes and seconds:
+        return f"{minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m"
+    return f"{seconds}s"
+
+
 async def _generate_session_summary(turns: list[dict]) -> str:
     if not turns:
         return ""
@@ -135,12 +146,21 @@ async def _write_session_doc(
             .collection("users").document(user_id)
             .collection("voice_sessions").document(session_id)
         )
+        num_of_user_turns = sum(1 for t in raw_turns if t.get("role") == "user")
+        num_of_assistant_turns = sum(
+            1 for t in raw_turns if t.get("role") == "assistant"
+        )
         ref.set({
             "started_at": started_at,
             "ended_at": ended_at,
             "duration_ms": duration_ms,
-            "turn_count": len(raw_turns),
+            "total_duration": _format_session_duration(duration_ms),
+            "num_of_turns": len(raw_turns),
+            "num_of_user_turns": num_of_user_turns,
+            "num_of_assistant_turns": num_of_assistant_turns,
             "tool_calls_made": tool_calls,
+            "num_of_tool_calls": len(tool_calls),
+            "model_used": settings.ANTHROPIC_CHAT_MODEL,
             "summary": summary,
             "archived": False,
             "raw_turns": raw_turns,

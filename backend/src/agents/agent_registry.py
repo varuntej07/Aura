@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from ..services.model_provider import ModelProvider, get_model_provider
 from .agent_base import ScheduledAgent
-from .implementations.jobs_agent import JobsAgent
 from .implementations.posts_agent import PostsAgent
 from .implementations.sports_agent import SportsAgent
 from .implementations.technews_agent import TechNewsAgent
@@ -29,7 +28,6 @@ class ScheduledAgentRegistry:
         self._models = models
         self._sports: SportsAgent | None = None
         self._technews: TechNewsAgent | None = None
-        self._jobs: JobsAgent | None = None
         self._posts: PostsAgent | None = None
 
     @property
@@ -45,12 +43,6 @@ class ScheduledAgentRegistry:
         return self._technews
 
     @property
-    def jobs(self) -> JobsAgent:
-        if self._jobs is None:
-            self._jobs = JobsAgent(self._models)
-        return self._jobs
-
-    @property
     def posts(self) -> PostsAgent:
         if self._posts is None:
             self._posts = PostsAgent(self._models)
@@ -62,10 +54,9 @@ class ScheduledAgentRegistry:
         Raises ValueError for unknown IDs so callers fail loudly.
         """
         mapping: dict[str, ScheduledAgent] = {
-            "sports":   self.sports,
+            "sports": self.sports,
             "technews": self.technews,
-            "jobs":     self.jobs,
-            "posts":    self.posts,
+            "posts": self.posts,
         }
         agent = mapping.get(agent_id)
         if agent is None:
@@ -77,7 +68,7 @@ class ScheduledAgentRegistry:
 
     @property
     def all_agent_ids(self) -> list[str]:
-        return ["sports", "technews", "jobs", "posts"]
+        return ["sports", "technews", "posts"]
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

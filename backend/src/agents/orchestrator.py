@@ -29,7 +29,6 @@ _AGENT_DISPATCH_DELAY_SECONDS: dict[str, int] = {
     "sports": 0,
     "technews": 3600,   # 1 h after sports
     "posts": 7200,   # 2 h after sports
-    "jobs": 10800,   # 3 h after sports
 }
 
 

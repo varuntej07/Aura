@@ -7,7 +7,7 @@ from ..agent_base import ScheduledAgent
 
 
 class PostsAgent(ScheduledAgent):
-    """PostForge — synthesizes user activity; no external fetch needed."""
+    """Tweeter — synthesizes user activity; no external fetch needed."""
 
     def __init__(self, models: ModelProvider) -> None:
         self._models = models
@@ -17,6 +17,6 @@ class PostsAgent(ScheduledAgent):
         return "posts"
 
     async def fetch_data(self, user_config: dict[str, Any]) -> list[dict[str, Any]]:
-        """PostForge synthesizes from user's stored interactions, no external fetch needed."""
+        """Tweeter synthesizes from user's stored interactions, no external fetch needed."""
         return []
 
