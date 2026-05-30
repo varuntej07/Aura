@@ -53,6 +53,16 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Play Store assets and keystore
+/Playstore Essentials/
+Feature graphic.png
+android/key.properties
+*.jks
+*.keystore
 .gstack/
+
+# Agent skills installed via the skills CLI (npx skills add)
+.agents/
 
 node_modules/

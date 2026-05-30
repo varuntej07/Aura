@@ -62,6 +62,37 @@ class _ConnectorsScreenState extends State<ConnectorsScreen> {
                 status: vm.gmail,
                 busy: vm.isMutating,
                 onToggle: vm.toggleGmail,
+                comingSoon: true,
+              ),
+              const SizedBox(height: 16),
+              const _ComingSoonConnectorCard(
+                iconAsset: 'assets/icons/todoist.png',
+                title: 'Todoist',
+                subtitle: 'Let Buddy add and check off your tasks.',
+              ),
+              const SizedBox(height: 16),
+              const _ComingSoonConnectorCard(
+                iconAsset: 'assets/icons/notion.png',
+                title: 'Notion',
+                subtitle: 'Capture notes and pull in your pages.',
+              ),
+              const SizedBox(height: 16),
+              const _ComingSoonConnectorCard(
+                iconAsset: 'assets/icons/spotify.png',
+                title: 'Spotify',
+                subtitle: 'Start focus playlists hands-free.',
+              ),
+              const SizedBox(height: 16),
+              const _ComingSoonConnectorCard(
+                iconAsset: 'assets/icons/slack.png',
+                title: 'Slack',
+                subtitle: 'Get nudges where you already work.',
+              ),
+              const SizedBox(height: 16),
+              const _ComingSoonConnectorCard(
+                iconAsset: 'assets/icons/oura.png',
+                title: 'Oura',
+                subtitle: 'Bring sleep and readiness into your day.',
               ),
             ],
           );
@@ -229,11 +260,17 @@ class _GmailCard extends StatelessWidget {
   final GmailConnectorStatus status;
   final bool busy;
   final Future<void> Function(bool enabled) onToggle;
+  // While true, the connector is shown as "Coming soon" and the toggle is
+  // hidden. Gmail uses restricted OAuth scopes that need Google verification
+  // (a CASA security assessment) before non-test users can connect — flip this
+  // back to false once that's done to restore the live toggle.
+  final bool comingSoon;
 
   const _GmailCard({
     required this.status,
     required this.busy,
     required this.onToggle,
+    this.comingSoon = false,
   });
 
   @override
@@ -288,33 +325,38 @@ class _GmailCard extends StatelessWidget {
                   ],
                 ),
               ),
-              Switch(
-                value: status.enabled,
-                onChanged: busy ? null : onToggle,
-                activeThumbColor: AppColors.accent,
-              ),
+              if (comingSoon)
+                const _ComingSoonBadge()
+              else
+                Switch(
+                  value: status.enabled,
+                  onChanged: busy ? null : onToggle,
+                  activeThumbColor: AppColors.accent,
+                ),
             ],
           ),
-          const SizedBox(height: 16),
-          _MetaRow(
-            label: 'Account',
-            value: status.emailAddress ?? 'Not connected',
-          ),
-          _MetaRow(
-            label: 'Connected',
-            value: connectedLabel ?? 'Not connected yet',
-          ),
-          if (status.lastError != null && status.lastError!.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 10),
-              child: Text(
-                status.lastError!,
-                style: const TextStyle(
-                  color: AppColors.warning,
-                  fontSize: 12,
+          if (!comingSoon) ...[
+            const SizedBox(height: 16),
+            _MetaRow(
+              label: 'Account',
+              value: status.emailAddress ?? 'Not connected',
+            ),
+            _MetaRow(
+              label: 'Connected',
+              value: connectedLabel ?? 'Not connected yet',
+            ),
+            if (status.lastError != null && status.lastError!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  status.lastError!,
+                  style: const TextStyle(
+                    color: AppColors.warning,
+                    fontSize: 12,
+                  ),
                 ),
               ),
-            ),
+          ],
         ],
       ),
     );
@@ -323,6 +365,103 @@ class _GmailCard extends StatelessWidget {
   static String? _formatDateTime(DateTime? value) {
     if (value == null) return null;
     return DateFormat('MMM d, h:mm a').format(value.toLocal());
+  }
+}
+
+/// Small pill shown in place of a connector's toggle while the integration
+/// isn't available yet. Identical across every coming-soon connector.
+class _ComingSoonBadge extends StatelessWidget {
+  const _ComingSoonBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppColors.accent.withValues(alpha: 0.3)),
+      ),
+      child: const Text(
+        'Coming soon',
+        style: TextStyle(
+          color: AppColors.accent,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+/// A connector tile for integrations that aren't live yet. Non-interactive —
+/// it advertises the integration and carries the shared "Coming soon" badge.
+class _ComingSoonConnectorCard extends StatelessWidget {
+  final String iconAsset;
+  final String title;
+  final String subtitle;
+
+  const _ComingSoonConnectorCard({
+    required this.iconAsset,
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: 0.75,
+      child: Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(7),
+                child: Image.asset(iconAsset),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            const _ComingSoonBadge(),
+          ],
+        ),
+      ),
+    );
   }
 }
 
