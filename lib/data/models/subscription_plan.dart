@@ -1,6 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-enum SubscriptionTier { free, starter, pro }
+enum SubscriptionTier { free, companion, pro }
 
 enum SubscriptionStatus { active, expired, gracePeriod }
 
@@ -8,6 +8,11 @@ enum SubscriptionStatus { active, expired, gracePeriod }
 /// entitlement middleware can handle each platform's receipt format correctly,
 /// and so web/promo grants can be added later without schema changes.
 enum EntitlementPlatform { ios, android, promo, web }
+
+/// Trial length granted to every new account. 7 days is the beta-launch default
+/// — long enough to form a daily-use habit on voice, short enough that users
+/// don't forget they signed up.
+const int kTrialDurationDays = 7;
 
 class UserEntitlement {
   final SubscriptionTier tier;
@@ -32,7 +37,7 @@ class UserEntitlement {
     this.originalPurchaseDate,
   });
 
-  // Computed 
+  // Computed
   bool get isTrialActive =>
       tier == SubscriptionTier.free &&
       DateTime.now().isBefore(trialEndDate);
@@ -42,7 +47,7 @@ class UserEntitlement {
   /// Returns 0 when trial has expired or user is on a paid plan.
   int get daysLeftInTrial {
     if (!isTrialActive) return 0;
-    return trialEndDate.difference(DateTime.now()).inDays.clamp(0, 14);
+    return trialEndDate.difference(DateTime.now()).inDays.clamp(0, kTrialDurationDays);
   }
 
   /// The effective tier the user should receive access to.
@@ -57,7 +62,7 @@ class UserEntitlement {
     final now = DateTime.now();
     final trialStart = (data['trial_start_date'] as Timestamp?)?.toDate() ?? now;
     final trialEnd = (data['trial_end_date'] as Timestamp?)?.toDate() ??
-        trialStart.add(const Duration(days: 14));
+        trialStart.add(const Duration(days: kTrialDurationDays));
 
     return UserEntitlement(
       tier: _parseTier(data['tier'] as String?),
@@ -79,7 +84,7 @@ class UserEntitlement {
       tier: SubscriptionTier.free,
       status: SubscriptionStatus.active,
       trialStartDate: now,
-      trialEndDate: now.add(const Duration(days: 14)),
+      trialEndDate: now.add(const Duration(days: kTrialDurationDays)),
       updatedAt: now,
     );
   }
@@ -147,21 +152,21 @@ class UserEntitlement {
 class SubscriptionProductIds {
   SubscriptionProductIds._();
 
-  static const String starterMonthly = 'aura_starter_monthly';
-  static const String starterAnnual = 'aura_starter_annual';
+  static const String companionMonthly = 'aura_companion_monthly';
+  static const String companionAnnual = 'aura_companion_annual';
   static const String proMonthly = 'aura_pro_monthly';
   static const String proAnnual = 'aura_pro_annual';
 
   static const Set<String> all = {
-    starterMonthly,
-    starterAnnual,
+    companionMonthly,
+    companionAnnual,
     proMonthly,
     proAnnual,
   };
 
   static SubscriptionTier tierForProductId(String productId) {
-    if (productId == starterMonthly || productId == starterAnnual) {
-      return SubscriptionTier.starter;
+    if (productId == companionMonthly || productId == companionAnnual) {
+      return SubscriptionTier.companion;
     }
     if (productId == proMonthly || productId == proAnnual) {
       return SubscriptionTier.pro;

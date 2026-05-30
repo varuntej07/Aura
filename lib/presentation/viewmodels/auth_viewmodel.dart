@@ -105,6 +105,15 @@ class AuthViewModel extends SafeChangeNotifier {
           _setState(ViewState.loaded);
         },
         failure: (error) {
+          // User backed out of the Google account picker — that's a normal
+          // choice, not an error. Quietly return to the login screen instead of
+          // flashing a red error banner at them.
+          if (error.code == ErrorCode.authCancelled) {
+            AppLogger.info('signInWithGoogle: cancelled by user', tag: 'AuthVM');
+            _error = null;
+            _setState(ViewState.idle);
+            return;
+          }
           AppLogger.error('signInWithGoogle: failed', error: error, tag: 'AuthVM');
           _error = error;
           _setState(ViewState.error);

@@ -1,12 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/models/subscription_plan.dart';
+import '../../../data/services/posthog_analytics_service.dart';
 import '../../viewmodels/subscription_viewmodel.dart';
 
-enum _PlanToggle { free, premium }
+enum _PlanToggle { free, companion, pro }
 
 enum _BillingPeriod { monthly, annual }
 
@@ -18,9 +21,15 @@ class PaywallScreen extends StatefulWidget {
 }
 
 class _PaywallScreenState extends State<PaywallScreen> {
-  _PlanToggle _activePlan = _PlanToggle.premium;
+  _PlanToggle _activePlan = _PlanToggle.companion;
   _BillingPeriod _billingPeriod = _BillingPeriod.annual;
   final PageController _togglePageController = PageController(initialPage: 1);
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(context.read<PostHogAnalyticsService>().trackEvent('paywall_viewed'));
+  }
 
   @override
   void dispose() {
@@ -30,7 +39,7 @@ class _PaywallScreenState extends State<PaywallScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pricing = _resolveLocalePricing(context);
+    final activePricing = _pricingForPlan(_activePlan);
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -69,7 +78,7 @@ class _PaywallScreenState extends State<PaywallScreen> {
                           ),
                           const SizedBox(height: 6),
                           const Text(
-                            '14-day free trial. Cancel anytime.',
+                            '7-day free trial. Cancel anytime.',
                             style: TextStyle(
                               color: AppColors.textTertiary,
                               fontSize: 14,
@@ -78,14 +87,13 @@ class _PaywallScreenState extends State<PaywallScreen> {
                           ),
                           const SizedBox(height: 24),
 
-                          // Free / Premium toggle
+                          // Free / Companion / Pro toggle
                           _PlanToggleSwitch(
                             selected: _activePlan,
-                            pageController: _togglePageController,
                             onChanged: (p) {
                               setState(() => _activePlan = p);
                               _togglePageController.animateToPage(
-                                p == _PlanToggle.free ? 0 : 1,
+                                _planIndex(p),
                                 duration: const Duration(milliseconds: 300),
                                 curve: Curves.easeInOut,
                               );
@@ -101,14 +109,13 @@ class _PaywallScreenState extends State<PaywallScreen> {
                               controller: _togglePageController,
                               onPageChanged: (index) {
                                 setState(() {
-                                  _activePlan = index == 0
-                                      ? _PlanToggle.free
-                                      : _PlanToggle.premium;
+                                  _activePlan = _planFromIndex(index);
                                 });
                               },
                               children: const [
                                 _FeatureList(plan: _PlanToggle.free),
-                                _FeatureList(plan: _PlanToggle.premium),
+                                _FeatureList(plan: _PlanToggle.companion),
+                                _FeatureList(plan: _PlanToggle.pro),
                               ],
                             ),
                           ),
@@ -122,13 +129,9 @@ class _PaywallScreenState extends State<PaywallScreen> {
                                 child: _BillingCard(
                                   period: _BillingPeriod.monthly,
                                   selected: _billingPeriod == _BillingPeriod.monthly,
-                                  enabled: _activePlan == _PlanToggle.premium,
-                                  pricing: pricing,
-                                  storePrice: vm.products
-                                      .where((p) => p.id == SubscriptionProductIds.starterMonthly)
-                                      .firstOrNull
-                                      ?.price,
-                                  onTap: _activePlan == _PlanToggle.premium
+                                  enabled: _activePlan != _PlanToggle.free,
+                                  pricing: activePricing,
+                                  onTap: _activePlan != _PlanToggle.free
                                       ? () => setState(() => _billingPeriod = _BillingPeriod.monthly)
                                       : null,
                                 ),
@@ -138,13 +141,9 @@ class _PaywallScreenState extends State<PaywallScreen> {
                                 child: _BillingCard(
                                   period: _BillingPeriod.annual,
                                   selected: _billingPeriod == _BillingPeriod.annual,
-                                  enabled: _activePlan == _PlanToggle.premium,
-                                  pricing: pricing,
-                                  storePrice: vm.products
-                                      .where((p) => p.id == SubscriptionProductIds.starterAnnual)
-                                      .firstOrNull
-                                      ?.price,
-                                  onTap: _activePlan == _PlanToggle.premium
+                                  enabled: _activePlan != _PlanToggle.free,
+                                  pricing: activePricing,
+                                  onTap: _activePlan != _PlanToggle.free
                                       ? () => setState(() => _billingPeriod = _BillingPeriod.annual)
                                       : null,
                                 ),
@@ -154,13 +153,13 @@ class _PaywallScreenState extends State<PaywallScreen> {
                           const SizedBox(height: 28),
 
                           // CTA
-                          if (_activePlan == _PlanToggle.premium) ...[
+                          if (_activePlan != _PlanToggle.free) ...[
                             _CtaButton(
-                              label: vm.isTrialActive
-                                  ? 'Continue with ${_billingPeriod == _BillingPeriod.annual ? 'Yearly' : 'Monthly'}'
-                                  : 'Start 14-day free trial',
+                              label: _activePlan == _PlanToggle.pro
+                                  ? 'Start 7-day trial · Pro'
+                                  : 'Start 7-day trial · Companion',
                               isLoading: vm.isLoading,
-                              onTap: () => _purchase(context, vm),
+                              onTap: () => _onSubscribe(context, vm),
                             ),
                           ] else ...[
                             _GhostButton(
@@ -194,20 +193,58 @@ class _PaywallScreenState extends State<PaywallScreen> {
     );
   }
 
-  void _purchase(BuildContext context, SubscriptionViewModel vm) {
-    vm.purchaseStarter(annual: _billingPeriod == _BillingPeriod.annual);
+  Future<void> _onSubscribe(BuildContext context, SubscriptionViewModel vm) async {
+    final tier = _activePlan == _PlanToggle.pro
+        ? SubscriptionTier.pro
+        : SubscriptionTier.companion;
+    final tierLabel = _activePlan == _PlanToggle.pro ? 'Pro' : 'Companion';
+    final annual = _billingPeriod == _BillingPeriod.annual;
+
+    unawaited(vm.captureInterest(tier: tier, annual: annual));
+
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => _InterestCapturedDialog(
+        tierLabel: tierLabel,
+        period: annual ? 'yearly' : 'monthly',
+      ),
+    );
+  }
+
+  static int _planIndex(_PlanToggle plan) {
+    switch (plan) {
+      case _PlanToggle.free:
+        return 0;
+      case _PlanToggle.companion:
+        return 1;
+      case _PlanToggle.pro:
+        return 2;
+    }
+  }
+
+  static _PlanToggle _planFromIndex(int index) {
+    switch (index) {
+      case 0:
+        return _PlanToggle.free;
+      case 2:
+        return _PlanToggle.pro;
+      default:
+        return _PlanToggle.companion;
+    }
   }
 }
 
-// Locale-based fallback pricing
+// Per-plan pricing
 
-class _LocalePricing {
+class _PlanPricing {
   final String symbol;
   final String monthly;
   final String annual;
   final String monthlyEquivalent;
 
-  const _LocalePricing({
+  const _PlanPricing({
     required this.symbol,
     required this.monthly,
     required this.annual,
@@ -215,49 +252,33 @@ class _LocalePricing {
   });
 }
 
-_LocalePricing _resolveLocalePricing(BuildContext context) {
-  final locale = Localizations.maybeLocaleOf(context);
-  final countryCode = locale?.countryCode ?? '';
+const _companionPricing = _PlanPricing(
+  symbol: '\$',
+  monthly: '19.99',
+  annual: '191',
+  monthlyEquivalent: '15.92',
+);
 
-  const euroCountries = {
-    'DE', 'FR', 'IT', 'ES', 'NL', 'PT', 'BE', 'AT',
-    'FI', 'IE', 'GR', 'SK', 'SI', 'LU', 'CY', 'EE', 'LV', 'LT', 'MT',
-  };
+const _proPricing = _PlanPricing(
+  symbol: '\$',
+  monthly: '34.99',
+  annual: '335',
+  monthlyEquivalent: '27.92',
+);
 
-  if (countryCode == 'IN') {
-    return const _LocalePricing(
-      symbol: '₹',
-      monthly: '499',
-      annual: '3,999',
-      monthlyEquivalent: '333',
-    );
-  }
-  if (euroCountries.contains(countryCode)) {
-    return const _LocalePricing(
-      symbol: '€',
-      monthly: '4.99',
-      annual: '39.99',
-      monthlyEquivalent: '3.33',
-    );
-  }
-  return const _LocalePricing(
-    symbol: '\$',
-    monthly: '4.99',
-    annual: '39.99',
-    monthlyEquivalent: '3.33',
-  );
+_PlanPricing _pricingForPlan(_PlanToggle plan) {
+  if (plan == _PlanToggle.pro) return _proPricing;
+  return _companionPricing;
 }
 
-// Free / Premium toggle
+// Free / Companion / Pro toggle
 
 class _PlanToggleSwitch extends StatelessWidget {
   final _PlanToggle selected;
-  final PageController pageController;
   final ValueChanged<_PlanToggle> onChanged;
 
   const _PlanToggleSwitch({
     required this.selected,
-    required this.pageController,
     required this.onChanged,
   });
 
@@ -279,9 +300,14 @@ class _PlanToggleSwitch extends StatelessWidget {
             onTap: () => onChanged(_PlanToggle.free),
           ),
           _ToggleSegment(
-            label: 'Premium',
-            isSelected: selected == _PlanToggle.premium,
-            onTap: () => onChanged(_PlanToggle.premium),
+            label: 'Companion',
+            isSelected: selected == _PlanToggle.companion,
+            onTap: () => onChanged(_PlanToggle.companion),
+          ),
+          _ToggleSegment(
+            label: 'Pro',
+            isSelected: selected == _PlanToggle.pro,
+            onTap: () => onChanged(_PlanToggle.pro),
           ),
         ],
       ),
@@ -317,7 +343,7 @@ class _ToggleSegment extends StatelessWidget {
             label,
             style: TextStyle(
               color: isSelected ? Colors.white : AppColors.textTertiary,
-              fontSize: 15,
+              fontSize: 14,
               fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
             ),
           ),
@@ -343,24 +369,19 @@ class _FeatureItem {
 
 const _freeFeatureItems = [
   _FeatureItem(
+    icon: Icons.record_voice_over_outlined,
+    text: '15 voice minutes per month',
+    included: true,
+  ),
+  _FeatureItem(
     icon: Icons.chat_bubble_outline_rounded,
-    text: '20 messages per day with Buddy',
+    text: '50 chat messages per month',
     included: true,
   ),
   _FeatureItem(
     icon: Icons.notifications_outlined,
     text: 'Basic reminders',
     included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.history_rounded,
-    text: '7-day chat history',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.record_voice_over_outlined,
-    text: 'Voice conversations with Buddy',
-    included: false,
   ),
   _FeatureItem(
     icon: Icons.extension_outlined,
@@ -374,35 +395,58 @@ const _freeFeatureItems = [
   ),
 ];
 
-const _premiumFeatureItems = [
-  _FeatureItem(
-    icon: Icons.all_inclusive_rounded,
-    text: 'Unlimited chat with Buddy',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.extension_outlined,
-    text: 'All agents unlocked',
-    included: true,
-  ),
+const _companionFeatureItems = [
   _FeatureItem(
     icon: Icons.record_voice_over_outlined,
-    text: 'Natural voice conversations',
+    text: '120 voice minutes per month',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.chat_bubble_outline_rounded,
+    text: '500 chat messages per month',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.calendar_today_outlined,
+    text: 'Calendar + reminders unlimited',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.restaurant_outlined,
+    text: '30 nutrition scans per month',
     included: true,
   ),
   _FeatureItem(
     icon: Icons.memory_rounded,
-    text: 'Full Aura memory profile',
+    text: 'Unlimited Aura memory',
+    included: true,
+  ),
+];
+
+const _proFeatureItems = [
+  _FeatureItem(
+    icon: Icons.record_voice_over_outlined,
+    text: '400 voice minutes per month',
     included: true,
   ),
   _FeatureItem(
-    icon: Icons.notifications_active_outlined,
-    text: 'Proactive briefings and nudges',
+    icon: Icons.all_inclusive_rounded,
+    text: 'Unlimited chat',
     included: true,
   ),
   _FeatureItem(
-    icon: Icons.history_rounded,
-    text: 'Unlimited chat history',
+    icon: Icons.bolt_outlined,
+    text: 'Priority voice + premium TTS',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.tune_rounded,
+    text: 'Custom interest tuning for notifications',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.workspace_premium_outlined,
+    text: 'Everything in Companion',
     included: true,
   ),
 ];
@@ -414,7 +458,11 @@ class _FeatureList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final items = plan == _PlanToggle.free ? _freeFeatureItems : _premiumFeatureItems;
+    final items = switch (plan) {
+      _PlanToggle.free => _freeFeatureItems,
+      _PlanToggle.companion => _companionFeatureItems,
+      _PlanToggle.pro => _proFeatureItems,
+    };
 
     return FauxGlassCard(
       borderRadius: 18,
@@ -489,8 +537,7 @@ class _BillingCard extends StatelessWidget {
   final _BillingPeriod period;
   final bool selected;
   final bool enabled;
-  final _LocalePricing pricing;
-  final String? storePrice;
+  final _PlanPricing pricing;
   final VoidCallback? onTap;
 
   const _BillingCard({
@@ -499,7 +546,6 @@ class _BillingCard extends StatelessWidget {
     required this.enabled,
     required this.pricing,
     required this.onTap,
-    this.storePrice,
   });
 
   @override
@@ -560,7 +606,7 @@ class _BillingCard extends StatelessWidget {
                         borderRadius: BorderRadius.circular(5),
                       ),
                       child: const Text(
-                        'Save 33%',
+                        'Save 20%',
                         style: TextStyle(
                           color: AppColors.accent,
                           fontSize: 9,
@@ -594,9 +640,7 @@ class _BillingCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  storePrice != null
-                      ? 'Billed $storePrice per year'
-                      : 'Billed ${pricing.symbol}${pricing.annual} per year',
+                  'Billed ${pricing.symbol}${pricing.annual} per year',
                   style: const TextStyle(
                     color: AppColors.textTertiary,
                     fontSize: 11,
@@ -604,9 +648,7 @@ class _BillingCard extends StatelessWidget {
                 ),
               ] else ...[
                 Text(
-                  storePrice != null
-                      ? '$storePrice/mo'
-                      : '${pricing.symbol}${pricing.monthly}/mo',
+                  '${pricing.symbol}${pricing.monthly}/mo',
                   style: TextStyle(
                     color: isActive ? AppColors.accent : AppColors.textPrimary,
                     fontSize: 20,
@@ -717,6 +759,59 @@ class _GhostButton extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// Acknowledgement dialog shown during beta in place of real IAP
+
+class _InterestCapturedDialog extends StatelessWidget {
+  final String tierLabel;
+  final String period;
+
+  const _InterestCapturedDialog({
+    required this.tierLabel,
+    required this.period,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppColors.deepBackground,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: AppColors.glassBorderLight),
+      ),
+      title: const Text(
+        'Thanks for your interest!',
+        style: TextStyle(
+          color: AppColors.textPrimary,
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      content: Text(
+        "Payments aren't live yet — we're shipping the final pieces. "
+        "We saved your interest in $tierLabel ($period) and you'll be the "
+        "first to know the moment it goes live.",
+        style: const TextStyle(
+          color: AppColors.textSecondary,
+          fontSize: 14,
+          height: 1.4,
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text(
+            'Got it',
+            style: TextStyle(
+              color: AppColors.accent,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

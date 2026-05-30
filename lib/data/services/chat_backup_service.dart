@@ -187,6 +187,7 @@ class ChatBackupService {
           .doc(userId)
           .collection('chat_sessions')
           .orderBy('updated_at', descending: true)
+          .limit(25)
           .get();
 
       if (sessionsSnapshot.docs.isEmpty) {
@@ -194,7 +195,6 @@ class ChatBackupService {
       }
 
       final restoredSessions = <ChatSessionsCompanion>[];
-      final restoredMessages = <ChatMessagesCompanion>[];
 
       for (final sessionDoc in sessionsSnapshot.docs) {
         final data = sessionDoc.data();
@@ -214,26 +214,6 @@ class ChatBackupService {
             agentId: Value(data['agent_id'] as String?),
           ),
         );
-
-        final messagesSnapshot = await sessionDoc.reference
-            .collection('messages')
-            .orderBy('sequence')
-            .get();
-
-        for (final messageDoc in messagesSnapshot.docs) {
-          final messageData = messageDoc.data();
-          restoredMessages.add(
-            ChatMessagesCompanion.insert(
-              id: messageDoc.id,
-              sessionId: sessionDoc.id,
-              content: (messageData['text'] as String?) ?? '',
-              isUser: (messageData['role'] as String?) == 'user',
-              channel: (messageData['channel'] as String?) ?? 'text',
-              timestamp: _toDateTime(messageData['created_at']) ?? startedAt,
-              sequence: Value((messageData['sequence'] as num?)?.toInt() ?? 0),
-            ),
-          );
-        }
       }
 
       if (await _localSessionCountForUser(userId) > 0) {
@@ -244,18 +224,14 @@ class ChatBackupService {
         for (final session in restoredSessions) {
           await _db.into(_db.chatSessions).insertOnConflictUpdate(session);
         }
-        for (final message in restoredMessages) {
-          await _db.into(_db.chatMessages).insertOnConflictUpdate(message);
-        }
       });
 
       AppLogger.info(
-        'Restored chat history from Firestore backup',
+        'Restored chat session metadata from Firestore backup',
         tag: 'ChatBackupService',
         metadata: {
           'userId': userId,
           'sessionCount': restoredSessions.length,
-          'messageCount': restoredMessages.length,
         },
       );
       return true;

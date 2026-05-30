@@ -27,6 +27,7 @@ class ChatRepository {
   Future<Result<List<ChatSession>>> loadMainSessions({
     required String userId,
     int limit = 25,
+    int offset = 0,
   }) async {
     try {
       final rows = await (_db.select(_db.chatSessions)
@@ -34,7 +35,7 @@ class ChatRepository {
             ..where((t) => t.agentId.isNull())
             ..where((t) => t.messageCount.isBiggerThanValue(0))
             ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
-            ..limit(limit))
+            ..limit(limit, offset: offset))
           .get();
       return Result.success(rows);
     } catch (e, st) {

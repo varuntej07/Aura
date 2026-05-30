@@ -36,16 +36,24 @@ class SubscriptionViewModel extends SafeChangeNotifier {
   UserEntitlement? get entitlement => _subscriptionService.entitlement;
 
   /// Convenience getters for the paywall screen — avoid repeating tier logic in UI.
-  bool get isOnStarterPlan => currentTier == SubscriptionTier.starter;
+  bool get isOnCompanionPlan => currentTier == SubscriptionTier.companion;
   bool get isOnProPlan => currentTier == SubscriptionTier.pro;
   bool get isOnFreePlan => currentTier == SubscriptionTier.free && !isTrialActive;
 
   // Actions
 
-  Future<void> purchaseStarter({bool annual = false}) async {
+  /// Beta-only: record interest in a tier instead of opening the store sheet.
+  /// Use this everywhere the paywall CTA is tapped until real IAP is enabled.
+  Future<void> captureInterest({
+    required SubscriptionTier tier,
+    required bool annual,
+  }) =>
+      _subscriptionService.captureInterest(tier: tier, annual: annual);
+
+  Future<void> purchaseCompanion({bool annual = false}) async {
     final productId = annual
-        ? SubscriptionProductIds.starterAnnual
-        : SubscriptionProductIds.starterMonthly;
+        ? SubscriptionProductIds.companionAnnual
+        : SubscriptionProductIds.companionMonthly;
     await _purchaseById(productId);
   }
 

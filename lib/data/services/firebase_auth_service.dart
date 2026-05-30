@@ -120,6 +120,24 @@ class FirebaseAuthService {
         return Result.failure(AppException.authCancelled());
       }
       return Result.failure(AppException.authFailed(e, st));
+    } on FirebaseAuthException catch (e, st) {
+      // Credential exchange (signInWithCredential) can fail on connectivity loss
+      // with the official network-request-failed code — surface that honestly.
+      AppLogger.error(
+        'Google sign-in credential exchange failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
+      if (e.code == 'network-request-failed') {
+        return Result.failure(AppException(
+          code: ErrorCode.authFailed,
+          message: "Looks like you're offline. Check your connection and try again.",
+          originalError: e,
+          stackTrace: st,
+        ));
+      }
+      return Result.failure(AppException.authFailed(e, st));
     } catch (e, st) {
       AppLogger.error(
         'Google sign-in failed',
@@ -273,7 +291,23 @@ class FirebaseAuthService {
       case 'too-many-requests':
         return AppException(
           code: ErrorCode.authFailed,
-          message: 'Too many attempts. Try again later.',
+          message: 'Too many attempts. Try again in a few minutes.',
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'network-request-failed':
+        // Official Firebase code for connectivity loss. Mapped explicitly so the
+        // user isn't told their password is wrong when they're really offline.
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: "Looks like you're offline. Check your connection and try again.",
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'operation-not-allowed':
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: 'Email sign-in is unavailable right now. Try continuing with Google.',
           originalError: e,
           stackTrace: st,
         );
@@ -307,6 +341,28 @@ class FirebaseAuthService {
         return AppException(
           code: ErrorCode.authFailed,
           message: 'Enter a valid email address.',
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'too-many-requests':
+        // Firebase rate-limits account creation too, not just sign-in.
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: 'Too many attempts. Try again in a few minutes.',
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'network-request-failed':
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: "Looks like you're offline. Check your connection and try again.",
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'operation-not-allowed':
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: 'Email sign-up is unavailable right now. Try continuing with Google.',
           originalError: e,
           stackTrace: st,
         );

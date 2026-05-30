@@ -19,6 +19,7 @@ a Flutter client joins room "voice-{uid}", this agent starts a session.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -100,6 +101,51 @@ def _log_voice_failure(
         "error_type": type(exc).__name__,
         "error": str(exc),
     })
+
+
+def _classify_pipeline_error(error_text: str) -> tuple[str, str]:
+    """Map a runtime pipeline error to (client_code, friendly_message).
+
+    Pulls the 'we're out of API credit / the provider rejected our key' case out
+    of the generic bucket so the app can honestly say it's an "our end" problem.
+    This is the exact shape of the zero-credit hang: every LLM/TTS fallback fails
+    with an auth/quota error and the user otherwise gets nothing.
+    """
+    lowered = error_text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "insufficient", "quota", "credit", "billing", "payment",
+            "401", "403", "unauthorized", "authentication", "rate limit",
+        )
+    ):
+        return (
+            "provider_unavailable",
+            "Buddy's voice is having a moment on our end. Hang tight and try again shortly.",
+        )
+    if "tts" in lowered or "cartesia" in lowered or "audio_output" in lowered:
+        return ("tts_pipeline_failed", "Buddy hit a snag mid-call. Mind tapping to start over?")
+    return ("session_runtime_failed", "Buddy hit a snag mid-call. Mind tapping to start over?")
+
+
+async def _publish_client_error(ctx: JobContext, code: str, message: str) -> None:
+    """Push a session.error down the LiveKit data channel so the Flutter client
+    shows a friendly message immediately instead of waiting on its own watchdog.
+
+    The payload shape matches VoiceServerEvent.fromJson on the client:
+    {type: 'session.error', message, payload: {code}}.
+    """
+    try:
+        payload = json.dumps({
+            "type": "session.error",
+            "message": message,
+            "payload": {"code": code},
+        }).encode("utf-8")
+        await ctx.room.local_participant.publish_data(payload, reliable=True)
+    except Exception as exc:
+        logger.warn("VoiceSession: failed to publish client error", {
+            "code": code, "error": str(exc),
+        })
 
 
 def _log_turn_metrics(
@@ -750,6 +796,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 "error_type": type(error).__name__,
                 "error": str(error),
             })
+            # Tell the user. Without this the client just sees a stuck "Listening"
+            # screen until its own silence watchdog trips — this is the fast path.
+            code, message = _classify_pipeline_error(str(error))
+            asyncio.create_task(
+                _publish_client_error(ctx, code, message),
+                name=f"voice-client-error-{session_id[:8]}",
+            )
 
         @session.on("close")
         def _on_close(ev) -> None:  # type: ignore[misc]
@@ -759,16 +812,19 @@ async def entrypoint(ctx: JobContext) -> None:
                 "error": str(close_error) if close_error else None,
             })
             if close_error:
-                error_text = str(close_error).lower()
-                code = "session_runtime_failed"
-                if "tts" in error_text or "cartesia" in error_text or "audio_output" in error_text:
-                    code = "tts_pipeline_failed"
+                code, message = _classify_pipeline_error(str(close_error))
                 _log_voice_failure(
                     code=code,
                     user_id=user_id,
                     room_name=ctx.room.name,
                     session_id=session_id,
                     exc=Exception(str(close_error)),
+                )
+                # Best-effort nudge to the client in case the runtime "error"
+                # event didn't fire (some failures only surface at close time).
+                asyncio.create_task(
+                    _publish_client_error(ctx, code, message),
+                    name=f"voice-client-error-close-{session_id[:8]}",
                 )
             session_done.set()
 

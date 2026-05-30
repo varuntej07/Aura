@@ -9,6 +9,7 @@ import '../../core/logging/app_logger.dart';
 import '../models/subscription_plan.dart';
 import 'firebase_auth_service.dart';
 import 'firestore_service.dart';
+import 'posthog_analytics_service.dart';
 
 const _tag = 'SubscriptionService';
 
@@ -23,6 +24,7 @@ const _tag = 'SubscriptionService';
 /// field both sides share.
 class SubscriptionService extends ChangeNotifier {
   final FirebaseAuthService _authService;
+  final PostHogAnalyticsService _postHogAnalyticsService;
 
   StreamSubscription<List<PurchaseDetails>>? _purchaseStreamSub;
 
@@ -35,7 +37,9 @@ class SubscriptionService extends ChangeNotifier {
   SubscriptionService({
     required FirestoreService firestoreService,
     required FirebaseAuthService authService,
-  })  : _authService = authService;
+    required PostHogAnalyticsService postHogAnalyticsService,
+  })  : _authService = authService,
+        _postHogAnalyticsService = postHogAnalyticsService;
 
   // ── Getters ────────────────────────────────────────────────────────────────
 
@@ -123,6 +127,11 @@ class SubscriptionService extends ChangeNotifier {
     if (!_isStoreAvailable) return;
     _clearError();
 
+    unawaited(_postHogAnalyticsService.trackEvent(
+      'purchase_initiated',
+      properties: {'product_id': product.id},
+    ));
+
     final uid = _authService.currentUser?.uid;
     final params = PurchaseParam(
       productDetails: product,
@@ -149,6 +158,48 @@ class SubscriptionService extends ChangeNotifier {
       _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
       _setLoading(false);
       notifyListeners();
+    }
+  }
+
+  // ── Beta interest capture ──────────────────────────────────────────────────
+
+  /// Beta-only path used while real IAP is disabled. Records a tier-intent
+  /// signal so we can size willingness-to-pay before turning on payments.
+  /// Writes `users/{uid}/payment_intent/{tier}_{period}` in Firestore and
+  /// fires a PostHog `paywall_intent` event with the same fields.
+  Future<void> captureInterest({
+    required SubscriptionTier tier,
+    required bool annual,
+  }) async {
+    final period = annual ? 'annual' : 'monthly';
+    final uid = _authService.currentUser?.uid;
+
+    unawaited(_postHogAnalyticsService.trackEvent(
+      'paywall_intent',
+      properties: {
+        'tier': tier.name,
+        'billing_period': period,
+      },
+    ));
+
+    if (uid == null) {
+      AppLogger.info('Interest captured pre-auth — PostHog only', tag: _tag);
+      return;
+    }
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('payment_intent')
+          .doc('${tier.name}_$period')
+          .set({
+        'tier': tier.name,
+        'billing_period': period,
+        'captured_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (e, st) {
+      AppLogger.error('Failed to write payment_intent', error: e, stackTrace: st, tag: _tag);
     }
   }
 
@@ -228,6 +279,11 @@ class SubscriptionService extends ChangeNotifier {
     _entitlement = updated;
     notifyListeners();
 
+    unawaited(_postHogAnalyticsService.trackEvent(
+      'purchase_completed',
+      properties: {'product_id': purchase.productID, 'tier': tier.name},
+    ));
+
     AppLogger.info('Entitlement granted', tag: _tag,
         metadata: {'tier': tier.name, 'productId': purchase.productID});
   }
@@ -300,7 +356,7 @@ class SubscriptionService extends ChangeNotifier {
       status: SubscriptionStatus.active,
       platform: null,
       trialStartDate: now,
-      trialEndDate: now.add(const Duration(days: 14)),
+      trialEndDate: now.add(const Duration(days: kTrialDurationDays)),
       updatedAt: now,
     );
   }

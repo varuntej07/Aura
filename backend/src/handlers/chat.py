@@ -103,7 +103,7 @@ def _error_stream(message: str) -> AsyncGenerator[str, None]:
 def _chat_limit_reached_stream() -> AsyncGenerator[str, None]:
     _payload = json.dumps({
         "type": "chat_limit_reached",
-        "message": "You've reached the daily message limit. Please upgrade to keep chatting.",
+        "message": "That's your free messages for today! Upgrade to keep the conversation going with Buddy.",
     })
 
     async def _gen():
@@ -613,7 +613,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     "error_type": type(exc).__name__,
                 },
             )
-            _err = json.dumps({"type": "error", "message": "Internal server error"})
+            _err = json.dumps({
+                "type": "error",
+                "message": "Something glitched on my end there. Mind sending that again?",
+            })
             yield f"data: {_err}\n\n"
         finally:
             yield "data: [DONE]\n\n"
