@@ -1,4 +1,4 @@
-package com.varundevs.aura
+package dev.varuntej.aura
 
 import io.flutter.embedding.android.FlutterActivity
 
