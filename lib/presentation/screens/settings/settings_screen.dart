@@ -78,6 +78,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  Future<void> _showFeedbackSheet(BuildContext context) async {
+    final settingsVm = context.read<SettingsViewModel>();
+    final messenger = ScaffoldMessenger.of(context);
+    final sent = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _FeedbackSheet(
+        onSubmit: (text, category) =>
+            settingsVm.submitFeedback(text: text, category: category),
+      ),
+    );
+    if (sent == true && mounted) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Got it — thanks for the feedback.'),
+          backgroundColor: AppColors.accent,
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -200,6 +222,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const SizedBox(height: 12),
                         _GlassDeleteAccountButton(
                           onTap: () => _confirmDeleteAccount(context),
+                        ),
+
+                        // ── Feedback ─────────────────────────────────────────
+                        _SectionLabel('Feedback'),
+                        _GlassNavTile(
+                          icon: Icons.feedback_outlined,
+                          title: 'Send Feedback',
+                          subtitle: 'Tell us what to change or fix',
+                          onTap: () => _showFeedbackSheet(context),
                         ),
 
                         // ── Legal ────────────────────────────────────────────
@@ -453,6 +484,266 @@ class _GlassSignOutButton extends StatelessWidget {
               fontSize: 16,
               fontWeight: FontWeight.w600,
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Feedback sheet
+
+/// The selectable feedback categories. Label is shown on the chip; value is the
+/// string stored in Firestore and sent to PostHog.
+const List<({String label, String value})> _feedbackCategories = [
+  (label: 'Idea', value: 'idea'),
+  (label: 'Bug', value: 'bug'),
+  (label: 'Voice', value: 'voice'),
+  (label: 'Other', value: 'other'),
+];
+
+class _FeedbackSheet extends StatefulWidget {
+  /// Returns null on success, or a user-facing error message on failure.
+  final Future<String?> Function(String text, String category) onSubmit;
+
+  const _FeedbackSheet({required this.onSubmit});
+
+  @override
+  State<_FeedbackSheet> createState() => _FeedbackSheetState();
+}
+
+class _FeedbackSheetState extends State<_FeedbackSheet> {
+  final TextEditingController _controller = TextEditingController();
+  String _selectedCategory = _feedbackCategories.first.value;
+  bool _isSubmitting = false;
+  bool _hasText = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(() {
+      final hasText = _controller.text.trim().isNotEmpty;
+      if (hasText != _hasText) setState(() => _hasText = hasText);
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    setState(() {
+      _isSubmitting = true;
+      _errorMessage = null;
+    });
+    final error =
+        await widget.onSubmit(_controller.text, _selectedCategory);
+    if (!mounted) return;
+    if (error == null) {
+      Navigator.pop(context, true);
+      return;
+    }
+    setState(() {
+      _isSubmitting = false;
+      _errorMessage = error;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: AppColors.deepBackground,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(
+            top: BorderSide(color: AppColors.glassBorderLight),
+          ),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppColors.glassBorderLight,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                "What's on your mind?",
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.3,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final category in _feedbackCategories)
+                    _CategoryChip(
+                      label: category.label,
+                      selected: _selectedCategory == category.value,
+                      onTap: () =>
+                          setState(() => _selectedCategory = category.value),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              FauxGlassCard.section(
+                child: TextField(
+                  controller: _controller,
+                  enabled: !_isSubmitting,
+                  maxLines: 5,
+                  maxLength: 1000,
+                  style: const TextStyle(
+                      color: AppColors.textPrimary, fontSize: 15, height: 1.4),
+                  cursorColor: AppColors.accent,
+                  decoration: const InputDecoration(
+                    hintText: 'Tell us anything — what you love, what feels off, '
+                        'what you wish it did.',
+                    hintStyle:
+                        TextStyle(color: AppColors.textTertiary, fontSize: 14),
+                    border: InputBorder.none,
+                    isCollapsed: true,
+                    counterText: '',
+                  ),
+                ),
+              ),
+              if (_errorMessage != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _errorMessage!,
+                  style: const TextStyle(color: AppColors.error, fontSize: 13),
+                ),
+              ],
+              const SizedBox(height: 16),
+              _FeedbackSubmitButton(
+                enabled: _hasText && !_isSubmitting,
+                isSubmitting: _isSubmitting,
+                onTap: _submit,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _CategoryChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!selected) {
+      return GestureDetector(
+        onTap: onTap,
+        child: FauxGlassCard.pill(
+          child: Text(
+            label,
+            style: const TextStyle(
+                color: AppColors.textSecondary, fontSize: 14),
+          ),
+        ),
+      );
+    }
+    // Selected state uses a dynamic accent border/gradient, so the default
+    // constructor is used here rather than the pill preset.
+    return GestureDetector(
+      onTap: onTap,
+      child: FauxGlassCard(
+        borderRadius: 20,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        borderColor: AppColors.accent.withValues(alpha: 0.5),
+        gradient: LinearGradient(
+          colors: [
+            AppColors.accent.withValues(alpha: 0.18),
+            AppColors.accent.withValues(alpha: 0.08),
+          ],
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: AppColors.accent,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FeedbackSubmitButton extends StatelessWidget {
+  final bool enabled;
+  final bool isSubmitting;
+  final VoidCallback onTap;
+
+  const _FeedbackSubmitButton({
+    required this.enabled,
+    required this.isSubmitting,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: Opacity(
+        opacity: enabled || isSubmitting ? 1.0 : 0.4,
+        child: FauxGlassCard(
+          borderRadius: 16,
+          padding: const EdgeInsets.symmetric(vertical: 15),
+          borderColor: AppColors.accent.withValues(alpha: 0.35),
+          gradient: LinearGradient(
+            colors: [
+              AppColors.accent.withValues(alpha: 0.22),
+              AppColors.accent.withValues(alpha: 0.10),
+            ],
+          ),
+          child: Center(
+            child: isSubmitting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.accent,
+                    ),
+                  )
+                : const Text(
+                    'Send',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
           ),
         ),
       ),

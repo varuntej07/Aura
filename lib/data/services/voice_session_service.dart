@@ -14,6 +14,14 @@ import 'posthog_analytics_service.dart';
 
 const _tag = 'VoiceSession';
 
+// How long we wait for Buddy to show ANY sign of life — the opening hello after
+// the agent joins, or a reply after the user finishes talking — before we tell
+// the user something's off instead of leaving them staring at a dead "Listening"
+// screen. Reset on every signal from the agent (state change, audio, text), so a
+// long tool call (web search, nutrition scan) never trips it. Healthy first audio
+// lands in 2-5s; 15s is a generous ceiling for "it's genuinely stuck".
+const _replyWatchdogTimeout = Duration(seconds: 15);
+
 class VoiceSessionService {
   final Future<String?> Function() _tokenProvider;
   final PostHogAnalyticsService _postHogAnalyticsService;
@@ -21,9 +29,12 @@ class VoiceSessionService {
   Room? _room;
   EventsListener<RoomEvent>? _listener;
   Timer? _agentJoinWatchdog;
+  Timer? _replyWatchdog;
   bool _isConnecting = false;
   bool _didEmitSessionReady = false;
   bool _didReceiveAssistantOutput = false;
+  bool _awaitingAssistantReply = false;
+  bool _didTrackFirstResponse = false;
   bool _closingByClient = false;
   final Stopwatch _sessionStopwatch = Stopwatch();
   final StreamController<VoiceServerEvent> _eventsController =
@@ -53,7 +64,7 @@ class VoiceSessionService {
       final tokenResult = await _fetchLiveKitToken(idToken);
       if (tokenResult == null) {
         return Result.failure(
-          AppException.unexpected('Failed to obtain voice session token.'),
+          AppException.unexpected("Couldn't get Buddy on the line. Try again in a sec?"),
         );
       }
 
@@ -81,11 +92,10 @@ class VoiceSessionService {
           _agentJoinWatchdog = Timer(const Duration(seconds: 20), () {
             if (_room != null && !_didReceiveAssistantOutput) {
               AppLogger.warning('Agent join timeout — no agent joined within 20s', tag: _tag);
-              _eventsController.add(const VoiceServerEvent(
-                type: 'session.error',
-                message: "Buddy didn't connect in time. Please try again.",
-                payload: {'code': 'agent_join_timeout'},
-              ));
+              _emitSessionError(
+                code: 'agent_join_timeout',
+                message: "Buddy's taking too long to pick up. Give it another tap?",
+              );
               close();
             }
           });
@@ -104,15 +114,11 @@ class VoiceSessionService {
           if (wasClientClose) {
             _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
           } else if (endedBeforeAssistantOutput) {
-            _eventsController.add(VoiceServerEvent(
-              type: 'session.error',
-              message:
-                  'Voice session ended before Buddy could reply. Please try again.',
-              payload: {
-                'code': 'agent_disconnected_early',
-                'reason': reason,
-              },
-            ));
+            _emitSessionError(
+              code: 'agent_disconnected_early',
+              message: "Call dropped before Buddy could say anything. Let's try again?",
+              extra: {'reason': reason},
+            );
           } else {
             _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
           }
@@ -124,6 +130,10 @@ class VoiceSessionService {
           if (e.participant.kind == ParticipantKind.AGENT) {
             _agentJoinWatchdog?.cancel();
             _agentJoinWatchdog = null;
+            // The agent's process is here, but it hasn't said hi yet. Watch for
+            // the greeting — if it never comes (e.g. the LLM/TTS is down), this
+            // is what saves the user from an endless "Listening" screen.
+            _armReplyWatchdog(reason: 'awaiting_greeting');
           }
         })
         ..on<ParticipantDisconnectedEvent>((e) {
@@ -135,23 +145,28 @@ class VoiceSessionService {
             final agentState = e.attributes['lk.agent.state'];
             if (agentState != null) {
               final mappedState = _mapAgentState(agentState);
+              // Agent is actively thinking/talking — it's alive, so push the
+              // silence watchdog back instead of letting it fire mid-tool-call.
+              if (agentState == 'thinking' || agentState == 'speaking') {
+                _pokeReplyWatchdog();
+              }
               _eventsController.add(VoiceServerEvent(
                 type: 'session.state',
                 payload: {'state': mappedState},
               ));
               if (mappedState == 'error') {
-                _eventsController.add(VoiceServerEvent(
-                  type: 'session.error',
-                  message: 'Buddy encountered an error. Please try again.',
-                  payload: {'code': 'agent_state_failed', 'agent_state': agentState},
-                ));
+                _emitSessionError(
+                  code: 'agent_state_failed',
+                  message: "Buddy hit a snag. Mind trying that again?",
+                  extra: {'agent_state': agentState},
+                );
               }
             }
           }
         })
         ..on<TrackSubscribedEvent>((e) {
           if (e.track is RemoteAudioTrack) {
-            _didReceiveAssistantOutput = true;
+            _markAssistantResponded();
             (e.track as RemoteAudioTrack).start();
             AppLogger.info('Remote audio track started', tag: _tag);
           }
@@ -165,7 +180,7 @@ class VoiceSessionService {
           for (final seg in e.segments) {
             final isAssistant = e.participant is RemoteParticipant;
             final role = isAssistant ? 'assistant' : 'user';
-            if (isAssistant) _didReceiveAssistantOutput = true;
+            if (isAssistant) _markAssistantResponded();
             _eventsController.add(VoiceServerEvent(
               type: '$role.text.${seg.isFinal ? 'final' : 'delta'}',
               text: seg.text,
@@ -173,6 +188,8 @@ class VoiceSessionService {
             ));
             if (seg.isFinal && !isAssistant) {
               AppLogger.info('Voice user transcript final', tag: _tag);
+              // User just finished talking — start the clock on Buddy's reply.
+              _armReplyWatchdog(reason: 'awaiting_reply');
             }
           }
         })
@@ -198,8 +215,8 @@ class VoiceSessionService {
       return Result.failure(
         AppException.unexpected(
           isIceFailure
-              ? 'Voice connection failed. Check your network and try again.'
-              : 'Failed to connect to the voice session.',
+              ? "Couldn't reach Buddy — looks like a network hiccup. Try again?"
+              : "Couldn't start the call. Give it another shot in a sec?",
           error: e,
           stackTrace: st,
         ),
@@ -254,7 +271,13 @@ class VoiceSessionService {
     ));
     try {
       await _room?.disconnect();
-    } catch (_) {}
+    } catch (e) {
+      // Disconnecting a half-dead room can throw; the session is ending anyway,
+      // so we don't surface it — but we leave a breadcrumb so a stuck close is
+      // traceable instead of vanishing.
+      AppLogger.warning('Ignored error while disconnecting room', tag: _tag,
+          metadata: {'error': e.toString()});
+    }
     _cleanupRoom();
   }
 
@@ -263,11 +286,81 @@ class VoiceSessionService {
       final json = jsonDecode(utf8.decode(data)) as Map<String, dynamic>;
       final event = VoiceServerEvent.fromJson(json);
       AppLogger.debug('← data channel: ${event.type}', tag: _tag);
+      // Any message from the agent is a sign of life — keep the watchdog at bay.
+      _pokeReplyWatchdog();
+      // The backend can push a session.error straight down the data channel when
+      // its pipeline dies (e.g. all LLM providers exhausted). Treat it exactly
+      // like a locally-detected error so it lands on the dashboard and stops the
+      // watchdog from double-firing.
+      if (event.type == 'session.error') {
+        _awaitingAssistantReply = false;
+        _replyWatchdog?.cancel();
+        _replyWatchdog = null;
+        final code = event.payload?['code'] as String? ?? 'backend_session_error';
+        unawaited(_postHogAnalyticsService.trackEvent('voice_error',
+            properties: {'code': code}));
+      }
       _eventsController.add(event);
     } catch (e) {
       AppLogger.warning('Failed to parse data channel message', tag: _tag,
           metadata: {'error': e.toString()});
     }
+  }
+
+  /// Start (or restart) the silence watchdog. Fires once if the agent goes fully
+  /// quiet for [_replyWatchdogTimeout] — no audio, no text, no state changes.
+  void _armReplyWatchdog({required String reason}) {
+    _awaitingAssistantReply = true;
+    _replyWatchdog?.cancel();
+    _replyWatchdog = Timer(_replyWatchdogTimeout, () {
+      if (_room == null || !_awaitingAssistantReply) return;
+      AppLogger.warning('Reply watchdog fired — Buddy went silent', tag: _tag,
+          metadata: {'reason': reason});
+      _emitSessionError(
+        code: 'agent_silent',
+        message: "Buddy's connected but gone quiet on me. Tap to try again?",
+        extra: {'reason': reason},
+      );
+      close();
+    });
+  }
+
+  /// Push the watchdog back when the agent shows a sign of life but hasn't
+  /// delivered its reply yet (mid-thought, mid-tool-call).
+  void _pokeReplyWatchdog() {
+    if (!_awaitingAssistantReply) return;
+    _armReplyWatchdog(reason: 'agent_active');
+  }
+
+  /// The agent actually produced output. Stop watching, and log the first
+  /// success of the session so we can track voice reliability per user.
+  void _markAssistantResponded() {
+    _didReceiveAssistantOutput = true;
+    _awaitingAssistantReply = false;
+    _replyWatchdog?.cancel();
+    _replyWatchdog = null;
+    if (!_didTrackFirstResponse) {
+      _didTrackFirstResponse = true;
+      unawaited(_postHogAnalyticsService.trackEvent('voice_first_response'));
+    }
+  }
+
+  /// Surface a session-fatal error to the UI and record it for the dashboard.
+  void _emitSessionError({
+    required String code,
+    required String message,
+    Map<String, dynamic>? extra,
+  }) {
+    _awaitingAssistantReply = false;
+    _replyWatchdog?.cancel();
+    _replyWatchdog = null;
+    unawaited(_postHogAnalyticsService.trackEvent('voice_error',
+        properties: {'code': code}));
+    _eventsController.add(VoiceServerEvent(
+      type: 'session.error',
+      message: message,
+      payload: {'code': code, ...?extra},
+    ));
   }
 
   String _mapAgentState(String agentState) {
@@ -289,11 +382,15 @@ class VoiceSessionService {
   void _cleanupRoom() {
     _agentJoinWatchdog?.cancel();
     _agentJoinWatchdog = null;
+    _replyWatchdog?.cancel();
+    _replyWatchdog = null;
     _listener?.dispose();
     _listener = null;
     _room = null;
     _didEmitSessionReady = false;
     _didReceiveAssistantOutput = false;
+    _awaitingAssistantReply = false;
+    _didTrackFirstResponse = false;
     _closingByClient = false;
   }
 

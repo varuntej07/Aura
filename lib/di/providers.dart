@@ -157,7 +157,10 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
       ),
     ),
     ChangeNotifierProvider<SettingsViewModel>(
-      create: (_) => SettingsViewModel(firestoreService: firestoreService),
+      create: (_) => SettingsViewModel(
+        firestoreService: firestoreService,
+        postHogAnalyticsService: postHogAnalyticsService,
+      ),
     ),
     ChangeNotifierProvider<ConnectorsViewModel>(
       create: (_) => ConnectorsViewModel(connectorService: connectorsService),

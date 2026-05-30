@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:io';
+
 import '../../core/base/safe_change_notifier.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/errors/app_exception.dart';
@@ -5,15 +8,20 @@ import '../../core/errors/error_handler.dart';
 import '../../core/logging/app_logger.dart';
 import '../../data/models/user_model.dart';
 import '../../data/services/firestore_service.dart';
+import '../../data/services/posthog_analytics_service.dart';
 import 'view_state.dart';
 
 export 'view_state.dart';
 
 class SettingsViewModel extends SafeChangeNotifier {
   final FirestoreService _firestoreService;
+  final PostHogAnalyticsService _postHogAnalyticsService;
 
-  SettingsViewModel({required FirestoreService firestoreService})
-      : _firestoreService = firestoreService;
+  SettingsViewModel({
+    required FirestoreService firestoreService,
+    required PostHogAnalyticsService postHogAnalyticsService,
+  })  : _firestoreService = firestoreService,
+        _postHogAnalyticsService = postHogAnalyticsService;
 
   ViewState _state = ViewState.idle;
   UserModel? _user;
@@ -74,6 +82,53 @@ class SettingsViewModel extends SafeChangeNotifier {
       _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
       _setState(ViewState.error);
     }
+  }
+
+  /// Beta feedback capture. Writes one document per submission to
+  /// `users/{uid}/feedback/{timestamp}` and fires a PostHog `feedback_submitted`
+  /// event tagged with the category. Returns null on success, or a user-facing
+  /// error message on failure. Deliberately does not touch [state] so the
+  /// settings screen's full-screen loader never takes over — the feedback sheet
+  /// owns its own submitting flag.
+  Future<String?> submitFeedback({
+    required String text,
+    required String category,
+  }) async {
+    final user = _user;
+    if (user == null) {
+      return "You're signed out. Sign back in to send feedback.";
+    }
+
+    unawaited(_postHogAnalyticsService.trackEvent(
+      'feedback_submitted',
+      properties: {'category': category},
+    ));
+
+    final docId = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+    final result = await _firestoreService.setDocument<Map<String, dynamic>>(
+      'users/${user.uid}/feedback',
+      docId,
+      {
+        'text': text.trim(),
+        'category': category,
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+        'app_version': '1.0.0',
+        'platform': Platform.isIOS ? 'ios' : 'android',
+      },
+      (json) => json,
+      merge: false,
+    );
+
+    return result.when(
+      success: (_) {
+        AppLogger.info('Feedback submitted ($category)', tag: 'SettingsVM');
+        return null;
+      },
+      failure: (error) {
+        AppLogger.error('Feedback submit failed', error: error, tag: 'SettingsVM');
+        return "Couldn't send that just now. Check your connection and try again.";
+      },
+    );
   }
 
   void clearError() {

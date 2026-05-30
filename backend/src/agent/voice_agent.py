@@ -247,15 +247,15 @@ def _local_date_in_zone(timezone_name: str) -> str:
         return datetime.now(UTC).strftime("%A, %-d %B %Y UTC")
 
 
-# Per-session sonic-3 voice conditioning. dominant_tone (communication style) -> speech cadence. 
-# Kept conservative (0.95-1.08) because sonic-3 treats speed as guidance, not a hard multiplier,
+# Per-session sonic-3 voice conditioning. dominant_tone (communication style) -> speech cadence.
+# Kept conservative (0.88-1.0) because sonic-3 treats speed as guidance, not a hard multiplier,
 # and large shifts sound unnatural. speed MUST be a float for sonic-3 — the plugin raises ValueError on the string enum.
 _TONE_TO_SPEED: dict[str, float] = {
-    "terse": 1.08,
-    "playful": 1.05,
-    "casual": 1.0,
-    "formal": 1.0,
-    "verbose": 0.95,
+    "terse": 1.0,
+    "playful": 0.97,
+    "casual": 0.92,
+    "formal": 0.92,
+    "verbose": 0.88,
 }
 
 # emotional_state (user affect) -> Cartesia TTSVoiceEmotion. Positive affect is mirrored; 

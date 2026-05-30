@@ -9,10 +9,12 @@ enum SubscriptionStatus { active, expired, gracePeriod }
 /// and so web/promo grants can be added later without schema changes.
 enum EntitlementPlatform { ios, android, promo, web }
 
-/// Trial length granted to every new account. 7 days is the beta-launch default
-/// — long enough to form a daily-use habit on voice, short enough that users
-/// don't forget they signed up.
-const int kTrialDurationDays = 7;
+/// Trial length granted to every new account. Set to 45 days for the beta so
+/// every tester has full (Pro) access for the whole beta window. The backend
+/// entitlement check honours this automatically — it reads `trial_end_date`
+/// from the doc the client writes (no backend change needed). Drop back down
+/// when payments go live.
+const int kTrialDurationDays = 45;
 
 class UserEntitlement {
   final SubscriptionTier tier;
