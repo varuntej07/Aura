@@ -16,8 +16,8 @@ dependencies = [
     "pydantic-settings>=2.7",
     "python-dotenv>=1.0",
 
-    # LiveKit — voice pipeline (STT: Deepgram, LLM: Anthropic, TTS: Cartesia, VAD: Silero)
-    "livekit-agents[deepgram,anthropic,cartesia,silero,google,turn-detector]>=1.5",
+    # LiveKit — voice pipeline (STT: Deepgram, LLM: OpenAI/Anthropic/Gemini, TTS: Cartesia, VAD: Silero)
+    "livekit-agents[deepgram,anthropic,cartesia,silero,google,turn-detector,openai]>=1.5",
     "livekit-api>=0.7",
 
     # Anthropic Claude

@@ -17,6 +17,7 @@
 #   gcloud secrets create juno-google-client-secret --project=<PROJECT_ID>
 #   gcloud secrets create juno-firebase-service-account --project=<PROJECT_ID>
 #   gcloud secrets create juno-firebase-web-api-key --project=<PROJECT_ID>   # voice worker: mint ID tokens for /mcp
+#   gcloud secrets create juno-openai-api-key --project=<PROJECT_ID>         # voice worker: primary voice LLM (gpt-4.1-mini)
 #   gcloud secrets create juno-gemini-api-key --project=<PROJECT_ID>         # voice worker + signal engine LLM fallback
 #   gcloud secrets create juno-brave-api-key --project=<PROJECT_ID>          # backend: real-time web_surf (chat + voice)
 #
@@ -126,6 +127,7 @@ gcloud run deploy "${WORKER_SERVICE_NAME}" \
   --set-env-vars="ENV=production" \
   --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}" \
   --set-env-vars="BACKEND_INTERNAL_URL=${SERVICE_URL}" \
+  --set-secrets="OPENAI_API_KEY=juno-openai-api-key:latest" \
   --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
   --set-secrets="LIVEKIT_API_KEY=livekit-api-key:latest" \
   --set-secrets="LIVEKIT_API_SECRET=livekit-api-secret:latest" \

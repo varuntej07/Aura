@@ -17,7 +17,7 @@ import '../data/services/chat_session_manager.dart';
 import '../data/services/feedback_service.dart';
 import '../data/services/firebase_auth_service.dart';
 import '../data/services/firestore_service.dart';
-import '../data/services/google_calendar_connector_service.dart';
+import '../data/services/connectors_service.dart';
 import '../data/services/backend_api_service.dart';
 import '../data/services/chat_service_provider.dart';
 import '../data/services/stub_chat_service_provider.dart';
@@ -64,7 +64,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   final ChatServiceProvider chatServiceProvider = Environment.hasConfiguredApi
       ? backendApiService
       : StubChatServiceProvider();
-  final googleCalendarConnectorService = GoogleCalendarConnectorService(
+  final connectorsService = ConnectorsService(
     apiClient: apiClient,
     authService: firebaseAuthService,
   );
@@ -125,8 +125,8 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     Provider<BackendApiService>.value(value: backendApiService),
     Provider<ChatServiceProvider>.value(value: chatServiceProvider),
     Provider<NutritionScanService>.value(value: nutritionScanService),
-    Provider<GoogleCalendarConnectorService>.value(
-      value: googleCalendarConnectorService,
+    Provider<ConnectorsService>.value(
+      value: connectorsService,
     ),
     Provider<VoiceSessionService>.value(value: voiceSessionService),
     Provider<WakeWordService>.value(value: wakeWordService),
@@ -160,7 +160,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
       create: (_) => SettingsViewModel(firestoreService: firestoreService),
     ),
     ChangeNotifierProvider<ConnectorsViewModel>(
-      create: (_) => ConnectorsViewModel(connectorService: googleCalendarConnectorService),
+      create: (_) => ConnectorsViewModel(connectorService: connectorsService),
       ),
     ChangeNotifierProvider<NutritionScanViewModel>(
       create: (_) => NutritionScanViewModel(
