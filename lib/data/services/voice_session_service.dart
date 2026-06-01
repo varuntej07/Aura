@@ -18,7 +18,7 @@ const _tag = 'VoiceSession';
 // the agent joins, or a reply after the user finishes talking — before we tell
 // the user something's off instead of leaving them staring at a dead "Listening"
 // screen. Reset on every signal from the agent (state change, audio, text), so a
-// long tool call (web search, nutrition scan) never trips it. Healthy first audio
+// long tool call (e.g. web search) never trips it. Healthy first audio
 // lands in 2-5s; 15s is a generous ceiling for "it's genuinely stuck".
 const _replyWatchdogTimeout = Duration(seconds: 15);
 

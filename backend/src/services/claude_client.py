@@ -39,7 +39,6 @@ EXCLUDED_TOOLS_FOR_AGENT_CHAT: set[str] = set()
 STARTER_ONLY_TOOLS: frozenset[str] = frozenset({
     "create_calendar_event",
     "get_upcoming_events",
-    "analyze_nutrition",
 })
 
 # Text Claude generates before a tool call is typically a brief narration sentence.

@@ -22,16 +22,13 @@ import '../data/services/backend_api_service.dart';
 import '../data/services/chat_service_provider.dart';
 import '../data/services/stub_chat_service_provider.dart';
 import '../data/services/notification_service.dart';
-import '../data/services/nutrition_scan_service.dart';
 import '../data/services/posthog_analytics_service.dart';
 import '../data/services/voice_session_service.dart';
 import '../data/services/wake_word_service.dart';
 import '../data/services/subscription_service.dart';
 import '../presentation/viewmodels/auth_viewmodel.dart';
 import '../presentation/viewmodels/connectors_viewmodel.dart';
-import '../presentation/viewmodels/dietary_profile_viewmodel.dart';
 import '../presentation/viewmodels/home_viewmodel.dart';
-import '../presentation/viewmodels/nutrition_scan_viewmodel.dart';
 import '../presentation/viewmodels/reminders_viewmodel.dart';
 import '../presentation/viewmodels/settings_viewmodel.dart';
 import '../presentation/viewmodels/subscription_viewmodel.dart';
@@ -73,7 +70,6 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     signalEventSink: backendApiService,
     postHogAnalyticsService: postHogAnalyticsService,
   );
-  final nutritionScanService = NutritionScanService(apiClient: apiClient);
   final voiceSessionService = VoiceSessionService(
     tokenProvider: firebaseAuthService.getIdToken,
     postHogAnalyticsService: postHogAnalyticsService,
@@ -124,7 +120,6 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     Provider<NotificationService>.value(value: notificationService),
     Provider<BackendApiService>.value(value: backendApiService),
     Provider<ChatServiceProvider>.value(value: chatServiceProvider),
-    Provider<NutritionScanService>.value(value: nutritionScanService),
     Provider<ConnectorsService>.value(
       value: connectorsService,
     ),
@@ -165,15 +160,6 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     ChangeNotifierProvider<ConnectorsViewModel>(
       create: (_) => ConnectorsViewModel(connectorService: connectorsService),
       ),
-    ChangeNotifierProvider<NutritionScanViewModel>(
-      create: (_) => NutritionScanViewModel(
-        service: nutritionScanService,
-        notificationService: notificationService,
-      ),
-    ),
-    ChangeNotifierProvider<DietaryProfileViewModel>(
-      create: (_) => DietaryProfileViewModel(service: nutritionScanService, prefs: prefs),
-    ),
     ChangeNotifierProvider<SubscriptionViewModel>(
       create: (_) => SubscriptionViewModel(subscriptionService: subscriptionService),
     ),

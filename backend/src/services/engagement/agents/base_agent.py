@@ -29,7 +29,7 @@ class BaseAgent(ABC):
 
         Args:
             context: EngagementDecision.engagement_context — curated facts
-                     about the event (food name, tone, past scans, etc.)
+                     about the event (event title, tone, etc.)
 
         Returns:
             NotificationOutput with title, body, opening_chat_message, suggested_replies

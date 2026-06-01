@@ -10,7 +10,7 @@ from typing import Literal
 
 from .logger import logger
 
-QueryType = Literal["chat", "voice", "nutrition_scan"]
+QueryType = Literal["chat", "voice"]
 
 
 async def log_query(

@@ -5,7 +5,6 @@ ToolExecutor — implements all tools.
 from __future__ import annotations
 
 import asyncio
-import re
 import zoneinfo
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -71,9 +70,6 @@ class ToolExecutor:
     def _memories_ref(self) -> fs.CollectionReference:
         return self._user_ref().collection("memories")
 
-    def _nutrition_logs_ref(self) -> fs.CollectionReference:
-        return self._user_ref().collection("nutrition_logs")
-
     async def execute(self, tool_name: str, input_data: dict[str, Any]) -> ToolResult:
         dispatch: dict[str, Any] = {
             "set_reminder": self._set_reminder,
@@ -86,7 +82,6 @@ class ToolExecutor:
             "send_email": self._send_email,
             "store_memory": self._store_memory,
             "query_memory": self._query_memory,
-            "analyze_nutrition": self._analyze_nutrition,
             "get_user_context": self._get_user_context,
             "ask_clarification": self._ask_clarification,
             "configure_agent": self._configure_agent,
@@ -382,59 +377,6 @@ class ToolExecutor:
 
         matches = await _run(_search)
         return {"matches": matches}
-
-    # Nutrition
-    async def _analyze_nutrition(self, inp: dict[str, Any]) -> ToolResult:
-        ocr_text = str(inp.get("ocr_text", "")).strip()
-        if not ocr_text:
-            raise ValueError("ocr_text is required")
-
-        quantity = float(inp.get("quantity", 1) or 1)
-
-        def _extract(pattern: str) -> float:
-            m = re.search(pattern, ocr_text, re.IGNORECASE)
-            return float(m.group(1)) if m else 0.0
-
-        calories = _extract(r"calories[^\d]*(\d+(?:\.\d+)?)")
-        protein = _extract(r"protein[^\d]*(\d+(?:\.\d+)?)")
-        sugar = _extract(r"sugar[^\d]*(\d+(?:\.\d+)?)")
-        sodium = _extract(r"sodium[^\d]*(\d+(?:\.\d+)?)")
-
-        concerns: list[str] = []
-        if sugar * quantity >= 20:
-            concerns.append("high sugar")
-        if sodium * quantity >= 600:
-            concerns.append("high sodium")
-        if protein * quantity <= 5:
-            concerns.append("low protein")
-
-        recommendation = "moderate" if ("high sugar" in concerns or "high sodium" in concerns) else "eat"
-
-        log_id = str(uuid4())
-        now_iso = datetime.now(UTC).isoformat()
-        log_data = {
-            "ocr_text": ocr_text,
-            "occasion": inp.get("occasion"),
-            "quantity": quantity,
-            "is_cheat_meal": bool(inp.get("is_cheat_meal", False)),
-            "analysis": {"calories": calories, "protein": protein, "sugar": sugar, "sodium": sodium},
-            "concerns": concerns,
-            "recommendation": recommendation,
-            "timestamp": now_iso,
-        }
-        ref = self._nutrition_logs_ref().document(log_id)
-        await _run(lambda: ref.set(log_data))
-
-        return {
-            "nutrition_log_id": log_id,
-            "calories": calories,
-            "protein_grams": protein,
-            "sugar_grams": sugar,
-            "sodium_mg": sodium,
-            "quantity": quantity,
-            "concerns": concerns,
-            "recommendation": recommendation,
-        }
 
     # Web surf — fast Brave search exposed to chat + voice (Gemini grounding stays on
     # the background sports ingest; the real-time path uses Brave for low latency).

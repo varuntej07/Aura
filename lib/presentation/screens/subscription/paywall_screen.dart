@@ -385,7 +385,7 @@ const _freeFeatureItems = [
   ),
   _FeatureItem(
     icon: Icons.extension_outlined,
-    text: 'Calendar, nutrition and more agents',
+    text: 'Calendar and more agents',
     included: false,
   ),
   _FeatureItem(
@@ -409,11 +409,6 @@ const _companionFeatureItems = [
   _FeatureItem(
     icon: Icons.calendar_today_outlined,
     text: 'Calendar + reminders unlimited',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.restaurant_outlined,
-    text: '30 nutrition scans per month',
     included: true,
   ),
   _FeatureItem(

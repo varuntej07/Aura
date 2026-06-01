@@ -27,21 +27,19 @@ class EngagementState(TypedDict, total=False):
     total=False means all keys are optional — stages populate only what they own.
     Serializable to JSON for Cloud Task payloads.
     """
-    # Set by the event trigger (nutrition.py, chat.py, etc.)
+    # Set by the event trigger (chat.py, calendar sync, etc.)
     user_id: str
-    trigger_event: str                  # "nutrition_scan" | "chat_query" | "calendar_event"
-    trigger_payload: dict[str, Any]     # raw event data (log_doc, query text, event id…)
+    trigger_event: str                  # "chat_query" | "calendar_event"
+    trigger_payload: dict[str, Any]     # raw event data (query text, event id…)
 
     # Populated by context loader
-    recent_nutrition_logs: list[dict[str, Any]]
-    dietary_profile: dict[str, Any] | None
     memories: list[dict[str, Any]]
     upcoming_events: list[dict[str, Any]]
     engagement_guard: dict[str, Any] | None   # rate-limit / daily-cap state
 
     # Populated by DecisionEngine
     should_engage: bool
-    chosen_agent: str                   # "nutrition_followup" | "habit_nudge" | …
+    chosen_agent: str                   # "calendar_prep" | "habit_nudge" | …
     delay_minutes: int
     tone: str                           # "roast" | "warn" | "educate" | "celebrate" | "check_in"
     engagement_context: dict[str, Any]  # curated subset passed to the specialist agent
@@ -66,7 +64,6 @@ class EngagementDecision(BaseModel):
 
     should_engage: bool
     chosen_agent: Literal[
-        "nutrition_followup",
         "habit_nudge",
         "calendar_prep",
         "memory_recall",

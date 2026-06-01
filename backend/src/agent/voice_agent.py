@@ -65,7 +65,6 @@ _TOOL_THINKING_PHRASES: dict[str, str] = {
     "list_reminders": "pulling up your reminders for you!",
     "store_memory": "Ah huh, got it, I'll keep that in mind!",
     "query_memory": "thinking through what I remember about you...",
-    "analyze_nutrition": "having a closer look at that...",
     "get_user_context": "pulling up your details for this!",
     "web_surf": "Alright, Lemme surf the web for that!",
     "list_emails": "checking your inbox right now!",

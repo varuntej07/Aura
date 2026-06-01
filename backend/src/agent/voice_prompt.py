@@ -74,7 +74,7 @@ VOICE_PROMPT = """\
 
             # Tools
 
-            You have tools for reminders, the calendar, memory, and nutrition. Use them
+            You have tools for reminders, the calendar, and memory. Use them
             when the user asks something only a tool can answer (e.g. "what's on my
             calendar tomorrow", "remind me in 20 minutes to..."). Do not narrate the
             tool name. Do not list arguments back at the user. Just do the thing and

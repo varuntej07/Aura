@@ -6,7 +6,7 @@ wrapped in asyncio.to_thread when called from async handlers.
 
 Two kinds of tasks:
   orchestrate -> immediate, POST /internal/engage/orchestrate
-                 called from nutrition.py/chat.py right before the HTTP response.
+                 called from the chat/calendar trigger paths right before the HTTP response.
                  Owns the full context-load -> decision -> copy-gen pipeline.
 
   notify -> delayed by decision.delay_minutes, POST /internal/engage/notify

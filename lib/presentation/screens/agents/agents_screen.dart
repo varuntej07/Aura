@@ -6,10 +6,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/models/agent.dart';
 import '../../viewmodels/connectors_viewmodel.dart';
-import '../../viewmodels/dietary_profile_viewmodel.dart';
 import '../connectors/connectors_screen.dart';
-import '../nutrition/dietary_onboarding_screen.dart';
-import '../nutrition/nutrition_scan_screen.dart';
 
 class AgentsScreen extends StatefulWidget {
   const AgentsScreen({super.key});
@@ -24,7 +21,6 @@ class _AgentsScreenState extends State<AgentsScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<ConnectorsViewModel>().load();
-      context.read<DietaryProfileViewModel>().load();
     });
   }
 
@@ -34,21 +30,8 @@ class _AgentsScreenState extends State<AgentsScreen> {
       return;
     }
 
-    // Custom screens for Nutrition and Connectors
+    // Custom screen for Connectors
     switch (agent.id) {
-      case 'nutrition':
-        final profileVm = context.read<DietaryProfileViewModel>();
-        if (!profileVm.nutritionAgentEnabled) {
-          Navigator.of(context, rootNavigator: true).push(
-            MaterialPageRoute<void>(
-              builder: (_) => const DietaryOnboardingScreen(),
-            ),
-          );
-        } else {
-          Navigator.of(context, rootNavigator: true).push(
-            MaterialPageRoute<void>(builder: (_) => const NutritionScanScreen()),
-          );
-        }
       case 'connectors':
         Navigator.of(context, rootNavigator: true).push(
           MaterialPageRoute<void>(builder: (_) => const ConnectorsScreen()),

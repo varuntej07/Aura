@@ -22,17 +22,17 @@ class Agent {
 }
 
 /// All agents shown on the Agents grid, in display order.
-/// Nutrition and Calendar keep their existing custom screens.
-/// The four new agents open a per-agent chat thread.
+/// Connectors keeps its existing custom screen.
+/// The other agents open a per-agent chat thread.
 ///
 /// Deep-link contract: each agent's [id] must match the `agent_id` string
 /// the backend sends in FCM data payloads for notification routing to work.
 const List<Agent> kAgents = [
   Agent(
     id: 'sports',
-    name: 'CricBolt',
+    name: 'MatchPoint',
     subtitle: 'Live scores & digests',
-    icon: Icons.sports_cricket_rounded,
+    icon: Icons.sports_rounded,
     color: Color(0xFF1B5E20),
   ),
   Agent(
@@ -43,32 +43,17 @@ const List<Agent> kAgents = [
     color: Color(0xFF0D47A1),
   ),
   Agent(
-    id: 'jobs',
-    name: 'HuntMode',
-    subtitle: 'Job listings',
-    icon: Icons.travel_explore_rounded,
-    color: Color(0xFFE65100),
-  ),
-  Agent(
     id: 'posts',
-    name: 'PostForge',
+    name: 'Tweeter',
     subtitle: 'Draft your tweets',
     icon: Icons.edit_note_rounded,
     color: Color(0xFF4A148C),
   ),
   Agent(
-    id: 'nutrition',
-    name: 'Nutrition',
-    subtitle: 'Scan & track food',
-    icon: Icons.camera_alt_rounded,
-    color: Color(0xFF00695C),
-    tapBehavior: AgentTapBehavior.customScreen,
-  ),
-  Agent(
-    id: 'calendar',
-    name: 'Calendar',
-    subtitle: 'Google Calendar sync',
-    icon: Icons.calendar_month_rounded,
+    id: 'connectors',
+    name: 'Connectors',
+    subtitle: 'Calendar, Gmail & more',
+    icon: Icons.hub_rounded,
     color: Color(0xFF283593),
     tapBehavior: AgentTapBehavior.customScreen,
   ),

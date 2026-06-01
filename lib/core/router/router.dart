@@ -18,7 +18,6 @@ import '../../presentation/screens/agents/agent_thread_screen.dart';
 import '../../presentation/screens/auth/login_screen.dart';
 import '../../presentation/screens/chat/chat_screen.dart';
 import '../../presentation/screens/home/home_screen.dart';
-import '../../presentation/screens/nutrition/nutrition_scan_screen.dart';
 import '../../presentation/screens/onboarding/onboarding_screen.dart';
 import '../../presentation/screens/reminders/reminders_screen.dart';
 import '../../presentation/screens/settings/settings_screen.dart';
@@ -163,11 +162,6 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
         path: '/paywall',
         pageBuilder: (context, state) =>
             _slidePage(state, const PaywallScreen()),
-      ),
-      GoRoute(
-        path: '/nutrition',
-        pageBuilder: (context, state) =>
-            _slidePage(state, const NutritionScanScreen()),
       ),
       GoRoute(
         path: '/reminders',

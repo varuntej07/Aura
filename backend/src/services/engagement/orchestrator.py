@@ -21,7 +21,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud import firestore as fs  # type: ignore
-from google.cloud.firestore_v1.base_query import FieldFilter  # type: ignore
 from langfuse import observe
 
 from ...lib.logger import logger
@@ -63,17 +62,13 @@ async def _orchestrate(
     now = datetime.now(UTC)
 
     # Step 1: Load context in parallel
-    nutrition_logs, dietary_profile, engagement_guard, memories, user_timezone = await asyncio.gather(
-        _load_recent_nutrition_logs(user_id),
-        _load_dietary_profile(user_id),
+    engagement_guard, memories, user_timezone = await asyncio.gather(
         _load_engagement_guard(user_id),
         _load_memories(user_id),
         _load_user_timezone(user_id),
     )
 
     context: dict[str, Any] = {
-        "recent_nutrition_logs": nutrition_logs,
-        "dietary_profile": dietary_profile,
         "engagement_guard": engagement_guard,
         "memories": memories,
         "user_timezone": user_timezone,
@@ -101,7 +96,7 @@ async def _orchestrate(
         return
 
     # Step 3: Atomically claim engagement slot — prevents TOCTOU race
-    is_interaction_triggered = trigger_event in ("nutrition_scan", "calendar_event")
+    is_interaction_triggered = trigger_event == "calendar_event"
     claimed, suppression_reason = await asyncio.to_thread(
         _claim_engagement_slot_sync, user_id, now, is_interaction_triggered
     )
@@ -220,7 +215,7 @@ def _claim_engagement_slot_sync(
                 pass
 
         # Daily cap — only proactive engagements count toward the cap;
-        # interaction-triggered (scan, calendar) are exempt
+        # interaction-triggered (calendar) are exempt
         if not is_interaction_triggered:
             sent_today = guard.get("proactive_notifications_sent_today", 0) if guard.get("guard_date") == today else 0
             if sent_today >= MAX_DAILY_PROACTIVE_NOTIFICATIONS:
@@ -245,43 +240,6 @@ def _claim_engagement_slot_sync(
 
 
 # ── Context loaders ───────────────────────────────────────────────────────────
-
-async def _load_recent_nutrition_logs(user_id: str, days: int = 30) -> list[dict]:
-    def _fetch() -> list[dict]:
-        db = admin_firestore()
-        from datetime import timedelta
-        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        docs = (
-            db.collection("users").document(user_id)
-            .collection("nutrition_logs")
-            .where(filter=FieldFilter("created_at", ">=", cutoff))
-            .order_by("created_at", direction="DESCENDING")
-            .limit(50)
-            .stream()
-        )
-        return [{"id": d.id, **d.to_dict()} for d in docs]
-    try:
-        return await asyncio.to_thread(_fetch)
-    except Exception as exc:
-        logger.warn("orchestrator: nutrition_logs load failed", {"error": str(exc)})
-        return []
-
-
-async def _load_dietary_profile(user_id: str) -> dict | None:
-    def _fetch() -> dict | None:
-        db = admin_firestore()
-        doc = (
-            db.collection("users").document(user_id)
-            .collection("dietary_profile").document("data")
-            .get()
-        )
-        return doc.to_dict() if doc.exists else None
-    try:
-        return await asyncio.to_thread(_fetch)
-    except Exception as exc:
-        logger.warn("orchestrator: dietary_profile load failed", {"error": str(exc)})
-        return None
-
 
 async def _load_engagement_guard(user_id: str) -> dict:
     def _fetch() -> dict:

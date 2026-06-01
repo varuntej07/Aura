@@ -5,7 +5,6 @@ Routes:
   GET  /health -> liveness probe
   GET  /voice/token -> LiveKit room token for Flutter client
   POST /chat -> text conversation (Claude)
-  POST /nutrition/analyze -> OCR nutrition analysis
   POST /notification-reply -> notification reply -> chat
   POST /scheduler/tick -> deliver due reminders (call from cron)
 
@@ -15,7 +14,6 @@ Local dev:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 import uuid
@@ -42,7 +40,6 @@ from .handlers.connectors import (
 )
 from .handlers.daily_notification import handle_send_nudge
 from .handlers.devices import register_device
-from .handlers.dietary_profile import handle_get_dietary_profile, handle_save_dietary_profile
 from .handlers.engagement import (
     handle_engagement_notify,
     handle_engagement_orchestrate,
@@ -50,14 +47,12 @@ from .handlers.engagement import (
 )
 from .handlers.mcp import register_mcp
 from .handlers.notification_reply import handle_notification_reply_request
-from .handlers.nutrition import handle_nutrition_analyze_request, handle_nutrition_scan_request
 from .handlers.scheduler import handle_scheduler_tick
 from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
 from .handlers.signal_feed import handle_signal_feed
 from .handlers.signal_tick import handle_signal_tick
 from .lib.logger import logger
-from .services.gemini_client import get_gemini_client
 from .services.request_auth import decode_firebase_claims
 
 app = FastAPI(title="Juno Backend", version="1.0.0")
@@ -183,37 +178,6 @@ async def chat_endpoint(request: Request) -> StreamingResponse:
     body = await request.body()
     event = _to_handler_event(request, body)
     return await handle_chat_stream(event)
-
-
-@app.post("/nutrition/scan")
-async def nutrition_scan_endpoint(request: Request) -> JSONResponse:
-    body = await request.body()
-    event = _to_handler_event(request, body)
-    result = await handle_nutrition_scan_request(event)
-    return _handler_response(result)
-
-
-@app.post("/nutrition/analyze")
-async def nutrition_endpoint(request: Request) -> JSONResponse:
-    body = await request.body()
-    event = _to_handler_event(request, body)
-    result = await handle_nutrition_analyze_request(event)
-    return _handler_response(result)
-
-
-@app.get("/nutrition/profile")
-async def nutrition_profile_get_endpoint(request: Request) -> JSONResponse:
-    event = _to_handler_event(request, b"")
-    result = await handle_get_dietary_profile(event)
-    return _handler_response(result)
-
-
-@app.post("/nutrition/profile")
-async def nutrition_profile_save_endpoint(request: Request) -> JSONResponse:
-    body = await request.body()
-    event = _to_handler_event(request, body)
-    result = await handle_save_dietary_profile(event)
-    return _handler_response(result)
 
 
 @app.post("/notification-reply")
@@ -426,15 +390,6 @@ async def on_startup() -> None:
         logger.info("Langfuse initialized")
     except Exception as exc:
         logger.warn("Langfuse initialization failed — tracing disabled", {"error": str(exc)})
-    # Pre-warm Vertex AI / Gemini so the first nutrition scan doesn't stall the event loop during SDK initialisation 
-    # (vertexai.init makes gRPC + metadata service calls that can take 1-5 s on a cold instance).
-    try:
-        await asyncio.to_thread(get_gemini_client)
-        logger.info("Gemini client pre-warmed")
-    except Exception as exc:
-        logger.warn("Gemini client pre-warm failed — nutrition scan will init lazily", {
-            "error": str(exc),
-        })
 
 
 if __name__ == "__main__":

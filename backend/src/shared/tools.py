@@ -203,21 +203,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "analyze_nutrition",
-        "description": "Analyze a food label from OCR text and give a health recommendation.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "ocr_text": {"type": "string", "description": "Raw text from food label OCR."},
-                "occasion": {"type": "string", "description": "Meal context (breakfast, snack, etc.)."},
-                "quantity": {"type": "number", "description": "Number of servings. Defaults to 1."},
-                "is_cheat_meal": {"type": "boolean", "default": False},
-                "user_health_context": {"type": "string"},
-            },
-            "required": ["ocr_text"],
-        },
-    },
-    {
         "name": "get_user_context",
         "description": "Retrieve a snapshot of the user's memories, reminders, and upcoming events.",
         "inputSchema": {

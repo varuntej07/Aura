@@ -270,17 +270,6 @@ class BackendApiService implements ChatServiceProvider {
     return _apiClient.delete('/account', (json) {});
   }
 
-  Future<Result<Map<String, dynamic>>> analyzeNutrition(
-    String ocrText,
-    String userId,
-  ) async {
-    return _apiClient.post(
-      '/nutrition/analyze',
-      {'ocr_text': ocrText, 'user_id': userId},
-      (json) => json,
-    );
-  }
-
   /// Post one or more signal-engine events. Fire-and-forget on the server
   /// side; the response is 202 with `{ "accepted": <int> }`.
   Future<Result<Map<String, dynamic>>> postSignalEvents(
