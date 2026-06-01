@@ -85,7 +85,17 @@ async def run_tick() -> TickSummary:
     user_ids = await feature_store.list_active_user_ids()
     summary.users_considered = len(user_ids)
     if not user_ids:
-        logger.info("signal_engine.scoring_loop: no active users")
+        # Fail loud: 0 active users while tokens exist means the active-user
+        # query is misconfigured. A plain "no users" is expected only when truly empty.
+        from ..fcm_token_registry import any_token_registered
+
+        if await asyncio.to_thread(any_token_registered):
+            logger.warn(
+                "signal_engine.scoring_loop: 0 active users but FCM tokens exist — "
+                "active-user query likely misconfigured (check fcm_tokens.registered_at)"
+            )
+        else:
+            logger.info("signal_engine.scoring_loop: no active users")
         return summary
 
     models = get_model_provider()

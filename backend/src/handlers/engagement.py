@@ -9,17 +9,16 @@ POST /internal/engage/responded -> Flutter calls when user taps notification.
 from __future__ import annotations
 
 import asyncio
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..lib.logger import logger
-from ..services.firebase import admin_firestore
-from ..services.notification_service import send_notification
 from ..services.engagement.agents.re_engagement import ReEngagementAgent
-from ..services.engagement.orchestrator import run_orchestration, _log_analytics
+from ..services.engagement.orchestrator import _log_analytics, run_orchestration
 from ..services.engagement.task_scheduler import get_task_scheduler
+from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
+from ..services.notification_service import send_notification
 
 
 # POST /internal/engage/orchestrate
@@ -61,7 +60,7 @@ async def handle_engagement_notify(payload: dict[str, Any]) -> dict[str, Any]:
         })
         return {"skipped": True, "reason": "already_completed"}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if action == "send_first":
         await _handle_send_first(user_id, engagement_id, doc, now)
@@ -101,7 +100,7 @@ async def handle_engagement_responded(
     if doc.get("status") == "responded":
         return {"ok": True, "already": True}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Cancel pending re-engagement task
     task_name = doc.get("cloud_task_name")
@@ -200,7 +199,7 @@ async def _handle_check_and_reengage(
     copy = await re_agent.generate({
         "escalation_level": 1,
         "original_agent": doc.get("chosen_agent", ""),
-        "original_topic": doc.get("engagement_context", {}).get("food_name", "something you scanned"),
+        "original_topic": doc.get("engagement_context", {}).get("event_title", "something we talked about"),
         "original_notification_title": doc.get("notification_title", ""),
     })
 
@@ -261,7 +260,7 @@ async def _handle_check_and_expire(
     copy = await re_agent.generate({
         "escalation_level": 2,
         "original_agent": doc.get("chosen_agent", ""),
-        "original_topic": doc.get("engagement_context", {}).get("food_name", "recent activity"),
+        "original_topic": doc.get("engagement_context", {}).get("event_title", "recent activity"),
         "original_notification_title": doc.get("notification_title", ""),
     })
 

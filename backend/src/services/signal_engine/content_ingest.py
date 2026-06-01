@@ -19,12 +19,20 @@ from ...agents.data_fetchers.arxiv_papers import fetch_recent_papers
 from ...agents.data_fetchers.cricket_scores import fetch_live_matches, fetch_recent_results
 from ...agents.data_fetchers.hackernews import fetch_top_stories
 from ...agents.data_fetchers.web_search import web_search
+from ...agents.data_fetchers.web_surf import _INGEST_REQUEST_TIMEOUT_S
 from ...lib.logger import logger
 from .content_pool import CandidateInput, add_candidates
 
 HACKERNEWS_FETCH_LIMIT = 20
 ARXIV_FETCH_LIMIT = 15
 CRICKET_FETCH_LIMIT = 10
+
+# Cap simultaneous web_surf calls. Each is a blocking Gemini call dispatched to the
+# loop's default thread pool (~5 workers on --cpu=1). Firing all 8 sports queries at
+# once starved that pool: queued queries burned their wait_for budget before a worker
+# freed up and timed out. 3 keeps every in-flight query backed by a real worker while
+# leaving headroom for the parallel cricbuzz fetch + embedder.
+SPORTS_WEB_SEARCH_CONCURRENCY = 3
 
 # Per-source TTL in hours.
 SOURCE_TTL_HOURS: dict[str, int] = {
@@ -116,10 +124,11 @@ async def run_sports_ingest() -> SportsSummary:
     summary = SportsSummary()
     now = datetime.now(UTC)
 
+    search_semaphore = asyncio.Semaphore(SPORTS_WEB_SEARCH_CONCURRENCY)
     live_matches, web_search_results = await asyncio.gather(
         _safe_fetch(fetch_live_matches(), "cricbuzz_live"),
         asyncio.gather(*[
-            _safe_sports_web_search(query, sub_cat)
+            _safe_sports_web_search(query, sub_cat, search_semaphore)
             for query, sub_cat in SPORTS_WEB_SEARCH_QUERIES
         ]),
     )
@@ -159,11 +168,24 @@ async def _safe_fetch(coro, source_name: str) -> list[dict]:
         return []
 
 
-async def _safe_sports_web_search(query: str, sub_category: str) -> list[CandidateInput]:
-    """One web search query -> one CandidateInput. Returns [] on any failure."""
+async def _safe_sports_web_search(
+    query: str,
+    sub_category: str,
+    semaphore: asyncio.Semaphore,
+) -> list[CandidateInput]:
+    """One web search query -> one CandidateInput. Returns [] on any failure.
+
+    The semaphore caps simultaneous web_surf calls so queries don't starve the thread
+    pool and time out while queued. Uses the longer background timeout budget.
+    """
     now = datetime.now(UTC)
     try:
-        text = await web_search(query, uid="sports_ingest")
+        async with semaphore:
+            text = await web_search(
+                query,
+                uid="sports_ingest",
+                timeout_s=_INGEST_REQUEST_TIMEOUT_S,
+            )
         if not text or not text.strip():
             return []
         title = _SPORTS_SUB_CATEGORY_TITLES.get(sub_category, " ".join(query.split()[:5]))
