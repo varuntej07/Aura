@@ -21,6 +21,16 @@
 -dontwarn kotlin.**
 -dontwarn kotlinx.**
 
+# Firebase Cloud Messaging — keep service entry points R8 can't see (reflection-
+# instantiated). The firebase-messaging AAR ships consumer rules, but pin these
+# explicitly so a release build can never strip push delivery.
+-keep class com.google.firebase.messaging.** { *; }
+-keep class com.google.firebase.iid.** { *; }
+-dontwarn com.google.firebase.iid.**
+# flutter_local_notifications — renders the notification UI
+-keep class com.dexterous.** { *; }
+-dontwarn com.dexterous.**
+
 # Flutter deferred components (Play Core split install) — not used in this app
 -dontwarn com.google.android.play.core.splitcompat.SplitCompatApplication
 -dontwarn com.google.android.play.core.splitinstall.SplitInstallException

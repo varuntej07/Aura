@@ -72,11 +72,9 @@ class Settings(BaseSettings):
     # Brave Search API (real-time chat + voice web_surf tool)
     BRAVE_API_KEY: str = ""
 
-    # Gemini API (nutrition VLM)
+    # Gemini API
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
-    GEMINI_NUTRITION_MODEL: str = "gemini-2.5-flash"
-    NUTRITION_SCAN_CONFIDENCE_THRESHOLD: float = 0.85
 
     # Model tiers
     # TIER_CHEAP -> cheap + fast; background tasks, notification copy, simple classification
@@ -109,10 +107,17 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_HOST: str = "https://cloud.langfuse.com"
 
+    # PostHog product analytics — server-side capture for the notification
+    # re-engagement funnel. Reuses the same public project key the Flutter app
+    # embeds (AndroidManifest / Info.plist). Left blank in dev so nothing is
+    # sent locally, mirroring the client which only captures outside dev.
+    POSTHOG_API_KEY: str = ""
+    POSTHOG_HOST: str = "https://us.i.posthog.com"
+
     # Juno personality — text chat
     BUDDY_CHAT_SYSTEM_PROMPT: str = (
         "You are a friendly buddy, a proactive personal assistant that helps with reminders, "
-        "scheduling, memory, and nutrition. Be warm, brief, and conversational. "
+        "scheduling, and memory. Be warm, brief, and conversational. "
         "Never use emojis in your responses. "
         "Never use em dashes (—), en dashes (–), or double hyphens (--) anywhere in your responses. "
         "If a thought needs connecting, rewrite the sentence so it flows naturally without them. "
@@ -162,6 +167,10 @@ class Settings(BaseSettings):
     @property
     def gemini_configured(self) -> bool:
         return bool(self.GEMINI_API_KEY)
+
+    @property
+    def posthog_configured(self) -> bool:
+        return bool(self.POSTHOG_API_KEY)
 
 
 settings = Settings()

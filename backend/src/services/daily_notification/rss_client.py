@@ -13,7 +13,7 @@ Three-level fallback chain (always returns at least one item):
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -125,16 +125,16 @@ def _parse_published(entry: Any) -> str:
     try:
         t = getattr(entry, "published_parsed", None)
         if t:
-            dt = datetime(*t[:6], tzinfo=timezone.utc)
+            dt = datetime(*t[:6], tzinfo=UTC)
             return dt.strftime("%B %d, %Y")
     except Exception:
         pass
-    return datetime.now(timezone.utc).strftime("%B %d, %Y")
+    return datetime.now(UTC).strftime("%B %d, %Y")
 
 
 def _empty_news_item() -> dict[str, str]:
     return {
         "title": "New research on nutrition and daily habits",
         "summary": "Emerging studies highlight the connection between consistent daily habits and long-term health outcomes.",
-        "published_at": datetime.now(timezone.utc).strftime("%B %d, %Y"),
+        "published_at": datetime.now(UTC).strftime("%B %d, %Y"),
     }

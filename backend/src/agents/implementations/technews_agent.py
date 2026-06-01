@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ...services.model_provider import ModelProvider
-from ..data_fetchers.web_search import web_search
 from ..agent_base import ScheduledAgent
+from ..data_fetchers.web_search import web_search
 
 _DEFAULT_TECH_INTERESTS = ["AI", "ML", "startups", "open source"]
 
@@ -27,7 +27,7 @@ class TechNewsAgent(ScheduledAgent):
         interest-specific query — and returns combined grounded text.
         """
         interests: list[str] = user_config.get("interests", _DEFAULT_TECH_INTERESTS)
-        current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        current_date = datetime.now(UTC).strftime("%Y-%m-%d")
         queries = _build_search_queries(interests, current_date)
 
         results = await asyncio.gather(
