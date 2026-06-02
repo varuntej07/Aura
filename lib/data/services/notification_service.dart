@@ -5,6 +5,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../../core/analytics/funnel_events.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import 'backend_api_service.dart';
@@ -31,6 +32,23 @@ class AgentNudgeTapPayload {
   const AgentNudgeTapPayload({
     required this.agentId,
     required this.chatOpener,
+  });
+}
+
+/// Payload emitted when the user taps a signal-engine content notification.
+/// Carries the funnel ids so the chat surface can attribute the resulting
+/// session + first reply back to the originating notification.
+class SignalNotificationTapPayload {
+  final String notificationId;
+  final String contentId;
+  final String category;
+  final String openingChatMessage;
+
+  const SignalNotificationTapPayload({
+    required this.notificationId,
+    required this.contentId,
+    required this.category,
+    required this.openingChatMessage,
   });
 }
 
@@ -74,12 +92,18 @@ class NotificationService {
 
   final _engagementTapController = StreamController<EngagementTapPayload>.broadcast();
   final _agentNudgeTapController = StreamController<AgentNudgeTapPayload>.broadcast();
+  final _signalNotificationTapController =
+      StreamController<SignalNotificationTapPayload>.broadcast();
 
   // Emits when the user taps an engagement notification.
   Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
 
   // Emits when the user taps a scheduled agent nudge notification.
   Stream<AgentNudgeTapPayload> get agentNudgeTapStream => _agentNudgeTapController.stream;
+
+  // Emits when the user taps a signal-engine content notification.
+  Stream<SignalNotificationTapPayload> get signalNotificationTapStream =>
+      _signalNotificationTapController.stream;
 
   // Public API
 
@@ -174,6 +198,7 @@ class NotificationService {
     _initialized = false;
     await _engagementTapController.close();
     await _agentNudgeTapController.close();
+    await _signalNotificationTapController.close();
   }
 
   // Private helpers
@@ -285,11 +310,29 @@ class NotificationService {
         'reminderId': message.data['reminder_id'],
       },
     );
+    final tapData = message.data;
+    final uid = _userId;
     unawaited(_postHogAnalyticsService.trackEvent(
-      'notification_tapped',
+      FunnelEvents.notificationTapped,
       properties: {
         'notification_type':
-            message.data['notification_type'] as String? ?? 'unknown',
+            tapData['notification_type'] as String? ?? 'unknown',
+        // Stamp the Firebase uid the server keyed the send on. On a cold launch
+        // from a killed app this tap can fire from getInitialMessage() before
+        // identifyUser(uid) lands, attaching the event to an anonymous PostHog
+        // id; carrying the uid as a property keeps the funnel join independent
+        // of identify() timing.
+        FunnelEvents.propFirebaseUid: ?uid,
+        // Funnel join keys — let PostHog filter signal-engine taps and join
+        // them to the server's signal_notification_sent event.
+        FunnelEvents.propNotificationOrigin:
+            tapData[FunnelEvents.propNotificationOrigin] as String? ?? 'unknown',
+        FunnelEvents.propNotificationId:
+            tapData[FunnelEvents.propNotificationId] as String? ?? '',
+        FunnelEvents.propContentId:
+            tapData[FunnelEvents.propContentId] as String? ?? '',
+        FunnelEvents.propCategory:
+            tapData[FunnelEvents.propCategory] as String? ?? '',
       },
     ));
     _reportNotificationOpened(message.data);
@@ -406,6 +449,20 @@ class NotificationService {
           engagementId: '',
           initialMessage: initialMessage,
           agentContext: '',
+        ));
+      }
+    } else if (notificationType == FunnelEvents.originSignalEngine) {
+      // Signal-engine content notification. Open chat seeded with the framed
+      // opener and carry the funnel ids so the chat surface can attribute the
+      // session + first reply back to this notification.
+      final notificationId =
+          data[FunnelEvents.propNotificationId] as String? ?? '';
+      if (notificationId.isNotEmpty) {
+        _signalNotificationTapController.add(SignalNotificationTapPayload(
+          notificationId: notificationId,
+          contentId: data[FunnelEvents.propContentId] as String? ?? '',
+          category: data[FunnelEvents.propCategory] as String? ?? '',
+          openingChatMessage: data['opening_chat_message'] as String? ?? '',
         ));
       }
     }

@@ -30,9 +30,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..model_provider import ModelProvider, get_model_provider
+from ..analytics import posthog_client
+from ..analytics.funnel_events import (
+    EVENT_NOTIFICATION_SENT,
+    NOTIFICATION_ORIGIN_SIGNAL_ENGINE,
+    PROP_CATEGORY,
+    PROP_CONTENT_ID,
+    PROP_NOTIFICATION_ID,
+    PROP_NOTIFICATION_ORIGIN,
+)
 from ..notification_service import send_notification
 from . import event_ingester, feature_store
 from .content_pool import ScoredCandidate, find_nearest_for_user
@@ -120,6 +130,22 @@ async def run_tick() -> TickSummary:
         "blocked_daily_cap": summary.blocked_daily_cap,
         "timeouts_swept": summary.timeouts_swept,
     })
+
+    # Fail loud: sending notifications while analytics is unconfigured means the
+    # re-engagement funnel is silently blind to every send (the "zero rows looks
+    # healthy" trap). A plain absence of the key is only expected in dev.
+    if summary.notifications_sent > 0 and not settings.posthog_configured:
+        logger.warn(
+            "signal_engine.scoring_loop: sent notifications but POSTHOG_API_KEY "
+            "is unset — re-engagement funnel is blind to these sends",
+            {"notifications_sent": summary.notifications_sent},
+        )
+
+    # Funnel events were captured fire-and-forget onto PostHog's background queue.
+    # Cloud Run freezes this container the moment the tick returns, so flush the
+    # queue out to the server first or step-1 sends are silently lost.
+    await posthog_client.flush()
+
     return summary
 
 
@@ -295,6 +321,23 @@ async def _score_one_user(
         sent_at=sent_at,
     )
     summary.notifications_sent += 1
+
+    # Top of the re-engagement funnel. Fire-and-forget; never blocks the tick.
+    # The shared property keys must match the client's tap event for PostHog to
+    # join sent -> tapped -> session -> action (see analytics/funnel_events.py).
+    await posthog_client.capture_event(
+        distinct_id=user_id,
+        event=EVENT_NOTIFICATION_SENT,
+        properties={
+            PROP_NOTIFICATION_ID: notification_id,
+            PROP_CONTENT_ID: best_cand.content_id,
+            PROP_CATEGORY: best_cand.category,
+            PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_SIGNAL_ENGINE,
+            "sub_category": best_cand.sub_category,
+            "source": best_cand.source,
+            "score": round(best_score, 4),
+        },
+    )
 
     logger.info("signal_engine.scoring_loop: notification sent", {
         "user_id": user_id,

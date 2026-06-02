@@ -31,7 +31,7 @@ dependencies = [
     "google-auth>=2.40",
     "google-auth-httplib2>=0.2",
 
-    # Google Gen AI SDK (Gemini via Vertex AI backend — nutrition VLM)
+    # Google Gen AI SDK (Gemini — embeddings, cheap-tier model calls)
     "google-genai>=1.0",
 
     # Google Cloud Tasks (durable delayed job scheduling)
@@ -48,6 +48,12 @@ dependencies = [
 
     # Langfuse for LLM observability and tracing
     "langfuse>=4.0",
+
+    # PostHog — server-side product analytics (notification re-engagement funnel).
+    # Pinned to the 5.x line (installed + tested locally: 5.4.0). The
+    # Posthog(project_api_key=..., host=...) ctor and capture(distinct_id, event,
+    # properties) signature this code calls are verified against 5.x.
+    "posthog>=5.4,<6",
 
 ]
 
@@ -72,15 +78,12 @@ omit = [
     "src/handlers/chat.py",
     "src/handlers/connectors.py",
     "src/handlers/devices.py",
-    "src/handlers/dietary_profile.py",
     "src/handlers/engagement.py",
     "src/handlers/notification_reply.py",
-    "src/handlers/nutrition.py",
     "src/handlers/scheduled_agents.py",
     "src/main.py",
     "src/services/claude_client.py",
     "src/services/engagement/*",
-    "src/services/gemini_client.py",
     "src/services/google_calendar_connector.py",
     "src/services/model_provider.py",
     "src/services/request_auth.py",

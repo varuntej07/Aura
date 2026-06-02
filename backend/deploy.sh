@@ -91,7 +91,9 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/service-account.json" \
   --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}" \
   --set-env-vars="LANGFUSE_PUBLIC_KEY=pk-lf-6e4f5a36-9d31-474c-b61a-3307653b6c1d" \
-  --set-env-vars="LANGFUSE_HOST=https://hipaa.cloud.langfuse.com"
+  --set-env-vars="LANGFUSE_HOST=https://hipaa.cloud.langfuse.com" \
+  --set-env-vars="POSTHOG_API_KEY=phc_CDtz3DmNraHdnJ2w9W7WJNkJ8VANYPBWAcqV2Uf77k5s" \
+  --set-env-vars="POSTHOG_HOST=https://us.i.posthog.com"
 
 # Print service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \

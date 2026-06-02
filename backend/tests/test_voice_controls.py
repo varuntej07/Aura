@@ -56,13 +56,18 @@ def test_each_emotional_state_maps_to_its_emotion(state, expected_emotion):
 
 
 def test_tone_and_emotion_combine():
+    """Tone and emotion are resolved independently and returned together."""
     speed, emotion = _derive_voice_controls("terse", "excited")
-    assert speed == 1.08
+    assert speed == _TONE_TO_SPEED["terse"]
     assert emotion == "Excited"
 
 
 def test_casing_and_whitespace_are_normalized():
-    assert _derive_voice_controls("  Playful ", "EXCITED") == (1.05, "Excited")
+    """'  Playful ' / 'EXCITED' must resolve to the same entries as their canonical keys."""
+    assert _derive_voice_controls("  Playful ", "EXCITED") == (
+        _TONE_TO_SPEED["playful"],
+        _EMOTIONAL_STATE_TO_VOICE_EMOTION["excited"],
+    )
 
 
 # --------------------------------------------------------------------------
