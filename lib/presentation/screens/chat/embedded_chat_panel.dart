@@ -23,6 +23,8 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   final _scrollController = ScrollController();
   double _keyboardHeight = 0;
+  AuthViewModel? _authVm;
+  VoidCallback? _authListener;
 
   @override
   bool get wantKeepAlive => true;
@@ -32,17 +34,38 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final uid = context.read<AuthViewModel>().user?.uid;
-      await context.read<TextChatViewModel>().init(uid);
+      if (!mounted) return;
+      final authVm = context.read<AuthViewModel>();
+      final vm = context.read<TextChatViewModel>();
+      await vm.init(authVm.user?.uid);
       _jumpToBottom();
+      // Re-run restore once auth resolves — covers init firing before sign-in
+      // finished on a fresh install (the window where history could look gone).
+      _authVm = authVm;
+      _authListener = () => vm.ensureRestoredForUser(authVm.user?.uid);
+      authVm.addListener(_authListener!);
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (_authListener != null) _authVm?.removeListener(_authListener!);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.paused &&
+        state != AppLifecycleState.resumed) {
+      return;
+    }
+    if (!mounted) return;
+    final uid = context.read<AuthViewModel>().user?.uid;
+    if (uid != null && uid.isNotEmpty) {
+      context.read<TextChatViewModel>().flushPendingBackup(uid);
+    }
   }
 
   @override

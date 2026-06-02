@@ -91,4 +91,13 @@ class MockChatBackupService extends _i1.Mock implements _i2.ChatBackupService {
             returnValueForMissingStub: _i3.Future<bool>.value(false),
           )
           as _i3.Future<bool>);
+
+  @override
+  _i3.Future<void> backfillUnsynced(String? userId) =>
+      (super.noSuchMethod(
+            Invocation.method(#backfillUnsynced, [userId]),
+            returnValue: _i3.Future<void>.value(),
+            returnValueForMissingStub: _i3.Future<void>.value(),
+          )
+          as _i3.Future<void>);
 }

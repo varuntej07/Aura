@@ -4,11 +4,21 @@ import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart' hide Constant;
 import 'package:drift/drift.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/logging/app_logger.dart';
 import '../local/app_database.dart';
 
 enum ChatSyncJobType { sessionUpsert, messageUpsert }
+
+/// Backfill is bounded to the same session window restore covers, so a one-time
+/// repair can never enqueue unbounded work.
+const int _backfillSessionLimit = 25;
+
+/// After this many failed sync attempts a job is treated as stuck and logged
+/// loudly (once), so a permanently-failing backup is visible instead of looping
+/// silently until the user reinstalls and loses data.
+const int _stuckJobAttemptThreshold = 8;
 
 class ChatBackupService {
   final AppDatabase _db;
@@ -247,6 +257,80 @@ class ChatBackupService {
     }
   }
 
+  /// One-time repair: enqueue local chat history that predates reliable sync so
+  /// it reaches Firestore and survives a reinstall. Gated by a per-user flag so
+  /// it runs once per install, and bounded to the [_backfillSessionLimit] most
+  /// recent sessions (the same window restore covers). Idempotent — Firestore
+  /// writes merge, so re-running would be safe even if the flag were cleared.
+  Future<void> backfillUnsynced(String userId) async {
+    final firestore = _firestore;
+    if (userId.isEmpty || firestore == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final flagKey = 'chat_backfill_v1_$userId';
+    if (prefs.getBool(flagKey) ?? false) return;
+
+    try {
+      final sessions = await (_db.select(_db.chatSessions)
+            ..where((t) => t.userId.equals(userId))
+            ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
+            ..limit(_backfillSessionLimit))
+          .get();
+
+      var enqueued = 0;
+      await _db.transaction(() async {
+        for (final session in sessions) {
+          await _db.into(_db.chatSyncJobs).insert(
+                ChatSyncJobsCompanion.insert(
+                  userId: userId,
+                  sessionId: session.id,
+                  jobType: ChatSyncJobType.sessionUpsert.name,
+                ),
+              );
+          enqueued++;
+
+          final messages = await (_db.select(_db.chatMessages)
+                ..where((t) => t.sessionId.equals(session.id)))
+              .get();
+          for (final message in messages) {
+            await _db.into(_db.chatSyncJobs).insert(
+                  ChatSyncJobsCompanion.insert(
+                    userId: userId,
+                    sessionId: session.id,
+                    messageId: Value(message.id),
+                    jobType: ChatSyncJobType.messageUpsert.name,
+                  ),
+                );
+            enqueued++;
+          }
+        }
+      });
+
+      await prefs.setBool(flagKey, true);
+
+      if (enqueued > 0) {
+        AppLogger.info(
+          'Backfill enqueued unsynced chat history',
+          tag: 'ChatBackupService',
+          metadata: {
+            'userId': userId,
+            'sessions': sessions.length,
+            'jobs': enqueued,
+          },
+        );
+        unawaited(processPendingJobs(userId: userId));
+      }
+    } catch (e, st) {
+      AppLogger.error(
+        'Backfill failed',
+        error: e,
+        stackTrace: st,
+        tag: 'ChatBackupService',
+        metadata: {'userId': userId},
+      );
+    }
+  }
+
   Future<bool> _processJob(
     ChatSyncJob job,
     FirebaseFirestore firestore,
@@ -342,6 +426,23 @@ class ChatBackupService {
         lastError: Value(truncatedError),
       ),
     );
+
+    // Fail loud once when a job crosses the stuck threshold — a permanently
+    // failing sync would otherwise loop silently and the user would lose this
+    // message on reinstall with no signal anywhere.
+    if (nextAttemptCount == _stuckJobAttemptThreshold) {
+      AppLogger.error(
+        'Chat backup job stuck — repeated sync failures',
+        tag: 'ChatBackupService',
+        metadata: {
+          'jobId': job.id,
+          'userId': job.userId,
+          'sessionId': job.sessionId,
+          'attempts': nextAttemptCount,
+          'lastError': truncatedError,
+        },
+      );
+    }
   }
 
   Duration _retryDelay(int attemptCount) {
