@@ -174,19 +174,26 @@ class FirebaseAuthService {
 
       return Result.success(serverAuthCode);
     } on GoogleSignInException catch (e, st) {
+      final isUserCancellation = e.code == GoogleSignInExceptionCode.canceled &&
+          (e.description == null ||
+              e.description!.isEmpty ||
+              e.description!.toLowerCase().contains('cancel'));
+      if (isUserCancellation) {
+        // User backed out of the account picker — a normal action, not a crash.
+        // Log as a warning so it never reaches Crashlytics.
+        AppLogger.warning(
+          'Google server auth code request cancelled by user',
+          tag: 'FirebaseAuthService',
+          metadata: {'code': e.code.toString()},
+        );
+        return Result.failure(AppException.authCancelled());
+      }
       AppLogger.error(
         'Google server auth code request failed',
         error: e,
         stackTrace: st,
         tag: 'FirebaseAuthService',
       );
-      final isUserCancellation = e.code == GoogleSignInExceptionCode.canceled &&
-          (e.description == null ||
-              e.description!.isEmpty ||
-              e.description!.toLowerCase().contains('cancel'));
-      if (isUserCancellation) {
-        return Result.failure(AppException.authCancelled());
-      }
       return Result.failure(AppException.authFailed(e, st));
     } catch (e, st) {
       AppLogger.error(

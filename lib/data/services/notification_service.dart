@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -151,8 +152,21 @@ class NotificationService {
     await _initializeLocalNotificationsPlugin();
     await _createAndroidChannel();
 
-    // 3. Get current token and register with backend
-    final token = await FirebaseMessaging.instance.getToken();
+    // 3. Get current token and register with backend.
+    // On the iOS simulator APNS is unavailable, so getToken() throws
+    // firebase_messaging/apns-token-not-set. Treat that one case as an expected
+    // warning instead of letting it surface as an uncaught Crashlytics error.
+    String? token;
+    try {
+      token = await FirebaseMessaging.instance.getToken();
+    } on FirebaseException catch (e) {
+      if (e.code != 'apns-token-not-set') rethrow;
+      AppLogger.warning(
+        'APNS token not set (expected on iOS simulator) — skipping FCM token registration',
+        tag: _tag,
+        metadata: {'userId': userId, 'code': e.code},
+      );
+    }
     AppLogger.info(
       'FCM token retrieved',
       tag: _tag,
