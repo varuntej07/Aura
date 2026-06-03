@@ -65,6 +65,17 @@ def _safe_doc_id(calendar_id: str, event_id: str) -> str:
     return f"{safe_calendar}__{event_id}"
 
 
+def _format_local_display(value: datetime | None, tz: ZoneInfo) -> str | None:
+    """Render a UTC datetime as a spoken-friendly local string with the zone name.
+
+    e.g. 'Thu, Jun 4, 1:00 PM PDT'. The agent reads this verbatim so it always
+    states the user's local time and timezone instead of a raw UTC value.
+    """
+    if value is None:
+        return None
+    return value.astimezone(tz).strftime("%a, %b %-d, %-I:%M %p %Z")
+
+
 def _event_range_to_utc(
     raw: dict[str, Any] | None,
     default_tz: str,
@@ -607,6 +618,7 @@ class GoogleCalendarConnector:
         limit: int,
         hours_ahead: int | None = None,
         skip_live_sync: bool = False,
+        force_sync: bool = False,
     ) -> dict[str, Any]:
         source = self._load_source()
         integration = self._load_integration()
@@ -616,7 +628,7 @@ class GoogleCalendarConnector:
         last_synced_at = _parse_iso(source.get("last_synced_at"))
         pending_sync = bool(source.get("pending_sync"))
         if not skip_live_sync and (
-            pending_sync or last_synced_at is None or (
+            force_sync or pending_sync or last_synced_at is None or (
                 _utc_now() - last_synced_at > timedelta(minutes=settings.CALENDAR_SYNC_STALE_MINUTES)
             )
         ):
@@ -650,10 +662,12 @@ class GoogleCalendarConnector:
                     "title": data.get("summary"),
                     "start_time": data.get("start_at"),
                     "end_time": data.get("end_at"),
+                    "start_local": _format_local_display(_coerce_datetime(data.get("start_at_ts")), tz),
+                    "end_local": _format_local_display(_coerce_datetime(data.get("end_at_ts")), tz),
                     "location": data.get("location"),
                     "status": data.get("status"),
                 })
-            return {"configured": True, "events": events, "range": "recent"}
+            return {"configured": True, "events": events, "range": "recent", "time_zone": tz_name}
 
         if start_time and end_time:
             range_start = datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(UTC)
@@ -717,6 +731,8 @@ class GoogleCalendarConnector:
                 "title": data.get("summary"),
                 "start_time": data.get("start_at"),
                 "end_time": data.get("end_at"),
+                "start_local": _format_local_display(_coerce_datetime(data.get("start_at_ts")), tz),
+                "end_local": _format_local_display(end_at, tz),
                 "location": data.get("location"),
                 "status": data.get("status"),
                 "attendees": [

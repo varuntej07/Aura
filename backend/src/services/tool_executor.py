@@ -270,7 +270,8 @@ class ToolExecutor:
                 end_time=str(inp.get("end_time", "")).strip() or None,
                 limit=int(inp.get("limit", 10) or 10),
                 hours_ahead=int(inp.get("hours_ahead", 24) or 24),
-                skip_live_sync=True,
+                skip_live_sync=False,
+                force_sync=True,
             )
 
         return await _run(_fetch)
