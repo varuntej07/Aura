@@ -11,6 +11,7 @@ import '../../core/network/api_response.dart';
 import '../models/voice_models.dart';
 import 'analytics_service.dart';
 import 'posthog_analytics_service.dart';
+import 'screen_wake_lock.dart';
 
 const _tag = 'VoiceSession';
 
@@ -25,6 +26,7 @@ const _replyWatchdogTimeout = Duration(seconds: 15);
 class VoiceSessionService {
   final Future<String?> Function() _tokenProvider;
   final PostHogAnalyticsService _postHogAnalyticsService;
+  final ScreenWakeLock _screenWakeLock;
 
   Room? _room;
   EventsListener<RoomEvent>? _listener;
@@ -43,8 +45,10 @@ class VoiceSessionService {
   VoiceSessionService({
     required Future<String?> Function() tokenProvider,
     required PostHogAnalyticsService postHogAnalyticsService,
+    ScreenWakeLock? screenWakeLock,
   })  : _tokenProvider = tokenProvider,
-        _postHogAnalyticsService = postHogAnalyticsService;
+        _postHogAnalyticsService = postHogAnalyticsService,
+        _screenWakeLock = screenWakeLock ?? WakelockPlusScreenWakeLock();
 
   Stream<VoiceServerEvent> get events => _eventsController.stream;
   bool get isConnected => _room != null;
@@ -81,6 +85,10 @@ class VoiceSessionService {
           _closingByClient = false;
           _sessionStopwatch.reset();
           _sessionStopwatch.start();
+          // Keep the screen on for the whole call — the user watches the orb
+          // without touching the screen, so the OS would otherwise sleep it.
+          // Released in _cleanupRoom() on every teardown path.
+          _acquireScreenWakeLock();
           AppLogger.info('LiveKit room connected', tag: _tag,
               metadata: {'room': roomName});
           unawaited(_postHogAnalyticsService.trackEvent('voice_session_started'));
@@ -379,7 +387,26 @@ class VoiceSessionService {
     }
   }
 
+  /// Ask the OS to keep the screen on for the duration of the call. A failure
+  /// here must never break the session, so it's swallowed with a breadcrumb.
+  void _acquireScreenWakeLock() {
+    unawaited(_screenWakeLock.enable().catchError((Object e) {
+      AppLogger.warning('Failed to acquire screen wake lock', tag: _tag,
+          metadata: {'error': e.toString()});
+    }));
+  }
+
+  /// Let the screen sleep again on its normal timer. Idempotent at the OS level,
+  /// so calling it on a session that never acquired the lock is harmless.
+  void _releaseScreenWakeLock() {
+    unawaited(_screenWakeLock.disable().catchError((Object e) {
+      AppLogger.warning('Failed to release screen wake lock', tag: _tag,
+          metadata: {'error': e.toString()});
+    }));
+  }
+
   void _cleanupRoom() {
+    _releaseScreenWakeLock();
     _agentJoinWatchdog?.cancel();
     _agentJoinWatchdog = null;
     _replyWatchdog?.cancel();

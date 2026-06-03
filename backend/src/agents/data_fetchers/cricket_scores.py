@@ -1,7 +1,7 @@
 """
 Fetches cricket scores and match data using the free ESPN Cricinfo RSS feed
 and the unofficial cricbuzz-python library (no API key required).
-Used by CricBolt.
+Used by MatchPoint.
 """
 
 from __future__ import annotations

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from ..models import NotificationOutput
 from ...model_provider import ModelProvider
+from ..models import NotificationOutput
 from .base_agent import BaseAgent
-
 
 _SYSTEM_PROMPT = """You are Buddy. You pay attention to what the user does and does not do.
 

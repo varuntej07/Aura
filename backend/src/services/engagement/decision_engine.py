@@ -1,17 +1,11 @@
 """
 DecisionEngine — pure Python, zero LLM calls.
 
-Decides whether to engage the user after a reactive trigger (nutrition scan or
-calendar event), which agent to use, and what tone to strike.
+Decides whether to engage the user after a reactive trigger (calendar event),
+which agent to use, and what tone to strike.
 
 Habit nudges are NOT handled here — they are planned daily by NotificationPlannerAgent
 in src/services/daily_notification/ which reads actual query history.
-
-Tone selection for nutrition_followup:
-    past_scan_count == 0                 → "educate"  (first time, explain)
-    1 <= past_scan_count < 3, bad verdict → "warn"    (seen before, heads up)
-    past_scan_count >= 3, bad verdict    → "roast"    (they keep doing it)
-    verdict == "eat"                     → "celebrate" (good choice)
 
 Rate-limit rules (all re-checked atomically via Firestore transaction in orchestrator.py):
     min 2h between any reactive notifications
@@ -40,7 +34,6 @@ QUIET_HOUR_START = 22   # 10 PM in the user's local timezone
 QUIET_HOUR_END = 8      #  8 AM in the user's local timezone
 
 # Fixed delays (seconds) for reactive notification types
-NUTRITION_FOLLOWUP_DELAY_MINUTES = 45
 CALENDAR_PREP_DELAY_MINUTES = 2
 
 
@@ -55,11 +48,9 @@ def decide(
     Pure function. No I/O. Takes assembled context, returns EngagementDecision.
 
     Args:
-        trigger_event:   "nutrition_scan" | "calendar_event"
-        trigger_payload: raw event data (nutrition log doc or calendar event dict)
+        trigger_event: "calendar_event"
+        trigger_payload: raw event data (calendar event dict)
         context: {
-            recent_nutrition_logs: list[dict],
-            dietary_profile: dict | None,
             engagement_guard: dict | None,
             memories: list[dict],
             user_timezone: str,               # IANA timezone e.g. "Asia/Kolkata"
@@ -82,9 +73,6 @@ def decide(
         )
 
     # ── Route by trigger event ────────────────────────────────────────────────
-    if trigger_event == "nutrition_scan":
-        return _decide_nutrition(trigger_payload, context)
-
     if trigger_event == "calendar_event":
         return _decide_calendar(trigger_payload, context)
 
@@ -134,7 +122,7 @@ def _check_suppression(now: datetime, guard: dict[str, Any], user_timezone: str)
             pass
 
     # Daily cap — only proactive (cold) notifications count against this cap;
-    # interaction-triggered ones (nutrition scan, calendar) are exempt.
+    # interaction-triggered ones (calendar) are exempt.
     today = now.date().isoformat()
     if guard.get("guard_date") == today:
         sent_today = guard.get("proactive_notifications_sent_today", 0)
@@ -146,70 +134,9 @@ def _check_suppression(now: datetime, guard: dict[str, Any], user_timezone: str)
 
 # ── Trigger-specific decision logic ──────────────────────────────────────────
 
-def _decide_nutrition(
-    payload: dict[str, Any],
-    context: dict[str, Any],
-) -> EngagementDecision:
-    food_name: str = payload.get("food_name", "").strip().lower()
-    verdict: str = payload.get("recommendation", "moderate")   # "eat"|"moderate"|"skip"
-    concerns: list[str] = payload.get("concerns", [])
-
-    # Count past scans of the same food (case-insensitive)
-    logs: list[dict] = context.get("recent_nutrition_logs", [])
-    past_scans = sum(
-        1 for log in logs
-        if log.get("food_name", "").strip().lower() == food_name
-    )
-
-    # Tone selection — fully deterministic
-    if verdict == "eat":
-        tone = "celebrate"
-    elif past_scans == 0:
-        tone = "educate"
-    elif past_scans < 3:
-        tone = "warn"
-    else:
-        tone = "roast"
-
-    # Skip if there's genuinely nothing worth saying
-    if verdict == "moderate" and past_scans == 0 and not concerns:
-        return EngagementDecision(
-            should_engage=False,
-            chosen_agent="none",
-            delay_minutes=0,
-            tone=tone,
-            engagement_context={},
-            suppression_reason="nothing_notable",
-        )
-
-    engagement_context: dict[str, Any] = {
-        "food_name": payload.get("food_name", "Unknown"),
-        "first_time": past_scans == 0,
-        "past_scan_count": past_scans,
-        "concerns": concerns,
-        "verdict": verdict,
-        "verdict_reason": payload.get("verdict_reason", ""),
-        "macros": payload.get("macros", {}),
-    }
-
-    profile = context.get("dietary_profile") or {}
-    if profile:
-        engagement_context["dietary_goal"] = profile.get("goal", "")
-        engagement_context["restrictions"] = profile.get("restrictions", [])
-        engagement_context["allergies"] = profile.get("allergies", [])
-
-    return EngagementDecision(
-        should_engage=True,
-        chosen_agent="nutrition_followup",
-        delay_minutes=NUTRITION_FOLLOWUP_DELAY_MINUTES,
-        tone=tone,
-        engagement_context=engagement_context,
-    )
-
-
 def _decide_calendar(
     payload: dict[str, Any],
-    context: dict[str, Any],   # reserved for future use (memories, dietary profile)
+    context: dict[str, Any],   # reserved for future use (memories)
 ) -> EngagementDecision:
     _ = context
     event_title: str = payload.get("title", "Meeting")

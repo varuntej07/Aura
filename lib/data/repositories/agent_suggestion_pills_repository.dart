@@ -17,13 +17,6 @@ const Map<String, List<String>> _fallbackSuggestionPillsByAgentId = {
     'Startup funding',
     'Open source picks',
   ],
-  'jobs': [
-    'SWE jobs today',
-    'Remote roles',
-    'Top companies hiring',
-    'Resume tips',
-    'Interview prep',
-  ],
   'posts': [
     'Draft a tweet',
     'LinkedIn post idea',

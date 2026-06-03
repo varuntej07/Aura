@@ -22,26 +22,40 @@ from pathlib import Path
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 _VOICE_AGENT = _BACKEND_ROOT / "src" / "agent" / "voice_agent.py"
+_VOICE_PACKAGE = _BACKEND_ROOT / "src" / "agent" / "voice"
 _PYPROJECT = _BACKEND_ROOT / "pyproject.toml"
 
 
+def _worker_source_files() -> list[Path]:
+    """Every runtime source file of the voice worker.
+
+    The worker entrypoint is voice_agent.py, but the livekit.plugins imports now
+    live across the voice/ package (e.g. voice/pipelines.py). All of it ships in
+    the worker Docker image, so the extras check must scan all of it — not just
+    the entrypoint — or a plugin imported in a package module slips the guard.
+    """
+    return [_VOICE_AGENT, *sorted(_VOICE_PACKAGE.glob("*.py"))]
+
+
 def _plugins_imported_by_worker() -> set[str]:
-    """Plugin module names referenced from livekit.plugins in voice_agent.py.
+    """Plugin module names referenced from livekit.plugins across the worker.
 
     Catches both `from livekit.plugins import a, b` and `livekit.plugins.x.y`.
     Normalizes module names to extra names (underscores -> hyphens).
     """
-    source = _VOICE_AGENT.read_text(encoding="utf-8")
     plugins: set[str] = set()
 
-    for match in re.finditer(r"from livekit\.plugins import ([^\n]+)", source):
-        for name in match.group(1).split(","):
-            cleaned = name.strip().split(" as ")[0].strip()
-            if cleaned:
-                plugins.add(cleaned)
+    for path in _worker_source_files():
+        source = path.read_text(encoding="utf-8")
 
-    for match in re.finditer(r"from livekit\.plugins\.([a-z_]+)", source):
-        plugins.add(match.group(1))
+        for match in re.finditer(r"from livekit\.plugins import ([^\n]+)", source):
+            for name in match.group(1).split(","):
+                cleaned = name.strip().split(" as ")[0].strip()
+                if cleaned:
+                    plugins.add(cleaned)
+
+        for match in re.finditer(r"from livekit\.plugins\.([a-z_]+)", source):
+            plugins.add(match.group(1))
 
     return {p.replace("_", "-") for p in plugins}
 

@@ -45,6 +45,17 @@ class _ChatScreenState extends State<ChatScreen> {
               initialMessage: extra['initialMessage'] as String,
             );
         _jumpToBottom();
+      } else if (extra is Map<String, dynamic> &&
+          extra.containsKey('signalNotificationId')) {
+        // Signal-engine content notification: seed the opener and arm funnel
+        // attribution for the user's first reply.
+        await chatVm.loadSignalNotificationContext(
+              notificationId: extra['signalNotificationId'] as String,
+              contentId: extra['signalContentId'] as String? ?? '',
+              category: extra['signalCategory'] as String? ?? '',
+              initialMessage: extra['initialMessage'] as String? ?? '',
+            );
+        _jumpToBottom();
       }
     });
   }

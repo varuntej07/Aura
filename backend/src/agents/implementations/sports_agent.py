@@ -4,8 +4,8 @@ import asyncio
 from typing import Any
 
 from ...services.model_provider import ModelProvider
-from ..data_fetchers.web_search import web_search
 from ..agent_base import ScheduledAgent
+from ..data_fetchers.web_search import web_search
 
 _DEFAULT_SPORTS_INTERESTS = ["RCB", "IPL", "India cricket", "Virat Kohli"]
 

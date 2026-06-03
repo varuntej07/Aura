@@ -82,6 +82,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       };
 
+      vm.onSignalNotificationTap = (payload) {
+        context.push(
+          '/chat/new',
+          extra: {
+            'initialMessage': payload.openingChatMessage,
+            'signalNotificationId': payload.notificationId,
+            'signalContentId': payload.contentId,
+            'signalCategory': payload.category,
+          },
+        );
+      };
+
       if (uid != null && uid.isNotEmpty) {
         await vm.initWakeWord(uid);
       }
@@ -829,6 +841,16 @@ class _SessionListState extends State<_SessionList> {
   Future<void> _load() async {
     final repo = context.read<ChatRepository>();
     final uid = context.read<AuthViewModel>().user?.uid ?? '';
+    // Hydrate the local store from the Firestore backup before reading it. The
+    // drawer is the chat-history surface and may be opened on a fresh install
+    // (or after a cache clear) before any chat screen has run a restore — so the
+    // read path owns its own hydration instead of depending on a sibling widget
+    // having been built. restoreFromBackupIfLocalEmpty is idempotent and a cheap
+    // no-op (single count query) once local sessions exist.
+    if (uid.isNotEmpty && mounted) {
+      await context.read<ChatBackupService>().restoreFromBackupIfLocalEmpty(uid);
+    }
+    if (!mounted) return;
     final result = await repo.loadMainSessions(userId: uid, limit: _pageSize);
     result.when(
       success: (s) => setState(() {

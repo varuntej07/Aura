@@ -274,37 +274,14 @@ async def resolve_outcome(
 
 
 async def list_active_user_ids(inactivity_days: int = 7) -> list[str]:
-    """Return user IDs with a registered FCM token seen within inactivity_days.
-
-    Mirrors agents/orchestrator._load_active_user_ids so the scoring loop
-    targets the same audience as the legacy agent dispatcher.
-    """
-    from datetime import timedelta
-
-    from google.cloud.firestore_v1.base_query import FieldFilter
-
-    cutoff = (datetime.now(UTC) - timedelta(days=inactivity_days)).isoformat()
-
-    def _fetch() -> list[str]:
-        db = admin_firestore()
-        docs = (
-            db.collection_group("fcm_tokens")
-            .where(filter=FieldFilter("last_seen", ">=", cutoff))
-            .stream()
-        )
-        user_ids: list[str] = []
-        seen: set[str] = set()
-        for doc in docs:
-            parts = doc.reference.path.split("/")
-            if len(parts) >= 2:
-                uid = parts[1]
-                if uid not in seen:
-                    seen.add(uid)
-                    user_ids.append(uid)
-        return user_ids
+    """Async wrapper over ``fcm_token_registry.list_active_user_ids`` — the single
+    source of truth for the ``fcm_tokens`` schema and the active-user query. The
+    scoring loop and the agent orchestrator both go through that one query so they
+    target the same audience and can never disagree on the field name."""
+    from ..fcm_token_registry import list_active_user_ids as _list_active_user_ids
 
     try:
-        return await asyncio.to_thread(_fetch)
+        return await asyncio.to_thread(_list_active_user_ids, inactivity_days)
     except Exception as exc:
         logger.error("feature_store.list_active_user_ids failed", {"error": str(exc)})
         return []

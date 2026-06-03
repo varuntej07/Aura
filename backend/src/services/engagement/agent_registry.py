@@ -3,7 +3,7 @@ AgentRegistry — single source of truth for all Juno engagement agents.
 
 Usage:
     registry = get_agent_registry()
-    agent = registry.get_specialist("nutrition_followup")
+    agent = registry.get_specialist("calendar_prep")
     output = await agent.generate(engagement_context)
 
 Adding a new agent (e.g. GymCoachAgent):
@@ -20,7 +20,6 @@ from ..model_provider import ModelProvider, get_model_provider
 from .agents.base_agent import BaseAgent
 from .agents.calendar_prep import CalendarPrepAgent
 from .agents.habit_nudge import HabitNudgeAgent
-from .agents.nutrition_followup import NutritionFollowupAgent
 from .agents.re_engagement import ReEngagementAgent
 
 
@@ -33,19 +32,12 @@ class AgentRegistry:
 
     def __init__(self, models: ModelProvider) -> None:
         self._models = models
-        self._nutrition_followup: NutritionFollowupAgent | None = None
         self._habit_nudge: HabitNudgeAgent | None = None
         self._calendar_prep: CalendarPrepAgent | None = None
         self._re_engagement: ReEngagementAgent | None = None
         # Future agents follow the same pattern — add property + _field above
 
     # ── Specialist agents ─────────────────────────────────────────────────────
-
-    @property
-    def nutrition_followup(self) -> NutritionFollowupAgent:
-        if self._nutrition_followup is None:
-            self._nutrition_followup = NutritionFollowupAgent(self._models)
-        return self._nutrition_followup
 
     @property
     def habit_nudge(self) -> HabitNudgeAgent:
@@ -74,7 +66,6 @@ class AgentRegistry:
         rather than silently sending nothing.
         """
         mapping: dict[str, BaseAgent] = {
-            "nutrition_followup": self.nutrition_followup,
             "habit_nudge":        self.habit_nudge,
             "calendar_prep":      self.calendar_prep,
             # re_engagement is invoked directly — not via get_specialist

@@ -203,15 +203,15 @@ class MockNotificationService extends _i1.Mock
           as _i3.Stream<_i8.AgentNudgeTapPayload>);
 
   @override
-  _i3.Stream<_i8.NutritionScanReadyTapPayload>
-  get nutritionScanReadyTapStream =>
+  _i3.Stream<_i8.SignalNotificationTapPayload>
+  get signalNotificationTapStream =>
       (super.noSuchMethod(
-            Invocation.getter(#nutritionScanReadyTapStream),
-            returnValue: _i3.Stream<_i8.NutritionScanReadyTapPayload>.empty(),
+            Invocation.getter(#signalNotificationTapStream),
+            returnValue: _i3.Stream<_i8.SignalNotificationTapPayload>.empty(),
             returnValueForMissingStub:
-                _i3.Stream<_i8.NutritionScanReadyTapPayload>.empty(),
+                _i3.Stream<_i8.SignalNotificationTapPayload>.empty(),
           )
-          as _i3.Stream<_i8.NutritionScanReadyTapPayload>);
+          as _i3.Stream<_i8.SignalNotificationTapPayload>);
 
   @override
   _i3.Future<void> initialize(String? userId) =>
@@ -226,21 +226,6 @@ class MockNotificationService extends _i1.Mock
   _i3.Future<void> dispose() =>
       (super.noSuchMethod(
             Invocation.method(#dispose, []),
-            returnValue: _i3.Future<void>.value(),
-            returnValueForMissingStub: _i3.Future<void>.value(),
-          )
-          as _i3.Future<void>);
-
-  @override
-  _i3.Future<void> showNutritionScanLocalNotification({
-    required String? title,
-    required String? body,
-  }) =>
-      (super.noSuchMethod(
-            Invocation.method(#showNutritionScanLocalNotification, [], {
-              #title: title,
-              #body: body,
-            }),
             returnValue: _i3.Future<void>.value(),
             returnValueForMissingStub: _i3.Future<void>.value(),
           )
@@ -395,29 +380,6 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
             ),
           )
           as _i3.Future<_i6.Result<void>>);
-
-  @override
-  _i3.Future<_i6.Result<Map<String, dynamic>>> analyzeNutrition(
-    String? ocrText,
-    String? userId,
-  ) =>
-      (super.noSuchMethod(
-            Invocation.method(#analyzeNutrition, [ocrText, userId]),
-            returnValue: _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
-              _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
-                this,
-                Invocation.method(#analyzeNutrition, [ocrText, userId]),
-              ),
-            ),
-            returnValueForMissingStub:
-                _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
-                  _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
-                    this,
-                    Invocation.method(#analyzeNutrition, [ocrText, userId]),
-                  ),
-                ),
-          )
-          as _i3.Future<_i6.Result<Map<String, dynamic>>>);
 
   @override
   _i3.Future<_i6.Result<Map<String, dynamic>>> postSignalEvents(

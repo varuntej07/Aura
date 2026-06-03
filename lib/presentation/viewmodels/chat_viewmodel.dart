@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:uuid/uuid.dart';
 
+import '../../core/analytics/funnel_events.dart';
 import '../../core/base/safe_change_notifier.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/errors/app_exception.dart';
@@ -52,6 +53,15 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   String? _currentUserId;
   bool _sessionTitleSet = false;
   bool _chatLimitReached = false;
+  // The uid restore/backfill has already been attempted for, so ensureRestoredForUser
+  // runs the work at most once per user even when called from several places.
+  String? _restoreAttemptedForUid;
+
+  // Set when a chat thread was opened from a signal-engine notification tap.
+  // The first user reply fires signal_action_after_notification once, then clears.
+  String? _pendingSignalNotificationId;
+  String? _pendingSignalContentId;
+  String? _pendingSignalCategory;
 
   ChatViewModel({
     required ChatServiceProvider backendService,
@@ -113,23 +123,42 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   Future<void> init(String? userId) async {
     _currentUserId = _normalizeUserId(userId);
 
+    await _loadSessions();
     if (agentId == null) {
-      // Main chat: restore from backup on first launch, then process pending jobs
-      await _loadSessions();
-      if (_sessions.isEmpty && _currentUserId != null) {
-        await _chatBackupService.restoreFromBackupIfLocalEmpty(_currentUserId!);
-        await _loadSessions();
-      }
-      if (_currentUserId != null) {
-        unawaited(_chatBackupService.processPendingJobs(userId: _currentUserId));
-      }
-    } else {
-      // Agent threads: load session list so _sessionTitleSet resolves correctly
-      // in _loadSession when the session already has a title.
-      await _loadSessions();
+      // Main chat: restore cloud history + repair unsynced rows 
+      // (guarded so it runs once per uid; safe to re-run when auth resolves later).
+      await ensureRestoredForUser(userId);
     }
 
     await initializeSession();
+  }
+
+  /// Restores cloud-backed history and repairs unsynced local rows for [userId],
+  /// then drains the backup queue. Only the main Buddy chat (agentId == null) is
+  /// backed up. Safe to call repeatedly — e.g. again once auth resolves after a
+  /// fresh install, because the per-uid guard runs the work at most once.
+  Future<void> ensureRestoredForUser(String? userId) async {
+    final uid = _normalizeUserId(userId);
+    if (uid == null || agentId != null) return;
+    if (_restoreAttemptedForUid == uid) return;
+    // Set the guard BEFORE the first await so two near-simultaneous callers
+    // (the post-frame init and the auth-state listener) can't both pass it.
+    _restoreAttemptedForUid = uid;
+    _currentUserId = uid;
+
+    final restored = await _chatBackupService.restoreFromBackupIfLocalEmpty(uid);
+    if (restored) await _loadSessions();
+    await _chatBackupService.backfillUnsynced(uid);
+    unawaited(_chatBackupService.processPendingJobs(userId: uid));
+    safeNotifyListeners();
+  }
+
+  /// Drains queued chat backups to Firestore. Called on app lifecycle changes so
+  /// a message sent just before backgrounding isn't lost if the OS kills us.
+  Future<void> flushPendingBackup(String? userId) async {
+    final uid = _normalizeUserId(userId);
+    if (uid == null) return;
+    await _chatBackupService.processPendingJobs(userId: uid);
   }
 
   /// Opens the correct session on init. Default: reuse the most recent session
@@ -197,6 +226,23 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
     final saved = await _persistMessage(userMsg);
     if (!saved) return;
+
+    // First reply in a notification-opened thread = the re-engagement payoff.
+    // Fire once, then disarm so later replies don't double-count.
+    if (_pendingSignalNotificationId != null) {
+      unawaited(postHogAnalytics.trackEvent(
+        FunnelEvents.actionAfterNotification,
+        properties: {
+          FunnelEvents.propNotificationId: _pendingSignalNotificationId!,
+          FunnelEvents.propContentId: _pendingSignalContentId ?? '',
+          FunnelEvents.propCategory: _pendingSignalCategory ?? '',
+          FunnelEvents.propNotificationOrigin: FunnelEvents.originSignalEngine,
+        },
+      ));
+      _pendingSignalNotificationId = null;
+      _pendingSignalContentId = null;
+      _pendingSignalCategory = null;
+    }
 
     _setState(ViewState.loading);
 
@@ -341,6 +387,48 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     if (engagementId.isNotEmpty) {
       unawaited(_backendService.markEngagementResponded(engagementId));
     }
+  }
+
+  /// Pre-loads the framed opener from a signal-engine content notification and
+  /// arms funnel attribution: fires signal_session_from_notification now; the
+  /// user's first reply will fire signal_action_after_notification (see
+  /// [sendMessage]). Mirrors [loadEngagementContext] without the engagement id.
+  Future<void> loadSignalNotificationContext({
+    required String notificationId,
+    required String contentId,
+    required String category,
+    required String initialMessage,
+  }) async {
+    _messages.clear();
+    _error = null;
+
+    if (initialMessage.isNotEmpty) {
+      final msg = ChatMessageModel(
+        id: _uuid.v4(),
+        text: initialMessage,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+      );
+      await _persistMessage(msg);
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+
+    _pendingSignalNotificationId = notificationId;
+    _pendingSignalContentId = contentId;
+    _pendingSignalCategory = category;
+
+    unawaited(postHogAnalytics.trackEvent(
+      FunnelEvents.sessionFromNotification,
+      properties: {
+        FunnelEvents.propNotificationId: notificationId,
+        FunnelEvents.propContentId: contentId,
+        FunnelEvents.propCategory: category,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originSignalEngine,
+      },
+    ));
   }
 
   // Subclass hooks

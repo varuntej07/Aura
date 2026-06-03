@@ -2,7 +2,7 @@ name: aura
 description: "Aura - Voice-first personal AI assistant"
 publish_to: 'none'
 
-version: 1.0.1+3
+version: 1.1.0+4
 
 environment:
   sdk: ^3.10.7
@@ -18,7 +18,7 @@ dependencies:
   firebase_analytics:
   firebase_crashlytics:
   firebase_messaging:
-  flutter_local_notifications:
+  flutter_local_notifications: 21.0.0
   google_sign_in:
   http:
   connectivity_plus:
@@ -30,7 +30,7 @@ dependencies:
   flutter_timezone:
   livekit_client:
   image_picker:
-  file_picker:
+  file_picker: 11.0.0
   flutter_image_compress:
   permission_handler:
   drift:
@@ -39,6 +39,7 @@ dependencies:
   go_router:
   in_app_purchase:
   posthog_flutter:
+  wakelock_plus:
 
 dev_dependencies:
   flutter_test:

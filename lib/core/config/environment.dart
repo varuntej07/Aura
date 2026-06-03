@@ -21,6 +21,12 @@ class Environment {
 
   static const String _envValue = String.fromEnvironment('ENV', defaultValue: 'dev');
 
+  // Compile-time overrides for pointing a `flutter run` build at a specific
+  // backend (e.g. a Cloud Run candidate revision) without touching prod.
+  // Empty unless passed via --dart-define=API_BASE_URL=... / WS_BASE_URL=...
+  static const String _apiTestBaseUrl = String.fromEnvironment('API_BASE_URL');
+  static const String _wsBaseUrlOverride = String.fromEnvironment('WS_BASE_URL');
+
   static Env get _env {
     switch (_envValue) {
       case 'prod':
@@ -55,10 +61,14 @@ class Environment {
         // Points to the deployed GCP backend so flutter run works without a local server.
         // To run against a local uvicorn instead, swap apiBaseUrl/wsBaseUrl with
         // DevTargets.devApiBaseUrl / DevTargets.devWsBaseUrl from dev_targets.dart.
-        return const EnvironmentConfig(
+        return EnvironmentConfig(
           env: Env.dev,
-          apiBaseUrl: 'https://juno-backend-620715294422.us-central1.run.app',
-          wsBaseUrl: 'wss://juno-backend-620715294422.us-central1.run.app',
+          apiBaseUrl: _apiTestBaseUrl.isNotEmpty
+              ? _apiTestBaseUrl
+              : 'https://juno-backend-620715294422.us-central1.run.app',
+          wsBaseUrl: _wsBaseUrlOverride.isNotEmpty
+              ? _wsBaseUrlOverride
+              : 'wss://juno-backend-620715294422.us-central1.run.app',
           firebaseProjectId: 'juno-dev',
           googleServerClientId: '620715294422-15h8gdqn7ii0b419ksfrf8u7fgghltoi.apps.googleusercontent.com',
         );

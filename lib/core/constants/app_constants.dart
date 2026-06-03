@@ -33,4 +33,6 @@ class AppConstants {
   static const remindersCollection = 'reminders';
   static const calendarCacheCollection = 'calendar_cache';
   static const usersCollection = 'users';
+  // Root-level collection for beta "Send Feedback" submissions
+  static const appFeedbackCollection = 'app_feedback';
 }

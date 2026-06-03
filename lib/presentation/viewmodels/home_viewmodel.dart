@@ -25,6 +25,7 @@ class HomeViewModel extends SafeChangeNotifier {
   StreamSubscription<VoiceServerEvent>? _voiceEventSub;
   StreamSubscription<EngagementTapPayload>? _engagementTapSub;
   StreamSubscription<AgentNudgeTapPayload>? _agentNudgeTapSub;
+  StreamSubscription<SignalNotificationTapPayload>? _signalTapSub;
 
   MicState _micState = MicState.idle;
   VoiceSessionStatus _voiceStatus = VoiceSessionStatus.disconnected;
@@ -38,6 +39,7 @@ class HomeViewModel extends SafeChangeNotifier {
   // Deep-link routing callbacks set by HomeScreen — keeps GoRouter out of VM.
   void Function(EngagementTapPayload)? onEngagementTap;
   void Function(AgentNudgeTapPayload)? onAgentNudgeTap;
+  void Function(SignalNotificationTapPayload)? onSignalNotificationTap;
 
   HomeViewModel({
     required VoiceSessionService voiceSessionService,
@@ -53,6 +55,8 @@ class HomeViewModel extends SafeChangeNotifier {
         _notificationService.engagementTapStream.listen(_onEngagementTap);
     _agentNudgeTapSub =
         _notificationService.agentNudgeTapStream.listen(_onAgentNudgeTap);
+    _signalTapSub = _notificationService.signalNotificationTapStream
+        .listen(_onSignalNotificationTap);
   }
 
   // Getters 
@@ -158,6 +162,10 @@ class HomeViewModel extends SafeChangeNotifier {
 
   void _onAgentNudgeTap(AgentNudgeTapPayload payload) {
     onAgentNudgeTap?.call(payload);
+  }
+
+  void _onSignalNotificationTap(SignalNotificationTapPayload payload) {
+    onSignalNotificationTap?.call(payload);
   }
 
   void _handleVoiceEvent(VoiceServerEvent event) {
@@ -390,6 +398,7 @@ class HomeViewModel extends SafeChangeNotifier {
     _voiceEventSub?.cancel();
     _engagementTapSub?.cancel();
     _agentNudgeTapSub?.cancel();
+    _signalTapSub?.cancel();
     unawaited(_wakeWordService.stop());
     unawaited(_voiceService.dispose());
     super.dispose();

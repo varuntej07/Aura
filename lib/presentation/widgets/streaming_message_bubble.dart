@@ -26,16 +26,6 @@ const _loadingMessagesByContext = <String, List<String>>{
     'indexing the feed...',
     'loading the diff...',
   ],
-  'jobs': [
-    'scanning the boards...',
-    'reading between the lines...',
-    'filtering the listings...',
-    'checking open roles...',
-    'loading the job feed...',
-    'reviewing the postings...',
-    'searching the market...',
-    'ranking the matches...',
-  ],
   'posts': [
     'drafting your voice...',
     'finding the angle...',
@@ -84,7 +74,7 @@ class StreamingMessageBubble extends StatefulWidget {
 
   /// Selects the loading message set for the current screen context.
   /// Matches keys in [_loadingMessagesByContext]: 'sports', 'technews',
-  /// 'jobs', 'posts'. Null falls back to the default general set.
+  /// 'posts'. Null falls back to the default general set.
   final String? contextTag;
 
   const StreamingMessageBubble({
@@ -190,7 +180,7 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
           children: [
             AnimatedBuilder(
               animation: _cursorController,
-              builder: (_, __) => Container(
+              builder: (_, _) => Container(
                 width: 6,
                 height: 6,
                 decoration: BoxDecoration(

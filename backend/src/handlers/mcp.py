@@ -175,24 +175,6 @@ async def query_memory(query: str, category_filter: str = "all") -> dict[str, An
     return await _run_tool("query_memory", {"query": query, "category_filter": category_filter})
 
 
-# Nutrition ---------------------------------------------------------------
-
-@mcp_server.tool()
-async def analyze_nutrition(
-    ocr_text: str,
-    quantity: float = 1.0,
-    occasion: str = "",
-    is_cheat_meal: bool = False,
-) -> dict[str, Any]:
-    """Analyze nutrition information from a food label's OCR text."""
-    return await _run_tool("analyze_nutrition", {
-        "ocr_text": ocr_text,
-        "quantity": quantity,
-        "occasion": occasion or None,
-        "is_cheat_meal": is_cheat_meal,
-    })
-
-
 # Web surf ----------------------------------------------------------------
 
 @mcp_server.tool()

@@ -3,13 +3,13 @@ SuggestionPillsAgent — generates 4-5 short suggestion pill labels per agent.
 
 Runs once daily alongside the notification pipeline (triggered from orchestrator.py
 after the daily plan is written). Writes results to Firestore:
-    agent_suggestion_pills/{user_id}  →  { "cricket": [...], "technews": [...], ... }
+    agent_suggestion_pills/{user_id}  →  { "sports": [...], "technews": [...], ... }
 
 Each agent's pills are grounded in live context relevant to that agent's domain:
-  - cricket:   today's cricket/IPL headlines from RSS
-  - technews:  today's AI/tech headlines from RSS
-  - jobs:      user's recent query history (job intent signals)
-  - posts:     user's recent query history (topics + tone signals)
+  - sports: today's sports headlines from RSS
+  - technews: today's AI/tech headlines from RSS
+  - jobs: user's recent query history (job intent signals)
+  - posts: user's recent query history (topics + tone signals)
 
 Pills are 3-6 words each — short enough to fit in a scrollable chip row.
 On any failure the agent is skipped silently; the Flutter app falls back to
@@ -28,7 +28,7 @@ from ...services.firebase import admin_firestore
 from ...services.model_provider import ModelProvider
 from . import rss_client
 
-_CRICKET_RSS_KEYWORDS = ["cricket", "IPL", "cricket match"]
+_SPORTS_RSS_KEYWORDS = ["sports", "cricket", "football", "IPL"]
 _TECHNEWS_RSS_KEYWORDS = ["artificial intelligence", "machine learning", "tech startup"]
 
 _SYSTEM_PROMPT = """You generate short suggestion pill labels for a chat agent.
@@ -48,28 +48,27 @@ class SuggestionPillsAgent:
     ) -> None:
         """Generate and save suggestion pills for all 4 chat agents.
 
-        Fetches domain-specific RSS context for cricket and technews in parallel
+        Fetches domain-specific RSS context for sports and technews in parallel
         with the LLM calls. Writes results to agent_suggestion_pills/{user_id}.
         Errors per agent are caught individually so one failure doesn't block others.
         """
-        cricket_result, tech_result = await asyncio.gather(
-            rss_client.fetch_news(_CRICKET_RSS_KEYWORDS),
+        sports_result, tech_result = await asyncio.gather(
+            rss_client.fetch_news(_SPORTS_RSS_KEYWORDS),
             rss_client.fetch_news(_TECHNEWS_RSS_KEYWORDS),
             return_exceptions=True,
         )
 
-        cricket_news = _news_items_or_empty("cricket", cricket_result)
+        sports_news = _news_items_or_empty("sports", sports_result)
         tech_news = _news_items_or_empty("technews", tech_result)
 
         results = await asyncio.gather(
-            self._generate_pills_for_agent("cricket", cricket_news, recent_queries),
+            self._generate_pills_for_agent("sports", sports_news, recent_queries),
             self._generate_pills_for_agent("technews", tech_news, recent_queries),
-            self._generate_pills_for_agent("jobs", [], recent_queries),
             self._generate_pills_for_agent("posts", [], recent_queries),
             return_exceptions=True,
         )
 
-        agent_ids = ["cricket", "technews", "jobs", "posts"]
+        agent_ids = ["sports", "technews", "posts"]
         pills_by_agent_id: dict[str, list[str]] = {}
 
         for agent_id, result in zip(agent_ids, results):
@@ -101,15 +100,14 @@ def _build_prompt(
     recent_queries: list[dict],
 ) -> str:
     agent_descriptions = {
-        "cricket": (
-            "CricBolt: a cricket analyst covering IPL, Test matches, "
-            "player stats, scores, and fixtures."
+        "sports": (
+            "MatchPoint: a sports analyst covering cricket, football, and more — "
+            "scores, player stats, results, and fixtures."
         ),
         "technews": (
             "BytePulse: an AI and tech news curator covering ML research, "
             "developer tools, and the tech industry."
         ),
-        "jobs": "HuntMode: a job search assistant surfacing software engineering and AI/ML roles.",
         "posts": (
             "Tweeter: a social media writing assistant drafting tweets "
             "and posts for X/Twitter."

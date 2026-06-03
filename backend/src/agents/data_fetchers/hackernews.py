@@ -1,6 +1,6 @@
 """
 Fetches stories from Hacker News using the official Algolia search API.
-No API key required. Used by BytePulse (tech news) and HuntMode (jobs).
+No API key required. Used by BytePulse (tech news).
 """
 
 from __future__ import annotations

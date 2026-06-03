@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from ..models import ReEngagementOutput
 from ...model_provider import ModelProvider
+from ..models import ReEngagementOutput
 from .base_agent import BaseAgent
-
 
 _SYSTEM_PROMPT = """You are Buddy. You sent the user a notification earlier. They did not respond.
 
@@ -55,7 +54,7 @@ class ReEngagementAgent(BaseAgent):
     async def generate(self, context: dict) -> ReEngagementOutput:  # type: ignore[override]
         level: int = context.get("escalation_level", 1)
         original_agent: str = context.get("original_agent", "general")
-        original_topic: str = context.get("original_topic", "something you scanned")
+        original_topic: str = context.get("original_topic", "something we talked about")
         original_title: str = context.get("original_notification_title", "")
 
         prompt = f"""Generate a level-{level} re-engagement notification.

@@ -16,11 +16,9 @@ All errors are caught and logged — a single failure never blocks other users.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..lib.logger import logger
-from ..services.firebase import admin_firestore
 from .agent_registry import get_scheduled_agent_registry
 
 # Agents are staggered so at most one runs at any given time, eliminating
@@ -118,32 +116,15 @@ async def _run(agent_id: str, user_id: str) -> None:
 
 
 async def _load_active_user_ids(inactivity_days: int = 7) -> list[str]:
-    """Return user IDs that have a registered FCM token seen within inactivity_days."""
-    from google.cloud.firestore_v1.base_query import FieldFilter
+    """Return uids with an FCM token registered within ``inactivity_days``.
 
-    cutoff = (datetime.now(UTC) - timedelta(days=inactivity_days)).isoformat()
-
-    def _fetch() -> list[str]:
-        db = admin_firestore()
-        docs = (
-            db.collection_group("fcm_tokens")
-            .where(filter=FieldFilter("last_seen", ">=", cutoff))
-            .stream()
-        )
-        user_ids: list[str] = []
-        seen: set[str] = set()
-        for doc in docs:
-            # Path: users/{uid}/fcm_tokens/{token}
-            parts = doc.reference.path.split("/")
-            if len(parts) >= 2:
-                uid = parts[1]
-                if uid not in seen:
-                    seen.add(uid)
-                    user_ids.append(uid)
-        return user_ids
+    Delegates to ``fcm_token_registry.list_active_user_ids`` which is the single source
+    of truth for ``fcm_tokens`` query, so the agent fan-out and the signal engine 
+    always target the same audience with the same field contract."""
+    from ..services.fcm_token_registry import list_active_user_ids
 
     try:
-        return await asyncio.to_thread(_fetch)
+        return await asyncio.to_thread(list_active_user_ids, inactivity_days)
     except Exception as exc:
         logger.error("agent_orchestrator: failed to load active users", {"error": str(exc)})
         return []
