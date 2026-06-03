@@ -84,12 +84,11 @@ class SettingsViewModel extends SafeChangeNotifier {
     }
   }
 
-  /// Beta feedback capture. Writes one document per submission to
-  /// `users/{uid}/feedback/{timestamp}` and fires a PostHog `feedback_submitted`
-  /// event tagged with the category. Returns null on success, or a user-facing
-  /// error message on failure. Deliberately does not touch [state] so the
-  /// settings screen's full-screen loader never takes over — the feedback sheet
-  /// owns its own submitting flag.
+  /// Beta feedback capture. Writes one document per submission to the
+  /// root `app_feedback/{timestamp}_{uid}` collection (each doc carries a
+  /// `uid` field) so every report is reviewable in one place instead of being
+  /// buried in each user's subcollection. Fires a PostHog `feedback_submitted`
+  /// event tagged with the category.
   Future<String?> submitFeedback({
     required String text,
     required String category,
@@ -104,11 +103,15 @@ class SettingsViewModel extends SafeChangeNotifier {
       properties: {'category': category},
     ));
 
-    final docId = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+    // Timestamp prefix keeps the console's lexicographic doc ordering
+    // chronological; the uid suffix prevents collisions across users.
+    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
+    final docId = '${timestamp}_${user.uid}';
     final result = await _firestoreService.setDocument<Map<String, dynamic>>(
-      'users/${user.uid}/feedback',
+      AppConstants.appFeedbackCollection,
       docId,
       {
+        'uid': user.uid,
         'text': text.trim(),
         'category': category,
         'created_at': DateTime.now().toUtc().toIso8601String(),
