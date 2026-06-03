@@ -9,7 +9,7 @@ pyproject extras in sync.
 
 from __future__ import annotations
 
-from livekit.agents import AgentSession, TurnHandlingOptions, mcp
+from livekit.agents import NOT_GIVEN, AgentSession, TurnHandlingOptions, mcp
 from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
@@ -101,16 +101,21 @@ def build_agent_session(
     llm: lk_llm.FallbackAdapter,
     tts: lk_tts.FallbackAdapter,
     vad: lk_vad.VAD,
-    turn_detector: MultilingualModel,
+    turn_detector: MultilingualModel | None,
     mcp_server: mcp.MCPServerHTTP,
 ) -> AgentSession:
-    """Assemble the AgentSession with tuned turn-handling for snappy, uninterrupted replies."""
+    """Assemble the AgentSession with tuned turn-handling for snappy, uninterrupted replies.
+
+    `turn_detector` is None when the semantic model failed to prewarm; 
+    passing NOT_GIVEN makes LiveKit fall back to VAD-based endpointing 
+    so the call still works (just without semantic end-of-turn).
+    """
     return AgentSession(
         stt=stt,
         llm=llm,
         tts=tts,
         vad=vad,
-        turn_detection=turn_detector,
+        turn_detection=turn_detector if turn_detector is not None else NOT_GIVEN,
         preemptive_generation=True,
         mcp_servers=[mcp_server],
         turn_handling=TurnHandlingOptions(

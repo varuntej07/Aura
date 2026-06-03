@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/constants/api_endpoints.dart';
 import '../../core/errors/app_exception.dart';
@@ -23,6 +24,12 @@ const _tag = 'VoiceSession';
 // lands in 2-5s; 15s is a generous ceiling for "it's genuinely stuck".
 const _replyWatchdogTimeout = Duration(seconds: 15);
 
+// How long a token fetched at app-open stays usable for a tap-to-talk. 
+// The backend mints LiveKit tokens with the SDK default 6h TTL, so this is a
+// conservative reuse window that keeps us well clear of expiry while removing
+// the token round-trip from the critical path when the user taps soon after.
+const _prewarmedTokenTtl = Duration(minutes: 30);
+
 class VoiceSessionService {
   final Future<String?> Function() _tokenProvider;
   final PostHogAnalyticsService _postHogAnalyticsService;
@@ -38,6 +45,9 @@ class VoiceSessionService {
   bool _awaitingAssistantReply = false;
   bool _didTrackFirstResponse = false;
   bool _closingByClient = false;
+  // Token prefetched at app open (see prewarm), reused by startSession while fresh.
+  Map<String, dynamic>? _prewarmedToken;
+  DateTime? _prewarmedTokenAt;
   final Stopwatch _sessionStopwatch = Stopwatch();
   final StreamController<VoiceServerEvent> _eventsController =
       StreamController<VoiceServerEvent>.broadcast();
@@ -53,6 +63,51 @@ class VoiceSessionService {
   Stream<VoiceServerEvent> get events => _eventsController.stream;
   bool get isConnected => _room != null;
 
+  /// Warm everything that can be done before the user taps the mic, so
+  /// tap-to-talk doesn't pay for a token round-trip or an OS permission prompt.
+  ///
+  /// Fully fire-and-forget: every failure is swallowed so a cold backend or a
+  /// denied mic at app open never surfaces an error or blocks the home screen.
+  /// Safe to call repeatedly (e.g. on every home-screen mount).
+  Future<void> prewarm() async {
+    if (_room != null || _isConnecting) return;
+    try {
+      final idToken = await _tokenProvider();
+      final token = await _fetchLiveKitToken(idToken);
+      if (token != null) {
+        _prewarmedToken = token;
+        _prewarmedTokenAt = DateTime.now();
+        AppLogger.info('Prewarmed LiveKit token', tag: _tag);
+      }
+    } catch (e) {
+      AppLogger.warning('Voice prewarm: token prefetch failed', tag: _tag,
+          metadata: {'error': e.toString()});
+    }
+    // Pre-resolve mic permission so the OS prompt is off the tap-to-talk path.
+    // request() is idempotent, it only shows the dialog if undecided, and
+    // returns immediately once granted or denied.
+    try {
+      await Permission.microphone.request();
+    } catch (e) {
+      AppLogger.warning('Voice prewarm: mic permission prefetch failed', tag: _tag,
+          metadata: {'error': e.toString()});
+    }
+  }
+
+  /// Return the prewarmed token if one was fetched recently enough to still be
+  /// valid, otherwise null so the caller fetches a fresh one.
+  Map<String, dynamic>? _freshPrewarmedToken() {
+    final token = _prewarmedToken;
+    final at = _prewarmedTokenAt;
+    if (token == null || at == null) return null;
+    if (DateTime.now().difference(at) > _prewarmedTokenTtl) {
+      _prewarmedToken = null;
+      _prewarmedTokenAt = null;
+      return null;
+    }
+    return token;
+  }
+
   Future<Result<void>> startSession(VoiceSessionConfig config) async {
     if (_room != null || _isConnecting) {
       AppLogger.warning('startSession called while already connected or connecting', tag: _tag);
@@ -64,8 +119,13 @@ class VoiceSessionService {
         metadata: {'userId': config.userId});
 
     try {
-      final idToken = await _tokenProvider();
-      final tokenResult = await _fetchLiveKitToken(idToken);
+      // Reuse the token prefetched at app open if it's still fresh; 
+      // otherwise fetch one now.
+      var tokenResult = _freshPrewarmedToken();
+      if (tokenResult == null) {
+        final idToken = await _tokenProvider();
+        tokenResult = await _fetchLiveKitToken(idToken);
+      }
       if (tokenResult == null) {
         return Result.failure(
           AppException.unexpected("Couldn't get Buddy on the line. Try again in a sec?"),
@@ -203,13 +263,26 @@ class VoiceSessionService {
         })
         ..on<DataReceivedEvent>((e) => _handleDataMessage(e.data));
 
-      await _room!.connect(
-        lkUrl,
-        lkToken,
-        connectOptions: const ConnectOptions(autoSubscribe: true),
+      // Buffer mic audio locally during connect so the user can talk the instant
+      // they tap: withPreConnectAudio records before the agent is ready and ships
+      // the buffer the moment Buddy goes active, discarding it if no agent joins.
+      // The 25s readiness timeout sits just past the 20s agent-join watchdog so
+      // the watchdog (with its friendly coded error) always owns the no-show case; 
+      // the room resets the buffer automatically on disconnect. A real
+      // connect failure inside the operation still propagates to the catch below.
+      await _room!.withPreConnectAudio(
+        () async {
+          await _room!.connect(
+            lkUrl,
+            lkToken,
+            connectOptions: const ConnectOptions(autoSubscribe: true),
+          );
+          await _room!.localParticipant?.setMicrophoneEnabled(true);
+        },
+        timeout: const Duration(seconds: 25),
+        onError: (e) => AppLogger.warning('Preconnect audio buffer error',
+            tag: _tag, metadata: {'error': e.toString()}),
       );
-
-      await _room!.localParticipant?.setMicrophoneEnabled(true);
 
       AppLogger.info('LiveKit mic enabled', tag: _tag);
       unawaited(AnalyticsService.logVoiceStarted());

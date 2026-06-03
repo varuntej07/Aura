@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -95,6 +97,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       };
 
       if (uid != null && uid.isNotEmpty) {
+        // Warm the voice stack before the user taps the mic. Fire-and-forget so
+        // it never blocks wake-word init or the first frame.
+        unawaited(vm.prewarmVoice());
         await vm.initWakeWord(uid);
       }
     });

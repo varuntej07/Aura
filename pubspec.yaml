@@ -28,7 +28,7 @@ dependencies:
   intl:
   shared_preferences:
   flutter_timezone:
-  livekit_client:
+  livekit_client: ^2.5.4  # >=2.5.4 required for PreConnectAudioBuffer
   image_picker:
   file_picker: 11.0.0
   flutter_image_compress:
