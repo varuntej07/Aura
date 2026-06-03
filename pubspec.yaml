@@ -18,7 +18,7 @@ dependencies:
   firebase_analytics:
   firebase_crashlytics:
   firebase_messaging:
-  flutter_local_notifications:
+  flutter_local_notifications: 21.0.0
   google_sign_in:
   http:
   connectivity_plus:
@@ -30,7 +30,7 @@ dependencies:
   flutter_timezone:
   livekit_client:
   image_picker:
-  file_picker:
+  file_picker: 11.0.0
   flutter_image_compress:
   permission_handler:
   drift:
