@@ -59,6 +59,18 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 def prewarm(process: JobProcess) -> None:
     logger.info("VoiceWorker: prewarming VAD model")
     process.userdata["vad"] = silero.VAD.load()
+    
+    # The semantic end-of-turn model loads once at startup instead of per session.
+    # Unlike VAD it is NOT fatal: if the ONNX load fails we store None and the
+    # session degrades to VAD-based endpointing (see entrypoint), so a model
+    # download/load problem never takes the whole worker down or kills calls.
+    logger.info("VoiceWorker: prewarming turn detector model")
+    try:
+        process.userdata["turn_detector"] = build_turn_detector()
+    except Exception:
+        logger.exception("VoiceWorker: turn detector prewarm failed -"
+                         "sessions now use VAD-based endpointing")
+        process.userdata["turn_detector"] = None
 
 
 async def _connect_to_room(ctx: JobContext, candidate_user_id: str) -> bool:
@@ -150,7 +162,10 @@ async def entrypoint(ctx: JobContext) -> None:
         # Failure is fatal for tool use so the session can still hold a
         # conversation but tools won't work, so we log loudly and bail.
         try:
-            firebase_id_token = await mint_firebase_id_token(user_id)
+            firebase_id_token = await asyncio.wait_for(
+                mint_firebase_id_token(user_id),
+                timeout=settings.VOICE_TOKEN_MINT_TIMEOUT_S,
+            )
         except Exception as exc:
             log_voice_failure(
                 code="mcp_token_mint_failed",
@@ -174,17 +189,16 @@ async def entrypoint(ctx: JobContext) -> None:
         tts_pipeline = build_tts_pipeline(sonic3_controls)
         mcp_server = build_mcp_server(firebase_id_token)
 
-        try:
-            turn_detector = build_turn_detector()
-        except Exception as exc:
-            log_voice_failure(
-                code="turn_detector_init_failed",
-                user_id=user_id,
-                room_name=ctx.room.name,
-                session_id=session_id,
-                exc=exc,
-            )
-            return
+        # None when the prewarm load failed (see prewarm). The session still starts,
+        # build_agent_session degrades to VAD-based endpointing, but we log it per session.
+        turn_detector = ctx.proc.userdata.get("turn_detector")
+        if turn_detector is None:
+            logger.warn("VoiceSession: turn detector unavailable — degrading to "
+                        "VAD-based endpointing", {
+                            "code": "turn_detector_unavailable",
+                            "user_id": user_id, "room": ctx.room.name,
+                            "session_id": session_id,
+                        })
 
         session = build_agent_session(
             stt=stt_pipeline,

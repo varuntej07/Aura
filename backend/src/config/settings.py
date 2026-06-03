@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Voice agent timeouts
     VOICE_TOOL_TIMEOUT_S: float = 5.0      # per-tool Firestore call budget
     VOICE_CONNECT_TIMEOUT_S: float = 10.0  # LiveKit room.connect() budget
+    VOICE_TOKEN_MINT_TIMEOUT_S: float = 5.0  # Firebase ID token mint budget before first audio
 
     # Chat tool timeout — longer than voice because text chat can tolerate a Google Calendar sync
     CHAT_TOOL_TIMEOUT_S: float = 20.0

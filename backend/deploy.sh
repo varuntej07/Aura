@@ -119,7 +119,7 @@ gcloud run deploy "${WORKER_SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
   --platform=managed \
   --allow-unauthenticated \
-  --min-instances=1 \
+  --min-instances=2 \
   --max-instances=2 \
   --memory=4Gi \
   --cpu=2 \

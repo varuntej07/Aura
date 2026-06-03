@@ -80,6 +80,12 @@ class HomeViewModel extends SafeChangeNotifier {
     AppLogger.info('Wake word active', tag: 'HomeViewModel');
   }
 
+  /// Warm the voice stack (LiveKit token + mic permission) when the home screen
+  /// mounts, so tapping the mic connects without a token round-trip or a
+  /// permission prompt in the way. Fire-and-forget; the service swallows any
+  /// failure so a cold backend or denied mic never reaches the UI.
+  Future<void> prewarmVoice() => _voiceService.prewarm();
+
   Future<void> startSession(String userId) async {
     _currentUserId = userId;
     if (hasActiveSession) return;
