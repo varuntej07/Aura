@@ -57,6 +57,8 @@
 	<string>https://us.i.posthog.com</string>
 	<key>com.posthog.posthog.CAPTURE_APPLICATION_LIFECYCLE_EVENTS</key>
 	<true/>
+	<key>GIDClientID</key>
+	<string>620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0.apps.googleusercontent.com</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

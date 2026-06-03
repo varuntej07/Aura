@@ -15,6 +15,14 @@
         { "fieldPath": "archived", "order": "ASCENDING" },
         { "fieldPath": "started_at", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "outcomes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "outcome", "order": "ASCENDING" },
+        { "fieldPath": "sent_at", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
