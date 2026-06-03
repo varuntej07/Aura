@@ -31,6 +31,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  Future<void> _signOut(BuildContext context) async {
+    final authVm = context.read<AuthViewModel>();
+    await authVm.signOut();
+    if (!mounted) return;
+    // Settings was pushed via Navigator (not GoRouter), so the redirect won't
+    // clear this screen on its own — navigating to the sign-in screen explicitly.
+    context.go('/login');
+  }
+
   Future<void> _confirmDeleteAccount(BuildContext context) async {
     final authVm = context.read<AuthViewModel>();
     final messenger = ScaffoldMessenger.of(context);
@@ -214,15 +223,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           _GlassInfoTile(
                               label: 'Email', value: user.email),
                         ],
-                        const SizedBox(height: 20),
-                        _GlassSignOutButton(
-                          onTap: () =>
-                              context.read<AuthViewModel>().signOut(),
-                        ),
-                        const SizedBox(height: 12),
-                        _GlassDeleteAccountButton(
-                          onTap: () => _confirmDeleteAccount(context),
-                        ),
 
                         // ── Feedback ─────────────────────────────────────────
                         _SectionLabel('Feedback'),
@@ -253,6 +253,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             Uri.parse('https://varuntej.dev/aura/terms-of-service'),
                             mode: LaunchMode.externalApplication,
                           ),
+                        ),
+
+                        const SizedBox(height: 28),
+                        _GlassSignOutButton(
+                          onTap: () => _signOut(context),
+                        ),
+                        const SizedBox(height: 12),
+                        _GlassDeleteAccountButton(
+                          onTap: () => _confirmDeleteAccount(context),
                         ),
 
                         const SizedBox(height: 28),
