@@ -47,5 +47,26 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Aura needs your microphone to hear voice commands and respond in real time.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Aura uses your camera so you can photograph documents and images to ask questions about them.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Aura accesses your photo library so you can attach images and documents to your messages.</string>
+	<key>com.posthog.posthog.API_KEY</key>
+	<string>phc_CDtz3DmNraHdnJ2w9W7WJNkJ8VANYPBWAcqV2Uf77k5s</string>
+	<key>com.posthog.posthog.POSTHOG_HOST</key>
+	<string>https://us.i.posthog.com</string>
+	<key>com.posthog.posthog.CAPTURE_APPLICATION_LIFECYCLE_EVENTS</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
