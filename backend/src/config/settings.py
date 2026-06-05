@@ -1,4 +1,5 @@
 import os
+import re
 
 from dotenv import load_dotenv
 from pydantic import field_validator
@@ -97,6 +98,30 @@ class Settings(BaseSettings):
     CLOUD_TASKS_QUEUE: str = "juno-engagement"
     # The URL Cloud Tasks will POST to. Must match the deployed Cloud Run URL.
     BACKEND_INTERNAL_URL: str = "https://juno-backend-620715294422.us-central1.run.app"
+
+    # OIDC audiences accepted by internal endpoints (_verify_scheduler_token).
+    # Cloud Run serves one service under several stable hostnames — the
+    # project-number form (…-620715294422.us-central1.run.app) AND the newer
+    # per-service hash form (…-wo3gl4yhlq-uc.a.run.app). An OIDC token's 'aud'
+    # claim is whichever hostname the caller targeted, so the backend must accept
+    # BOTH or a Cloud Run URL-format change silently 401s every scheduler tick
+    # (the 2026-06-04 outage). Whitespace/comma-separated; override via env with
+    # no code change. BACKEND_INTERNAL_URL is unioned in at read time so the
+    # Cloud Tasks path can never be rejected even if the two settings drift.
+    SCHEDULER_OIDC_AUDIENCES: str = (
+        "https://juno-backend-620715294422.us-central1.run.app "
+        "https://juno-backend-wo3gl4yhlq-uc.a.run.app"
+    )
+
+    @property
+    def scheduler_oidc_audience_list(self) -> list[str]:
+        """Every OIDC audience accepted for internal endpoints. Always includes
+        BACKEND_INTERNAL_URL (the audience the Cloud Tasks minters sign with) so
+        that path can never 401, regardless of SCHEDULER_OIDC_AUDIENCES."""
+        audiences = [a for a in re.split(r"[\s,]+", self.SCHEDULER_OIDC_AUDIENCES) if a]
+        if self.BACKEND_INTERNAL_URL and self.BACKEND_INTERNAL_URL not in audiences:
+            audiences.append(self.BACKEND_INTERNAL_URL)
+        return audiences
 
     # Chat history — number of prior turns forwarded to Claude for context.
     # 30 messages covers ~15 turns, enough for mid-length sessions without blowing token budget.

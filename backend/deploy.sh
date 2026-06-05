@@ -21,15 +21,24 @@
 #   gcloud secrets create juno-gemini-api-key --project=<PROJECT_ID>         # voice worker + signal engine LLM fallback
 #   gcloud secrets create juno-brave-api-key --project=<PROJECT_ID>          # backend: real-time web_surf (chat + voice)
 #
+# Cloud Scheduler prerequisite (one-time, NOT created by this script):
+#   The juno-scheduler service account must exist, and the Cloud Scheduler
+#   service agent (service-<PROJECT_NUMBER>@gcp-sa-cloudscheduler.iam.gserviceaccount.com)
+#   needs roles/iam.serviceAccountTokenCreator on it so it can mint the OIDC token
+#   the backend's _verify_scheduler_token check requires.
+#
 # Usage:
 #   bash backend/deploy.sh juno-2ea45 us-central1
 
 set -euo pipefail
 
-# Prevent Git Bash on Windows from converting Unix paths inside 
+# Prevent Git Bash on Windows from converting Unix paths inside
 # --set-env-vars and --set-secrets args (e.g. /run/secrets/... -> C:/Program Files/Git/run/...).
+# The scheduler flags carry slashes too (cron "*/15 ...", time zones "Etc/UTC",
+# and the https:// URI/audience), so exclude them as well or the jobs get a
+# mangled audience and 401.
 # gcloud's own executable path still converts correctly.
-export MSYS2_ARG_CONV_EXCL='--set-env-vars;--set-secrets'
+export MSYS2_ARG_CONV_EXCL='--set-env-vars;--set-secrets;--schedule;--time-zone;--uri;--oidc-token-audience'
 
 # Config
 PROJECT_ID="${1:?Usage: deploy.sh <GCP_PROJECT_ID> <REGION>}"
@@ -49,6 +58,7 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   containerregistry.googleapis.com \
   secretmanager.googleapis.com \
+  cloudscheduler.googleapis.com \
   --project="${PROJECT_ID}"
 
 # Build & push image
@@ -58,6 +68,23 @@ docker build -t "${IMAGE}:latest" "${SCRIPT_DIR}"
 
 echo "▶ Pushing image to GCR..."
 docker push "${IMAGE}:latest"
+
+# ── OIDC audience contract ───────────────────────────────────────────────────
+# Cloud Run serves the backend under a STABLE project-number hostname
+# (…-<PROJECT_NUMBER>.<REGION>.run.app) AND a per-service hash hostname
+# (…-<hash>-uc.a.run.app, returned by status.url). An OIDC token's 'aud' is
+# whichever hostname the caller targeted. We SIGN every scheduler/task token
+# with the stable URL and tell the backend to ACCEPT both, so a Cloud Run
+# URL-format change can never 401 the scheduler again (the 2026-06-04 outage).
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
+STABLE_SERVICE_URL="https://${SERVICE_NAME}-${PROJECT_NUMBER}.${REGION}.run.app"
+EXISTING_SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --project="${PROJECT_ID}" --format='value(status.url)' 2>/dev/null || true)"
+ACCEPTED_AUDIENCES="${STABLE_SERVICE_URL}"
+if [[ -n "${EXISTING_SERVICE_URL}" && "${EXISTING_SERVICE_URL}" != "${STABLE_SERVICE_URL}" ]]; then
+  ACCEPTED_AUDIENCES="${STABLE_SERVICE_URL} ${EXISTING_SERVICE_URL}"
+fi
+echo "▶ Stable service URL (token audience): ${STABLE_SERVICE_URL}"
+echo "▶ Audiences the backend will accept:   ${ACCEPTED_AUDIENCES}"
 
 # Deploy to Cloud Run
 echo "▶ Deploying to Cloud Run..."
@@ -77,6 +104,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="ANTHROPIC_MODEL=claude-sonnet-4-6" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
   --set-env-vars="GOOGLE_REDIRECT_URI=" \
+  --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
+  --set-env-vars="SCHEDULER_OIDC_AUDIENCES=${ACCEPTED_AUDIENCES}" \
   --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
   --set-secrets="LIVEKIT_API_KEY=livekit-api-key:latest" \
   --set-secrets="LIVEKIT_API_SECRET=livekit-api-secret:latest" \
@@ -104,6 +133,42 @@ SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
 echo ""
 echo "✅ ${SERVICE_NAME} deployed: ${SERVICE_URL}"
 
+# Cloud Scheduler jobs — codified so the OIDC audience can never silently drift.
+# Each job calls a /scheduler or /internal endpoint guarded by _verify_scheduler_token,
+# which checks the OIDC token's audience against settings.scheduler_oidc_audience_list
+# (every hostname that routes here). We pin --uri and --oidc-token-audience to the
+# STABLE project-number URL (${STABLE_SERVICE_URL}) — never status.url, which switched
+# hostname format and caused the 2026-06-04 401 outage. The backend accepts both the
+# stable and hash hostnames, so signing with the stable one is always valid.
+echo ""
+echo "▶ Reconciling Cloud Scheduler jobs (audience=${STABLE_SERVICE_URL})..."
+SCHEDULER_SA="juno-scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
+
+ensure_scheduler_job() {
+  local name="$1" schedule="$2" path="$3" tz="${4:-Etc/UTC}"
+  local args=(
+    --location="${REGION}" --project="${PROJECT_ID}"
+    --schedule="${schedule}" --time-zone="${tz}"
+    --uri="${STABLE_SERVICE_URL}${path}" --http-method=POST
+    --oidc-service-account-email="${SCHEDULER_SA}"
+    --oidc-token-audience="${STABLE_SERVICE_URL}"
+  )
+  if gcloud scheduler jobs describe "${name}" --location="${REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "  • updating ${name}"
+    gcloud scheduler jobs update http "${name}" "${args[@]}"
+  else
+    echo "  • creating ${name}"
+    gcloud scheduler jobs create http "${name}" "${args[@]}"
+  fi
+}
+
+ensure_scheduler_job "juno-reminder-tick" "* * * * *" "/scheduler/tick"
+ensure_scheduler_job "juno-signal-engine-tick" "*/15 * * * *" "/internal/signal-engine/tick"
+ensure_scheduler_job "juno-content-ingest" "0 * * * *" "/internal/signal-engine/content-ingest"
+ensure_scheduler_job "juno-agents-tick" "0 9 * * *" "/internal/agents/tick" "America/Los_Angeles"
+
+echo "✅ Cloud Scheduler jobs reconciled"
+
 # Voice worker
 echo ""
 echo "▶ Building voice worker Docker image..."
@@ -119,7 +184,7 @@ gcloud run deploy "${WORKER_SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
   --platform=managed \
   --allow-unauthenticated \
-  --min-instances=2 \
+  --min-instances=1 \
   --max-instances=2 \
   --memory=4Gi \
   --cpu=2 \
@@ -128,7 +193,7 @@ gcloud run deploy "${WORKER_SERVICE_NAME}" \
   --concurrency=1 \
   --set-env-vars="ENV=production" \
   --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}" \
-  --set-env-vars="BACKEND_INTERNAL_URL=${SERVICE_URL}" \
+  --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
   --set-secrets="OPENAI_API_KEY=juno-openai-api-key:latest" \
   --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
   --set-secrets="LIVEKIT_API_KEY=livekit-api-key:latest" \

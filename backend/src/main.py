@@ -188,23 +188,32 @@ async def notification_reply_endpoint(request: Request) -> JSONResponse:
     return _handler_response(result)
 
 
-_CLOUD_RUN_AUDIENCE = "https://juno-backend-620715294422.us-central1.run.app"
 _google_auth_transport = GoogleRequest()
 
 
 def _verify_scheduler_token(request: Request) -> None:
-    """Allow only Cloud Scheduler calls signed by the juno-scheduler service account."""
+    """Allow only Cloud Scheduler / Cloud Tasks calls signed by the juno-scheduler
+    service account. The token's audience is checked against every hostname that
+    routes to this service (settings.scheduler_oidc_audience_list) so a Cloud Run
+    URL-format change can't 401 the scheduler — see the 2026-06-04 audience-drift
+    outage. verify_oauth2_token accepts a list and matches membership."""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         logger.warn("scheduler_auth: missing bearer token", {"path": request.url.path})
         raise HTTPException(status_code=401, detail="Missing bearer token")
     token = auth_header.removeprefix("Bearer ")
     try:
-        claims = verify_oauth2_token(token, _google_auth_transport, audience=_CLOUD_RUN_AUDIENCE)
+        claims = verify_oauth2_token(
+            token, _google_auth_transport, audience=settings.scheduler_oidc_audience_list
+        )
     except Exception as exc:
-        logger.warn("scheduler_auth: invalid OIDC token", {
+        # ERROR, not WARN: a rejected token means an internal endpoint (reminders,
+        # notifications, ingest) is silently 401ing — an outage. The accepted list
+        # is logged inline so the next audience drift is one grep away from the fix.
+        logger.error("scheduler_auth: OIDC token REJECTED — internal endpoint is 401ing (scheduler/tasks outage)", {
             "path": request.url.path,
             "error": str(exc),
+            "accepted_audiences": settings.scheduler_oidc_audience_list,
         })
         raise HTTPException(status_code=401, detail="Invalid OIDC token")
     caller_email = claims.get("email", "")
