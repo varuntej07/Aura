@@ -1,8 +1,8 @@
 # Project Overview
 
-Aura is my personal Flutter and Python FastAPI assistant app. The assistant persona is Buddy. The app covers text chat, LiveKit voice, reminders, memory, nutrition, notifications, scheduled agents, and Google Calendar tools.
+Aura is AI companion app (currently beta testing with 15 users). The assistant persona is Buddy. The app covers text chat, LiveKit voice, reminders, memory, notifications, scheduled agents, Google Calendar and Gmail tools, and live web search.
 
-Keep the project simple. Prefer one clear working path over broad architecture changes.
+Keep the project production-grade. Prefer clear working path with scalabiity, maintainabiity, future-proof and robust, most importantly flexible with additional incoming features in the long run. 
 
 ## Architecture
 
@@ -29,6 +29,7 @@ Backend services live in `backend/src/services`.
 Scheduled domain agents live in `backend/src/agents`. These agents only fetch data (`fetch_data`). Notification sending is handled by the signal engine, not the agents.
 
 Voice runs through `backend/src/agent/voice_agent.py` as a separate LiveKit worker.
+`voice_agent.py` is the thin orchestrator; its pieces — telemetry, error mapping, Firestore fetchers, prompt context, pipeline builders, voice conditioning, and the session event recorder — live in the `backend/src/agent/voice/` package.
 
 `backend/src/services/user_aura_extractor.py` builds a passive behavioral profile per user.
 It fires as a fire-and-forget `asyncio.create_task` from the chat handler after every message.
@@ -36,6 +37,18 @@ Profile documents live in the `UserAura/{uid}` Firestore collection.
 The extractor always passes the user's previous query (`prev_user_query` field) alongside the
 current message to Gemini Flash, which decides when prior context is needed — no hardcoded
 heuristics. Failed extractions are swallowed silently so the chat stream is never affected.
+
+Interests are stored as a **closed taxonomy, not free text**. `backend/src/services/user_aura_schema.py`
+is the single source of truth: ~30 broad categories (+ `other`) that the extraction prompt constrains
+Gemini to (off-list values coerce to `other`), each holding the specific subjects named in the message
+(e.g. `politics_governance` → `KCR`) with time-decayed weights (30-day half-life) and a per-category cap.
+The writer (`apply_interest_signal`) and every reader — chat prompt suffix, voice prompt, notification
+framer, and the signal-engine `user_vector` embedding (which embeds subjects, never raw slugs) — go
+through the schema's accessors, which fall back to the legacy `deep_interest_frequencies` map until a
+profile rebuilds. This replaced an earlier design where free-text interest strings were Firestore map keys
+and fragmented into 100+ near-duplicate buckets (see `lessons-learnt.text`, 2026-06-04). `deep_interest_frequencies`
+is kept on the doc (frozen) for old app clients; the two dead maps (`surface_topic_frequencies`,
+`named_entities_seen`) are dropped once a profile reaches 5 categories.
 
 ## Signal Engine
 
@@ -48,14 +61,25 @@ Full architecture in `backend/docs/signal_engine.md`.
 - `POST /events` — Flutter reports user events (taps, dismissals, skips, app opens). Updates user vector via EMA.
 - `GET /feed/recommend` — ranked content feed for in-app display.
 - `POST /internal/signal-engine/tick` — Cloud Scheduler every 15 min. Runs scoring and sends notifications.
-- `POST /internal/signal-engine/content-ingest` — Cloud Scheduler hourly. Pulls HN/arXiv/ESPN Cricinfo RSS into the pool.
-- Sports ingest (cricbuzz live + web-searched leagues) runs inside `/scheduler/tick` every 30 min via a `minute % 30 == 0` gate — no separate scheduler job needed.
+- `POST /internal/signal-engine/content-ingest` — Cloud Scheduler hourly. Pulls HN, arXiv, ESPN Cricinfo RSS, and global Google News RSS into the pool.
+- Sports ingest (cricbuzz live match scores only) runs inside `/scheduler/tick` every 30 min via a `minute % 30 == 0` gate — no separate scheduler job needed. Broader sports headlines now arrive via Google News RSS in the hourly content-ingest; the old Gemini-grounded web search for leagues was removed.
 
 **`/scheduler/tick` runs every minute** (`juno-reminder-tick` Cloud Scheduler job). Use `minute % N == 0` gating inside `handlers/scheduler.py` to piggyback any periodic work at N-minute intervals without creating new scheduler jobs.
 
 **Out of scope for the signal engine:** calendar meeting reminders and the post-nutrition-scan engagement chain. These stay on their existing LLM paths.
 
 `backend/src/services/daily_notification/orchestrator.py`  only runs the calendar reminder pipeline 
+
+### Notification re-engagement funnel (PostHog)
+
+Signal-engine notifications are instrumented as a 4-step PostHog funnel so "which notification earns a tap and a reply" is measurable, not guessed:
+`signal_notification_sent` (server, `scoring_loop` after delivery) → `notification_tapped` (client, filter `notification_origin == signal_engine`) → `signal_session_from_notification` (chat opens from the tap) → `signal_action_after_notification` (user's first reply in that thread).
+
+The event names and join-key property names live in ONE place per side: `backend/src/services/analytics/funnel_events.py` and `lib/core/analytics/funnel_events.dart`. `backend/tests/test_funnel_event_contract.py` reads the Dart file and fails CI if the two drift — a rename on either side breaks the build instead of silently flattening the funnel.
+
+Server capture goes through `analytics/posthog_client.py` — fire-and-forget, a no-op when `POSTHOG_API_KEY` is unset, and never raises into a scoring tick. It reuses the public `phc_` project key the app already embeds (`POSTHOG_API_KEY` / `POSTHOG_HOST` in `settings.py`, wired in `deploy.sh`). `run_tick` logs a loud WARNING if it sends notifications while the key is unset (funnel-blind).
+
+Tapping a `signal_engine` notification opens chat seeded with `opening_chat_message`, routed via `dispatchNotificationTap` → `signalNotificationTapStream` → `/chat/new`. `ChatViewModel.loadSignalNotificationContext` fires the session event and arms the first reply to fire the action event once.
 
 ## UI System
 
@@ -80,9 +104,14 @@ Performance rule: never put `BackdropFilter` inside a `ListView` or `GridView`. 
 
 `AuthViewModel` uses a stream subscription to `authRepository.userModelStream` (backed by Firebase `authStateChanges()`). Auth state updates reactively — no polling. The router's `refreshListenable: authViewModel` handles redirects automatically.
 
-Sign-in supports Google and Email/Password. Email sign-in auto-creates an account on `user-not-found`.
+Sign-in supports Google and Email/Password. Account creation is an explicit "Create account" flow — sign-in does **not** auto-create (and couldn't reliably anyway, see below).
 
 The home screen drawer checks `authVm.user != null` and shows a sign-in button when unauthenticated, hiding the session list.
+
+**Error mapping** lives in `FirebaseAuthService._mapSignInError` / `_mapSignUpError` (data layer; the VM/UI only render `AppException.message`):
+- `user-not-found` / `wrong-password` / `invalid-credential` collapse into one "Wrong email or password" message — required by Firebase **Email Enumeration Protection** (on by default), which returns `invalid-credential` instead of the granular codes. Do not split them.
+- `network-request-failed` is mapped explicitly to an offline message in both maps and the Google credential path — never tell a user their password is wrong when they're actually offline.
+- Google sign-in **cancellation** is swallowed in `AuthViewModel.signInWithGoogle` (returns to idle, no red banner) — backing out of the account picker is a normal action, not an error.
 
 ## Onboarding
 
@@ -104,7 +133,9 @@ After a successful write, it calls `AuthViewModel.markOnboardingComplete()` (upd
 
 ## Paywall
 
-`/paywall` route renders `PaywallScreen` with three tiers: Free, Monthly (`aura_starter_monthly`), Annual (`aura_starter_annual`). Calls `SubscriptionViewModel.purchaseStarter(annual: bool)`.
+`/paywall` route renders `PaywallScreen` with three tiers: Free, Companion ($19.99/mo, $191/yr, IDs `aura_companion_monthly` / `aura_companion_annual`), and Pro ($34.99/mo, $335/yr, IDs `aura_pro_monthly` / `aura_pro_annual`). 45-day free Companion trial (extended for beta) via `kTrialDurationDays` in `subscription_plan.dart`.
+
+**Beta interest-capture mode:** Real IAP is disabled. The tier CTAs call `SubscriptionViewModel.captureInterest(tier, annual)` which fires a PostHog `paywall_intent` event and writes `users/{uid}/payment_intent/{tier}_{period}` to Firestore, then shows an acknowledgement `AlertDialog`. The `purchaseCompanion` / `purchasePro` methods on the VM are wired but unused while beta is on — switch the paywall CTAs back to those when payments go live.
 
 ## Run
 
@@ -126,11 +157,7 @@ cd backend
 python -m src.agent.voice_agent start
 ```
 
-Flutter app:
-
-```powershell
-flutter run
-```
+Flutter app (run analyze first to catch compile errors before the full Gradle build):
 
 Production backend URL:
 
@@ -143,6 +170,48 @@ Deploy backend + voice worker to Cloud Run (from repo root, requires Git Bash):
 ```powershell
 & "C:\Program Files\Git\bin\bash.exe" backend/deploy.sh juno-2ea45 us-central1
 ```
+
+### Test a backend change on your phone before all users get it (dark deploy)
+
+`deploy.sh` shifts 100% of traffic to the new revision immediately. To test new
+backend code on your own phone first — same single Firestore, signed in as
+yourself so only your own `users/{uid}` docs are touched — deploy a **dark
+candidate** revision and point only your debug build at it:
+
+```powershell
+# 1. Build & push the new image
+docker build -t gcr.io/juno-2ea45/juno-backend:latest backend
+docker push gcr.io/juno-2ea45/juno-backend:latest
+
+# 2. Deploy dark — 0% live traffic, gets a tagged URL. Inherits all
+#    env vars/secrets from the live revision (only add --set-secrets if the
+#    code introduces a NEW one).
+gcloud run deploy juno-backend `
+  --image=gcr.io/juno-2ea45/juno-backend:latest `
+  --region=us-central1 --project=juno-2ea45 `
+  --no-traffic --tag=candidate
+
+# 3. Run the phone build against the candidate URL (released app is unaffected —
+#    it has the bare prod URL compiled in and can't reach the tagged URL).
+flutter run --dart-define=API_BASE_URL=https://candidate---juno-backend-620715294422.us-central1.run.app `
+            --dart-define=WS_BASE_URL=wss://candidate---juno-backend-620715294422.us-central1.run.app
+
+# 4a. Good → promote to everyone (bare prod URL now serves candidate code,
+#     no app update needed):
+gcloud run services update-traffic juno-backend `
+  --region=us-central1 --project=juno-2ea45 --to-tags=candidate=100
+
+# 4b. Bad → do nothing. Users never saw it.
+```
+
+The `API_BASE_URL` / `WS_BASE_URL` dart-defines override the dev backend in
+`lib/core/config/environment.dart` (empty by default → prod URL). The `candidate`
+in the URL is the `--tag` value; change the tag and the prefix changes to match.
+Bare URL routes to whatever revision holds live traffic; a tagged URL always
+routes to its revision even at 0% traffic. **Caveat:** any code path that writes
+across *all* users (collection-group batch / migration / backfill) can't be
+safely dark-tested against the shared prod Firestore — gate those behind an
+explicit trigger flag.
 
 Aura app legal pages (hosted on varuntej.dev portfolio):
 
@@ -158,9 +227,58 @@ This is useful as a personal project, but reliability still depends on clean loc
 
 Keep `.env`, service account JSON, OAuth client JSON, and platform Google service files out of commits. `.env` is intentionally not ignored so variable names stay visible locally.
 
-The backend depends on several external services: Firebase, Anthropic, Gemini, LiveKit, Deepgram, Cartesia, Google Calendar, Cloud Scheduler, Cloud Tasks, and FCM. Treat every integration as optional at development time and make failures explicit.
+The backend depends on several external services: Firebase, Anthropic, OpenAI, Gemini, Brave Search, LiveKit, Deepgram, Cartesia, Google Calendar, Gmail, Cloud Scheduler, Cloud Tasks, and FCM. Treat every integration as optional at development time and make failures explicit.
+
+### Error handling and user-facing copy
+
+Audience is 18-30. Error copy is casual, blames the tech not the user, and always points at the next action ("try again", "check your connection"). Never leave a user-facing wait unbounded — every wait needs a timeout that ends in a visible message.
+
+- **Flutter HTTP** is centralized in `ApiClient` (`lib/core/network/`) with per-call timeouts + exponential-backoff retries; timeout constants live in `core/constants/app_constants.dart`. The SSE chat stream never retries once the server accepts it (avoids duplicate tool calls / replayed text).
+- **Voice silence watchdog** (`voice_session_service.dart`, `_replyWatchdogTimeout` = 15s) covers the "agent connected but never speaks" hang (e.g. zero LLM credit). It arms when the agent joins (greeting) and after each user turn (reply), resets on any sign of life (agent state, audio, text, data), and emits a coded `session.error`. Codes → friendly copy in `HomeViewModel._toVoiceErrorMessage` (the mic orb is the retry button).
+- **Backend voice** (the `voice/` package) publishes a `session.error` down the LiveKit data channel on pipeline failure so the client doesn't wait on its own watchdog; `classify_pipeline_error` (in `voice/errors.py`) splits provider-exhausted/quota (`provider_unavailable`) from generic failures.
+- **Voice telemetry:** PostHog `voice_first_response` (success) and `voice_error` `{code}` (failure) fire from the Flutter client; the backend also logs structured `VoiceSession: failure` lines to Cloud Logging.
 
 The Flutter and Dart analyzer commands timed out in this environment during review. Recheck locally before relying on the current app state.
+
+### Pre-deploy checklist
+
+Before deploying the backend, verify it starts cleanly:
+
+```powershell
+cd backend && python -c "import src.main; print('OK')"
+```
+
+This catches broken imports before Docker builds them into a crashing container.
+
+### Database field verification
+
+Whenever you change any database logic (a Firestore query, a field read/write, a backup/restore path), FIRST verify which fields actually exist on the target documents before writing the code — read the writer that produces those documents (or inspect a live document), confirm the exact field names, and only then proceed, stating the justification for the field you chose. Do not query or read a field on the assumption it exists.
+
+This is not optional. A query that filters on a field no document has does not error — it returns zero rows silently, which looks identical to "no data." That exact mistake (an FCM active-user query filtering `last_seen` while the writer only ever wrote `registered_at`) caused a 4-day notification outage. See `lessons-learnt.text` (2026-05-31).
+
+Defend every field-name contract three ways: a single shared constant/accessor so the name lives in one place (writer and all readers reference it), a writer→reader round-trip test that breaks CI if either side is renamed, and a loud WARNING/ERROR log when a query returns nothing while the underlying data is clearly non-empty. Never let "zero rows" and "healthy" look the same.
+
+### Firestore index maintenance
+
+Whenever you add or change a Firestore query that uses `collection_group(...)`, an inequality (`>`, `>=`, `<`, `<=`), an `order_by`, or filters on multiple fields, you MUST also declare the matching index in `firestore.indexes.json` (wired via `firebase.json`) and deploy it with `firebase deploy --only firestore:indexes --project juno-2ea45`. Firestore auto-creates single-field indexes only at **collection** scope — a `collection_group` query ordered/filtered by a field needs an explicit `COLLECTION_GROUP` field override, which is never created automatically.
+
+A missing index makes the query throw a 400 at runtime, not at deploy or import time. If that error is swallowed (e.g. caught and returning `[]`), it looks identical to "no data." This is exactly what happened on 2026-06-01: the `fcm_tokens` collection-group query filtering `registered_at >= cutoff` had no `COLLECTION_GROUP_ASC` index, so `list_active_user_ids` returned zero users and notifications silently stopped.
+
+Note that declaring a field override **disables Firestore's automatic single-field indexing for that field path** — list every scope you still need (`COLLECTION` ascending/descending plus the `COLLECTION_GROUP` entry), not just the new one.
+
+### httpx redirect behavior
+
+`httpx.AsyncClient` does NOT follow redirects by default. Any external HTTP call that may redirect (http → https, domain changes) must use `follow_redirects=True` or the request silently fails with a 3xx error.
+
+### Dependency upgrade discipline
+
+When bumping a `>=X.Y` bound in `pyproject.toml`, check the package changelog for breaking API changes before deploying.
+
+Every plugin imported from `livekit.plugins` anywhere in the voice worker — `backend/src/agent/voice_agent.py` (the `silero` VAD prewarm) and the `backend/src/agent/voice/` package (most live in `voice/pipelines.py`) — must have a matching `livekit-agents[...]` extra in `pyproject.toml`. A missing extra passes all local checks (the plugin is in the dev venv) but crashes the worker Docker image at startup with `ImportError: cannot import name '<plugin>' from 'livekit.plugins'`, failing the Cloud Run deploy after the full build. `backend/tests/test_voice_worker_deps.py` guards this — it scans `voice_agent.py` plus the whole `voice/` package, so adding a plugin import in any new package module is still covered.
+
+livekit_client uses `SCREAMING_CASE` enum values (e.g. `ParticipantKind.AGENT`, not `ParticipantKind.agent`). Run `flutter analyze` after any livekit upgrade to catch casing mismatches before the full Gradle build.
+
+Adding or upgrading an Android Flutter plugin can fail the Gradle build with `Inconsistent JVM Target Compatibility Between Java and Kotlin Tasks` on that plugin's `:compileDebugKotlin` task. Cause: each plugin pins its own Java and Kotlin JVM targets and they disagree (some pin Kotlin high, some pin Java low), and the only JDK here is Android Studio's bundled JBR 21, so an unpinned Kotlin target defaults to 21. This is already handled centrally in `android/build.gradle.kts`: a `subprojects { afterEvaluate { ... } }` block forces **both** Java (`BaseExtension.compileOptions`) and Kotlin (`KotlinCompile` jvmTarget) to 17 on every module, so the pair is always consistent. That block must stay registered **before** the `evaluationDependsOn(":app")` block (evaluating `:app` eagerly evaluates every plugin module; a later registration throws "Cannot run afterEvaluate ... already evaluated"). Caveat: it forces everything **down** to 17 — a future plugin that genuinely requires JVM 21 would fail with a *different* error (a 21-only API / "source release 21" message), at which point bump the app and this block together.
 
 ## Stream Contract
 
@@ -281,6 +399,16 @@ If you notice something worth fixing elsewhere, mention it in a note.
 Do not touch it. Ever.
 
 Before deleting any file, overwriting existing code, dropping database records, removing dependencies, or making any change that cannot be trivially undone, stop completely. List exactly what will be affected. Ask for explicit confirmation. Only proceed after I say yes in the current message.
+
+## Design Docs
+
+Design documents live in `~/.gstack/projects/varuntej07-juno/` as timestamped markdown files.
+
+**Latest approved:** `varun-main-design-20260525-175702.md` — "Aura Beta Launch — Voice Accountability for ADHD Adults." 26-day plan to ship the existing app to 10-20 beta testers in ADHD/accountability communities. Decision gate: do 3+ of 10 testers say voice matters AND they'd pay?
+
+**Prior designs:**
+- `varun-main-design-20260519-185952.md` — "Buddy — AI Accountability Partner with Personality" (APPROVED). Positioned Aura as accountability tool for ADHD adults/solo operators.
+- `varun-main-design-20260513-211359.md` — "Notification Overhaul — Global Budget + Zomato-grade Copy" (DRAFT). Signal engine architecture for notification coordination.
 
 ## Skill routing
 
