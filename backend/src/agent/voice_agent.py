@@ -59,18 +59,10 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 def prewarm(process: JobProcess) -> None:
     logger.info("VoiceWorker: prewarming VAD model")
     process.userdata["vad"] = silero.VAD.load()
-    
-    # The semantic end-of-turn model loads once at startup instead of per session.
-    # Unlike VAD it is NOT fatal: if the ONNX load fails we store None and the
-    # session degrades to VAD-based endpointing (see entrypoint), so a model
-    # download/load problem never takes the whole worker down or kills calls.
-    logger.info("VoiceWorker: prewarming turn detector model")
-    try:
-        process.userdata["turn_detector"] = build_turn_detector()
-    except Exception:
-        logger.exception("VoiceWorker: turn detector prewarm failed -"
-                         "sessions now use VAD-based endpointing")
-        process.userdata["turn_detector"] = None
+    # The semantic end-of-turn model can't be prewarmed: LiveKit loads and
+    # initializes it inside AgentSession on first use (it needs the job's
+    # inference executor, which only exists in the entrypoint). Only its
+    # weights are fetched ahead of time, via `download-files` at build time.
 
 
 async def _connect_to_room(ctx: JobContext, candidate_user_id: str) -> bool:
@@ -189,15 +181,18 @@ async def entrypoint(ctx: JobContext) -> None:
         tts_pipeline = build_tts_pipeline(sonic3_controls)
         mcp_server = build_mcp_server(firebase_id_token)
 
-        # None when the prewarm load failed (see prewarm). The session still starts,
-        # build_agent_session degrades to VAD-based endpointing, but we log it per session.
-        turn_detector = ctx.proc.userdata.get("turn_detector")
-        if turn_detector is None:
+        # Loaded inside the entrypoint (not prewarm): the model needs the job's
+        # inference executor, which only exists here. If construction fails the
+        # session still starts, degrading to VAD-based endpointing.
+        try:
+            turn_detector = build_turn_detector()
+        except Exception as exc:
+            turn_detector = None
             logger.warn("VoiceSession: turn detector unavailable — degrading to "
                         "VAD-based endpointing", {
                             "code": "turn_detector_unavailable",
                             "user_id": user_id, "room": ctx.room.name,
-                            "session_id": session_id,
+                            "session_id": session_id, "error": str(exc),
                         })
 
         session = build_agent_session(

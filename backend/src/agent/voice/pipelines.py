@@ -106,7 +106,7 @@ def build_agent_session(
 ) -> AgentSession:
     """Assemble the AgentSession with tuned turn-handling for snappy, uninterrupted replies.
 
-    `turn_detector` is None when the semantic model failed to prewarm; 
+    `turn_detector` is None when the semantic model failed to load;
     passing NOT_GIVEN makes LiveKit fall back to VAD-based endpointing 
     so the call still works (just without semantic end-of-turn).
     """
