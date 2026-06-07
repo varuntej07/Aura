@@ -8,6 +8,7 @@ import '../../core/theme/glass_card.dart';
 import '../../data/models/chat_attachment.dart';
 import '../../data/models/chat_message_model.dart';
 import 'flash_alert.dart';
+import 'full_screen_image_viewer.dart';
 import 'reminder_card.dart';
 
 /// Callback signatures for bubble actions.
@@ -461,21 +462,25 @@ class _AttachmentPreviewRow extends StatelessWidget {
       spacing: 6,
       runSpacing: 6,
       alignment: WrapAlignment.end,
-      children: attachments.map(_buildTile).toList(),
+      children: attachments.map((a) => _buildTile(context, a)).toList(),
     );
   }
 
-  Widget _buildTile(ChatAttachment attachment) {
+  Widget _buildTile(BuildContext context, ChatAttachment attachment) {
     if (attachment.type == ChatAttachmentType.image) {
       final previewBytes = attachment.thumbnail ?? attachment.bytes;
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.memory(
-          previewBytes,
-          width: 64,
-          height: 64,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => _docChip(attachment),
+      return GestureDetector(
+        onTap: () =>
+            FullScreenImageViewer.open(context, bytes: attachment.bytes),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.memory(
+            previewBytes,
+            width: 64,
+            height: 64,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _docChip(attachment),
+          ),
         ),
       );
     }

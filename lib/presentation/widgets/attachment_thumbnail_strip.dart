@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../data/models/chat_attachment.dart';
+import 'full_screen_image_viewer.dart';
 
 /// Horizontal scrollable strip of attachment previews shown above the input
 /// field after the user selects files. Each thumbnail has an × remove button.
@@ -47,7 +48,7 @@ class _AttachmentTile extends StatelessWidget {
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        _buildPreview(),
+        _buildPreview(context),
         if (onRemove != null)
           Positioned(
             top: -6,
@@ -74,17 +75,21 @@ class _AttachmentTile extends StatelessWidget {
     );
   }
 
-  Widget _buildPreview() {
+  Widget _buildPreview(BuildContext context) {
     if (attachment.type == ChatAttachmentType.image) {
       final previewBytes = attachment.thumbnail ?? attachment.bytes;
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Image.memory(
-          previewBytes,
-          width: 72,
-          height: 72,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => _documentTile(),
+      return GestureDetector(
+        onTap: () =>
+            FullScreenImageViewer.open(context, bytes: attachment.bytes),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.memory(
+            previewBytes,
+            width: 72,
+            height: 72,
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _documentTile(),
+          ),
         ),
       );
     }

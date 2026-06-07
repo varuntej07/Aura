@@ -1,6 +1,6 @@
 # Aura
 
-Aura is a voice-first personal AI companion. The assistant persona is **Buddy**. The product is a Flutter app backed by a Python FastAPI service, and it covers text chat, real-time voice, reminders, memory, nutrition scanning, smart notifications, scheduled agents, and Google Calendar and Gmail tools.
+Aura is a voice-first personal AI companion. The assistant persona is **Buddy**. The product is a Flutter app backed by a Python FastAPI service, and it covers text chat, real-time voice, reminders, memory, smart notifications, scheduled agents, live web search, and Google Calendar and Gmail tools.
 
 The guiding principle is one clear working path over broad architecture. Every external dependency is treated as optional at development time, and every failure is made visible rather than hidden.
 
@@ -26,7 +26,8 @@ The guiding principle is one clear working path over broad architecture. Every e
 | Mobile app | Flutter (Dart), MVVM with Provider, go_router, drift (local SQLite) |
 | Backend API | Python FastAPI on Cloud Run |
 | Voice worker | LiveKit Agents, a separate Cloud Run worker |
-| Chat and voice LLM | Anthropic Claude, with Gemini Flash as fallback |
+| Chat LLM | Anthropic Claude (Haiku 4.5) |
+| Voice LLM | OpenAI GPT-4.1 mini, falling back to Anthropic Claude, then Gemini Flash |
 | Cheap-tier LLM | Gemini Flash for copy framing and passive profiling |
 | Embeddings | Gemini `gemini-embedding-001`, 768 dimensions |
 | Voice pipeline | Deepgram STT, Cartesia TTS, Silero VAD, LiveKit turn detector |
@@ -81,7 +82,7 @@ Three runtime pieces cooperate: the Flutter client, the FastAPI backend, and the
         +------+-----------+------+                     |
                |           |                            |
         Firestore /      external LLMs            LiveKit Cloud (audio)
-        FCM / Auth       Claude, Gemini,
+        FCM / Auth       OpenAI, Claude, Gemini,
                          Deepgram, Cartesia
                               ^
                               |
@@ -131,7 +132,7 @@ Voice is a separate LiveKit Agents worker, not part of the FastAPI request path.
 **Pipeline.** The worker uses a cascading architecture: speech to text, then language model, then text to speech.
 
 - **STT**: Deepgram Nova, with `nova-3` falling back to `nova-2`
-- **LLM**: Anthropic Claude, with Gemini Flash as fallback
+- **LLM**: OpenAI GPT-4.1 mini, falling back to Anthropic Claude, then Gemini Flash (`build_llm_pipeline`)
 - **TTS**: Cartesia, with `sonic-3` falling back to `sonic-2`
 - **Turn taking**: Silero VAD plus the LiveKit multilingual turn detector
 
@@ -237,7 +238,7 @@ Scheduled domain agents in `backend/src/agents/` only fetch data. They never sen
 
 **Onboarding.** New accounts are stamped incomplete and routed through a five-slide intro followed by an age gate and consent screen. Consent, date of birth, and completion are written atomically. Behavioral profiling only runs once consent is granted, which is the GDPR gate.
 
-**Paywall.** Three tiers exist (Free, Companion, Pro) with a seven-day Companion trial. During beta, real in-app purchase is disabled and the call to action captures interest instead: it fires a PostHog event and records the intent in Firestore, then acknowledges. The purchase methods are wired and ready to switch on when payments go live.
+**Paywall.** Three tiers exist (Free, Companion, Pro) with a 45-day Companion trial (extended for beta). During beta, real in-app purchase is disabled and the call to action captures interest instead: it fires a PostHog event and records the intent in Firestore, then acknowledges. The purchase methods are wired and ready to switch on when payments go live.
 
 ## Reliability principles
 
