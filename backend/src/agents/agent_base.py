@@ -48,23 +48,6 @@ class ScheduledAgent(ABC):
         """Fetch fresh content. No LLM calls here — pure data retrieval."""
         ...
 
-    @abstractmethod
-    async def build_notification(
-        self,
-        user_id: str,
-        content: list[dict[str, Any]],
-        user_config: dict[str, Any],
-        interaction_history: list[dict[str, Any]],
-    ) -> dict[str, str] | None:
-        """
-        Judge the fetched content and, if worthy, produce a push notification.
-
-        Returns a notification dict:
-            {"title": str, "body": str, "opening_chat_message": str}
-        or None if the judge decides nothing is worth notifying.
-        """
-        ...
-
     def _db(self) -> fs.Client:
         return admin_firestore()
 

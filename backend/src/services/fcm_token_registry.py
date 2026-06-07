@@ -14,24 +14,63 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from firebase_admin import exceptions, messaging
+
 from ..lib.logger import logger
 from .firebase import admin_firestore
 
 _SUBCOLLECTION = "fcm_tokens"
 
 # Field names for documents in users/{uid}/fcm_tokens/{token}.
-# SINGLE SOURCE OF TRUTH: the writer (register_token) and every reader reference these constants, 
+# SINGLE SOURCE OF TRUTH: the writer (register_token) and every reader reference these constants,
 # so the field names can never drift.
 FIELD_TOKEN = "token"
 FIELD_PLATFORM = "platform"
 FIELD_REGISTERED_AT = "registered_at"
 
-# FCM error codes that indicate a token is permanently invalid.
+# Exception types raised by ``send_each_for_multicast`` that mean a token is
+# permanently invalid and must be deleted. This is the primary, version-stable
+# detection path — checking the exception class avoids depending on the exact
+# string code the SDK happens to expose.
+INVALID_TOKEN_EXCEPTIONS = (
+    messaging.UnregisteredError,      # token expired / app uninstalled (canonical NOT_FOUND)
+    messaging.SenderIdMismatchError,  # token belongs to a different FCM sender
+    exceptions.InvalidArgumentError,  # malformed / unparseable token
+)
+
+# FCM error codes that indicate a token is permanently invalid. Used only as a
+# fallback for SDK paths that don't raise one of INVALID_TOKEN_EXCEPTIONS.
+# Codes are normalised to lowercase-hyphenated before comparison, so both the
+# canonical codes ("NOT_FOUND" -> "not-found") and the messaging-style codes
+# ("messaging/registration-token-not-registered") land here.
 INVALID_TOKEN_CODES = frozenset({
     "registration-token-not-registered",
     "invalid-registration-token",
     "invalid-argument",
+    "not-found",
+    "sender-id-mismatch",
 })
+
+
+def is_permanently_invalid_token_error(exc: BaseException | None) -> bool:
+    """True if an FCM send exception means the device token should be deleted.
+
+    Checks the exception type first (stable across SDK versions), then falls
+    back to matching the normalised error code so a future SDK change can't
+    silently reopen the stale-token leak.
+    """
+    if exc is None:
+        return False
+    if isinstance(exc, INVALID_TOKEN_EXCEPTIONS):
+        return True
+    code = (
+        getattr(exc, "code", "")
+        or getattr(getattr(exc, "cause", None), "error_code", "")
+        or ""
+    )
+    if isinstance(code, str):
+        code = code.split("/")[-1].lower().replace("_", "-")
+    return code in INVALID_TOKEN_CODES
 
 
 def _tokens_ref(user_id: str):

@@ -214,6 +214,38 @@ class TestSendNotification:
         assert result.success_count == 1
 
     @pytest.mark.asyncio
+    async def test_unregistered_error_instance_is_auto_deleted(self):
+        """Regression: FCM raises a real messaging.UnregisteredError (canonical
+        code NOT_FOUND, "Requested entity was not found.") for stale tokens. The
+        old code matched only hyphenated string codes and normalised exc.code to
+        "not_found", which was absent from the prune set, so dead tokens were
+        never deleted and retried on every tick. Detection is now by exception
+        type, which must catch this."""
+        from src.services.notification_service import send_notification
+
+        tokens = [_token_doc("dead_token")]
+
+        resp = MagicMock()
+        resp.success = False
+        resp.exception = messaging.UnregisteredError("Requested entity was not found.")
+
+        batch = MagicMock(spec=messaging.BatchResponse)
+        batch.responses = [resp]
+        batch.success_count = 0
+        batch.failure_count = 1
+
+        mock_msg = MagicMock()
+        mock_msg.send_each_for_multicast = MagicMock(return_value=batch)
+
+        with patch("src.services.notification_service.get_user_tokens", return_value=tokens):
+            with patch("src.services.notification_service.admin_messaging", return_value=mock_msg):
+                with patch("src.services.notification_service.remove_invalid_tokens") as mock_remove:
+                    result = await send_notification("user1", title="T", body="B")
+
+        assert result.invalid_tokens == ["dead_token"]
+        mock_remove.assert_called_once_with("user1", ["dead_token"])
+
+    @pytest.mark.asyncio
     async def test_error_code_extracted_from_exc_cause(self):
         """Error code can be on exc.cause.error_code (nested firebase exception)."""
         from src.services.notification_service import send_notification

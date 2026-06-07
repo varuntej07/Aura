@@ -1,69 +1,33 @@
-"""Regression tests for the sports web-search ingest path.
+"""Coverage for the (now free) sports ingest path.
 
-These lock in the fix for the every-30-min timeout storm: background web_surf calls
-must use the longer ingest timeout budget, and the fan-out must be concurrency-capped
-so queries don't starve the thread pool and time out while queued.
+The paid Gemini-grounded league search was removed — broader sports headlines now
+arrive via Google News RSS in run_ingest, and run_sports_ingest keeps only the free
+cricbuzz live scores. These pin that the grounded path is gone and cricbuzz still flows.
 """
 
 from __future__ import annotations
 
-import asyncio
+from unittest.mock import AsyncMock
 
 from src.services.signal_engine import content_ingest
-from src.agents.data_fetchers.web_surf import _INGEST_REQUEST_TIMEOUT_S
 
 
-async def test_sports_search_uses_ingest_timeout_budget(monkeypatch):
-    """The background path must pass the longer ingest timeout, not the tight 6s default."""
-    captured: dict[str, float] = {}
+async def test_run_sports_ingest_uses_only_free_cricbuzz(monkeypatch):
+    """Sports ingest maps cricbuzz live matches and embeds them — no web search."""
+    live = [{"team1": "IND", "team2": "AUS", "score": "201/3", "match": "1st ODI"}]
+    monkeypatch.setattr(content_ingest, "fetch_live_matches", AsyncMock(return_value=live))
+    embed = AsyncMock(return_value=1)
+    monkeypatch.setattr(content_ingest, "_embed_and_write", embed)
 
-    async def fake_web_search(query: str, uid: str, timeout_s: float) -> str:
-        captured["timeout_s"] = timeout_s
-        return "some result text"
+    summary = await content_ingest.run_sports_ingest()
 
-    monkeypatch.setattr(content_ingest, "web_search", fake_web_search)
-
-    semaphore = asyncio.Semaphore(content_ingest.SPORTS_WEB_SEARCH_CONCURRENCY)
-    await content_ingest._safe_sports_web_search("IPL score today", "ipl", semaphore)
-
-    assert captured["timeout_s"] == _INGEST_REQUEST_TIMEOUT_S
-
-
-async def test_sports_search_fan_out_respects_concurrency_cap(monkeypatch):
-    """All queries fire at once, but the semaphore must keep in-flight calls <= cap."""
-    in_flight = 0
-    max_in_flight = 0
-
-    async def fake_web_search(query: str, uid: str, timeout_s: float) -> str:
-        nonlocal in_flight, max_in_flight
-        in_flight += 1
-        max_in_flight = max(max_in_flight, in_flight)
-        try:
-            await asyncio.sleep(0.02)  # hold the slot so overlap is observable
-            return "result"
-        finally:
-            in_flight -= 1
-
-    monkeypatch.setattr(content_ingest, "web_search", fake_web_search)
-
-    semaphore = asyncio.Semaphore(content_ingest.SPORTS_WEB_SEARCH_CONCURRENCY)
-    await asyncio.gather(*[
-        content_ingest._safe_sports_web_search(query, sub_cat, semaphore)
-        for query, sub_cat in content_ingest.SPORTS_WEB_SEARCH_QUERIES
-    ])
-
-    assert len(content_ingest.SPORTS_WEB_SEARCH_QUERIES) > content_ingest.SPORTS_WEB_SEARCH_CONCURRENCY
-    assert max_in_flight <= content_ingest.SPORTS_WEB_SEARCH_CONCURRENCY
+    assert summary.live_cricket_fetched == 1
+    embed.assert_awaited_once()
+    candidates = embed.await_args.args[0]
+    assert candidates and candidates[0].source == "cricbuzz_live"
 
 
-async def test_sports_search_swallows_failure_and_returns_empty(monkeypatch):
-    """A failing search must not propagate — it returns [] so the rest of ingest survives."""
-    async def failing_web_search(query: str, uid: str, timeout_s: float) -> str:
-        raise TimeoutError()  # the empty-string error that started this investigation
-
-    monkeypatch.setattr(content_ingest, "web_search", failing_web_search)
-
-    semaphore = asyncio.Semaphore(content_ingest.SPORTS_WEB_SEARCH_CONCURRENCY)
-    result = await content_ingest._safe_sports_web_search("x", "ipl", semaphore)
-
-    assert result == []
+def test_grounded_sports_search_symbols_removed():
+    """The paid Gemini-grounded sports search must stay gone (cost regression guard)."""
+    assert not hasattr(content_ingest, "_safe_sports_web_search")
+    assert not hasattr(content_ingest, "SPORTS_WEB_SEARCH_QUERIES")

@@ -46,9 +46,12 @@ def _sendable_candidate() -> ScoredCandidate:
 
 def _ready_state() -> feature_store.SignalStoreState:
     state = feature_store.SignalStoreState()
-    # bootstrap_done so the "no signal yet" early-return is skipped, and a clean
-    # daily counter so the send isn't capped.
+    # bootstrap_done plus a non-zero user_vector so the "no signal yet" early-return
+    # is skipped (the loop skips any user whose vector is still all-zero, since a
+    # zero query vector has no meaningful nearest neighbours), and a clean daily
+    # counter so the send isn't capped.
     state.bootstrap_done = True
+    state.user_vector = [0.1] * feature_store.USER_VECTOR_DIMENSION
     state.sends_today = 0
     state.consecutive_no_open_ticks = 0
     return state
@@ -65,6 +68,8 @@ def patched_send_path(monkeypatch):
     )
     monkeypatch.setattr(scoring_loop, "_sweep_timeouts", AsyncMock(return_value=0))
     monkeypatch.setattr(scoring_loop, "_should_refresh_user_vector", lambda state: False)
+    # Pin active hours so this funnel test never flakes at night UTC.
+    monkeypatch.setattr(scoring_loop, "is_within_active_hours", lambda *a, **k: True)
     monkeypatch.setattr(
         scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[cand])
     )

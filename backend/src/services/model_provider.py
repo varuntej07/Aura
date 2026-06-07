@@ -76,6 +76,21 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def is_quota_exhausted(exc: BaseException) -> bool:
+    """True when an LLM or embedding call failed because the provider's quota or
+    prepaid credits are exhausted (HTTP 429 / RESOURCE_EXHAUSTED), as opposed to a
+    generic transient error. The signal-engine fail-loud guards use this to log a
+    depleted-billing outage in plain terms instead of letting it look healthy.
+
+    Mirrors the inline 429 / RESOURCE_EXHAUSTED checks in _call_gemini and the
+    embedder; centralised here so the notification pipeline has one definition."""
+    if getattr(exc, "code", None) == 429:
+        return True
+    if isinstance(exc, anthropic.RateLimitError):
+        return True
+    return "RESOURCE_EXHAUSTED" in str(exc).upper()
+
+
 class ModelProvider:
     """
     Tier-based LLM interface. Three tiers, any number of underlying models.
@@ -255,10 +270,21 @@ class ModelProvider:
                 temperature=temperature,
             )
 
+        last_exc: BaseException | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_TIMEOUT_S)
-            except TimeoutError:
+                result = await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_TIMEOUT_S)
+                if attempt > 1:
+                    # One visible line per call when retries eventually succeeded, so a
+                    # recovered-after-transient-error call isn't completely silent.
+                    logger.warn("ModelProvider: Gemini recovered after retries", {
+                        "model": model_id,
+                        "attempts": attempt,
+                        "last_error": str(last_exc)[:300] if last_exc else None,
+                    })
+                return result
+            except TimeoutError as exc:
+                last_exc = exc
                 if attempt == _MAX_RETRIES:
                     if fallback_chain:
                         return await _use_next_in_chain(
@@ -272,13 +298,17 @@ class ModelProvider:
                     })
                     raise
                 delay = _GEMINI_BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
-                logger.warn("ModelProvider: Gemini timeout, backing off", {
+                # Per-attempt backoff is DEBUG to keep prod logs to one line per call;
+                # the resolution path (recovery / fallback / terminal) carries the visible line.
+                logger.debug("ModelProvider: Gemini timeout, backing off", {
                     "model": model_id,
                     "attempt": attempt,
                     "delay_s": round(delay, 2),
+                    "timeout_s": _TIMEOUT_S,
                 })
                 await asyncio.sleep(delay)
             except Exception as exc:
+                last_exc = exc
                 # google-genai raises APIError subclasses with an HTTP `.code` attribute.
                 # When the SDK wraps a gRPC error, `.code` may be a gRPC StatusCode enum (e.g. UNAVAILABLE=14) rather than the integer 503,
                 # so also check the error string for known transient gRPC status names.
@@ -305,11 +335,30 @@ class ModelProvider:
                     })
                     raise
                 if not retryable or attempt == _MAX_RETRIES:
+                    # Resolution point for this model — make a depleted-credits outage scream
+                    # in plain terms instead of hiding in a wall of identical backoff lines.
+                    if is_quota_exhausted(exc):
+                        logger.error(
+                            "ModelProvider: Gemini quota/credits EXHAUSTED (429 RESOURCE_EXHAUSTED) — "
+                            "background LLM work is failing. Check GEMINI_API_KEY billing at "
+                            "https://ai.studio/projects.",
+                            {
+                                "model": model_id,
+                                "attempt": attempt,
+                                "code": code,
+                                "error": str(exc)[:300],
+                            },
+                        )
                     if fallback_chain:
                         reason = "retries exhausted" if attempt == _MAX_RETRIES else "non-retryable error"
                         return await _use_next_in_chain(
                             reason,
-                            {"attempt": attempt, "code": code, "error_type": type(exc).__name__},
+                            {
+                                "attempt": attempt,
+                                "code": code,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc)[:300],
+                            },
                         )
                     logger.exception("ModelProvider: Gemini call failed, no fallback left", {
                         "model": model_id,
@@ -320,12 +369,15 @@ class ModelProvider:
                     })
                     raise
                 delay = _GEMINI_BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
-                logger.warn("ModelProvider: Gemini retryable error, backing off", {
+                # Per-attempt backoff is DEBUG (full error preserved for LOG_LEVEL=DEBUG);
+                # the resolution path emits the single visible line for this call.
+                logger.debug("ModelProvider: Gemini retryable error, backing off", {
                     "model": model_id,
                     "attempt": attempt,
                     "delay_s": round(delay, 2),
                     "error_type": type(exc).__name__,
                     "code": code,
+                    "error": str(exc)[:300],
                 })
                 await asyncio.sleep(delay)
         # retry loop always returns or raises; this line is unreachable

@@ -32,6 +32,7 @@ from ..services.claude_client import ClaudeClient
 from ..services.request_auth import resolve_user_id
 from ..services.tool_executor import ToolExecutor
 from ..services.user_aura_extractor import extract_and_update_user_aura
+from ..services.user_aura_schema import interest_prompt_lines
 
 _aura_cache: dict[str, dict[str, Any]] = {}
 _aura_cache_locks: dict[str, asyncio.Lock] = {}
@@ -239,13 +240,13 @@ def _build_injected_system_prompt_suffix(
         sections.append("<active_goals>\n" + "\n".join(f"- {g}" for g in goals) + "\n</active_goals>")
         injected_fields.append(f"active_goals({len(goals)})")
 
-    # Top 3 interest areas ranked by message frequency -- gives Buddy domain context.
-    interest_freq: dict[str, int] = profile.get("deep_interest_frequencies", {})
-    if interest_freq:
-        top_interests = [
-            k for k, _ in sorted(interest_freq.items(), key=lambda x: x[1], reverse=True)[:3]
-        ]
-        sections.append(f"<interests>{', '.join(top_interests)}</interests>")
+    # Top interest areas with the specific subjects inside them (e.g.
+    # "politics & governance: KCR") -- gives Buddy domain context plus the named
+    # entities that make a reply feel personal. Falls back to legacy free-text
+    # interests while a profile rebuilds into the new structure.
+    interest_lines = interest_prompt_lines(profile)
+    if interest_lines:
+        sections.append("<interests>\n" + "\n".join(f"- {line}" for line in interest_lines) + "\n</interests>")
         injected_fields.append("interests")
 
     # Directive corrections extracted from turns where the user explicitly corrected Buddy.

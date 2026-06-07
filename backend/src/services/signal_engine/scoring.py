@@ -37,6 +37,11 @@ SAME_CATEGORY_DIVERSITY_PENALTY = 0.6
 TIME_SLOT_SCORE_FLOOR = 0.5
 TIME_SLOT_SCORE_CEILING = 1.5
 
+# Local quiet hours. Notifications are never delivered outside the active window,
+# regardless of score. The active window is [QUIET_HOURS_END, QUIET_HOURS_START).
+QUIET_HOURS_START = 22  # 10pm — stop sending
+QUIET_HOURS_END = 8     # 8am  — resume sending
+
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Standard cosine. Returns 0 if either vector is zero or wrong length."""
@@ -54,6 +59,33 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
 
 
+def is_within_active_hours(user_local_hour: int) -> bool:
+    """False during local quiet hours — a hard gate, independent of score.
+
+    Active window is [QUIET_HOURS_END, QUIET_HOURS_START). Handles a window that
+    wraps past midnight (e.g. END=8, START=22 -> active 08:00-21:59).
+    """
+    if QUIET_HOURS_END <= QUIET_HOURS_START:
+        return QUIET_HOURS_END <= user_local_hour < QUIET_HOURS_START
+    # Window wraps midnight (e.g. END=20, START=6): active outside [START, END).
+    return user_local_hour >= QUIET_HOURS_END or user_local_hour < QUIET_HOURS_START
+
+
+def cold_start_daypart_prior(user_local_hour: int) -> float:
+    """Time-slot multiplier for a user with no learned open history yet.
+
+    Until real per-slot rates exist, prefer well-known engagement windows so the
+    first notifications land at sane times instead of a flat 0.5 that makes the
+    send threshold effectively unreachable. Night edges keep the floor; the quiet
+    hours gate hard-blocks them anyway.
+    """
+    if user_local_hour in (8, 9) or user_local_hour in (12, 13) or 18 <= user_local_hour <= 21:
+        return 1.2  # morning, lunch, and evening peaks
+    if 10 <= user_local_hour <= 17:
+        return 1.0  # daytime plateau
+    return TIME_SLOT_SCORE_FLOOR  # early morning / late night edges
+
+
 def time_slot_open_score(
     time_slot_open_rates: list[float],
     *,
@@ -62,16 +94,17 @@ def time_slot_open_score(
 ) -> float:
     """Clamp slot_rate / mean_rate to [floor, ceiling].
 
-    A user with completely flat rates gets 1.0 everywhere. A user with a
-    strong morning preference gets >1 at 09:00 and <1 at midnight.
+    A user with a strong morning preference gets >1 at 09:00 and <1 at midnight.
+    A user with no learned history yet falls back to a time-of-day prior
+    (see cold_start_daypart_prior) instead of a flat floor.
     """
     if not time_slot_open_rates or len(time_slot_open_rates) != TIME_SLOTS_PER_DAY:
-        return 1.0
+        return cold_start_daypart_prior(user_local_hour)
     slot = (user_local_hour * 2 + (1 if user_local_minute >= 30 else 0)) % TIME_SLOTS_PER_DAY
     slot_rate = time_slot_open_rates[slot]
     mean_rate = sum(time_slot_open_rates) / TIME_SLOTS_PER_DAY
     if mean_rate <= 0:
-        return TIME_SLOT_SCORE_FLOOR
+        return cold_start_daypart_prior(user_local_hour)
     ratio = slot_rate / mean_rate
     return max(TIME_SLOT_SCORE_FLOOR, min(TIME_SLOT_SCORE_CEILING, ratio))
 

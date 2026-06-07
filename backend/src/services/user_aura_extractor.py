@@ -13,16 +13,28 @@ Firestore path: UserAura/{uid}
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from ..lib.logger import logger
 from .model_provider import get_model_provider
+from .user_aura_schema import (
+    CATEGORY_LABELS,
+    DEAD_INTEREST_FIELDS,
+    INTEREST_CATEGORIES,
+    LEGACY_SUNSET_CATEGORY_COUNT,
+    OTHER_CATEGORY,
+    apply_interest_signal,
+    category_count,
+)
+from .user_aura_schema import sanitize_firestore_key as _sanitize_firestore_key
 
 _MAX_INFERRED_GOALS = 10
+_MAX_EXPLICIT_FACTS = 20          # cap on stored durable facts per user
 
 # Low temperature: we want consistent structured JSON, not creative output.
 _EXTRACTION_TEMPERATURE = 0.1
@@ -30,25 +42,53 @@ _EXTRACTION_TEMPERATURE = 0.1
 _MIN_DIRECTIVE_HINT_LENGTH = 15   # hints shorter than this are too vague to be actionable
 _MAX_ACCEPTED_HINTS = 30          # cap on stored accepted hints per user
 _MAX_STYLE_SIGNALS = 10           # cap on style avoid/prefer entries in UserAura
+_MAX_INTERESTS_PER_MESSAGE = 3    # categories the model may emit per message
+
+# Firestore hard-fails a document write at 1 MiB. Warn well before so a bloating
+# profile screams in logs instead of silently freezing on a swallowed write.
+_PROFILE_SIZE_WARN_BYTES = 800_000
+
+
+class InterestSignal(BaseModel):
+    """One interest extracted from a message: a canonical category plus the
+    specific subject named in it. Subject is what gives personalization its edge
+    — "KCR" under politics_governance, not just "politics"."""
+
+    category: str             # one of user_aura_schema.INTEREST_CATEGORIES
+    # Specific person/place/org/product/topic, or null. Defaulted so a model
+    # response that omits the key degrades to category-only instead of failing
+    # validation and dropping the whole extraction.
+    subject: str | None = None
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _coerce_known_category(cls, value: object) -> str:
+        # The model is constrained by the prompt, but never trust it: any value
+        # outside the taxonomy collapses to OTHER so the closed-set contract holds.
+        slug = str(value or "").strip().lower().replace(" ", "_").replace("&", "")
+        slug = "_".join(part for part in slug.split("_") if part)
+        return slug if slug in INTEREST_CATEGORIES else OTHER_CATEGORY
 
 
 class MessageInsight(BaseModel):
     # Request classification
-    primary_intent: str            # task_request | seeking_advice | information_lookup |
+    primary_intent: str | None     # task_request | seeking_advice | information_lookup |
                                    # casual_chat | venting | complaint | gratitude | follow_up_only
+                                   # null on zero-signal/ack messages (the LLM omits an intent)
     secondary_intent: str | None
 
-    # Two-layer topic extraction
-    surface_topics: list[str]      # literal subjects in the message — max 3
-    deep_interests: list[str]      # inferred passion/knowledge areas — max 3
+    # Interest extraction — category (closed taxonomy) + specific subject. Max 3.
+    interests: list[InterestSignal]
 
-    # Domain and behavioral signals
-    domain: str                    # work | health | finance | learning | social |
+    # Domain and behavioral signals — required enums, but the LLM can still omit them
+    # (null) on zero-signal/ack messages, so they accept None to avoid rejecting the
+    # whole extraction. Every reader guards for None before use.
+    domain: str | None             # work | health | finance | learning | social |
                                    # entertainment | personal | technical | unclear
-    tone: str                      # casual | terse | verbose | formal | playful
+    tone: str | None               # casual | terse | verbose | formal | playful
     emotional_state: str | None    # neutral | anxious | frustrated | excited | anticipatory |
                                    # curious | sad — null if not clearly signaled
-    urgency: str                   # none | low | medium | high
+    urgency: str | None            # none | low | medium | high
 
     # Interaction preference signals
     response_depth_preference: str | None   # wants_brief | wants_detailed | wants_step_by_step |
@@ -60,7 +100,6 @@ class MessageInsight(BaseModel):
     explicit_facts: list[str]      # durable identity/preference facts only — e.g. "I live in Hyderabad",
                                    # "dislikes early-morning showers". NOT task params like reminder
                                    # times, dates, deadlines, or one-off scheduling details.
-    named_entities: list[str]      # people, places, apps, orgs mentioned — max 5
     inferred_goal_hints: list[str] # high-confidence goal inferences only — max 3
 
     # Metadata
@@ -75,9 +114,16 @@ class MessageInsight(BaseModel):
     directive_hint: str | None     # populated only for correction or re_query with a concrete instruction
 
 
-_EXTRACTION_SYSTEM_PROMPT = """\
-            You are an insight extractor for a personal AI assistant called Aura.
-            Analyze the user's message and extract behavioral signals, interests, and preferences.
+_CATEGORY_REFERENCE = "\n".join(
+    f" - {slug}: {label}" for slug, label in CATEGORY_LABELS.items()
+)
+
+_EXTRACTION_SYSTEM_PROMPT = f"""\
+            You are the insight extractor for a personal AI assistant called Aura.
+            Everything you extract becomes the user's "UserAura" profile, which directly powers
+            two things: (1) how Aura tailors its chat and voice replies to this user, and
+            (2) which notifications we send them and how we word them. Accuracy here is the
+            difference between generic and genuinely personal -- extract carefully.
 
             Rules:
             - Extract only signals you are highly confident about.
@@ -88,28 +134,47 @@ _EXTRACTION_SYSTEM_PROMPT = """\
             - Set extraction_skipped to true ONLY for pure acknowledgments with zero informational content
             such as standalone "ok", "thanks", "yes", "no", "sure", "got it" with nothing else attached.
 
-            Examples of the inference depth expected:
+            INTERESTS (the most important part):
+            For each message produce up to 3 interest signals. Each signal has two parts:
+              * category: map the message to EXACTLY ONE category from the fixed list below. If
+                nothing fits, use "other". Never invent a category outside this list.
+              * subject: the SPECIFIC person, place, organisation, product, event, or topic the user
+                actually named. Specificity is the whole point -- if the user asks about KCR, return
+                category "politics_governance" with subject "KCR", NOT just "politics", because knowing
+                it is *KCR* lets us personalise ("KCR is in the news today") instead of a flat
+                "politics update". Set subject to null only when the message has no concrete subject
+                (e.g. "what does this word mean", "convert 5km to miles").
+
+            Categories (slug: meaning):
+{_CATEGORY_REFERENCE}
+
+            Interest examples:
+
+            "Who is the CM of Telangana right now?"
+            interests: [{{"category": "politics_governance", "subject": "KCR"}},
+                        {{"category": "regional_local_affairs", "subject": "Telangana"}}]
+            primary_intent: information_lookup, domain: unclear
 
             "Give me a tweet for the RCB vs MI match"
-            surface_topics: ["RCB vs MI", "tweet writing"]
-            deep_interests: ["IPL cricket", "social media content creation"]
+            interests: [{{"category": "sports", "subject": "RCB vs MI"}},
+                        {{"category": "technology_computing", "subject": "tweet writing"}}]
             primary_intent: task_request, domain: entertainment, tone: casual
 
             "Is Triton and CUDA the same but in different languages?"
-            surface_topics: ["Triton", "CUDA"]
-            deep_interests: ["GPU kernel programming", "ML inference optimization"]
+            interests: [{{"category": "technology_computing", "subject": "CUDA"}}]
             question_type: comparison, domain: technical
 
-            "Check my Gmail for any job interview updates"
-            surface_topics: ["Gmail", "job interviews"]
-            deep_interests: ["job hunting", "career transitions"]
-            emotional_state: anticipatory
-            inferred_goal_hints: ["actively expecting interview callbacks"]
+            "What is the on-road price of the XUV 3XO?"
+            interests: [{{"category": "automotive", "subject": "XUV 3XO"}}]
+            primary_intent: information_lookup
 
             "explain SGEMM"
-            surface_topics: ["SGEMM"]
-            deep_interests: ["CUDA kernels", "linear algebra optimization", "GPU programming"]
+            interests: [{{"category": "technology_computing", "subject": "SGEMM"}}]
             domain: technical, question_type: what_is
+
+            "convert 100 euros to rupees"
+            interests: [{{"category": "personal_finance", "subject": null}}]
+            primary_intent: information_lookup
 
             explicit_facts captures DURABLE facts about the user -- who they are and their stable
             preferences -- never transient task parameters. Keep identity, relationships, location,
@@ -179,8 +244,7 @@ def _build_extraction_prompt(
         "{\n"
         '  "primary_intent": "task_request|seeking_advice|information_lookup|casual_chat|venting|complaint|gratitude|follow_up_only",\n'
         '  "secondary_intent": "string or null",\n'
-        '  "surface_topics": ["literal subjects -- max 3"],\n'
-        '  "deep_interests": ["inferred passion/knowledge areas -- max 3"],\n'
+        '  "interests": [{"category": "one slug from the category list", "subject": "specific subject or null"}],\n'
         '  "domain": "work|health|finance|learning|social|entertainment|personal|technical|unclear",\n'
         '  "tone": "casual|terse|verbose|formal|playful",\n'
         '  "emotional_state": "neutral|anxious|frustrated|excited|anticipatory|curious|sad or null",\n'
@@ -188,7 +252,6 @@ def _build_extraction_prompt(
         '  "response_depth_preference": "wants_brief|wants_detailed|wants_step_by_step|wants_examples|wants_opinion or null",\n'
         '  "question_type": "how_to|what_is|opinion_request|recommendation|comparison|troubleshooting or null",\n'
         '  "explicit_facts": ["durable identity/preference facts only -- no reminder times, dates, or task params"],\n'
-        '  "named_entities": ["people, places, apps, orgs -- max 5"],\n'
         '  "inferred_goal_hints": ["high-confidence goals -- max 3"],\n'
         '  "used_prev_query_context": true or false,\n'
         '  "extraction_skipped": true or false,\n'
@@ -221,10 +284,11 @@ def _merge_profile(
     Pure function — no I/O. The caller writes the result to Firestore.
     """
     profile: dict[str, Any] = dict(existing)
+    now = datetime.now(UTC)
 
     # Always advance the previous query pointer and timestamp regardless of skip.
     profile["prev_user_query"] = current_message
-    profile["last_updated"] = datetime.now(UTC).isoformat()
+    profile["last_updated"] = now.isoformat()
 
     if insight.extraction_skipped:
         return profile
@@ -235,20 +299,27 @@ def _merge_profile(
         freq_map[safe] = freq_map.get(safe, 0) + 1
 
     # Intents
-    _inc("intent_distribution", insight.primary_intent)
+    primary_intent = insight.primary_intent
+    if primary_intent:
+        _inc("intent_distribution", primary_intent)
     if insight.secondary_intent:
         _inc("intent_distribution", insight.secondary_intent)
 
-    # Topics and interests
-    for topic in insight.surface_topics:
-        _inc("surface_topic_frequencies", topic)
-    for interest in insight.deep_interests:
-        _inc("deep_interest_frequencies", interest)
+    # Interests — canonical category + specific subject, time-decayed. Replaces the
+    # old free-text deep_interest/surface_topic/named_entity frequency maps.
+    interests = profile.get("interests")
+    if not isinstance(interests, dict):
+        interests = {}
+        profile["interests"] = interests
+    for signal in insight.interests[:_MAX_INTERESTS_PER_MESSAGE]:
+        apply_interest_signal(interests, signal.category, signal.subject, now)
 
     # Domain, tone, urgency
-    _inc("domain_frequencies", insight.domain)
-    _inc("tone_signals", insight.tone)
-    if insight.urgency != "none":
+    if insight.domain:
+        _inc("domain_frequencies", insight.domain)
+    if insight.tone:
+        _inc("tone_signals", insight.tone)
+    if insight.urgency and insight.urgency != "none":
         _inc("urgency_distribution", insight.urgency)
 
     # Optional signals
@@ -259,15 +330,14 @@ def _merge_profile(
     if insight.response_depth_preference:
         _inc("depth_preference_signals", insight.response_depth_preference)
 
-    # Named entities
-    for entity in insight.named_entities:
-        _inc("named_entities_seen", entity)
-
     # Lists — append with dedup (order-preserving, oldest entries kept)
     facts: list[str] = profile.setdefault("explicit_facts", [])
     for fact in insight.explicit_facts:
         if fact not in facts:
             facts.append(fact)
+    # Cap durable facts — keep the most recent when over the limit.
+    if len(facts) > _MAX_EXPLICIT_FACTS:
+        profile["explicit_facts"] = facts[-_MAX_EXPLICIT_FACTS:]
 
     goals: list[str] = profile.setdefault("inferred_goals", [])
     for goal in insight.inferred_goal_hints:
@@ -281,6 +351,14 @@ def _merge_profile(
     profile["dominant_tone"] = _argmax(profile.get("tone_signals", {}))
     profile["response_depth_preference"] = _argmax(profile.get("depth_preference_signals", {}))
     profile["extraction_count"] = profile.get("extraction_count", 0) + 1
+
+    # Sunset the DEAD interest maps (nothing reads them) once the new structure is
+    # mature, to reclaim doc space. deep_interest_frequencies is intentionally kept
+    # — the shipped Flutter app still reads it and the accessors fall back to it —
+    # until the app update that reads `interests` has reached every client.
+    if category_count(profile) >= LEGACY_SUNSET_CATEGORY_COUNT:
+        for dead_field in DEAD_INTEREST_FIELDS:
+            profile.pop(dead_field, None)
 
     return profile
 
@@ -297,6 +375,17 @@ async def _read_user_aura_profile(uid: str) -> dict[str, Any]:
 
 async def _write_user_aura_profile(uid: str, profile: dict[str, Any]) -> None:
     from .firebase import admin_firestore
+
+    # Firestore hard-fails a document write above 1 MiB, and that failure is
+    # swallowed downstream — which would silently freeze the profile. Warn loudly
+    # while there is still headroom so a bloating doc never looks healthy.
+    approx_bytes = len(json.dumps(profile, default=str).encode("utf-8"))
+    if approx_bytes >= _PROFILE_SIZE_WARN_BYTES:
+        logger.warn("UserAuraExtractor: profile approaching Firestore 1MB limit", {
+            "user_id": uid,
+            "approx_bytes": approx_bytes,
+            "interest_categories": category_count(profile),
+        })
 
     def _put() -> None:
         admin_firestore().collection("UserAura").document(uid).set(profile)
@@ -496,7 +585,7 @@ async def extract_and_update_user_aura(
         logger.info("UserAuraExtractor: profile updated", {
             "user_id": uid,
             "primary_intent": insight.primary_intent,
-            "deep_interests": insight.deep_interests,
+            "interests": [f"{s.category}:{s.subject}" for s in insight.interests],
             "domain": insight.domain,
             "extraction_skipped": insight.extraction_skipped,
             "used_prev_query": insight.used_prev_query_context,

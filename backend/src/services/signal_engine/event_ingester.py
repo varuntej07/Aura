@@ -20,7 +20,6 @@ holds per-request state on its functions or globals.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from ...lib.logger import logger
@@ -117,7 +116,7 @@ async def _apply_event_inner(
 ) -> None:
     state = await feature_store.read_state(user_id)
     if not state.bootstrap_done:
-        state = await _bootstrap_user_vector(user_id, state)
+        state = await bootstrap_user_vector(user_id, state)
 
     target_embedding: list[float] | None = None
     target_category: str | None = category
@@ -227,13 +226,17 @@ def _bump_time_slot_rate(
     )
 
 
-async def _bootstrap_user_vector(user_id: str, state: SignalStoreState) -> SignalStoreState:
+async def bootstrap_user_vector(user_id: str, state: SignalStoreState) -> SignalStoreState:
     """Initial user_vector = mean of embeddings for top deep_interests in UserAura.
 
     Falls back to a zero vector when UserAura is absent (consent not granted)
     or has no usable interests. bootstrap_done is set either way.
+
+    Called on the first event for a user (apply_event) and, for users who never
+    fire events, directly from the scoring loop's first tick so the engine is
+    not deadlocked waiting on client events that may never arrive.
     """
-    interests = await _read_top_deep_interests(user_id, top_k=10)
+    interests = await _read_interest_embedding_texts(user_id, top_k=10)
     if interests:
         try:
             vectors = await embed_texts(interests)
@@ -277,7 +280,7 @@ async def refresh_user_vector_from_aura(
     for completely idle users.
     """
     from datetime import datetime
-    interests = await _read_top_deep_interests(user_id, top_k=10)
+    interests = await _read_interest_embedding_texts(user_id, top_k=10)
     if interests:
         try:
             vectors = await embed_texts(interests)
@@ -300,30 +303,27 @@ async def refresh_user_vector_from_aura(
     return state
 
 
-async def _read_top_deep_interests(user_id: str, top_k: int) -> list[str]:
-    """Pull deep_interest_frequencies from UserAura and return the top_k keys."""
+async def _read_interest_embedding_texts(user_id: str, top_k: int) -> list[str]:
+    """Pull the richest interest strings from UserAura for embedding into the
+    user_vector. Prefers specific subjects ("KCR", "XUV 3XO") over coarse category
+    labels, and falls back to the legacy free-text interests for old profiles."""
     import asyncio
 
     from ..firebase import admin_firestore
+    from ..user_aura_schema import interest_embedding_texts
 
-    def _fetch() -> dict[str, int]:
+    def _fetch() -> list[str]:
         snap = admin_firestore().collection("UserAura").document(user_id).get()
         if not snap.exists:
-            return {}
+            return []
         data = snap.to_dict() or {}
-        freq = data.get("deep_interest_frequencies") or {}
-        return {str(k): int(v) for k, v in freq.items()} if isinstance(freq, dict) else {}
+        return interest_embedding_texts(data, k=top_k)
 
     try:
-        freq_map = await asyncio.to_thread(_fetch)
+        return await asyncio.to_thread(_fetch)
     except Exception as exc:
-        logger.warn("event_ingester: read deep_interests failed", {
+        logger.warn("event_ingester: read interest embedding texts failed", {
             "user_id": user_id,
             "error": str(exc),
         })
         return []
-
-    if not freq_map:
-        return []
-    ranked: Iterable[tuple[str, int]] = sorted(freq_map.items(), key=lambda kv: kv[1], reverse=True)
-    return [k for k, _ in list(ranked)[:top_k]]

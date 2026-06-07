@@ -31,8 +31,8 @@ from firebase_admin import messaging
 
 from ..lib.logger import logger
 from .fcm_token_registry import (
-    INVALID_TOKEN_CODES,
     get_user_tokens,
+    is_permanently_invalid_token_error,
     remove_invalid_tokens,
 )
 from .firebase import admin_messaging
@@ -214,14 +214,17 @@ async def send_notification(
                 # Normalise: "messaging/registration-token-not-registered"
                 error_code = error_code.split("/")[-1].lower()
 
+        is_invalid = is_permanently_invalid_token_error(exc)
+
         logger.warn("send_notification: token delivery failed", {
             "user_id": user_id,
             "token_preview": token_strings[idx][:20],
             "error_code": error_code,
             "error": str(exc),
+            "token_removed": is_invalid,
         })
 
-        if error_code in INVALID_TOKEN_CODES:
+        if is_invalid:
             invalid.append(token_strings[idx])
 
     # 6. Auto-delete permanently invalid tokens

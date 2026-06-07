@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from ...services.firebase import admin_firestore
+from ...services.user_aura_schema import interest_prompt_lines
 
 
 async def fetch_user_profile(user_id: str) -> dict[str, str]:
@@ -98,10 +99,9 @@ async def fetch_user_aura_profile(user_id: str) -> dict[str, str]:
         if style_parts:
             lines.append(f"Communication style: {', '.join(style_parts)}")
 
-        interests_map: dict = data.get("deep_interest_frequencies", {})
-        top_interests = sorted(interests_map, key=lambda k: interests_map[k], reverse=True)[:3]
-        if top_interests:
-            lines.append(f"Interests: {', '.join(top_interests)}")
+        interest_lines = interest_prompt_lines(data)
+        if interest_lines:
+            lines.append(f"Interests: {'; '.join(interest_lines)}")
 
         facts: list = data.get("explicit_facts", [])[:5]
         if facts:

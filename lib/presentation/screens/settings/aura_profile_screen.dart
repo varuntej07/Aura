@@ -95,7 +95,12 @@ class _AuraProfileBody extends StatelessWidget {
       children: [
         _ExplicitFactsSection(facts: _strings(profile['explicit_facts'])),
         _GoalsSection(goals: _strings(profile['inferred_goals'])),
-        _InterestsSection(interests: _interestMap(profile['deep_interest_frequencies'])),
+        _InterestsSection(
+          entries: _InterestsSection.parse(
+            profile['interests'],
+            profile['deep_interest_frequencies'],
+          ),
+        ),
         _ToneSection(
           tone: profile['dominant_tone'] as String?,
           depthPref: profile['response_depth_preference'] as String?,
@@ -114,13 +119,6 @@ class _AuraProfileBody extends StatelessWidget {
   static List<String> _strings(dynamic value) {
     if (value is List) return value.whereType<String>().toList();
     return [];
-  }
-
-  static Map<String, int> _interestMap(dynamic value) {
-    if (value is Map) {
-      return value.map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
-    }
-    return {};
   }
 }
 
@@ -164,29 +162,105 @@ class _GoalsSection extends StatelessWidget {
   }
 }
 
-// Section: top interests ranked by frequency
+// Section: top interest categories with the specific subjects inside them
+
+class _InterestEntry {
+  final String label;
+  final List<String> subjects;
+  final double weight;
+  const _InterestEntry(this.label, this.subjects, this.weight);
+}
 
 class _InterestsSection extends StatelessWidget {
-  final Map<String, int> interests;
-  const _InterestsSection({required this.interests});
+  final List<_InterestEntry> entries;
+  const _InterestsSection({required this.entries});
+
+  /// Parse the nested `interests` map ({category: {weight, subjects: {...}}}).
+  /// Falls back to the legacy flat `deep_interest_frequencies` map for profiles
+  /// that have not rebuilt into the new structure yet.
+  static List<_InterestEntry> parse(dynamic interests, dynamic legacy) {
+    if (interests is Map && interests.isNotEmpty) {
+      final result = <_InterestEntry>[];
+      interests.forEach((slug, node) {
+        if (node is! Map) return;
+        final weight = (node['weight'] as num?)?.toDouble() ?? 0;
+        if (weight <= 0) return;
+        final subjects = <MapEntry<String, double>>[];
+        final raw = node['subjects'];
+        if (raw is Map) {
+          raw.forEach((key, sv) {
+            if (sv is Map) {
+              subjects.add(MapEntry(
+                (sv['display'] ?? key).toString(),
+                (sv['weight'] as num?)?.toDouble() ?? 0,
+              ));
+            }
+          });
+        }
+        subjects.sort((a, b) => b.value.compareTo(a.value));
+        result.add(_InterestEntry(
+          _prettySlug(slug.toString()),
+          subjects.take(4).map((e) => e.key).toList(),
+          weight,
+        ));
+      });
+      result.sort((a, b) => b.weight.compareTo(a.weight));
+      return result.take(6).toList();
+    }
+
+    if (legacy is Map && legacy.isNotEmpty) {
+      final result = legacy.entries
+          .map((e) => _InterestEntry(
+                e.key.toString(),
+                const [],
+                (e.value as num?)?.toDouble() ?? 0,
+              ))
+          .toList()
+        ..sort((a, b) => b.weight.compareTo(a.weight));
+      return result.take(6).toList();
+    }
+    return [];
+  }
+
+  static String _prettySlug(String slug) {
+    if (slug.isEmpty) return slug;
+    final words = slug.replaceAll('_', ' ');
+    return words[0].toUpperCase() + words.substring(1);
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (interests.isEmpty) return const SizedBox.shrink();
-
-    final sorted = interests.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    final top = sorted.take(6).toList();
+    if (entries.isEmpty) return const SizedBox.shrink();
 
     return _ProfileSection(
       icon: Icons.interests_outlined,
       label: 'Topics you care about',
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: top
-            .map((e) => _InterestChip(label: e.key, count: e.value))
-            .toList(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < entries.length; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            Text(
+              entries[i].label,
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (entries[i].subjects.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: entries[i]
+                    .subjects
+                    .map((s) => _InterestChip(label: s))
+                    .toList(),
+              ),
+            ],
+          ],
+        ],
       ),
     );
   }
@@ -390,37 +464,15 @@ class _SubLabel extends StatelessWidget {
 
 class _InterestChip extends StatelessWidget {
   final String label;
-  final int count;
 
-  const _InterestChip({required this.label, required this.count});
+  const _InterestChip({required this.label});
 
   @override
   Widget build(BuildContext context) {
     return FauxGlassCard.pill(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
-          ),
-          const SizedBox(width: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-            decoration: BoxDecoration(
-              color: AppColors.accent.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '$count',
-              style: const TextStyle(
-                color: AppColors.accent,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
+      child: Text(
+        label,
+        style: const TextStyle(color: AppColors.textPrimary, fontSize: 13),
       ),
     );
   }

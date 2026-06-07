@@ -232,8 +232,41 @@ async def find_nearest_for_user(
     try:
         return await asyncio.to_thread(_query)
     except Exception as exc:
-        logger.error("content_pool.find_nearest_for_user failed", {"error": str(exc)})
+        message = str(exc)
+        if "vector index" in message.lower():
+            # This is the difference between "no content matched" and "the engine
+            # is structurally dead". A missing vector index makes EVERY user get 0
+            # candidates, so notifications silently stop. Log it loud and distinct.
+            logger.error(
+                "content_pool.find_nearest_for_user: MISSING VECTOR INDEX on "
+                "content_candidates.embedding — every user gets 0 candidates and "
+                "NO notifications can send. Create it with: gcloud firestore indexes "
+                "composite create --collection-group=content_candidates "
+                "--query-scope=COLLECTION "
+                "--field-config=vector-config='{\"dimension\":\"768\",\"flat\":\"{}\"}'"
+                ",field-path=embedding",
+                {"error": message},
+            )
+        else:
+            logger.error("content_pool.find_nearest_for_user failed", {"error": message})
         return []
+
+
+async def has_any_candidate() -> bool:
+    """Cheap existence probe (limit 1) so the scoring loop can tell an empty
+    content pool apart from "pool has content but nothing cleared threshold".
+    Mirrors fcm_token_registry.any_token_registered — lets the loop fail loud
+    when 0 notifications coincide with an empty pool (ingest starved)."""
+    def _probe() -> bool:
+        db = admin_firestore()
+        return len(list(db.collection("content_candidates").limit(1).stream())) > 0
+
+    try:
+        return await asyncio.to_thread(_probe)
+    except Exception as exc:
+        # Unknown pool state — return True so we never raise a false "pool empty" alarm.
+        logger.warn("content_pool.has_any_candidate probe failed", {"error": str(exc)})
+        return True
 
 
 async def get_candidate(content_id: str) -> ScoredCandidate | None:

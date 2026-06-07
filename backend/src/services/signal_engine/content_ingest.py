@@ -1,12 +1,14 @@
 """
 Content ingest — two entry points:
 
-  run_ingest()         hourly — HN, arXiv, ESPN Cricinfo RSS
-  run_sports_ingest()  every 30 min — cricbuzz live matches + web-searched leagues
+  run_ingest()         hourly — HN, arXiv, ESPN Cricinfo RSS, Google News (global)
+  run_sports_ingest()  every 30 min — cricbuzz live match scores
 
-All fetches run in parallel. The embedder de-dups by content_id so re-running
-early is cheap. Fetcher failures are isolated; one bad source never blocks the
-rest.
+All fetches run in parallel and use FREE sources (RSS + public scrapes). The pool
+only needs title + body + url to embed and score, so the previous Gemini-grounded
+web search was removed: it paid to synthesise prose we then truncated and embedded.
+The embedder de-dups by content_id so re-running early is cheap. Fetcher failures
+are isolated; one bad source never blocks the rest.
 """
 
 from __future__ import annotations
@@ -17,54 +19,24 @@ from datetime import UTC, datetime
 
 from ...agents.data_fetchers.arxiv_papers import fetch_recent_papers
 from ...agents.data_fetchers.cricket_scores import fetch_live_matches, fetch_recent_results
+from ...agents.data_fetchers.google_news import fetch_google_news
 from ...agents.data_fetchers.hackernews import fetch_top_stories
-from ...agents.data_fetchers.web_search import web_search
-from ...agents.data_fetchers.web_surf import _INGEST_REQUEST_TIMEOUT_S
 from ...lib.logger import logger
+from ..model_provider import is_quota_exhausted
 from .content_pool import CandidateInput, add_candidates
 
 HACKERNEWS_FETCH_LIMIT = 20
 ARXIV_FETCH_LIMIT = 15
 CRICKET_FETCH_LIMIT = 10
-
-# Cap simultaneous web_surf calls. Each is a blocking Gemini call dispatched to the
-# loop's default thread pool (~5 workers on --cpu=1). Firing all 8 sports queries at
-# once starved that pool: queued queries burned their wait_for budget before a worker
-# freed up and timed out. 3 keeps every in-flight query backed by a real worker while
-# leaving headroom for the parallel cricbuzz fetch + embedder.
-SPORTS_WEB_SEARCH_CONCURRENCY = 3
+GOOGLE_NEWS_LIMIT_PER_FEED = 8
 
 # Per-source TTL in hours.
 SOURCE_TTL_HOURS: dict[str, int] = {
     "hackernews": 24,
     "arxiv": 96,
     "espncricinfo": 12,
-    "cricbuzz_live": 2,       # live match content expires fast
-    "sports_web_search": 6,   # web-fetched league scores go stale within a session
-}
-
-# Each entry: (web search query, sub_category tag for cosine matching).
-# Capped at 8 queries — each is a Gemini Flash call; parallelised but not free.
-SPORTS_WEB_SEARCH_QUERIES: list[tuple[str, str]] = [
-    ("IPL cricket live score match highlights today", "ipl"),
-    ("Premier League football result today", "premier_league"),
-    ("cricket international match score result today", "cricket"),
-    ("NBA basketball game score tonight", "nba"),
-    ("La Liga football result today", "la_liga"),
-    ("Formula 1 F1 race result today", "formula1"),
-    ("tennis grand slam match result today", "tennis"),
-    ("NFL football game score tonight", "nfl"),
-]
-
-_SPORTS_SUB_CATEGORY_TITLES: dict[str, str] = {
-    "ipl": "IPL cricket latest",
-    "premier_league": "Premier League latest",
-    "cricket": "Cricket international latest",
-    "nba": "NBA basketball latest",
-    "la_liga": "La Liga latest",
-    "formula1": "Formula 1 latest",
-    "tennis": "Tennis latest",
-    "nfl": "NFL football latest",
+    "cricbuzz_live": 2,    # live match content expires fast
+    "google_news": 24,     # global headlines stay relevant ~a day
 }
 
 
@@ -73,89 +45,102 @@ class IngestSummary:
     hackernews_fetched: int = 0
     arxiv_fetched: int = 0
     cricket_fetched: int = 0
+    google_news_fetched: int = 0
     total_written: int = 0
 
 
 @dataclass
 class SportsSummary:
     live_cricket_fetched: int = 0
-    sports_web_searches_fetched: int = 0
     total_written: int = 0
 
 
 async def run_ingest() -> IngestSummary:
-    """Hourly: fetch from HN, arXiv, and ESPN Cricinfo RSS in parallel."""
+    """Hourly: fetch HN, arXiv, ESPN Cricinfo RSS, and global Google News in parallel."""
     summary = IngestSummary()
     now = datetime.now(UTC)
 
-    hn, arxiv, cricket = await asyncio.gather(
+    hn, arxiv, cricket, news = await asyncio.gather(
         _safe_fetch(fetch_top_stories(limit=HACKERNEWS_FETCH_LIMIT), "hackernews"),
         _safe_fetch(fetch_recent_papers(max_results=ARXIV_FETCH_LIMIT), "arxiv"),
         _safe_fetch(fetch_recent_results(limit=CRICKET_FETCH_LIMIT), "espncricinfo"),
+        _safe_fetch(fetch_google_news(limit_per_feed=GOOGLE_NEWS_LIMIT_PER_FEED), "google_news"),
     )
 
     summary.hackernews_fetched = len(hn)
     summary.arxiv_fetched = len(arxiv)
     summary.cricket_fetched = len(cricket)
+    summary.google_news_fetched = len(news)
 
     candidates: list[CandidateInput] = []
     candidates.extend(_map_hackernews(hn, now))
     candidates.extend(_map_arxiv(arxiv, now))
     candidates.extend(_map_cricket_rss(cricket, now))
+    candidates.extend(_map_google_news(news, now))
 
     if not candidates:
         logger.info("content_ingest: no items fetched")
         return summary
 
-    written = await add_candidates(candidates)
+    written = await _embed_and_write(candidates)
     summary.total_written = written
 
     logger.info("content_ingest: complete", {
         "hackernews": summary.hackernews_fetched,
         "arxiv": summary.arxiv_fetched,
         "cricket": summary.cricket_fetched,
+        "google_news": summary.google_news_fetched,
         "written": summary.total_written,
     })
     return summary
 
 
 async def run_sports_ingest() -> SportsSummary:
-    """Every 30 min: live cricket scores + web-searched league results."""
+    """Every 30 min: live cricket scores from cricbuzz (free scrape).
+
+    Broader sports headlines (other leagues) now arrive via Google News in
+    run_ingest; this path keeps only the free, freshness-sensitive live scores.
+    """
     summary = SportsSummary()
     now = datetime.now(UTC)
 
-    search_semaphore = asyncio.Semaphore(SPORTS_WEB_SEARCH_CONCURRENCY)
-    live_matches, web_search_results = await asyncio.gather(
-        _safe_fetch(fetch_live_matches(), "cricbuzz_live"),
-        asyncio.gather(*[
-            _safe_sports_web_search(query, sub_cat, search_semaphore)
-            for query, sub_cat in SPORTS_WEB_SEARCH_QUERIES
-        ]),
-    )
-    web_search_candidates: list[CandidateInput] = [
-        item for batch in web_search_results for item in batch
-    ]
-
+    live_matches = await _safe_fetch(fetch_live_matches(), "cricbuzz_live")
     summary.live_cricket_fetched = len(live_matches)
-    summary.sports_web_searches_fetched = len(web_search_candidates)
 
-    candidates: list[CandidateInput] = []
-    candidates.extend(_map_live_cricket(live_matches, now))
-    candidates.extend(web_search_candidates)
-
+    candidates = _map_live_cricket(live_matches, now)
     if candidates:
-        written = await add_candidates(candidates)
+        written = await _embed_and_write(candidates)
         summary.total_written = written
 
     logger.info("content_ingest.sports: complete", {
         "live_cricket": summary.live_cricket_fetched,
-        "web_search_items": summary.sports_web_searches_fetched,
         "written": summary.total_written,
     })
     return summary
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+async def _embed_and_write(candidates: list[CandidateInput]) -> int:
+    """Embed + upsert candidates, but make a quota/credits failure scream.
+
+    add_candidates embeds via Gemini (gemini-embedding-001), which has no non-Gemini
+    fallback. When prepaid credits are exhausted it raises 429 RESOURCE_EXHAUSTED, the
+    content pool stops refreshing, and signal-engine notifications dry up as candidates
+    expire. We log that in plain terms instead of a silent 5xx, then re-raise so the
+    Cloud Scheduler job still reports the failure."""
+    try:
+        return await add_candidates(candidates)
+    except Exception as exc:
+        if is_quota_exhausted(exc):
+            logger.error(
+                "content_ingest: Gemini quota/credits EXHAUSTED — content pool is NOT "
+                "refreshing; signal-engine notifications will dry up as candidates expire. "
+                "Check GEMINI_API_KEY billing at https://ai.studio/projects.",
+                {"error": str(exc)},
+            )
+        raise
+
 
 async def _safe_fetch(coro, source_name: str) -> list[dict]:
     try:
@@ -168,44 +153,24 @@ async def _safe_fetch(coro, source_name: str) -> list[dict]:
         return []
 
 
-async def _safe_sports_web_search(
-    query: str,
-    sub_category: str,
-    semaphore: asyncio.Semaphore,
-) -> list[CandidateInput]:
-    """One web search query -> one CandidateInput. Returns [] on any failure.
-
-    The semaphore caps simultaneous web_surf calls so queries don't starve the thread
-    pool and time out while queued. Uses the longer background timeout budget.
-    """
-    now = datetime.now(UTC)
-    try:
-        async with semaphore:
-            text = await web_search(
-                query,
-                uid="sports_ingest",
-                timeout_s=_INGEST_REQUEST_TIMEOUT_S,
-            )
-        if not text or not text.strip():
-            return []
-        title = _SPORTS_SUB_CATEGORY_TITLES.get(sub_category, " ".join(query.split()[:5]))
-        return [CandidateInput(
-            source="sports_web_search",
-            category="sports",
-            sub_category=sub_category,
+def _map_google_news(items: list[dict], freshness_ts: datetime) -> list[CandidateInput]:
+    """Map free Google News RSS items to candidates, carrying their feed category."""
+    candidates: list[CandidateInput] = []
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        candidates.append(CandidateInput(
+            source="google_news",
+            category=str(item.get("category") or "news"),
+            sub_category=str(item.get("sub_category") or ""),
             title=title,
-            body=text[:500].strip(),
-            url="",
-            freshness_ts=now,
-            ttl_hours=SOURCE_TTL_HOURS["sports_web_search"],
-        )]
-    except Exception as exc:
-        logger.warn("content_ingest: sports web search failed", {
-            "query": query,
-            "sub_category": sub_category,
-            "error": str(exc),
-        })
-        return []
+            body=str(item.get("body") or "").strip(),
+            url=str(item.get("url") or "").strip(),
+            freshness_ts=freshness_ts,
+            ttl_hours=SOURCE_TTL_HOURS["google_news"],
+        ))
+    return candidates
 
 
 def _map_hackernews(items: list[dict], freshness_ts: datetime) -> list[CandidateInput]:

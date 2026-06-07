@@ -34,6 +34,7 @@ from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..model_provider import ModelProvider, get_model_provider
+from ..user_aura_schema import top_interest_subjects
 from ..analytics import posthog_client
 from ..analytics.funnel_events import (
     EVENT_NOTIFICATION_SENT,
@@ -45,7 +46,7 @@ from ..analytics.funnel_events import (
 )
 from ..notification_service import send_notification
 from . import event_ingester, feature_store
-from .content_pool import ScoredCandidate, find_nearest_for_user
+from .content_pool import ScoredCandidate, find_nearest_for_user, has_any_candidate
 from .notification_framer import (
     UserFramingContext,
     _safe_fallback,
@@ -60,6 +61,7 @@ from .scoring import (
     fatigue_penalty,
     freshness_decay,
     is_sendable,
+    is_within_active_hours,
     time_slot_open_score,
 )
 
@@ -86,6 +88,7 @@ class TickSummary:
     notifications_sent: int = 0
     blocked_below_threshold: int = 0
     blocked_daily_cap: int = 0
+    blocked_quiet_hours: int = 0
     timeouts_swept: int = 0
 
 
@@ -125,11 +128,44 @@ async def run_tick() -> TickSummary:
 
     logger.info("signal_engine.scoring_loop: tick complete", {
         "users_considered": summary.users_considered,
+        "users_skipped_no_state": summary.users_skipped_no_state,
         "notifications_sent": summary.notifications_sent,
         "blocked_below_threshold": summary.blocked_below_threshold,
         "blocked_daily_cap": summary.blocked_daily_cap,
+        "blocked_quiet_hours": summary.blocked_quiet_hours,
         "timeouts_swept": summary.timeouts_swept,
     })
+
+    # Fail loud: 0 notifications while the content pool is empty means ingest is
+    # starved (e.g. Gemini credits exhausted) — distinct from "pool has content but
+    # nothing cleared threshold", which is normal. Mirrors the 0-active-users guard.
+    if summary.notifications_sent == 0 and summary.users_considered > 0:
+        if not await has_any_candidate():
+            logger.warn(
+                "signal_engine.scoring_loop: 0 notifications and content pool is EMPTY — "
+                "ingest is failing to refresh candidates (check Gemini billing / the "
+                "content-ingest job). Notifications cannot send with an empty pool.",
+                {"users_considered": summary.users_considered},
+            )
+        elif (
+            summary.blocked_below_threshold == 0
+            and summary.blocked_daily_cap == 0
+            and summary.blocked_quiet_hours == 0
+        ):
+            # Pool has content and nobody was even scored — every user fell out
+            # before the threshold gate. Most likely the vector index is missing
+            # (find_nearest returns [] silently) or no user has a bootstrapped
+            # vector. Distinct from the normal "scored but nothing cleared 0.45".
+            logger.warn(
+                "signal_engine.scoring_loop: 0 notifications but pool has content AND "
+                "no user reached the scoring gate — vector search likely failing "
+                "(missing content_candidates.embedding index) or no user has a vector. "
+                "Check the find_nearest_for_user error log.",
+                {
+                    "users_considered": summary.users_considered,
+                    "users_skipped_no_state": summary.users_skipped_no_state,
+                },
+            )
 
     # Fail loud: sending notifications while analytics is unconfigured means the
     # re-engagement funnel is silently blind to every send (the "zero rows looks
@@ -174,9 +210,26 @@ async def _score_one_user(
     if timeouts > 0:
         state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + timeouts)
 
-    if not state.bootstrap_done and not _has_any_signal(state):
+    # Cold start: a user with no vector yet is bootstrapped from their UserAura
+    # interests here, on the loop itself, instead of waiting for a /events call
+    # that may never arrive. Without this the loop and the client deadlock —
+    # no vector -> skipped -> no notification -> no tap -> no event -> no vector.
+    if not state.bootstrap_done:
+        state = await event_ingester.bootstrap_user_vector(user_id, state)
+
+    # Still no signal after bootstrap (no UserAura profile / consent not granted):
+    # nothing to match on, so skip without spending on scoring.
+    if not _has_any_signal(state):
         await _safe_write_state(user_id, state)
         summary.users_skipped_no_state += 1
+        return
+
+    # Hard quiet-hours gate: never deliver at night regardless of score. Skipped
+    # without bumping the no-open counter so nighttime ticks don't trigger
+    # exploration drift.
+    if not is_within_active_hours(user_local_now.hour):
+        await _safe_write_state(user_id, state)
+        summary.blocked_quiet_hours += 1
         return
 
     # Periodic Aura refresh for idle users so evolved interests surface.
@@ -468,11 +521,9 @@ async def _build_framing_context(user_id: str, user_local_now: datetime) -> User
         })
         aura = {}
 
-    deep_freq = aura.get("deep_interest_frequencies") or {}
-    top_interests: list[str] = []
-    if isinstance(deep_freq, dict):
-        ranked = sorted(deep_freq.items(), key=lambda kv: int(kv[1]), reverse=True)
-        top_interests = [str(k) for k, _ in ranked[:3]]
+    # Specific subjects (e.g. "KCR", "XUV 3XO") give the framer a concrete hook to
+    # personalise copy; falls back to legacy free-text interests for old profiles.
+    top_interests = top_interest_subjects(aura, k=3)
 
     return UserFramingContext(
         top_interests=top_interests,
