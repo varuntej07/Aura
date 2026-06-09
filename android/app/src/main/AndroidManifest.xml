@@ -34,6 +34,18 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="aura_default" />
+        <!-- Monochrome white icon required for Android status bar (API 21+).
+             Full-color icons render as a grey dot; this must be white-on-transparent. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+        <!-- PostHog analytics -->
+        <meta-data android:name="com.posthog.posthog.API_KEY"
+            android:value="phc_CDtz3DmNraHdnJ2w9W7WJNkJ8VANYPBWAcqV2Uf77k5s" />
+        <meta-data android:name="com.posthog.posthog.POSTHOG_HOST"
+            android:value="https://us.i.posthog.com" />
+        <meta-data android:name="com.posthog.posthog.CAPTURE_APPLICATION_LIFECYCLE_EVENTS"
+            android:value="true" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -46,6 +58,13 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Push notifications: required on Android 13+ (API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Camera: required to photograph documents for chat attachments -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Photo library: API 33+ granular media permissions -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+    <!-- Photo library: API 32 and below -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
 
     <queries>
         <intent>

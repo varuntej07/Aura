@@ -12,6 +12,7 @@ import '../data/repositories/chat_repository.dart';
 import '../data/repositories/memory_repository.dart';
 import '../data/repositories/onboarding_repository.dart';
 import '../data/repositories/reminder_repository.dart';
+import '../data/services/app_feedback_service.dart';
 import '../data/services/chat_backup_service.dart';
 import '../data/services/chat_session_manager.dart';
 import '../data/services/feedback_service.dart';
@@ -55,6 +56,12 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
 
   // Analytics
   final postHogAnalyticsService = PostHogAnalyticsService();
+
+  // Feedback — one write path shared by Settings and the voice orb.
+  final appFeedbackService = AppFeedbackService(
+    firestoreService: firestoreService,
+    postHogAnalyticsService: postHogAnalyticsService,
+  );
 
   // Remote services
   final backendApiService = BackendApiService(apiClient: apiClient);
@@ -113,6 +120,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     Provider<AppDatabase>.value(value: appDatabase),
     Provider<ChatBackupService>.value(value: chatBackupService),
     Provider<FeedbackService>.value(value: feedbackService),
+    Provider<AppFeedbackService>.value(value: appFeedbackService),
     Provider<ChatRepository>.value(value: chatRepository),
     Provider<ChatSessionManager>.value(value: chatSessionManager),
 
@@ -149,12 +157,13 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
         wakeWordService: wakeWordService,
         chatRepository: chatRepository,
         notificationService: notificationService,
+        appFeedbackService: appFeedbackService,
       ),
     ),
     ChangeNotifierProvider<SettingsViewModel>(
       create: (_) => SettingsViewModel(
         firestoreService: firestoreService,
-        postHogAnalyticsService: postHogAnalyticsService,
+        appFeedbackService: appFeedbackService,
       ),
     ),
     ChangeNotifierProvider<ConnectorsViewModel>(

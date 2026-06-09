@@ -102,8 +102,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (sent == true && mounted) {
       messenger.showSnackBar(
         const SnackBar(
-          content: Text('Got it — thanks for the feedback.'),
-          backgroundColor: AppColors.accent,
+          content: Text(
+            'Got it — thanks for the feedback.',
+            style: TextStyle(color: AppColors.textPrimary),
+          ),
+          backgroundColor: AppColors.surfaceVariant,
         ),
       );
     }

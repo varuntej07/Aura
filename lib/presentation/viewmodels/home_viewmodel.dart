@@ -7,11 +7,24 @@ import '../../core/logging/app_logger.dart';
 import '../../data/models/chat_message_model.dart';
 import '../../data/models/voice_models.dart';
 import '../../data/repositories/chat_repository.dart';
+import '../../data/services/app_feedback_service.dart';
 import '../../data/services/notification_service.dart';
 import '../../data/services/voice_session_service.dart';
 import '../../data/services/wake_word_service.dart';
 
 enum MicState { idle, listening, processing }
+
+/// Snapshot of a just-ended voice call, used to render the "Voice chat ended"
+/// rating card. Held after the live session state is reset.
+class VoiceSessionEndedSummary {
+  final String? sessionId;
+  final Duration duration;
+
+  const VoiceSessionEndedSummary({
+    required this.sessionId,
+    required this.duration,
+  });
+}
 
 /// Manages voice sessions on the home screen.
 /// Chat message persistence is done directly via [ChatRepository] so this
@@ -21,6 +34,7 @@ class HomeViewModel extends SafeChangeNotifier {
   final WakeWordService _wakeWordService;
   final ChatRepository _chatRepository;
   final NotificationService _notificationService;
+  final AppFeedbackService _appFeedbackService;
 
   StreamSubscription<VoiceServerEvent>? _voiceEventSub;
   StreamSubscription<EngagementTapPayload>? _engagementTapSub;
@@ -35,6 +49,8 @@ class HomeViewModel extends SafeChangeNotifier {
   int _voiceTranscriptSequence = 0;
   String? _currentVoiceChatSessionId; // Drift session for persisting voice messages
   String? _currentUserId;
+  DateTime? _sessionStartedAt; // for the ended-call duration
+  VoiceSessionEndedSummary? _endedSummary;
 
   // Deep-link routing callbacks set by HomeScreen — keeps GoRouter out of VM.
   void Function(EngagementTapPayload)? onEngagementTap;
@@ -46,10 +62,12 @@ class HomeViewModel extends SafeChangeNotifier {
     required WakeWordService wakeWordService,
     required ChatRepository chatRepository,
     required NotificationService notificationService,
+    required AppFeedbackService appFeedbackService,
   })  : _voiceService = voiceSessionService,
         _wakeWordService = wakeWordService,
         _chatRepository = chatRepository,
-        _notificationService = notificationService {
+        _notificationService = notificationService,
+        _appFeedbackService = appFeedbackService {
     _voiceEventSub = _voiceService.events.listen(_handleVoiceEvent);
     _engagementTapSub =
         _notificationService.engagementTapStream.listen(_onEngagementTap);
@@ -66,6 +84,7 @@ class HomeViewModel extends SafeChangeNotifier {
   AppException? get error => _error;
   String get liveTranscript => _liveTranscript;
   List<VoiceTranscriptEntry> get voiceTranscript => List.unmodifiable(_voiceTranscript);
+  VoiceSessionEndedSummary? get endedSummary => _endedSummary;
 
   bool get hasActiveSession =>
       _voiceStatus != VoiceSessionStatus.disconnected &&
@@ -95,6 +114,8 @@ class HomeViewModel extends SafeChangeNotifier {
     _micState = MicState.listening;
     _liveTranscript = '';
     _voiceTranscript.clear();
+    _sessionStartedAt = DateTime.now();
+    _endedSummary = null;
     safeNotifyListeners();
 
     // Create a Drift session to persist voice messages so they appear in
@@ -135,6 +156,7 @@ class HomeViewModel extends SafeChangeNotifier {
     if (sessionId != null) {
       unawaited(_saveVoiceSessionTitle(sessionId));
     }
+    _captureEndedSummary(sessionId);
     _resetVoiceState();
     safeNotifyListeners();
   }
@@ -285,6 +307,7 @@ class HomeViewModel extends SafeChangeNotifier {
         if (endedSessionId != null) {
           unawaited(_saveVoiceSessionTitle(endedSessionId));
         }
+        _captureEndedSummary(endedSessionId);
         _resetVoiceState();
         safeNotifyListeners();
     }
@@ -397,6 +420,55 @@ class HomeViewModel extends SafeChangeNotifier {
     _voiceStatus = VoiceSessionStatus.disconnected;
     _micState = MicState.idle;
     _currentVoiceChatSessionId = null;
+  }
+
+  // Snapshot the just-ended call so the "Voice chat ended" rating card can
+  // render after live state is reset.
+  void _captureEndedSummary(String? sessionId) {
+    final start = _sessionStartedAt;
+    _endedSummary = VoiceSessionEndedSummary(
+      sessionId: sessionId,
+      duration: start == null ? Duration.zero : DateTime.now().difference(start),
+    );
+  }
+
+  /// Dismisses the ended-call rating card 
+  void dismissEndedSummary() {
+    if (_endedSummary == null) return;
+    _endedSummary = null;
+    safeNotifyListeners();
+  }
+
+  /// Records a like/dislike on the just-ended voice call to the shared
+  /// `app_feedback` collection. Returns null on success, or a user-facing
+  /// error message on failure.
+  Future<String?> submitVoiceSessionRating({
+    required bool liked,
+    List<String> reasons = const [],
+    String? note,
+  }) async {
+    final uid = _currentUserId;
+    if (uid == null || uid.isEmpty) {
+      return "You're signed out. Sign back in to send feedback.";
+    }
+    final summary = _endedSummary;
+    final rating = liked ? 'like' : 'dislike';
+    return _appFeedbackService.submit(
+      uid: uid,
+      category: 'voice',
+      text: note ?? '',
+      extraFields: {
+        'rating': rating,
+        'reasons': reasons,
+        'duration_seconds': summary?.duration.inSeconds ?? 0,
+        'session_id': summary?.sessionId ?? '',
+        'source': 'voice_session_end',
+      },
+      extraEventProperties: {
+        'rating': rating,
+        'source': 'voice_session_end',
+      },
+    );
   }
 
   @override

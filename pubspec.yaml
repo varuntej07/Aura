@@ -70,6 +70,9 @@ flutter_launcher_icons:
 flutter:
   uses-material-design: true
 
+  shaders:
+    - shaders/voice_sphere.frag
+
   assets:
     # Drop your "Hey Buddy" .ppn file here from Picovoice Console.
     # Placeholder: using built-in keyword until custom model is added.

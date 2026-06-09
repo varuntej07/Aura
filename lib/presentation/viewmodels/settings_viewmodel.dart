@@ -1,27 +1,24 @@
-import 'dart:async';
-import 'dart:io';
-
 import '../../core/base/safe_change_notifier.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/logging/app_logger.dart';
 import '../../data/models/user_model.dart';
+import '../../data/services/app_feedback_service.dart';
 import '../../data/services/firestore_service.dart';
-import '../../data/services/posthog_analytics_service.dart';
 import 'view_state.dart';
 
 export 'view_state.dart';
 
 class SettingsViewModel extends SafeChangeNotifier {
   final FirestoreService _firestoreService;
-  final PostHogAnalyticsService _postHogAnalyticsService;
+  final AppFeedbackService _appFeedbackService;
 
   SettingsViewModel({
     required FirestoreService firestoreService,
-    required PostHogAnalyticsService postHogAnalyticsService,
+    required AppFeedbackService appFeedbackService,
   })  : _firestoreService = firestoreService,
-        _postHogAnalyticsService = postHogAnalyticsService;
+        _appFeedbackService = appFeedbackService;
 
   ViewState _state = ViewState.idle;
   UserModel? _user;
@@ -84,11 +81,8 @@ class SettingsViewModel extends SafeChangeNotifier {
     }
   }
 
-  /// Beta feedback capture. Writes one document per submission to the
-  /// root `app_feedback/{timestamp}_{uid}` collection (each doc carries a
-  /// `uid` field) so every report is reviewable in one place instead of being
-  /// buried in each user's subcollection. Fires a PostHog `feedback_submitted`
-  /// event tagged with the category.
+  /// Beta feedback capture. Delegates to [AppFeedbackService] so typed feedback
+  /// and voice-orb ratings share one write path and one root collection.
   Future<String?> submitFeedback({
     required String text,
     required String category,
@@ -97,40 +91,10 @@ class SettingsViewModel extends SafeChangeNotifier {
     if (user == null) {
       return "You're signed out. Sign back in to send feedback.";
     }
-
-    unawaited(_postHogAnalyticsService.trackEvent(
-      'feedback_submitted',
-      properties: {'category': category},
-    ));
-
-    // Timestamp prefix keeps the console's lexicographic doc ordering
-    // chronological; the uid suffix prevents collisions across users.
-    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
-    final docId = '${timestamp}_${user.uid}';
-    final result = await _firestoreService.setDocument<Map<String, dynamic>>(
-      AppConstants.appFeedbackCollection,
-      docId,
-      {
-        'uid': user.uid,
-        'text': text.trim(),
-        'category': category,
-        'created_at': DateTime.now().toUtc().toIso8601String(),
-        'app_version': '1.0.0',
-        'platform': Platform.isIOS ? 'ios' : 'android',
-      },
-      (json) => json,
-      merge: false,
-    );
-
-    return result.when(
-      success: (_) {
-        AppLogger.info('Feedback submitted ($category)', tag: 'SettingsVM');
-        return null;
-      },
-      failure: (error) {
-        AppLogger.error('Feedback submit failed', error: error, tag: 'SettingsVM');
-        return "Couldn't send that just now. Check your connection and try again.";
-      },
+    return _appFeedbackService.submit(
+      uid: user.uid,
+      category: category,
+      text: text,
     );
   }
 

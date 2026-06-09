@@ -20,6 +20,7 @@ import '../../viewmodels/home_viewmodel.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
 import '../settings/settings_screen.dart';
+import '../../widgets/voice_sphere.dart';
 
 enum _HomeMode { voice, chat }
 
@@ -343,7 +344,8 @@ class _VoicePanel extends StatelessWidget {
     final bottomReserve = MediaQuery.of(context).viewPadding.bottom + 110;
 
     return Consumer<HomeViewModel>(
-      builder: (_, vm, _) {
+      builder: (context, vm, _) {
+        final endedSummary = vm.endedSummary;
         return Stack(
           children: [
             Positioned.fill(
@@ -356,6 +358,20 @@ class _VoicePanel extends StatelessWidget {
                 ),
               ),
             ),
+            // "Voice chat ended" rating card, pinned on top
+            if (endedSummary != null)
+              Positioned(
+                top: 8,
+                left: 24,
+                right: 24,
+                child: _VoiceEndedCard(
+                  key: ValueKey(endedSummary.sessionId ?? endedSummary.duration.inSeconds),
+                  summary: endedSummary,
+                  onLike: () => _showVoiceFeedbackDialog(context, vm, liked: true),
+                  onDislike: () => _showVoiceFeedbackDialog(context, vm, liked: false),
+                  onAutoDismiss: vm.dismissEndedSummary,
+                ),
+              ),
             Positioned(
               left: 0,
               right: 0,
@@ -427,16 +443,17 @@ class _VoiceButtonState extends State<_VoiceButton> {
         _ => 'Start voice',
       };
 
-  Color _colorOf(MicState state) => switch (state) {
-        MicState.idle => AppColors.micIdle,
-        MicState.listening => AppColors.micListening,
-        MicState.processing => AppColors.micProcessing,
+  // Sphere brightness/swirl-speed per mic state: idle is calm, listening is the
+  // brightest, thinking sits in between.
+  double _intensityOf(MicState state) => switch (state) {
+        MicState.idle => 0.35,
+        MicState.listening => 1.0,
+        MicState.processing => 0.7,
       };
 
   @override
   Widget build(BuildContext context) {
     final label = _labelOf(widget.voiceStatus);
-    final color = _colorOf(widget.micState);
     return GestureDetector(
       onTap: widget.onTap,
       child: Column(
@@ -446,55 +463,25 @@ class _VoiceButtonState extends State<_VoiceButton> {
             animation: Listenable.merge([widget.breathAnimation, widget.rippleAnimation]),
             builder: (_, _) {
               final isActive = widget.micState != MicState.idle;
-              final scale = isActive ? 1.0 : widget.breathAnimation.value;
+              // Idle: slow gentle breath. Active: noticeably larger + a fast pulse.
+              final double scale;
+              if (isActive) {
+                final pulse = (widget.rippleAnimation.value - 1.0) / 0.5; // 0..1, ~900ms
+                scale = 1.15 + 0.15 * pulse;
+              } else {
+                scale = widget.breathAnimation.value;
+              }
               return Transform.scale(
                 scale: scale,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    // Ripple ring — visible while listening
-                    if (widget.micState == MicState.listening)
-                      Transform.scale(
-                        scale: widget.rippleAnimation.value,
-                        child: Container(
-                          width: 100,
-                          height: 100,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: color.withValues(
-                              alpha: (1 - widget.rippleAnimation.value + 1)
-                                  .clamp(0, 0.25),
-                            ),
-                          ),
-                        ),
-                      ),
-                    // Main button
-                    Container(
-                      width: 80,
-                      height: 80,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: color,
-                        boxShadow: [
-                          BoxShadow(
-                            color: color.withValues(alpha: 0.45),
-                            blurRadius: 24,
-                            spreadRadius: 4,
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.mic_rounded,
-                        color: Colors.white,
-                        size: 36,
-                      ),
-                    ),
-                  ],
+                // Glowing sphere — the speech orb
+                child: VoiceSphere(
+                  intensity: _intensityOf(widget.micState),
+                  size: 104,
                 ),
               );
             },
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 4),
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 200),
             child: Text(
@@ -648,6 +635,267 @@ class _VoiceTranscriptLine extends StatelessWidget {
           height: 1.5,
           fontWeight: isUser ? FontWeight.w600 : FontWeight.w500,
           fontStyle: isTool ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
+    );
+  }
+}
+
+// Voice chat ended — rating card + feedback dialog
+
+const List<String> _voiceLikeReasons = [
+  'Fast',
+  'Understood me',
+  'Felt natural',
+  'Helpful',
+];
+
+const List<String> _voiceDislikeReasons = [
+  'Too slow',
+  "Didn't listen",
+  'Not engaging',
+  'Misunderstood me',
+];
+
+String _formatVoiceDuration(Duration d) {
+  final minutes = d.inMinutes;
+  final seconds = d.inSeconds % 60;
+  if (minutes > 0) return '${minutes}m ${seconds}s';
+  return '${seconds}s';
+}
+
+Future<void> _showVoiceFeedbackDialog(
+  BuildContext context,
+  HomeViewModel vm, {
+  required bool liked,
+}) async {
+  final result = await showDialog<({List<String> reasons, String note})>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _VoiceFeedbackDialog(liked: liked),
+  );
+  // Dialog is non-dismissible, but guard anyway.
+  final reasons = result?.reasons ?? const <String>[];
+  final note = result?.note ?? '';
+  final error = await vm.submitVoiceSessionRating(
+    liked: liked,
+    reasons: reasons,
+    note: note,
+  );
+  vm.dismissEndedSummary();
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        error ?? 'Got it — thanks for the feedback.',
+        style: const TextStyle(color: AppColors.textPrimary),
+      ),
+      backgroundColor:
+          error == null ? AppColors.surfaceVariant : AppColors.errorSurface,
+      behavior: SnackBarBehavior.floating,
+    ),
+  );
+}
+
+class _VoiceEndedCard extends StatefulWidget {
+  final VoiceSessionEndedSummary summary;
+  final VoidCallback onLike;
+  final VoidCallback onDislike;
+  final VoidCallback onAutoDismiss;
+
+  const _VoiceEndedCard({
+    super.key,
+    required this.summary,
+    required this.onLike,
+    required this.onDislike,
+    required this.onAutoDismiss,
+  });
+
+  @override
+  State<_VoiceEndedCard> createState() => _VoiceEndedCardState();
+}
+
+class _VoiceEndedCardState extends State<_VoiceEndedCard> {
+  Timer? _dismissTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _dismissTimer = Timer(const Duration(seconds: 10), widget.onAutoDismiss);
+  }
+
+  @override
+  void dispose() {
+    _dismissTimer?.cancel();
+    super.dispose();
+  }
+
+  // A rating opens a dialog — stop the auto-dismiss so the card doesn't vanish
+  // out from under it.
+  void _cancelAutoDismiss() => _dismissTimer?.cancel();
+
+  @override
+  Widget build(BuildContext context) {
+    // Solid surface instead of glass card, to ensure readability of the feedback options
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.glassBorderLight, width: 1),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Voice chat ended · ${_formatVoiceDuration(widget.summary.duration)}',
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.thumb_up_alt_outlined),
+            color: AppColors.textSecondary,
+            iconSize: 20,
+            tooltip: 'Liked it',
+            onPressed: () {
+              _cancelAutoDismiss();
+              widget.onLike();
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.thumb_down_alt_outlined),
+            color: AppColors.textSecondary,
+            iconSize: 20,
+            tooltip: "Didn't like it",
+            onPressed: () {
+              _cancelAutoDismiss();
+              widget.onDislike();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceFeedbackDialog extends StatefulWidget {
+  final bool liked;
+
+  const _VoiceFeedbackDialog({required this.liked});
+
+  @override
+  State<_VoiceFeedbackDialog> createState() => _VoiceFeedbackDialogState();
+}
+
+class _VoiceFeedbackDialogState extends State<_VoiceFeedbackDialog> {
+  final Set<String> _selected = {};
+  final TextEditingController _noteController = TextEditingController();
+
+  @override
+  void dispose() {
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final options = widget.liked ? _voiceLikeReasons : _voiceDislikeReasons;
+    return AlertDialog(
+      backgroundColor: AppColors.surface,
+      title: Text(
+        widget.liked ? 'What worked?' : 'What went wrong?',
+        style: const TextStyle(color: AppColors.textPrimary, fontSize: 18),
+      ),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final option in options)
+                  _FeedbackPill(
+                    label: option,
+                    selected: _selected.contains(option),
+                    onTap: () => setState(() {
+                      if (!_selected.add(option)) _selected.remove(option);
+                    }),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _noteController,
+              maxLines: 3,
+              minLines: 1,
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: InputDecoration(
+                hintText: 'Anything else? (optional)',
+                hintStyle: const TextStyle(color: AppColors.textTertiary),
+                filled: true,
+                fillColor: AppColors.surfaceVariant,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(
+            (reasons: _selected.toList(), note: _noteController.text.trim()),
+          ),
+          child: const Text('Submit', style: TextStyle(color: AppColors.accent)),
+        ),
+      ],
+    );
+  }
+}
+
+class _FeedbackPill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _FeedbackPill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppColors.accent.withValues(alpha: 0.18)
+              : AppColors.glassWhiteFill,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: selected ? AppColors.accent : AppColors.glassBorderLight,
+            width: 1,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? AppColors.accent : AppColors.textSecondary,
+            fontSize: 12,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+          ),
         ),
       ),
     );
