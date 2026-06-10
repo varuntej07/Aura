@@ -49,7 +49,9 @@ class _RemindersViewState extends State<_RemindersView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final uid = context.read<AuthViewModel>().user?.uid;
       if (uid != null) {
-        context.read<RemindersViewModel>().loadReminders(uid);
+        // Force a refetch on every open so reminders created elsewhere
+        // (e.g. via Aura's save_reminder tool) show without an app restart.
+        context.read<RemindersViewModel>().refreshReminders(uid);
       }
     });
   }
@@ -100,12 +102,39 @@ class _RemindersViewState extends State<_RemindersView> {
           final completed = vm.completedReminders;
           final uid = context.read<AuthViewModel>().user?.uid ?? '';
 
+          Future<void> onRefresh() =>
+              uid.isEmpty ? Future<void>.value() : vm.refreshReminders(uid);
+
           if (active.isEmpty && completed.isEmpty) {
-            return const _EmptyState();
+            // Wrapped in a scroll view so pull-to-refresh works on the empty
+            // state too, the empty message still fills the viewport.
+            return RefreshIndicator(
+              onRefresh: onRefresh,
+              color: AppColors.accent,
+              backgroundColor: AppColors.deepBackground,
+              child: LayoutBuilder(
+                builder: (context, constraints) => ListView(
+                  controller: _scrollController,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: [
+                    ConstrainedBox(
+                      constraints:
+                          BoxConstraints(minHeight: constraints.maxHeight),
+                      child: const _EmptyState(),
+                    ),
+                  ],
+                ),
+              ),
+            );
           }
 
-          return ListView(
+          return RefreshIndicator(
+            onRefresh: onRefresh,
+            color: AppColors.accent,
+            backgroundColor: AppColors.deepBackground,
+            child: ListView(
             controller: _scrollController,
+            physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.symmetric(vertical: 8),
             children: [
               if (vm.errorMessage != null)
@@ -156,6 +185,7 @@ class _RemindersViewState extends State<_RemindersView> {
 
               SizedBox(height: MediaQuery.of(context).viewPadding.bottom + 96),
             ],
+            ),
           );
         },
       ),

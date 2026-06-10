@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart' hide Constant;
@@ -144,6 +145,16 @@ class ChatBackupService {
               channel: (d['channel'] as String?) ?? 'text',
               timestamp: _toDateTime(d['created_at']) ?? DateTime.now(),
               sequence: Value((d['sequence'] as num?)?.toInt() ?? 0),
+              // Full metadata round-trips back into Drift. Older backup docs that
+              // predate this enrichment simply lack these keys and read as null.
+              status: Value(d['status'] as String?),
+              feedback: Value(d['feedback'] as String?),
+              errorReason: Value(d['error_reason'] as String?),
+              engagementId: Value(d['engagement_id'] as String?),
+              engagementAgent: Value(d['engagement_agent'] as String?),
+              reminderJson: Value(_encodeJsonField(d['reminder'])),
+              clarificationJson: Value(_encodeJsonField(d['clarification'])),
+              attachmentJson: Value(_encodeJsonField(d['attachments'])),
             ),
           );
         }
@@ -267,7 +278,10 @@ class ChatBackupService {
     if (userId.isEmpty || firestore == null) return;
 
     final prefs = await SharedPreferences.getInstance();
-    final flagKey = 'chat_backfill_v1_$userId';
+    // v2 bump: re-runs the one-time backfill so messages synced under the old
+    // (metadata-lossy) writer get re-pushed from Drift, which holds every field.
+    // Bounded to _backfillSessionLimit recent sessions and idempotent (merge writes)
+    final flagKey = 'chat_backfill_v2_$userId';
     if (prefs.getBool(flagKey) ?? false) return;
 
     try {
@@ -401,6 +415,15 @@ class ChatBackupService {
   }
 
   Map<String, dynamic> _messageDoc(ChatMessage message) {
+    // Structured payloads are stored in Drift as JSON strings. We decode them to
+    // nested maps so the Firestore backup is human-readable in the console (the
+    // whole reason this layout exists) and so restore can re-encode them losslessly.
+    final reminder = _decodeJsonObject(message.reminderJson);
+    final clarification = _decodeJsonObject(message.clarificationJson);
+    // attachment_json is metadata-only by design (fileName/mimeType/type/thumbnail);
+    // raw file bytes are never persisted to Drift, so nothing sensitive is uploaded.
+    final attachments = _decodeJsonArray(message.attachmentJson);
+
     return {
       'session_id': message.sessionId,
       'role': message.isUser ? 'user' : 'assistant',
@@ -408,7 +431,47 @@ class ChatBackupService {
       'channel': message.channel,
       'created_at': Timestamp.fromDate(message.timestamp.toUtc()),
       'sequence': message.sequence,
+      // Default mirrors ChatMessageModel.fromMap, which treats a null status as 'sent'.
+      'status': message.status ?? 'sent',
+      if (message.feedback != null) 'feedback': message.feedback,
+      if (message.errorReason != null) 'error_reason': message.errorReason,
+      if (message.engagementId != null) 'engagement_id': message.engagementId,
+      if (message.engagementAgent != null)
+        'engagement_agent': message.engagementAgent,
+      'reminder': ?reminder,
+      'clarification': ?clarification,
+      'attachments': ?attachments,
     };
+  }
+
+  /// Decodes a Drift-stored JSON object string into a map, or null if absent/invalid.
+  Map<String, dynamic>? _decodeJsonObject(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Decodes a Drift-stored JSON array string into a list, or null if empty/invalid.
+  List<dynamic>? _decodeJsonArray(String? raw) {
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      return (decoded is List && decoded.isNotEmpty) ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Re-encodes a backed-up nested map/list back to the JSON string Drift expects.
+  /// Empty collections become null so the local row matches "no payload".
+  String? _encodeJsonField(Object? value) {
+    if (value is Map && value.isNotEmpty) return jsonEncode(value);
+    if (value is List && value.isNotEmpty) return jsonEncode(value);
+    return null;
   }
 
   Future<void> _markJobFailed(ChatSyncJob job, Object error) async {
