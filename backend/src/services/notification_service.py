@@ -75,6 +75,7 @@ async def send_notification(
     badge: int | None = None,
     sound: str = "default",
     apns_category: str | None = None,
+    data_only: bool = False,
 ) -> NotificationResult:
     """Send an FCM push notification to all registered devices for a user.
 
@@ -103,6 +104,12 @@ async def send_notification(
                            ``"default"`` (system sound).
         apns_category:     iOS interactive notification category (enables
                            action buttons defined in the app).
+        data_only:         When True, omit the Android display ``notification``
+                           block so the message is delivered straight to the
+                           app's background handler, which builds the rich
+                           notification (action-button suggestion chips) itself
+                           from the data payload. iOS still shows an alert via
+                           the APNS ``aps.alert`` so it is never silent there.
 
     Returns:
         ``NotificationResult`` with delivery counts and a list of invalid
@@ -115,7 +122,7 @@ async def send_notification(
     )
 
     if not token_docs:
-        logger.info("send_notification: no registered tokens — skipping", {
+        logger.info("send_notification: no registered tokens found, skipping user", {
             "user_id": user_id,
             "title": title,
             "notification_type": notification_type,
@@ -143,22 +150,31 @@ async def send_notification(
     if collapse_key:
         apns_headers["apns-collapse-id"] = collapse_key
 
+    # In data-only mode the Android side carries no display notification — the
+    # app's background handler renders it (with interactive suggestion chips) —
+    # but iOS cannot build a notification from a data push, so the alert is
+    # carried in the APNS payload to keep iOS from going silent.
+    android_notification = (
+        None
+        if data_only
+        else messaging.AndroidNotification(sound=sound, channel_id=_ANDROID_CHANNEL_ID)
+    )
+    aps_alert = messaging.ApsAlert(title=title, body=body) if data_only else None
+
     message = messaging.MulticastMessage(
         tokens=token_strings,
-        notification=messaging.Notification(title=title, body=body),
+        notification=None if data_only else messaging.Notification(title=title, body=body),
         data=payload,
         android=messaging.AndroidConfig(
             priority="high" if priority == "high" else "normal",
             collapse_key=collapse_key,
-            notification=messaging.AndroidNotification(
-                sound=sound,
-                channel_id=_ANDROID_CHANNEL_ID,
-            ),
+            notification=android_notification,
         ),
         apns=messaging.APNSConfig(
             headers=apns_headers,
             payload=messaging.APNSPayload(
                 aps=messaging.Aps(
+                    alert=aps_alert,
                     sound=sound,
                     badge=badge,
                     category=apns_category,
@@ -168,7 +184,7 @@ async def send_notification(
         ),
     )
 
-    logger.info("send_notification: sending", {
+    logger.info("send_notification: sending notification..", {
         "user_id": user_id,
         "notification_type": notification_type,
         "title": title,

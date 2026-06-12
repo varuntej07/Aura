@@ -24,6 +24,15 @@ const Map<String, List<String>> _fallbackSuggestionPillsByAgentId = {
     'Trending angle',
     'Contrarian take',
   ],
+  // Main Buddy chat. Generic-but-warm starters shown for brand-new users, before
+  // the first personalized generation lands, or on a fetch failure. Written in the
+  // user's own voice — tapping one drops it into the input box, so each must read
+  // as something the user types TO Buddy, never a question Buddy asks the user.
+  'buddy': [
+    'Help me plan my day',
+    'I need to vent for a sec',
+    'Keep motivating me today ',
+  ],
 };
 
 /// Reads agent suggestion pills from `agent_suggestion_pills/{uid}` in Firestore.

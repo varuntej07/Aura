@@ -20,6 +20,7 @@ import '../data/services/firebase_auth_service.dart';
 import '../data/services/firestore_service.dart';
 import '../data/services/connectors_service.dart';
 import '../data/services/backend_api_service.dart';
+import '../data/services/buddy_pills_refresher.dart';
 import '../data/services/chat_service_provider.dart';
 import '../data/services/stub_chat_service_provider.dart';
 import '../data/services/notification_service.dart';
@@ -65,6 +66,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
 
   // Remote services
   final backendApiService = BackendApiService(apiClient: apiClient);
+  final buddyPillsRefresher = BuddyPillsRefresher(backendApiService: backendApiService);
   final ChatServiceProvider chatServiceProvider = Environment.hasConfiguredApi
       ? backendApiService
       : StubChatServiceProvider();
@@ -104,6 +106,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   final onboardingRepository = OnboardingRepository(
     firestoreService: firestoreService,
     postHogAnalyticsService: postHogAnalyticsService,
+    backendApiService: backendApiService,
   );
 
   return [
@@ -127,6 +130,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     // Remote services
     Provider<NotificationService>.value(value: notificationService),
     Provider<BackendApiService>.value(value: backendApiService),
+    Provider<BuddyPillsRefresher>.value(value: buddyPillsRefresher),
     Provider<ChatServiceProvider>.value(value: chatServiceProvider),
     Provider<ConnectorsService>.value(
       value: connectorsService,
@@ -158,6 +162,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
         chatRepository: chatRepository,
         notificationService: notificationService,
         appFeedbackService: appFeedbackService,
+        buddyPillsRefresher: buddyPillsRefresher,
       ),
     ),
     ChangeNotifierProvider<SettingsViewModel>(

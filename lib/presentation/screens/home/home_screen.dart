@@ -3,12 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/local/app_database.dart';
 import '../../../data/models/voice_models.dart';
+import '../../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../../data/repositories/chat_repository.dart';
+import '../../../data/services/buddy_pills_refresher.dart';
 import '../../../data/services/chat_service_provider.dart';
 import '../../../data/services/chat_backup_service.dart';
 import '../../../data/services/chat_session_manager.dart';
@@ -17,6 +20,7 @@ import '../../../data/services/posthog_analytics_service.dart';
 import '../../../core/network/connectivity_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/home_viewmodel.dart';
+import '../../viewmodels/notification_chat_seed.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
 import '../settings/settings_screen.dart';
@@ -70,11 +74,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       vm.onEngagementTap = (payload) {
         context.push(
           '/chat/new',
-          extra: {
-            'engagementId': payload.engagementId,
-            'agentContext': payload.agentContext,
-            'initialMessage': payload.initialMessage,
-          },
+          extra: NotificationChatSeed(
+            origin: NotificationChatOrigin.engagement,
+            openingMessage: payload.initialMessage,
+            engagementId: payload.engagementId,
+            agentContext: payload.agentContext,
+          ),
         );
       };
 
@@ -85,15 +90,60 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       };
 
-      vm.onSignalNotificationTap = (payload) {
+      vm.onSignalNotificationTap = (payload) async {
+        // "read" content opens the source article in an in-app browser; opening
+        // (not endorsing) trains the vector mildly and fires the read-path funnel
+        // terminal. Anything else (or a launch failure) opens chat with Buddy.
+        final wantsRead =
+            payload.contentKind == 'read' && payload.url.isNotEmpty;
+        if (wantsRead) {
+          final uri = Uri.tryParse(payload.url);
+          if (uri != null) {
+            unawaited(vm.reportSignalContentOpened(payload));
+            try {
+              final ok = await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+              if (ok) return;
+            } catch (_) {
+              // fall through to chat below
+            }
+          }
+        }
+        if (!mounted) return;
         context.push(
           '/chat/new',
-          extra: {
-            'initialMessage': payload.openingChatMessage,
-            'signalNotificationId': payload.notificationId,
-            'signalContentId': payload.contentId,
-            'signalCategory': payload.category,
-          },
+          extra: NotificationChatSeed(
+            origin: NotificationChatOrigin.signal,
+            openingMessage: payload.openingChatMessage,
+            notificationId: payload.notificationId,
+            contentId: payload.contentId,
+            category: payload.category,
+          ),
+        );
+      };
+
+      vm.onThreadFollowUpTap = (payload) {
+        context.push(
+          '/chat/new',
+          extra: NotificationChatSeed(
+            origin: NotificationChatOrigin.thread,
+            openingMessage: payload.question,
+            threadId: payload.threadId,
+            suggestedReplies: payload.suggestedReplies,
+          ),
+        );
+      };
+
+      vm.onIcebreakerTap = (payload) {
+        // An icebreaker always opens chat seeded with Buddy's opener. The
+        // notification id rides along so the chat surface can attribute the
+        // session + first reply back to this opener in the funnel.
+        context.push(
+          '/chat/new',
+          extra: NotificationChatSeed(
+            origin: NotificationChatOrigin.icebreaker,
+            openingMessage: payload.openingChatMessage,
+            notificationId: payload.notificationId,
+          ),
         );
       };
 
@@ -118,6 +168,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         connectivityService: context.read<ConnectivityService>(),
         chatSessionManager: context.read<ChatSessionManager>(),
         postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
+        suggestionPillsRepository: context.read<AgentSuggestionPillsRepository>(),
+        buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
       );
       _textChatViewModelCreated = true;
     }

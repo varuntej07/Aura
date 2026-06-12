@@ -4,9 +4,11 @@ import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
+import '../../../data/services/buddy_pills_refresher.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../../widgets/chat_message_list.dart';
+import '../../widgets/chat_suggestion_pills.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/message_input.dart';
 import '../../widgets/sign_in_gate_dialog.dart';
@@ -22,6 +24,10 @@ class EmbeddedChatPanel extends StatefulWidget {
 class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   final _scrollController = ScrollController();
+  // Shared with [MessageInput] so a tapped starter pill can fill and focus the
+  // input box instead of sending immediately.
+  final _inputController = TextEditingController();
+  final _inputFocusNode = FocusNode();
   double _keyboardHeight = 0;
   AuthViewModel? _authVm;
   VoidCallback? _authListener;
@@ -52,6 +58,8 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     WidgetsBinding.instance.removeObserver(this);
     if (_authListener != null) _authVm?.removeListener(_authListener!);
     _scrollController.dispose();
+    _inputController.dispose();
+    _inputFocusNode.dispose();
     super.dispose();
   }
 
@@ -65,6 +73,11 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     final uid = context.read<AuthViewModel>().user?.uid;
     if (uid != null && uid.isNotEmpty) {
       context.read<TextChatViewModel>().flushPendingBackup(uid);
+      // Leaving the app after a session: if the user did anything, regenerate
+      // the Buddy pills so fresh ones are waiting on their next visit.
+      if (state == AppLifecycleState.paused) {
+        context.read<BuddyPillsRefresher>().refreshIfActivity(uid);
+      }
     }
   }
 
@@ -100,6 +113,19 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
 
   String get _uid => context.read<AuthViewModel>().user?.uid ?? 'anonymous';
 
+  /// Drops a tapped starter into the input box and focuses it, so the user can
+  /// edit before sending — the pills are conversation openers, not auto-sends.
+  void _fillInput(String text) {
+    if (context.read<AuthViewModel>().user == null) {
+      showSignInGateDialog(context);
+      return;
+    }
+    _inputController.text = text;
+    _inputController.selection =
+        TextSelection.collapsed(offset: text.length);
+    _inputFocusNode.requestFocus();
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -134,7 +160,14 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
                             _scrollToBottom();
                           },
                         )
-                      : const EmptyChatPlaceholder(agentName: 'Buddy')
+                      : vm.suggestionPills.isNotEmpty
+                          // Personalized starters, centered. Tapping fills the
+                          // input box (see [_fillInput]) instead of auto-sending.
+                          ? ChatSuggestionPills(
+                              pills: vm.suggestionPills,
+                              onTap: _fillInput,
+                            )
+                          : const EmptyChatPlaceholder(agentName: 'Buddy')
                   : ChatMessageList(
                       messages: vm.messages,
                       scrollController: _scrollController,
@@ -161,6 +194,8 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
                 ),
               ),
             MessageInput(
+              controller: _inputController,
+              focusNode: _inputFocusNode,
               isLoading: vm.state == ViewState.loading,
               hint: 'Ask Buddy anything...',
               allowAttachments: context.read<AuthViewModel>().user != null,

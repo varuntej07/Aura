@@ -3,7 +3,7 @@ POST /scheduler/tick finds due reminders and sends FCM push notifications.
 Called by a cron job (Cloud Scheduler) every minute.
 
 Periodic work piggybacked here (avoids creating extra Cloud Scheduler jobs):
-  minute % 30 == 0  — sports content ingest + calendar fallback sync for all users
+  minute % 30 == 0  — calendar fallback sync for all users
   hour == 1, minute == 30  — daily plan fan-out (= 07:00 IST)
 """
 
@@ -15,9 +15,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..lib.logger import logger
+from ..services.notification_budget import record_committed_send
 from ..services.notification_rewriter import rewrite_reminder_notification
 from ..services.notification_service import send_notification
-from ..services.signal_engine.content_ingest import run_sports_ingest
 from ..services.tool_executor import (
     claim_reminder_for_processing,
     fetch_due_reminders,
@@ -68,6 +68,36 @@ async def _fan_out_daily_plans() -> None:
     logger.info("scheduler: daily plan fan-out complete", {"users": len(user_ids)})
 
 
+async def _run_thread_reflection() -> None:
+    """Hourly curiosity follow-up pass over all active users.
+
+    Fire-and-forget so the scheduler tick returns its 200 before the LLM-bound
+    reflection runs. A no-op while THREAD_ENGINE_ENABLED is off, and internally
+    isolated per user, so it can never delay or fail the reminder tick.
+    """
+    from ..services.threads.thread_reflector import run_reflection_tick
+
+    try:
+        await run_reflection_tick()
+    except Exception as exc:
+        logger.error("scheduler: thread reflection tick failed", {"error": str(exc)})
+
+
+async def _run_icebreaker() -> None:
+    """Hourly icebreaker pass over all active users.
+
+    Fire-and-forget so the scheduler tick returns its 200 before the LLM-bound
+    opener generation runs. A no-op while ICEBREAKER_ENABLED is off, and
+    internally isolated per user, so it can never delay or fail the reminder tick.
+    """
+    from ..services.icebreaker.icebreaker_engine import run_icebreaker_tick
+
+    try:
+        await run_icebreaker_tick()
+    except Exception as exc:
+        logger.error("scheduler: icebreaker tick failed", {"error": str(exc)})
+
+
 async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one scheduler tick.
 
@@ -84,8 +114,6 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         now_utc = datetime.now(UTC)
         now_minute = now_utc.minute
 
-        sports_ingest_coro = run_sports_ingest() if now_minute % 30 == 0 else asyncio.sleep(0)
-
         # Periodic fallback sync every 30 min. Catches events missed when:
         #   - Google push notification was dropped (documented ~small% rate)
         #   - Watch channel expired between 6-hour renewal windows
@@ -96,11 +124,10 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             else asyncio.sleep(0)
         )
 
-        renewed_channels, synced_calendars, due, _, periodic_sync_result = await asyncio.gather(
+        renewed_channels, synced_calendars, due, periodic_sync_result = await asyncio.gather(
             asyncio.to_thread(GoogleCalendarConnector.renew_expiring_channels, 10),
             asyncio.to_thread(GoogleCalendarConnector.process_pending_sync_jobs, 20),
             asyncio.to_thread(fetch_due_reminders),
-            sports_ingest_coro,
             periodic_sync_coro,
         )
 
@@ -109,6 +136,19 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # the background without blocking the Cloud Scheduler timeout window.
         if now_utc.hour == 1 and now_minute == 30:
             asyncio.create_task(_fan_out_daily_plans())
+
+        # Curiosity follow-up reflection, once an hour. Fire-and-forget; gated
+        # internally by THREAD_ENGINE_ENABLED so this is a cheap no-op until the
+        # full thread path (client pill rendering + reply ingest) ships.
+        if now_minute == 0:
+            asyncio.create_task(_run_thread_reflection())
+
+        # Icebreaker openers, once an hour at minute 15 (offset from the thread
+        # reflector at minute 0 so the two LLM passes never burst together).
+        # Fire-and-forget; gated internally by ICEBREAKER_ENABLED so this is a
+        # cheap no-op until the full icebreaker path is dogfooded on a dark candidate.
+        if now_minute == 15:
+            asyncio.create_task(_run_icebreaker())
 
         delivered = 0
 
@@ -148,6 +188,9 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
 
                 if result.delivered:
                     await asyncio.to_thread(mark_reminder_fired, user_id, reminder_id)
+                    # Committed send: never blocked, but recorded so a proactive
+                    # push is spaced away from it (no-op while the flag is off).
+                    await record_committed_send(user_id, source="reminder")
                     delivered += 1
                     logger.info("Reminder delivered", {
                         "user_id": user_id,

@@ -11,6 +11,7 @@ import 'core/config/firebase_config.dart';
 import 'core/errors/error_handler.dart';
 import 'core/logging/app_logger.dart';
 import 'data/services/analytics_service.dart';
+import 'data/services/thread_notification_handler.dart';
 import 'di/providers.dart';
 
 /// FCM background message handler.
@@ -27,6 +28,13 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       'notificationType': message.data['notification_type'],
     },
   );
+
+  // Curiosity follow-ups arrive data-only so we can render interactive
+  // suggestion chips ourselves (FCM cannot draw action buttons). 
+  // Build the rich notification here in the background isolate.
+  if (isThreadFollowUp(message)) {
+    await showThreadFollowUpNotification(message);
+  }
 }
 
 void main() {
@@ -48,7 +56,7 @@ void main() {
       ErrorHandler.init();
       ErrorHandler.setEnvironment(Environment.current.env.name);
 
-      if (firebaseReady && !Environment.isDev) {
+      if (firebaseReady) {
         await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
         unawaited(AnalyticsService.logAppOpen());
       }

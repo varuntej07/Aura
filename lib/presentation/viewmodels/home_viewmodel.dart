@@ -8,6 +8,7 @@ import '../../data/models/chat_message_model.dart';
 import '../../data/models/voice_models.dart';
 import '../../data/repositories/chat_repository.dart';
 import '../../data/services/app_feedback_service.dart';
+import '../../data/services/buddy_pills_refresher.dart';
 import '../../data/services/notification_service.dart';
 import '../../data/services/voice_session_service.dart';
 import '../../data/services/wake_word_service.dart';
@@ -35,11 +36,14 @@ class HomeViewModel extends SafeChangeNotifier {
   final ChatRepository _chatRepository;
   final NotificationService _notificationService;
   final AppFeedbackService _appFeedbackService;
+  final BuddyPillsRefresher _buddyPillsRefresher;
 
   StreamSubscription<VoiceServerEvent>? _voiceEventSub;
   StreamSubscription<EngagementTapPayload>? _engagementTapSub;
   StreamSubscription<AgentNudgeTapPayload>? _agentNudgeTapSub;
   StreamSubscription<SignalNotificationTapPayload>? _signalTapSub;
+  StreamSubscription<ThreadFollowUpTapPayload>? _threadTapSub;
+  StreamSubscription<IcebreakerTapPayload>? _icebreakerTapSub;
 
   MicState _micState = MicState.idle;
   VoiceSessionStatus _voiceStatus = VoiceSessionStatus.disconnected;
@@ -56,6 +60,8 @@ class HomeViewModel extends SafeChangeNotifier {
   void Function(EngagementTapPayload)? onEngagementTap;
   void Function(AgentNudgeTapPayload)? onAgentNudgeTap;
   void Function(SignalNotificationTapPayload)? onSignalNotificationTap;
+  void Function(ThreadFollowUpTapPayload)? onThreadFollowUpTap;
+  void Function(IcebreakerTapPayload)? onIcebreakerTap;
 
   HomeViewModel({
     required VoiceSessionService voiceSessionService,
@@ -63,18 +69,19 @@ class HomeViewModel extends SafeChangeNotifier {
     required ChatRepository chatRepository,
     required NotificationService notificationService,
     required AppFeedbackService appFeedbackService,
+    required BuddyPillsRefresher buddyPillsRefresher,
   })  : _voiceService = voiceSessionService,
         _wakeWordService = wakeWordService,
         _chatRepository = chatRepository,
         _notificationService = notificationService,
-        _appFeedbackService = appFeedbackService {
+        _appFeedbackService = appFeedbackService,
+        _buddyPillsRefresher = buddyPillsRefresher {
     _voiceEventSub = _voiceService.events.listen(_handleVoiceEvent);
-    _engagementTapSub =
-        _notificationService.engagementTapStream.listen(_onEngagementTap);
-    _agentNudgeTapSub =
-        _notificationService.agentNudgeTapStream.listen(_onAgentNudgeTap);
-    _signalTapSub = _notificationService.signalNotificationTapStream
-        .listen(_onSignalNotificationTap);
+    _engagementTapSub = _notificationService.engagementTapStream.listen(_onEngagementTap);
+    _agentNudgeTapSub = _notificationService.agentNudgeTapStream.listen(_onAgentNudgeTap);
+    _signalTapSub = _notificationService.signalNotificationTapStream.listen(_onSignalNotificationTap);
+    _threadTapSub = _notificationService.threadFollowUpTapStream.listen(_onThreadFollowUpTap);
+    _icebreakerTapSub = _notificationService.icebreakerTapStream.listen(_onIcebreakerTap);
   }
 
   // Getters 
@@ -108,6 +115,10 @@ class HomeViewModel extends SafeChangeNotifier {
   Future<void> startSession(String userId) async {
     _currentUserId = userId;
     if (hasActiveSession) return;
+
+    // A voice session is real activity too, ground the next Buddy-pills
+    // regeneration on it so a voice-only user still gets fresh pills.
+    _buddyPillsRefresher.markActivity();
 
     _error = null;
     _voiceStatus = VoiceSessionStatus.connecting;
@@ -194,6 +205,24 @@ class HomeViewModel extends SafeChangeNotifier {
 
   void _onSignalNotificationTap(SignalNotificationTapPayload payload) {
     onSignalNotificationTap?.call(payload);
+  }
+
+  /// Reports a "read" signal notification's article open (vector nudge + funnel read-terminal). 
+  /// Delegates to the notification service so the screen stays out of the service layer.
+  Future<void> reportSignalContentOpened(SignalNotificationTapPayload payload) {
+    return _notificationService.reportContentOpened(
+      contentId: payload.contentId,
+      category: payload.category,
+      notificationId: payload.notificationId,
+    );
+  }
+
+  void _onThreadFollowUpTap(ThreadFollowUpTapPayload payload) {
+    onThreadFollowUpTap?.call(payload);
+  }
+
+  void _onIcebreakerTap(IcebreakerTapPayload payload) {
+    onIcebreakerTap?.call(payload);
   }
 
   void _handleVoiceEvent(VoiceServerEvent event) {
@@ -477,6 +506,8 @@ class HomeViewModel extends SafeChangeNotifier {
     _engagementTapSub?.cancel();
     _agentNudgeTapSub?.cancel();
     _signalTapSub?.cancel();
+    _threadTapSub?.cancel();
+    _icebreakerTapSub?.cancel();
     unawaited(_wakeWordService.stop());
     unawaited(_voiceService.dispose());
     super.dispose();

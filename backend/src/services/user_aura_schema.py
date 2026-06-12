@@ -86,6 +86,21 @@ CATEGORY_LABELS: dict[str, str] = {
 # Tuple of valid slugs — used by the writer to coerce unknown LLM output to OTHER.
 INTEREST_CATEGORIES: tuple[str, ...] = tuple(CATEGORY_LABELS.keys())
 
+# Provenance of an interest node. An interest can be explicitly declared at
+# onboarding, passively learned from chat, or both. Stored on each interest node
+# so a reader can tell a durable declared interest from a decaying learned one.
+INTEREST_ORIGIN_ONBOARDING = "onboarding"
+INTEREST_ORIGIN_LEARNED = "learned"
+INTEREST_ORIGIN_BOTH = "both"
+
+# Field names written on the users/{uid} doc at onboarding. Defined here (the one
+# taxonomy module both onboarding writer and signal-engine reader import) so the
+# field-name contract lives in exactly one place per the data-layer discipline.
+ONBOARDING_INTERESTS_FIELD = "onboarding_interests"  # list[taxonomy slug]
+GENDER_FIELD = "gender"
+LOCALE_FIELD = "locale"
+LANGUAGE_FIELD = "language"
+
 # Recency half-life: a node's weight halves every this-many days of inactivity.
 HALF_LIFE_DAYS = 30.0
 # Per-category cap on distinct subjects; lowest-weight subjects are evicted.
@@ -158,11 +173,23 @@ def _decayed_weight(weight: Any, last_seen: Any, now: datetime) -> float:
 # Writer primitive
 # --------------------------------------------------------------------------
 
+def _merge_origin(existing: Any, incoming: str) -> str:
+    """Combine a node's existing origin with a new one. onboarding + learned = both."""
+    if existing not in (
+        INTEREST_ORIGIN_ONBOARDING, INTEREST_ORIGIN_LEARNED, INTEREST_ORIGIN_BOTH,
+    ):
+        return incoming
+    if existing == INTEREST_ORIGIN_BOTH or existing == incoming:
+        return existing
+    return INTEREST_ORIGIN_BOTH
+
+
 def apply_interest_signal(
     interests: dict[str, Any],
     category: str,
     subject: str | None,
     now: datetime,
+    origin: str = INTEREST_ORIGIN_LEARNED,
 ) -> None:
     """
     Fold one (category, subject) signal into the `interests` map in place.
@@ -170,16 +197,23 @@ def apply_interest_signal(
     Unknown categories are coerced to OTHER_CATEGORY. The category weight always
     advances; the subject weight advances only when a concrete subject is given.
     Both use decay-then-increment so the stored number is recency-aware.
+
+    `origin` records provenance: passive chat signals default to "learned"; the
+    onboarding seeder passes "onboarding". A node touched by both becomes "both".
     """
     slug = category if category in INTEREST_CATEGORIES else OTHER_CATEGORY
     now_iso = now.isoformat()
 
     node = interests.get(slug)
     if not isinstance(node, dict):
-        node = {"weight": 0.0, "first_seen": now_iso, "last_seen": now_iso, "subjects": {}}
+        node = {
+            "weight": 0.0, "first_seen": now_iso, "last_seen": now_iso,
+            "subjects": {}, "origin": origin,
+        }
         interests[slug] = node
     node["weight"] = _decayed_weight(node.get("weight"), node.get("last_seen"), now) + 1.0
     node["last_seen"] = now_iso
+    node["origin"] = _merge_origin(node.get("origin"), origin)
     node.setdefault("first_seen", now_iso)
 
     subjects = node.setdefault("subjects", {})
@@ -365,3 +399,32 @@ def category_count(profile: dict[str, Any]) -> int:
     """Number of categories present in the new structure (used to sunset legacy)."""
     interests = profile.get("interests")
     return len(interests) if isinstance(interests, dict) else 0
+
+
+def active_category_slugs(profile: dict[str, Any], now: datetime | None = None) -> list[str]:
+    """Taxonomy slugs the user has a live (decayed weight > 0) interest in.
+
+    Used by the signal-engine scoring gate to build a user's category allow-list.
+    These are already taxonomy slugs (the only thing the interests map stores), so
+    the caller does not need to normalise them. Ordered strongest-first.
+    """
+    now = now or datetime.now(UTC)
+    return [slug for slug, _weight, _node in _ranked_categories(profile, now)]
+
+
+def seed_onboarding_interests(
+    interests: dict[str, Any],
+    slugs: list[str],
+    now: datetime | None = None,
+) -> None:
+    """Seed declared onboarding interests into the `interests` map in place.
+
+    Each slug is folded in via apply_interest_signal with origin="onboarding" and
+    no subject (a declared category has no specific subject yet). Off-taxonomy
+    slugs coerce to OTHER, matching the writer's contract elsewhere.
+    """
+    now = now or datetime.now(UTC)
+    for slug in slugs:
+        apply_interest_signal(
+            interests, slug, subject=None, now=now, origin=INTEREST_ORIGIN_ONBOARDING,
+        )

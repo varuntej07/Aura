@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
@@ -11,6 +12,7 @@ import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import 'backend_api_service.dart';
 import 'posthog_analytics_service.dart';
+import 'thread_notification_handler.dart';
 
 /// Payload emitted when the user taps an engagement notification.
 class EngagementTapPayload {
@@ -44,11 +46,46 @@ class SignalNotificationTapPayload {
   final String contentId;
   final String category;
   final String openingChatMessage;
+  // "read" opens the source url in an in-app browser; "discuss" (or empty) opens
+  // chat. url is the source article when contentKind is "read".
+  final String contentKind;
+  final String url;
 
   const SignalNotificationTapPayload({
     required this.notificationId,
     required this.contentId,
     required this.category,
+    required this.openingChatMessage,
+    this.contentKind = '',
+    this.url = '',
+  });
+}
+
+/// Payload emitted when the user taps a curiosity follow-up notification (or its
+/// body on iOS, where the suggestion chips render in-chat instead of on the
+/// notification). Carries the question + suggested replies so the chat surface
+/// can seed Buddy's opener and the tappable pills.
+class ThreadFollowUpTapPayload {
+  final String threadId;
+  final String question;
+  final List<String> suggestedReplies;
+
+  const ThreadFollowUpTapPayload({
+    required this.threadId,
+    required this.question,
+    required this.suggestedReplies,
+  });
+}
+
+/// Payload emitted when the user taps an icebreaker notification. An icebreaker
+/// always opens chat seeded with Buddy's opener (there is no read/url branch).
+/// Carries the funnel id so the chat surface can attribute the session + reply.
+class IcebreakerTapPayload {
+  final String notificationId;
+  final String openingChatMessage;
+
+  const IcebreakerTapPayload({
+    required this.notificationId,
     required this.openingChatMessage,
   });
 }
@@ -88,6 +125,7 @@ class NotificationService {
   String? _userId;
   StreamSubscription<String>? _tokenRefreshSubscription;
   StreamSubscription<RemoteMessage>? _foregroundSubscription;
+  StreamSubscription<Map<String, dynamic>>? _threadBodyTapSub;
 
   final _localNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -95,6 +133,10 @@ class NotificationService {
   final _agentNudgeTapController = StreamController<AgentNudgeTapPayload>.broadcast();
   final _signalNotificationTapController =
       StreamController<SignalNotificationTapPayload>.broadcast();
+  final _threadFollowUpTapController =
+      StreamController<ThreadFollowUpTapPayload>.broadcast();
+  final _icebreakerTapController =
+      StreamController<IcebreakerTapPayload>.broadcast();
 
   // Emits when the user taps an engagement notification.
   Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
@@ -105,6 +147,16 @@ class NotificationService {
   // Emits when the user taps a signal-engine content notification.
   Stream<SignalNotificationTapPayload> get signalNotificationTapStream =>
       _signalNotificationTapController.stream;
+
+  // Emits when the user taps a curiosity follow-up notification (or its body on
+  // iOS) — the chat surface seeds Buddy's question and renders the pills.
+  Stream<ThreadFollowUpTapPayload> get threadFollowUpTapStream =>
+      _threadFollowUpTapController.stream;
+
+  // Emits when the user taps an icebreaker notification — the chat surface opens
+  // seeded with Buddy's opener.
+  Stream<IcebreakerTapPayload> get icebreakerTapStream =>
+      _icebreakerTapController.stream;
 
   // Public API
 
@@ -151,6 +203,16 @@ class NotificationService {
     // 2. Initialize local notifications plugin + create Android channel
     await _initializeLocalNotificationsPlugin();
     await _createAndroidChannel();
+    // Register the thread-followup plugin + its background action callback so
+    // inline replies are handled even when the app is terminated.
+    await ensureThreadNotificationsInitialized();
+
+    // The follow-up notification is built locally, so a BODY tap is delivered to
+    // the local-notifications handler, not onMessageOpenedApp. Relay it into the
+    // tap stream HomeViewModel listens to, and replay any terminated-launch tap.
+    await _threadBodyTapSub?.cancel();
+    _threadBodyTapSub = threadBodyTapStream.listen(_relayThreadBodyTap);
+    unawaited(handleThreadNotificationColdLaunch());
 
     // 3. Get current token and register with backend.
     // On the iOS simulator APNS is unavailable, so getToken() throws
@@ -206,13 +268,17 @@ class NotificationService {
   Future<void> dispose() async {
     await _tokenRefreshSubscription?.cancel();
     await _foregroundSubscription?.cancel();
+    await _threadBodyTapSub?.cancel();
     _tokenRefreshSubscription = null;
     _foregroundSubscription = null;
+    _threadBodyTapSub = null;
     _userId = null;
     _initialized = false;
     await _engagementTapController.close();
     await _agentNudgeTapController.close();
     await _signalNotificationTapController.close();
+    await _threadFollowUpTapController.close();
+    await _icebreakerTapController.close();
   }
 
   // Private helpers
@@ -292,6 +358,13 @@ class NotificationService {
 
   /// Show a system notification while the app is in the foreground.
   Future<void> _handleForegroundMessage(RemoteMessage message) async {
+    // Curiosity follow-ups are data-only (no notification block) so we render
+    // the interactive chip notification ourselves, same as in the background.
+    if (isThreadFollowUp(message)) {
+      await showThreadFollowUpNotification(message);
+      return;
+    }
+
     final notification = message.notification;
     if (notification == null) return;
 
@@ -366,6 +439,36 @@ class NotificationService {
         category: category,
       ),
     ]);
+  }
+
+  /// Call when the user opens a "read" signal notification's article in the
+  /// in-app browser. Does two things: nudges the user vector mildly toward the
+  /// actual content (the content_opened signal event), and fires the read-path
+  /// funnel terminal (`content_opened`) so a tapped-and-read notification is a
+  /// measurable conversion — the read path never reaches the chat action step.
+  Future<void> reportContentOpened({
+    required String contentId,
+    String? category,
+    String? notificationId,
+  }) async {
+    if (contentId.isEmpty) return;
+    unawaited(_postSignalEvents([
+      _buildEventPayload(
+        eventType: 'content_opened',
+        contentId: contentId,
+        category: category,
+      ),
+    ]));
+    unawaited(_postHogAnalyticsService.trackEvent(
+      FunnelEvents.contentOpened,
+      properties: {
+        FunnelEvents.propFirebaseUid: ?_userId,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originSignalEngine,
+        FunnelEvents.propNotificationId: ?notificationId,
+        FunnelEvents.propContentId: contentId,
+        FunnelEvents.propCategory: ?category,
+      },
+    ));
   }
 
   /// Call once per cold app open. Records the local-time slot so the engine
@@ -477,9 +580,73 @@ class NotificationService {
           contentId: data[FunnelEvents.propContentId] as String? ?? '',
           category: data[FunnelEvents.propCategory] as String? ?? '',
           openingChatMessage: data['opening_chat_message'] as String? ?? '',
+          contentKind: data['content_kind'] as String? ?? '',
+          url: data['url'] as String? ?? '',
+        ));
+      }
+    } else if (notificationType == kThreadFollowUpType) {
+      // Curiosity follow-up tapped on the body (or any iOS tap, where chips are
+      // not on the notification): open chat seeded with the question + pills.
+      final threadId = data['thread_id'] as String? ?? '';
+      final question = data['question'] as String? ?? '';
+      if (threadId.isNotEmpty && question.isNotEmpty) {
+        _threadFollowUpTapController.add(ThreadFollowUpTapPayload(
+          threadId: threadId,
+          question: question,
+          suggestedReplies: _decodeSuggestedRepliesData(data['suggested_replies']),
+        ));
+      }
+    } else if (notificationType == FunnelEvents.originIcebreaker) {
+      // Icebreaker opener tapped: open chat seeded with Buddy's opener, carrying
+      // the funnel id so the chat surface can attribute the session + first reply.
+      final notificationId =
+          data[FunnelEvents.propNotificationId] as String? ?? '';
+      final openingChatMessage = data['opening_chat_message'] as String? ?? '';
+      if (openingChatMessage.isNotEmpty) {
+        _icebreakerTapController.add(IcebreakerTapPayload(
+          notificationId: notificationId,
+          openingChatMessage: openingChatMessage,
         ));
       }
     }
+  }
+
+  /// Relays an Android notification body tap (from the local-notifications
+  /// handler) into [threadFollowUpTapStream], and fires the funnel tap step that
+  /// the FCM `onMessageOpenedApp` path fires for every other notification.
+  void _relayThreadBodyTap(Map<String, dynamic> data) {
+    final threadId = data['thread_id'] as String? ?? '';
+    if (threadId.isEmpty) return;
+
+    unawaited(_postHogAnalyticsService.trackEvent(
+      FunnelEvents.notificationTapped,
+      properties: {
+        'notification_type': kThreadFollowUpType,
+        FunnelEvents.propFirebaseUid: ?_userId,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originThreadEngine,
+        FunnelEvents.propThreadId: threadId,
+      },
+    ));
+
+    _threadFollowUpTapController.add(ThreadFollowUpTapPayload(
+      threadId: threadId,
+      question: data['question'] as String? ?? '',
+      suggestedReplies:
+          (data['suggested_replies'] as List?)?.cast<String>() ?? const [],
+    ));
+  }
+
+  /// Decode the JSON-encoded `suggested_replies` string from an FCM data
+  /// payload into a list. Returns an empty list on anything malformed.
+  static List<String> _decodeSuggestedRepliesData(Object? raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.map((e) => e.toString()).toList();
+    } catch (_) {
+      // Malformed payload just means no pills — never throw out of a tap.
+    }
+    return const [];
   }
 
   /// Convenience accessor used for testing / debug screens.

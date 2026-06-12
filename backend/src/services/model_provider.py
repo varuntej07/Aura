@@ -41,6 +41,7 @@ _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0           # Anthropic backoff: 1s, 2s, 4s
 _GEMINI_BASE_DELAY_S = 5.0    # Gemini backoff: 5s, 10s, 20s — background tasks, 503s need time to clear
 _TIMEOUT_S = 30.0             # per-call budget for background LLM work
+_REASON_TIMEOUT_S = 90.0      # deep reasoning (Opus + adaptive thinking) runs long; streamed
 
 # Anthropic exceptions that are worth retrying (transient / server-side)
 _ANTHROPIC_RETRYABLE = (
@@ -174,6 +175,58 @@ class ModelProvider:
             response_model=response_model,
             temperature=temperature,
         )
+
+    @observe(name="anthropic_reason_turn")
+    async def reason_turn(
+        self,
+        messages: list[dict],
+        *,
+        system: str | None = None,
+        tools: list[dict] | None = None,
+    ) -> Any:
+        """One streamed turn on the reasoning model (Sonnet, REASON_STEP_MODEL),
+        returning the RAW final message with tool_use blocks intact so the caller can
+        drive its own tool loop (the reason_step funnel). Unlike balanced()/expert(),
+        this does not flatten to text. Plain tool-use turn: no thinking, no temperature
+        — the step discipline lives in the system prompt, not in extended reasoning.
+        Streams so a longer turn never trips the SDK HTTP timeout."""
+        model_id = settings.REASON_STEP_MODEL
+        client = self._get_anthropic_client().with_options(timeout=_REASON_TIMEOUT_S)
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "max_tokens": 4000,
+            "messages": messages,
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = tools
+
+        logger.debug("ModelProvider.reason_turn", {"model": model_id, "turns": len(messages)})
+
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                async with client.messages.stream(**kwargs) as stream:
+                    return await stream.get_final_message()
+            except _ANTHROPIC_RETRYABLE as exc:
+                if attempt == _MAX_RETRIES:
+                    logger.exception("ModelProvider: reason_turn() failed after retries", {
+                        "model": model_id,
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    })
+                    raise
+                delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                logger.warn("ModelProvider: reason_turn() retryable error, backing off", {
+                    "model": model_id,
+                    "attempt": attempt,
+                    "delay_s": round(delay, 2),
+                    "error_type": type(exc).__name__,
+                })
+                await asyncio.sleep(delay)
+        # retry loop always returns or raises; this line is unreachable
+        raise RuntimeError("ModelProvider: reason_turn() retry loop exited unexpectedly")
 
     async def _call(
         self,

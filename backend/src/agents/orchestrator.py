@@ -106,10 +106,10 @@ async def _run(agent_id: str, user_id: str) -> None:
         })
         return
 
-    # Step 2: Fetch fresh content (retained for future signal_engine/content_ingest use)
-    await agent.fetch_data(user_config)
-
-    logger.info("agent_orchestrator: fetch complete — notification send handled by signal engine", {
+    # Content fetch + notification send are both owned by the signal engine
+    # (content_ingest → scoring_loop). This orchestrator no longer fetches —
+    # its per-agent fetch_data output was discarded here and never consumed.
+    logger.info("agent_orchestrator: run completed: content + notifications handled by signal engine", {
         "agent_id": agent_id,
         "user_id": user_id,
     })

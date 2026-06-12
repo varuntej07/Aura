@@ -20,7 +20,15 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ValidationError, field_validator
 
+from ..config.settings import settings
 from ..lib.logger import logger
+from .life_facts_schema import (
+    LIFE_FACT_DESCRIPTIONS,
+    LIFE_FACT_KEYS,
+    LIFE_FACTS_FIELD,
+    apply_life_fact,
+    remove_life_fact,
+)
 from .model_provider import get_model_provider
 from .user_aura_schema import (
     CATEGORY_LABELS,
@@ -43,6 +51,7 @@ _MIN_DIRECTIVE_HINT_LENGTH = 15   # hints shorter than this are too vague to be 
 _MAX_ACCEPTED_HINTS = 30          # cap on stored accepted hints per user
 _MAX_STYLE_SIGNALS = 10           # cap on style avoid/prefer entries in UserAura
 _MAX_INTERESTS_PER_MESSAGE = 3    # categories the model may emit per message
+_MAX_LIFE_FACTS_PER_MESSAGE = 3   # durable life facts the model may emit per message
 
 # Firestore hard-fails a document write at 1 MiB. Warn well before so a bloating
 # profile screams in logs instead of silently freezing on a swallowed write.
@@ -70,6 +79,18 @@ class InterestSignal(BaseModel):
         return slug if slug in INTEREST_CATEGORIES else OTHER_CATEGORY
 
 
+class LifeFactSignal(BaseModel):
+    """One durable life fact extracted from a message: a closed-taxonomy key plus
+    the concrete value named (e.g. key="has_pet", value="dog named Bruno"). These
+    arm the Icebreaker engine's life-aware openers. Off-list keys are dropped by
+    the schema writer, so the closed-set contract holds even if the model invents
+    a key."""
+
+    key: str                  # one of life_facts_schema.LIFE_FACT_KEYS
+    value: str | None = None  # the concrete value (pet name, city, ...), or null
+    negated: bool = False     # True when the user DENIES/corrects this fact, so it is cleared
+
+
 class MessageInsight(BaseModel):
     # Request classification
     primary_intent: str | None     # task_request | seeking_advice | information_lookup |
@@ -79,6 +100,11 @@ class MessageInsight(BaseModel):
 
     # Interest extraction — category (closed taxonomy) + specific subject. Max 3.
     interests: list[InterestSignal]
+
+    # Durable life facts (closed-taxonomy key + value) that arm life-aware
+    # notifications. Sparse by design — usually empty. Defaulted so a model that
+    # omits the key degrades to "no facts" instead of failing the whole extraction.
+    life_facts: list[LifeFactSignal] = []
 
     # Domain and behavioral signals — required enums, but the LLM can still omit them
     # (null) on zero-signal/ack messages, so they accept None to avoid rejecting the
@@ -116,6 +142,10 @@ class MessageInsight(BaseModel):
 
 _CATEGORY_REFERENCE = "\n".join(
     f" - {slug}: {label}" for slug, label in CATEGORY_LABELS.items()
+)
+
+_LIFE_FACT_REFERENCE = "\n".join(
+    f" - {key}: {LIFE_FACT_DESCRIPTIONS[key]}" for key in LIFE_FACT_KEYS
 )
 
 _EXTRACTION_SYSTEM_PROMPT = f"""\
@@ -193,6 +223,44 @@ _EXTRACTION_SYSTEM_PROMPT = f"""\
             explicit_facts: ["was rejected after an 8-round interview that included a 6-hour onsite"]
             emotional_state: sad, domain: work
 
+            LIFE FACTS (sparse, high-value — usually empty):
+            Separately from explicit_facts, extract life_facts ONLY when the user states a
+            durable fact that fits one of the fixed keys below. Each life fact is a (key, value)
+            pair: pick EXACTLY ONE key from the list, and put the concrete detail in value.
+            Emit a life fact only when you are highly confident and the detail is durable (not a
+            one-off). Most messages produce NO life facts -- return an empty list then. Never
+            invent a key outside this list.
+
+            The fact MUST be about the user themselves, stated in the first person (their own
+            pet, home, job, habit). NEVER store a fact about another person -- "my friend's dog",
+            "my sister is a doctor", "my roommate has a cat" produce NO life fact. When unsure
+            whose fact it is, emit nothing.
+
+            If the user DENIES or corrects a fact ("I don't have a dog", "I never said I was
+            married", "I moved out of Hyderabad"), emit that key with "negated": true and no
+            value, so the stored fact is cleared. Use negated only for an explicit denial.
+
+            Life fact keys (key: meaning):
+{_LIFE_FACT_REFERENCE}
+
+            Life fact examples:
+
+            "my dog Bruno keeps chewing my shoes"
+            life_facts: [{{"key": "has_pet", "value": "dog named Bruno"}}]
+
+            "I'm based in Hyderabad and usually take the metro to work"
+            life_facts: [{{"key": "home_city", "value": "Hyderabad"}},
+                         {{"key": "commute_mode", "value": "takes the metro"}}]
+
+            "what's a good protein intake" (no durable fact stated)
+            life_facts: []
+
+            "my friend's dog keeps chewing my shoes" (the dog is not the user's)
+            life_facts: []
+
+            "actually I don't have a dog" (explicit denial -> clear the fact)
+            life_facts: [{{"key": "has_pet", "negated": true}}]
+
             Turn Scoring (apply when a previous assistant response is provided):
             The current user message is the "next-state signal" -- it reveals how well Buddy responded.
             Set signal_type to one of the following based on how the current message relates to the previous response:
@@ -245,6 +313,7 @@ def _build_extraction_prompt(
         '  "primary_intent": "task_request|seeking_advice|information_lookup|casual_chat|venting|complaint|gratitude|follow_up_only",\n'
         '  "secondary_intent": "string or null",\n'
         '  "interests": [{"category": "one slug from the category list", "subject": "specific subject or null"}],\n'
+        '  "life_facts": [{"key": "one key from the life fact list", "value": "concrete value or null", "negated": false}],\n'
         '  "domain": "work|health|finance|learning|social|entertainment|personal|technical|unclear",\n'
         '  "tone": "casual|terse|verbose|formal|playful",\n'
         '  "emotional_state": "neutral|anxious|frustrated|excited|anticipatory|curious|sad or null",\n'
@@ -313,6 +382,21 @@ def _merge_profile(
         profile["interests"] = interests
     for signal in insight.interests[:_MAX_INTERESTS_PER_MESSAGE]:
         apply_interest_signal(interests, signal.category, signal.subject, now)
+
+    # Life facts — the sparse, typed map that arms life-aware notifications. Gated
+    # by a flag so the feature ships dark and starts accumulating facts BEFORE any
+    # icebreaker can fire (and so it can be turned off instantly without a deploy).
+    # The schema writer silently drops off-taxonomy keys, so the closed-set holds.
+    if settings.LIFE_FACTS_CAPTURE_ENABLED and insight.life_facts:
+        life_facts = profile.get(LIFE_FACTS_FIELD)
+        if not isinstance(life_facts, dict):
+            life_facts = {}
+            profile[LIFE_FACTS_FIELD] = life_facts
+        for fact in insight.life_facts[:_MAX_LIFE_FACTS_PER_MESSAGE]:
+            if fact.negated:
+                remove_life_fact(life_facts, fact.key)
+            else:
+                apply_life_fact(life_facts, fact.key, fact.value, now)
 
     # Domain, tone, urgency
     if insight.domain:
