@@ -83,13 +83,25 @@ class ConnectorsViewModel extends SafeChangeNotifier {
         _state = ViewState.loaded;
       },
       failure: (error) {
-        _error = error;
-        _state = ViewState.error;
-        AppLogger.error(
-          'Google Calendar toggle failed',
-          error: error,
-          tag: 'ConnectorsVM',
-        );
+        // User backed out of the Google account picker before connecting —
+        // that's a normal choice, not an error. Quietly leave the toggle off
+        // instead of flashing a red error banner at them.
+        if (error.code == ErrorCode.authCancelled) {
+          AppLogger.info(
+            'Google Calendar connect cancelled by user',
+            tag: 'ConnectorsVM',
+          );
+          _error = null;
+          _state = ViewState.loaded;
+        } else {
+          _error = error;
+          _state = ViewState.error;
+          AppLogger.error(
+            'Google Calendar toggle failed',
+            error: error,
+            tag: 'ConnectorsVM',
+          );
+        }
       },
     );
 

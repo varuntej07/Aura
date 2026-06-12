@@ -12,16 +12,128 @@ from uuid import uuid4
 
 from google.cloud import firestore as fs
 from google.cloud.firestore_v1.base_query import FieldFilter
+from pydantic import BaseModel
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..shared.tools import claude_tool_definitions
 from .firebase import admin_firestore
 from .gmail_connector import GmailConnector
 from .google_calendar_connector import GoogleCalendarConnector
+from .model_provider import _strip_fences, get_model_provider
 
 ToolResult = dict[str, Any]
 
 TOOL_TIMEOUT_S = settings.CHAT_TOOL_TIMEOUT_S
+
+
+# reason_step funnel contract. The stepper (Sonnet) fetches via the web_surf TOOL; 
+# it talks to the user only through this JSON shape, one step per call 
+# (A1: clarify renders through the existing ask_clarification chips).
+class _ReasonStep(BaseModel):
+    action: str = "present"          # "clarify" | "present" | "final"
+    confidence: float = 0.0
+    question: str = ""
+    options: list[str] = []
+    findings: str = ""
+    next_question: str = ""
+    answer: str = ""
+
+
+REASON_STEP_SYSTEM = (
+    "You guide the user through ONE step at a time. Never dump a multi-branch answer in a "
+    "single message.\n\n"
+    "RULES:\n"
+        "1. Clarify before reasoning. If the request forks into materially different paths and the "
+        "user hasn't chosen one, ask ONE clarifying question with 2-5 short, concrete options. Do "
+        "NOT explain each path in detail yet — just surface the choice.\n"
+        "2. Fetch before asserting. For anything tied to a specific place, time, price, company, or "
+        "current requirement, do NOT answer from memory — call the web_surf tool with specific "
+        "queries to get real, current resources (actual sites, company names, numbers).\n"
+        "3. Present, then hand back the next decision. After fetching, show the concrete findings "
+        "(real sites/names/numbers) and end with the next branch as a follow-up question.\n"
+        "4. Finalize only when no material branch remains and the concrete resources are in hand.\n\n"
+        "To FETCH: call the web_surf tool (you may call it more than once before replying).\n"
+        "To talk to the user: return ONLY a JSON object — no prose, no markdown fences — one of:\n"
+        '  {"action": "clarify", "question": "...", "options": ["...", "..."]}\n'
+        '  {"action": "present", "findings": "<concrete findings naming real sites>", '
+        '"next_question": "<next decision, or empty>", "options": ["...", "..."]}\n'
+        '  {"action": "final", "confidence": <0.0-1.0>, "answer": "..."}\n\n'
+    "Treat confidence below 0.85 as not ready to finalize — clarify or present instead. Never "
+    "invent sites, companies, or requirements; if you didn't fetch it, don't claim it. Be warm, "
+    "specific, and concise."
+)
+
+# The stepper may call only web_surf — never itself or any other tool.
+_REASON_STEP_TOOLS = [t for t in claude_tool_definitions() if t["name"] == "web_surf"]
+
+
+def _build_reason_seed(inp: dict[str, Any]) -> str:
+    task = str(inp.get("task", "")).strip()
+    context = str(inp.get("known_context", "")).strip()
+    parts = [f"User's request:\n{task}"]
+    
+    if context:
+        parts.append(f"Already known / resolved so far:\n{context}")
+    parts.append("Decide and produce the SINGLE next step now.")
+    return "\n\n".join(parts)
+
+
+def _format_fetch_result(out: ToolResult) -> str:
+    """Turn a _web_surf result into text the stepper can cite (real sites + urls)."""
+    if out.get("error"):
+        return str(out.get("user_message") or "Search unavailable right now.")
+    
+    text = str(out.get("text") or "").strip()
+    sources = out.get("sources") or []
+    lines = [
+        f"- {s.get('title') or s.get('url')} — {s.get('url')}"
+        for s in sources
+        if isinstance(s, dict) and s.get("url")
+    ]
+    
+    if lines and text:
+        return text + "\n\nSources:\n" + "\n".join(lines)
+    if lines:
+        return "Sources:\n" + "\n".join(lines)
+    return text or "No useful results."
+
+
+def _parse_reason_step(raw: str) -> _ReasonStep:
+    cleaned = _strip_fences(raw)
+    try:
+        return _ReasonStep.model_validate_json(cleaned)
+    except Exception:
+        # Model didn't emit clean JSON — degrade to presenting its text, never crash the chat.
+        return _ReasonStep(action="present", findings=raw)
+
+
+def _reason_step_to_result(step: _ReasonStep) -> ToolResult:
+    action = step.action
+    # Confidence gate: don't let a low-confidence 'final' through — ask instead of guessing.
+    if action == "final" and step.confidence and step.confidence < settings.REASON_STEP_CONFIDENCE_FLOOR:
+        action = "clarify"
+    
+    if action == "clarify":
+        return {
+            "needs_clarification": True,
+            "instruction": "Before answering, call ask_clarification with this question and options.",
+            "question": step.question or step.next_question,
+            "options": step.options,
+        }
+    
+    if action == "present":
+        out: ToolResult = {"findings": step.findings}
+        if step.next_question:
+            out["next_question"] = step.next_question
+            out["options"] = step.options
+            out["instruction"] = (
+                "Relay the findings, then call ask_clarification with next_question and options."
+            )
+        else:
+            out["instruction"] = "Relay these concrete findings to the user, then ask what they'd like next."
+        return out
+    return {"reasoned_answer": step.answer or step.findings}
 
 
 # runs sync functions with timeout
@@ -87,6 +199,7 @@ class ToolExecutor:
             "configure_agent": self._configure_agent,
             "get_agent_config": self._get_agent_config,
             "web_surf": self._web_surf,
+            "reason_step": self._reason_step,
         }
         handler = dispatch.get(tool_name)
         if handler is None:
@@ -180,6 +293,18 @@ class ToolExecutor:
         }
         ref = self._reminders_ref().document(reminder_id)
         await _run(lambda: ref.set(data))
+
+        # Open a curiosity thread for this reminder so Buddy can later ask what
+        # it is about (not whether it was done). Fire-and-forget and a no-op
+        # while the engine is disabled, so the tool path is never affected.
+        from .threads.thread_writer import record_reminder_thread
+
+        asyncio.create_task(record_reminder_thread(
+            self._user_id,
+            reminder_id=reminder_id,
+            message=message,
+            trigger_at_iso=trigger_at,
+        ))
 
         return {
             "reminder_id": reminder_id,
@@ -416,6 +541,63 @@ class ToolExecutor:
             "question": str(inp.get("question", "")).strip(),
             "options": [str(o) for o in inp.get("options", [])],
             "multi_select": bool(inp.get("multi_select", False)),
+        }
+
+    # Staged reasoning funnel (chat-only, flag-gated). Sonnet runs the protocol one step at a
+    # time, fetching real resources via web_surf itself, and crosses back to the user only for
+    # a clarify / present / final step (A1: clarify renders through ask_clarification). Off by
+    # default — see REASON_STEP_ENABLED.
+    async def _reason_step(self, inp: dict[str, Any]) -> ToolResult:
+        if not settings.REASON_STEP_ENABLED:
+            logger.warn("Tool: reason_step called while disabled", {"user_id": self._user_id})
+            return {"error": True, "user_message": "I can't walk you through that one step by step yet."}
+
+        task = str(inp.get("task", "")).strip()
+        if not task:
+            raise ValueError("task is required")
+
+        provider = get_model_provider()
+        messages: list[dict[str, Any]] = [{"role": "user", "content": _build_reason_seed(inp)}]
+        fetches_used = 0
+
+        for _turn in range(settings.REASON_STEP_MAX_TURNS):
+            msg = await provider.reason_turn(
+                messages,
+                system=REASON_STEP_SYSTEM,
+                tools=_REASON_STEP_TOOLS,
+            )
+            tool_uses = [b for b in msg.content if getattr(b, "type", None) == "tool_use"]
+
+            # No tool call → the model emitted the structured step as text. Done for this turn.
+            if not tool_uses:
+                raw = " ".join(
+                    b.text for b in msg.content if getattr(b, "type", None) == "text"
+                ).strip()
+                return _reason_step_to_result(_parse_reason_step(raw))
+
+            # Execute the model's web_surf calls itself, feed results back, continue the funnel.
+            messages.append({"role": "assistant", "content": msg.content})
+            results: list[dict[str, Any]] = []
+            for block in tool_uses:
+                if block.name == "web_surf" and fetches_used < settings.REASON_STEP_MAX_FETCHES:
+                    fetches_used += 1
+                    out = await self._web_surf(dict(block.input))
+                    content = _format_fetch_result(out)
+                else:
+                    content = "Fetch budget reached — present what you have or ask the user."
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": content})
+            messages.append({"role": "user", "content": results})
+
+        # Out of turns — fail soft with a clarification rather than a half-baked answer.
+        logger.warn("Tool: reason_step exhausted turns", {
+            "user_id": self._user_id,
+            "fetches": fetches_used,
+        })
+        return {
+            "needs_clarification": True,
+            "instruction": "Call ask_clarification with this question.",
+            "question": "I'm pulling together a lot here — what matters most to you right now?",
+            "options": [],
         }
 
     # User context

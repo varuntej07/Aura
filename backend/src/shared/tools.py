@@ -262,6 +262,37 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["question", "options"],
         },
     },
+    {
+        "name": "reason_step",
+        "description": (
+            "Guide the user through a complex, branching, or resource-finding request ONE step "
+            "at a time — clarify which path they want before explaining it, fetch real current "
+            "resources (actual sites, companies, prices) before asserting, and surface the next "
+            "decision as you go. Use for open-ended 'how do I…' / 'help me figure out…' requests "
+            "with multiple routes or where concrete, up-to-date options matter (e.g. applying for "
+            "jobs or visas abroad, choosing a platform or tool, planning a multi-step project). "
+            "Do NOT use for chit-chat, reminders, memory lookups, or anything a single direct "
+            "reply already handles well."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The user's request, restated in full.",
+                },
+                "known_context": {
+                    "type": "string",
+                    "description": (
+                        "Everything already known or resolved so far — the user's situation plus "
+                        "any earlier choices in this funnel (e.g. 'wants the Opportunity Card, "
+                        "targeting Munich'). Lets the step pick up where the last one left off."
+                    ),
+                },
+            },
+            "required": ["task"],
+        },
+    },
 ]
 
 # Claude (Anthropic SDK) format

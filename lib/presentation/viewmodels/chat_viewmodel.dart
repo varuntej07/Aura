@@ -25,6 +25,15 @@ import 'view_state.dart';
 
 export 'view_state.dart';
 
+/// A funnel "first reply" event armed by a notification-seeded chat open, fired
+/// exactly once by [ChatViewModel.sendMessage] on the user's next send. One type
+/// for every proactive origin so the reply step is wired in a single place.
+class _PendingNotificationReply {
+  final String event;
+  final Map<String, Object> properties;
+  const _PendingNotificationReply(this.event, this.properties);
+}
+
 /// Shared chat logic used by all chat screens (main Buddy chat and per-agent threads).
 /// Subclasses provide [agentId] and implement [initializeSession] for their
 /// specific session-loading strategy.
@@ -57,11 +66,13 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   // runs the work at most once per user even when called from several places.
   String? _restoreAttemptedForUid;
 
-  // Set when a chat thread was opened from a signal-engine notification tap.
-  // The first user reply fires signal_action_after_notification once, then clears.
-  String? _pendingSignalNotificationId;
-  String? _pendingSignalContentId;
-  String? _pendingSignalCategory;
+  // Set when a chat thread was opened from a proactive notification that has a
+  // "first reply" funnel step (signal action / thread reply / icebreaker reply).
+  // The first user reply fires it once, then clears. One field for every origin,
+  // so a new decider cannot forget to wire its reply step. Engagement has no
+  // reply step (it marks responded on open), so it never arms this. Thread arms
+  // it only for in-chat replies — shade replies are counted server-side.
+  _PendingNotificationReply? _pendingReply;
 
   ChatViewModel({
     required ChatServiceProvider backendService,
@@ -214,6 +225,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     if (trimmed.isEmpty && !hasAttachments) return;
     _currentUserId = _normalizeUserId(userId);
 
+    // Any send consumes the curiosity pills — they only make sense before the
+    // user has answered the follow-up.
+    if (_threadSuggestions.isNotEmpty) {
+      _threadSuggestions = const [];
+    }
+
     final userMsg = ChatMessageModel(
       id: _uuid.v4(),
       text: trimmed,
@@ -228,20 +245,16 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     if (!saved) return;
 
     // First reply in a notification-opened thread = the re-engagement payoff.
-    // Fire once, then disarm so later replies don't double-count.
-    if (_pendingSignalNotificationId != null) {
+    // One mechanism fires it for every origin (signal action / thread reply /
+    // icebreaker reply), so a new decider can never forget to wire its funnel
+    // step. Fire once, then disarm so later replies don't double-count.
+    final pendingReply = _pendingReply;
+    if (pendingReply != null) {
       unawaited(postHogAnalytics.trackEvent(
-        FunnelEvents.actionAfterNotification,
-        properties: {
-          FunnelEvents.propNotificationId: _pendingSignalNotificationId!,
-          FunnelEvents.propContentId: _pendingSignalContentId ?? '',
-          FunnelEvents.propCategory: _pendingSignalCategory ?? '',
-          FunnelEvents.propNotificationOrigin: FunnelEvents.originSignalEngine,
-        },
+        pendingReply.event,
+        properties: pendingReply.properties,
       ));
-      _pendingSignalNotificationId = null;
-      _pendingSignalContentId = null;
-      _pendingSignalCategory = null;
+      _pendingReply = null;
     }
 
     _setState(ViewState.loading);
@@ -358,6 +371,83 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _setState(_messages.isEmpty ? ViewState.idle : ViewState.loaded);
   }
 
+  // Curiosity follow-up (thread) pre-load
+
+  /// Suggestion chips for an open curiosity follow-up. Empty once the user has
+  /// replied (or for a thread that was already answered in the notification
+  /// shade). The chat screen renders these above the input; tapping one calls
+  /// [sendMessage].
+  List<String> _threadSuggestions = const [];
+  List<String> get threadSuggestions => List.unmodifiable(_threadSuggestions);
+
+  /// Pre-loads a curiosity follow-up thread when its notification is tapped.
+  ///
+  /// If [priorMessages] is non-empty the user already answered in the shade, so
+  /// we reconcile that server-side exchange into the chat and show no pills.
+  /// Otherwise we seed Buddy's question as the opener and surface the pills.
+  /// [priorMessages] entries are `{role, content}` maps from
+  /// `BackendApiService.fetchThreadMessages`.
+  Future<void> loadThreadFollowUpContext({
+    required String threadId,
+    required String question,
+    required List<String> suggestedReplies,
+    List<Map<String, dynamic>> priorMessages = const [],
+  }) async {
+    _messages.clear();
+    _error = null;
+
+    if (priorMessages.isNotEmpty) {
+      // Reconcile the shade exchange. Persist oldest-first so order is correct.
+      for (final m in priorMessages) {
+        final content = (m['content'] as String?)?.trim() ?? '';
+        if (content.isEmpty) continue;
+        await _persistMessage(ChatMessageModel(
+          id: _uuid.v4(),
+          text: content,
+          isUser: (m['role'] as String?) == 'user',
+          timestamp: DateTime.now(),
+          channel: ChatMessageChannel.text,
+          sessionId: _currentSessionId,
+        ));
+      }
+      _threadSuggestions = const [];
+    } else {
+      if (question.isNotEmpty) {
+        await _persistMessage(ChatMessageModel(
+          id: _uuid.v4(),
+          text: question,
+          isUser: false,
+          timestamp: DateTime.now(),
+          channel: ChatMessageChannel.text,
+          sessionId: _currentSessionId,
+        ));
+      }
+      _threadSuggestions = List.unmodifiable(suggestedReplies);
+    }
+
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+
+    // Funnel session step: the chat opened from a follow-up tap. Arm the action
+    // event only when the user hasn't already answered in the shade (those
+    // replies are counted server-side, so arming would double-count).
+    _armNotificationFunnel(
+      sessionEvent: FunnelEvents.threadSessionFromNotification,
+      sessionProps: {
+        FunnelEvents.propThreadId: threadId,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originThreadEngine,
+      },
+      // Arm the in-chat reply only when the user has not already answered in the
+      // shade (those are counted server-side; arming would double-count).
+      replyEvent: priorMessages.isEmpty ? FunnelEvents.threadReply : null,
+      replyProps: {
+        FunnelEvents.propThreadId: threadId,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originThreadEngine,
+        'channel': 'in_chat',
+      },
+    );
+  }
+
   // Engagement pre-load
 
   /// Pre-loads an assistant message from an engagement notification tap before
@@ -416,19 +506,81 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _setState(ViewState.loaded);
     await _refreshSessions();
 
-    _pendingSignalNotificationId = notificationId;
-    _pendingSignalContentId = contentId;
-    _pendingSignalCategory = category;
-
-    unawaited(postHogAnalytics.trackEvent(
-      FunnelEvents.sessionFromNotification,
-      properties: {
+    _armNotificationFunnel(
+      sessionEvent: FunnelEvents.sessionFromNotification,
+      sessionProps: {
         FunnelEvents.propNotificationId: notificationId,
         FunnelEvents.propContentId: contentId,
         FunnelEvents.propCategory: category,
         FunnelEvents.propNotificationOrigin: FunnelEvents.originSignalEngine,
       },
-    ));
+      replyEvent: FunnelEvents.actionAfterNotification,
+      replyProps: {
+        FunnelEvents.propNotificationId: notificationId,
+        FunnelEvents.propContentId: contentId,
+        FunnelEvents.propCategory: category,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originSignalEngine,
+      },
+    );
+  }
+
+  /// Fires the "chat opened from a notification" session funnel step, and when
+  /// the origin has a first-reply step, arms it to fire exactly once on the
+  /// user's next send. Every seeded-opener path funnels through here so session
+  /// and reply attribution are wired identically for all proactive deciders —
+  /// the unification that keeps a new decider from silently dropping its funnel.
+  void _armNotificationFunnel({
+    required String sessionEvent,
+    required Map<String, Object> sessionProps,
+    String? replyEvent,
+    Map<String, Object> replyProps = const {},
+  }) {
+    unawaited(
+      postHogAnalytics.trackEvent(sessionEvent, properties: sessionProps),
+    );
+    _pendingReply = replyEvent == null
+        ? null
+        : _PendingNotificationReply(replyEvent, replyProps);
+  }
+
+  /// Pre-loads the opener from an icebreaker notification tap and arms funnel
+  /// attribution: fires icebreaker_session_from_notification now; the user's
+  /// first reply fires icebreaker_reply once (see [sendMessage]). Mirrors
+  /// [loadSignalNotificationContext].
+  Future<void> loadIcebreakerContext({
+    required String notificationId,
+    required String openingMessage,
+  }) async {
+    _messages.clear();
+    _error = null;
+
+    if (openingMessage.isNotEmpty) {
+      final msg = ChatMessageModel(
+        id: _uuid.v4(),
+        text: openingMessage,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+      );
+      await _persistMessage(msg);
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+
+    _armNotificationFunnel(
+      sessionEvent: FunnelEvents.icebreakerSessionFromNotification,
+      sessionProps: {
+        FunnelEvents.propNotificationId: notificationId,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originIcebreaker,
+      },
+      replyEvent: FunnelEvents.icebreakerReply,
+      replyProps: {
+        FunnelEvents.propNotificationId: notificationId,
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originIcebreaker,
+        'channel': 'in_chat',
+      },
+    );
   }
 
   // Subclass hooks
