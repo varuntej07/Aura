@@ -117,7 +117,8 @@ def build_agent_session(
         vad=vad,
         turn_detection=turn_detector if turn_detector is not None else NOT_GIVEN,
         preemptive_generation=True,
-        mcp_servers=[mcp_server],
+        mcp_servers=[mcp_server], 
+        user_away_timeout=15.0,          # Flip user state to "away" after 12s of user silence
         turn_handling=TurnHandlingOptions(
             # MultilingualModel already guards turn finality semantically,
             # so we lower the endpointing floor from the 0.5s default to 0.2s (~300ms faster reply)

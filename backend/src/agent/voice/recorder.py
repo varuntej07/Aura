@@ -34,6 +34,13 @@ TOOL_THINKING_PHRASES: dict[str, str] = {
     "send_email": "alright, firing off that email now!",
 }
 
+# Spoken (LLM-framed) when the user has gone silent long enough
+AWAY_NUDGE_INSTRUCTIONS = (
+    "The user has gone quiet for a little while. In Buddy's warm, casual voice, "
+    "gently check whether they're still around. Keep it to one short, low-pressure "
+    "line, no guilt, no list of questions."
+)
+
 
 class VoiceSessionRecorder:
     """Accumulates transcript/tool state and bridges session events to telemetry + the client."""
@@ -59,6 +66,7 @@ class VoiceSessionRecorder:
     def attach(self) -> None:
         """Register every handler on the session. Call once, after construction."""
         self._session.on("agent_state_changed", self._on_state)
+        self._session.on("user_state_changed", self._on_user_state)
         self._session.on("user_input_transcribed", self._on_user_transcript)
         self._session.on("conversation_item_added", self._on_conversation_item)
         self._session.on("session_usage_updated", self._on_usage)
@@ -70,6 +78,37 @@ class VoiceSessionRecorder:
         logger.info("VoiceSession: agent_state_changed", {
             "session_id": self._session_id, "user_id": self._user_id,
             "state": state,
+        })
+
+    def _on_user_state(self, ev) -> None:  # type: ignore[misc]
+        new_state = str(getattr(ev, "new_state", ""))
+        logger.info("VoiceSession: user_state_changed", {
+            "session_id": self._session_id, "user_id": self._user_id,
+            "state": new_state,
+        })
+        if new_state != "away":
+            return
+        # Gate on agent being idle so the nudge never lands on top of Buddy already
+        # speaking or mid tool-call (same guard the tool-thinking phrase uses).
+        if str(getattr(self._session, "agent_state", "")) != "listening":
+            logger.info("VoiceSession: away nudge skipped (agent not listening)", {
+                "session_id": self._session_id, "user_id": self._user_id,
+                "agent_state": str(getattr(self._session, "agent_state", "")),
+            })
+            return
+
+        async def _nudge() -> None:
+            try:
+                await self._session.generate_reply(instructions=AWAY_NUDGE_INSTRUCTIONS)
+            except Exception as exc:
+                logger.warn("VoiceSession: away nudge failed", {
+                    "session_id": self._session_id, "user_id": self._user_id,
+                    "error": str(exc),
+                })
+
+        asyncio.create_task(_nudge(), name=f"away-nudge-{self._session_id[:8]}")
+        logger.info("VoiceSession: away nudge", {
+            "session_id": self._session_id, "user_id": self._user_id,
         })
 
     def _on_user_transcript(self, ev) -> None:  # type: ignore[misc]
