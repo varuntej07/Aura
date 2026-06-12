@@ -3,6 +3,7 @@ import '../../core/theme/app_colors.dart';
 
 class AuraTextField extends StatelessWidget {
   final TextEditingController controller;
+  final FocusNode? focusNode;
   final String hint;
   final bool enabled;
   final ValueChanged<String>? onSubmitted;
@@ -10,6 +11,7 @@ class AuraTextField extends StatelessWidget {
   const AuraTextField({
     super.key,
     required this.controller,
+    this.focusNode,
     this.hint = 'Ask Aura anything...',
     this.enabled = true,
     this.onSubmitted,
@@ -25,6 +27,7 @@ class AuraTextField extends StatelessWidget {
       ),
       child: TextField(
         controller: controller,
+        focusNode: focusNode,
         enabled: enabled,
         minLines: 1,
         maxLines: 5,
@@ -49,7 +52,9 @@ class AuraTextField extends StatelessWidget {
             vertical: 12,
           ),
         ),
-        textInputAction: TextInputAction.send,
+        // Return key inserts a newline; sending is done via the send button.
+        textInputAction: TextInputAction.newline,
+        keyboardType: TextInputType.multiline,
         onSubmitted: (value) {
           if (value.trim().isNotEmpty) {
             onSubmitted?.call(value);

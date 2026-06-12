@@ -13,21 +13,32 @@ import 'connectivity_service.dart';
 
 class ApiClient {
   final ConnectivityService _connectivity;
-  final Future<String?> Function() _tokenProvider;
+  final Future<String?> Function({bool forceRefresh}) _tokenProvider;
 
   ApiClient({
     required ConnectivityService connectivity,
-    required Future<String?> Function() tokenProvider,
+    required Future<String?> Function({bool forceRefresh}) tokenProvider,
   })  : _connectivity = connectivity,
         _tokenProvider = tokenProvider;
 
   Future<Map<String, String>> _headers() async {
-    final token = await _tokenProvider();
+    final token = await _resolveAuthToken();
     return {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       if (token != null) 'Authorization': 'Bearer $token',
     };
+  }
+
+  /// Fetches the Firebase ID token, retrying once with a forced refresh when the
+  /// cached token comes back null. The cache returns null when the token has
+  /// expired and the app has been idle (e.g. a cold launch from a notification
+  /// tap on a flaky network); the forced refresh fetches a fresh one. 
+  /// Returns null only when no token can be obtained at all.
+  Future<String?> _resolveAuthToken() async {
+    final cached = await _tokenProvider();
+    if (cached != null) return cached;
+    return _tokenProvider(forceRefresh: true);
   }
 
   Future<Result<T>> get<T>(
@@ -163,6 +174,10 @@ class ApiClient {
     for (var attempt = 0; attempt < AppConstants.maxApiRetries; attempt++) {
       final headers = await _headers();
       headers['Accept'] = 'text/event-stream';
+      
+      if (!headers.containsKey('Authorization')) {
+        throw AppException.sessionTokenUnavailable();
+      }
       final request = http.Request('POST', url)
         ..headers.addAll(headers)
         ..body = encodedBody;

@@ -38,6 +38,14 @@ class UserSettings {
 }
 
 class UserModel {
+  static const String fieldLastLoginAt = 'last_login_at';
+  static const String fieldLoginCount = 'login_count';
+  static const String fieldLastLogoutAt = 'last_logout_at';
+  static const String fieldLogoutCount = 'logout_count';
+  static const String fieldIsActive = 'is_active';
+  static const String fieldSignInMethod = 'sign_in_method';
+  static const String fieldPlatform = 'platform';
+
   final String uid;
   final String displayName;
   final String email;
@@ -49,6 +57,13 @@ class UserModel {
   final bool onboardingComplete;
   final bool? auraConsentGranted;
   final String? dateOfBirth;
+  final DateTime? lastLoginAt;
+  final int loginCount;
+  final DateTime? lastLogoutAt;
+  final int logoutCount;
+  final bool isActive;
+  final String? signInMethod;
+  final String? platform;
 
   const UserModel({
     required this.uid,
@@ -62,6 +77,13 @@ class UserModel {
     this.onboardingComplete = true,
     this.auraConsentGranted,
     this.dateOfBirth,
+    this.lastLoginAt,
+    this.loginCount = 0,
+    this.lastLogoutAt,
+    this.logoutCount = 0,
+    this.isActive = false,
+    this.signInMethod,
+    this.platform,
   });
 
   factory UserModel.fromJson(Map<String, dynamic> json) {
@@ -79,7 +101,19 @@ class UserModel {
       onboardingComplete: json['onboarding_complete'] as bool? ?? true, // Existing users without this field are treated as onboarded.
       auraConsentGranted: json['aura_consent_granted'] as bool?,
       dateOfBirth: json['date_of_birth'] as String?,
+      lastLoginAt: _parseIso(json[fieldLastLoginAt]),
+      loginCount: (json[fieldLoginCount] as num?)?.toInt() ?? 0,
+      lastLogoutAt: _parseIso(json[fieldLastLogoutAt]),
+      logoutCount: (json[fieldLogoutCount] as num?)?.toInt() ?? 0,
+      isActive: json[fieldIsActive] as bool? ?? false,
+      signInMethod: json[fieldSignInMethod] as String?,
+      platform: json[fieldPlatform] as String?,
     );
+  }
+
+  static DateTime? _parseIso(Object? value) {
+    if (value is! String || value.isEmpty) return null;
+    return DateTime.tryParse(value);
   }
 
   Map<String, dynamic> toJson() => {
@@ -119,6 +153,13 @@ class UserModel {
       onboardingComplete: onboardingComplete ?? this.onboardingComplete,
       auraConsentGranted: auraConsentGranted ?? this.auraConsentGranted,
       dateOfBirth: dateOfBirth ?? this.dateOfBirth,
+      lastLoginAt: this.lastLoginAt,
+      loginCount: this.loginCount,
+      lastLogoutAt: this.lastLogoutAt,
+      logoutCount: this.logoutCount,
+      isActive: this.isActive,
+      signInMethod: this.signInMethod,
+      platform: this.platform,
     );
   }
 }

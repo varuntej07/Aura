@@ -1,4 +1,6 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/errors/app_exception.dart';
@@ -39,11 +41,88 @@ class AuthRepository {
   Future<Result<UserModel>> signInWithGoogle() async {
     final authResult = await _authService.signInWithGoogle();
     return authResult.when(
-      success: (user) async {
-        return _getOrCreateUser(user, name: null);
-      },
+      success: (user) =>
+          _completeSignIn(user, name: null, signInMethod: 'google'),
       failure: (error) => Future.value(Result.failure(error)),
     );
+  }
+
+  /// Runs only after a real, user-initiated sign-in (not a silent session
+  /// restore through [userModelStream]): ensures the user doc exists, then
+  /// records login metadata. A metadata write failure is logged but never
+  /// fails the sign-in.
+  Future<Result<UserModel>> _completeSignIn(
+    User firebaseUser, {
+    required String? name,
+    required String signInMethod,
+  }) async {
+    final result = await _getOrCreateUser(firebaseUser, name: name);
+    return result.when(
+      success: (user) async {
+        await _recordLoginMetadata(firebaseUser.uid, signInMethod);
+        return Result.success(user);
+      },
+      failure: (error) => Result.failure(error),
+    );
+  }
+
+  /// Stamps last_login_at, increments login_count, marks the session active, and
+  /// records how/where they signed in. Uses [FieldValue.increment] so the counter
+  /// is atomic and starts from 0 on docs written by older app clients.
+  Future<void> _recordLoginMetadata(String uid, String signInMethod) async {
+    final result = await _firestoreService.updateDocument(
+      AppConstants.usersCollection,
+      uid,
+      {
+        UserModel.fieldLastLoginAt: DateTime.now().toUtc().toIso8601String(),
+        UserModel.fieldLoginCount: FieldValue.increment(1),
+        UserModel.fieldIsActive: true,
+        UserModel.fieldSignInMethod: signInMethod,
+        UserModel.fieldPlatform: _platformName(),
+      },
+    );
+    result.when(
+      success: (_) {},
+      failure: (error) => AppLogger.warning(
+        'Failed to record login metadata (non-blocking)',
+        tag: 'AuthRepository',
+        metadata: {'uid': uid, 'error': error.message},
+      ),
+    );
+  }
+
+  /// Stamps last_logout_at, increments logout_count, and clears the active flag.
+  /// Must run while Firebase auth is still valid — Firestore rules reject the
+  /// write once the session is cleared.
+  Future<void> _recordLogoutMetadata(String uid) async {
+    final result = await _firestoreService.updateDocument(
+      AppConstants.usersCollection,
+      uid,
+      {
+        UserModel.fieldLastLogoutAt: DateTime.now().toUtc().toIso8601String(),
+        UserModel.fieldLogoutCount: FieldValue.increment(1),
+        UserModel.fieldIsActive: false,
+      },
+    );
+    result.when(
+      success: (_) {},
+      failure: (error) => AppLogger.warning(
+        'Failed to record logout metadata (non-blocking)',
+        tag: 'AuthRepository',
+        metadata: {'uid': uid, 'error': error.message},
+      ),
+    );
+  }
+
+  String _platformName() {
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.iOS:
+        return 'ios';
+      case TargetPlatform.android:
+        return 'android';
+      default:
+        return defaultTargetPlatform.name;
+    }
   }
 
   Future<Result<UserModel>> _getOrCreateUser(
@@ -159,7 +238,8 @@ class AuthRepository {
     final authResult =
         await _authService.signInWithEmailAndPassword(email, password);
     return authResult.when(
-      success: (user) async => _getOrCreateUser(user, name: null),
+      success: (user) =>
+          _completeSignIn(user, name: null, signInMethod: 'password'),
       failure: (error) => Future.value(Result.failure(error)),
     );
   }
@@ -169,12 +249,19 @@ class AuthRepository {
     final authResult =
         await _authService.createUserWithEmailAndPassword(email, password, name);
     return authResult.when(
-      success: (user) async => _getOrCreateUser(user, name: name),
+      success: (user) =>
+          _completeSignIn(user, name: name, signInMethod: 'password'),
       failure: (error) => Future.value(Result.failure(error)),
     );
   }
 
   Future<Result<void>> signOut() async {
+    // Record logout while the session is still authenticated; once
+    // _authService.signOut() runs, Firestore rules reject writes to the doc.
+    final uid = _authService.currentUser?.uid;
+    if (uid != null) {
+      await _recordLogoutMetadata(uid);
+    }
     return _authService.signOut();
   }
 

@@ -55,6 +55,15 @@ class AppException implements Exception {
     );
   }
 
+  /// A signed-in user's Firebase ID token could not be fetched (expired cache +
+  /// a failed refresh, e.g. a cold launch from a notification tap on a flaky network).
+  factory AppException.sessionTokenUnavailable() {
+    return const AppException(
+      code: ErrorCode.authTokenExpired,
+      message: "Couldn't verify your session. Check your connection and try again.",
+    );
+  }
+
   factory AppException.serverError(int statusCode, String body) {
     return AppException(
       code: ErrorCode.serverError,

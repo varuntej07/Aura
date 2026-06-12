@@ -46,7 +46,7 @@ class ReminderRepository {
     final result = await _firestoreService.getPaginatedCollection(
       _userCollection(userId),
       ReminderModel.fromJson,
-      queryBuilder: (ref) => ref.orderBy('trigger_at'),
+      queryBuilder: (ref) => ref.orderBy('trigger_at', descending: true),
       after: _cursor,
       limit: pageSize,
     );

@@ -1,13 +1,39 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../../../core/onboarding/onboardable_interests.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/repositories/onboarding_repository.dart';
 import '../../viewmodels/auth_viewmodel.dart';
+
+/// Common device language codes -> a readable name the notification framer can
+/// write copy in. Falls back to English for anything unmapped.
+const Map<String, String> _languageNames = {
+  'en': 'English',
+  'hi': 'Hindi',
+  'te': 'Telugu',
+  'ta': 'Tamil',
+  'kn': 'Kannada',
+  'ml': 'Malayalam',
+  'mr': 'Marathi',
+  'gu': 'Gujarati',
+  'bn': 'Bengali',
+  'pa': 'Punjabi',
+  'ur': 'Urdu',
+  'es': 'Spanish',
+  'fr': 'French',
+  'de': 'German',
+  'pt': 'Portuguese',
+  'ar': 'Arabic',
+  'zh': 'Chinese',
+  'ja': 'Japanese',
+};
 
 class AuraConsentScreen extends StatefulWidget {
   const AuraConsentScreen({super.key});
@@ -17,13 +43,18 @@ class AuraConsentScreen extends StatefulWidget {
 }
 
 class _AuraConsentScreenState extends State<AuraConsentScreen> {
-  // Two internal steps: 0 = age gate, 1 = Aura consent.
+  // 3 internal steps: 0 = age gate, 1 = profile (gender + interests), 2 = Aura consent.
   int _step = 0;
 
   // Age gate state — pre-set to the max allowed date so the picker opens
   // at 2013 and the user can continue without scrolling if that's their year.
   late DateTime _selectedDate;
   String? _ageError;
+
+  // Profile state - gender (tone only) + declared interests (relevance).
+  String? _gender;
+  final Set<String> _selectedInterests = {};
+  String? _interestError;
 
   // Consent state
   bool _auraConsentGranted = true;
@@ -74,6 +105,36 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
     setState(() => _step = 1);
   }
 
+  void _toggleInterest(String slug) {
+    setState(() {
+      if (_selectedInterests.contains(slug)) {
+        _selectedInterests.remove(slug);
+      } else {
+        _selectedInterests.add(slug);
+      }
+      _interestError = null;
+    });
+  }
+
+  void _confirmProfile() {
+    if (_selectedInterests.length < OnboardableInterests.minSelection) {
+      setState(() => _interestError =
+          'Pick at least ${OnboardableInterests.minSelection} so Buddy knows what to send you.');
+      return;
+    }
+    setState(() => _step = 2);
+  }
+
+  /// Device locale ("en-US") + readable language name ("English") captured for
+  /// region-aware ranking and in-language notification copy.
+  ({String locale, String language}) _deviceLocaleAndLanguage() {
+    final ui.Locale l = WidgetsBinding.instance.platformDispatcher.locale;
+    final country = (l.countryCode ?? '').trim();
+    final localeStr = country.isNotEmpty ? '${l.languageCode}-$country' : l.languageCode;
+    final language = _languageNames[l.languageCode] ?? 'English';
+    return (locale: localeStr, language: language);
+  }
+
   Future<void> _finalize() async {
     if (_saving) return;
     setState(() => _saving = true);
@@ -91,11 +152,17 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
     // Under-18s are never profiled regardless of the toggle.
     final effectiveConsent = age >= 18 ? _auraConsentGranted : false;
     final dob = _selectedDate.toIso8601String().split('T').first;
+    final device = _deviceLocaleAndLanguage();
+    final gender = _gender ?? 'LGBTQ+';
 
     final success = await repo.saveOnboardingResult(
       uid: uid,
       dateOfBirth: dob,
       auraConsentGranted: effectiveConsent,
+      gender: gender,
+      interestSlugs: _selectedInterests.toList(),
+      locale: device.locale,
+      language: device.language,
     );
 
     if (!mounted) return;
@@ -105,6 +172,7 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
       // AuraConsentScreen was pushed via Navigator (not GoRouter), so we cannot
       // rely on the refreshListenable redirect to clear the mixed stack cleanly.
       authVm.markOnboardingComplete(auraConsentGranted: effectiveConsent);
+      
       if (mounted) context.go('/home');
     } else {
       setState(() => _saving = false);
@@ -150,15 +218,26 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
                     onConfirm: _confirmAgeGate,
                     bottomPadding: bottomPadding,
                   )
-                : _ConsentStep(
-                    key: const ValueKey('consent'),
-                    auraConsentGranted: _auraConsentGranted,
-                    isMinor: _selectedAge < 18,
-                    saving: _saving,
-                    onToggle: (v) => setState(() => _auraConsentGranted = v),
-                    onConfirm: _finalize,
-                    bottomPadding: bottomPadding,
-                  ),
+                : _step == 1
+                    ? _ProfileStep(
+                        key: const ValueKey('profile'),
+                        gender: _gender,
+                        selectedInterests: _selectedInterests,
+                        interestError: _interestError,
+                        onGenderChanged: (g) => setState(() => _gender = g),
+                        onToggleInterest: _toggleInterest,
+                        onConfirm: _confirmProfile,
+                        bottomPadding: bottomPadding,
+                      )
+                    : _ConsentStep(
+                        key: const ValueKey('consent'),
+                        auraConsentGranted: _auraConsentGranted,
+                        isMinor: _selectedAge < 18,
+                        saving: _saving,
+                        onToggle: (v) => setState(() => _auraConsentGranted = v),
+                        onConfirm: _finalize,
+                        bottomPadding: bottomPadding,
+                      ),
           ),
         ),
       ),
@@ -296,6 +375,192 @@ class _AgeGateStep extends StatelessWidget {
   }
 }
 
+// Profile step - gender (tone) + interests (relevance)
+class _ProfileStep extends StatelessWidget {
+  final String? gender;
+  final Set<String> selectedInterests;
+  final String? interestError;
+  final ValueChanged<String?> onGenderChanged;
+  final ValueChanged<String> onToggleInterest;
+  final VoidCallback onConfirm;
+  final double bottomPadding;
+
+  const _ProfileStep({
+    super.key,
+    required this.gender,
+    required this.selectedInterests,
+    required this.interestError,
+    required this.onGenderChanged,
+    required this.onToggleInterest,
+    required this.onConfirm,
+    required this.bottomPadding,
+  });
+
+  // (display label, stored value). "Prefer not to say" stores empty so the
+  // notification framer stays gender-neutral.
+  static const List<(String, String)> _genderOptions = [
+    ('Male', 'male'),
+    ('Female', 'female'),
+    ('Non-binary', 'non-binary'),
+    ('Prefer not to say', ''),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(24, 24, 24, bottomPadding + 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _StepIndicator(current: 1),
+          const SizedBox(height: 28),
+
+          const Text(
+            'A little about you',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 28,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.8,
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'This shapes what Buddy sends you and how it sounds. Change it anytime in Settings.',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 15,
+              height: 1.5,
+            ),
+          ),
+
+          const SizedBox(height: 28),
+
+          const Text(
+            'Gender',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _genderOptions.map((opt) {
+              final selected = gender == opt.$2;
+              return _SelectableChip(
+                label: opt.$1,
+                selected: selected,
+                onTap: () => onGenderChanged(opt.$2),
+              );
+            }).toList(),
+          ),
+
+          const SizedBox(height: 28),
+
+          Text(
+            'What should Buddy keep you posted on? (pick ${OnboardableInterests.minSelection}+)',
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: SingleChildScrollView(
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: OnboardableInterests.all.map((interest) {
+                  final selected = selectedInterests.contains(interest.slug);
+                  return _SelectableChip(
+                    label: interest.label,
+                    selected: selected,
+                    onTap: () => onToggleInterest(interest.slug),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            child: interestError != null
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 4, bottom: 8),
+                    child: Text(
+                      interestError!,
+                      style: const TextStyle(color: AppColors.error, fontSize: 13),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+
+          const SizedBox(height: 8),
+          _ConsentButton(label: 'Continue', onTap: onConfirm, isFinal: false),
+        ],
+      ),
+    );
+  }
+}
+
+// Selectable pill used for gender + interests
+class _SelectableChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _SelectableChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: FauxGlassCard(
+        borderRadius: 20,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        borderColor: selected
+            ? AppColors.accent.withValues(alpha: 0.5)
+            : AppColors.glassBorderDim,
+        gradient: selected
+            ? LinearGradient(
+                colors: [
+                  AppColors.accent.withValues(alpha: 0.22),
+                  AppColors.accent.withValues(alpha: 0.10),
+                ],
+              )
+            : null,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (selected) ...[
+              const Icon(Icons.check_rounded, color: AppColors.accent, size: 15),
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? AppColors.textPrimary : AppColors.textSecondary,
+                fontSize: 14,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // Consent step
 class _ConsentStep extends StatelessWidget {
   final bool auraConsentGranted;
@@ -322,7 +587,7 @@ class _ConsentStep extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _StepIndicator(current: 1),
+          _StepIndicator(current: 2),
           const SizedBox(height: 28),
 
           const Text(
@@ -531,17 +796,20 @@ class _WhatAuraTracksCard extends StatelessWidget {
 class _StepIndicator extends StatelessWidget {
   final int current;
 
+  // Three onboarding steps: age gate, profile, consent.
+  static const int _total = 3;
+
   const _StepIndicator({required this.current});
 
   @override
   Widget build(BuildContext context) {
     return Row(
-      children: List.generate(2, (i) {
+      children: List.generate(_total, (i) {
         final isActive = i == current;
         final isDone = i < current;
         return Expanded(
           child: Padding(
-            padding: EdgeInsets.only(right: i < 1 ? 8 : 0),
+            padding: EdgeInsets.only(right: i < _total - 1 ? 8 : 0),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 300),
               height: 3,

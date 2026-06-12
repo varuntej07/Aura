@@ -47,11 +47,14 @@ from .handlers.engagement import (
 )
 from .handlers.mcp import register_mcp
 from .handlers.notification_reply import handle_notification_reply_request
+from .handlers.buddy_pills import handle_refresh_buddy_pills
+from .handlers.onboarding_profile import handle_onboarding_profile
 from .handlers.scheduler import handle_scheduler_tick
 from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
 from .handlers.signal_feed import handle_signal_feed
 from .handlers.signal_tick import handle_signal_tick
+from .handlers.threads import handle_thread_messages, handle_thread_reply
 from .lib.logger import logger
 from .services.request_auth import decode_firebase_claims
 
@@ -188,6 +191,16 @@ async def notification_reply_endpoint(request: Request) -> JSONResponse:
     return _handler_response(result)
 
 
+@app.post("/threads/reply")
+async def threads_reply_endpoint(request: Request) -> JSONResponse:
+    return await handle_thread_reply(request)
+
+
+@app.get("/threads/{thread_id}/messages")
+async def threads_messages_endpoint(thread_id: str, request: Request) -> JSONResponse:
+    return await handle_thread_messages(request, thread_id)
+
+
 _google_auth_transport = GoogleRequest()
 
 
@@ -284,6 +297,19 @@ async def daily_notify_send_endpoint(
     result = await handle_send_nudge(body)
     status_code = result.pop("status_code", 200)
     return JSONResponse(content=result, status_code=status_code)
+
+
+# Onboarding: seed declared interests into UserAura (consent-gated).
+@app.post("/onboarding/profile")
+async def onboarding_profile_endpoint(request: Request) -> JSONResponse:
+    return await handle_onboarding_profile(request)
+
+
+# On Main Buddy text chat: regenerates personalized suggestion pills after a session
+# (fired by the client on app background when the user did something this session).
+@app.post("/chat/buddy-pills/refresh")
+async def refresh_buddy_pills_endpoint(request: Request) -> JSONResponse:
+    return await handle_refresh_buddy_pills(request)
 
 
 # Signal engine — user events, ranked feed, scoring tick, content ingest.

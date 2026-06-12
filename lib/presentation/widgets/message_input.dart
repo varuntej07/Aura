@@ -16,6 +16,7 @@ class MessageInput extends StatefulWidget {
   final void Function(String text, List<ChatAttachment> attachments) onSend;
   final VoidCallback? onStop;
   final TextEditingController? controller;
+  final FocusNode? focusNode;
   final double extraBottomPadding;
   final bool allowAttachments;
 
@@ -26,6 +27,7 @@ class MessageInput extends StatefulWidget {
     this.hint = 'Message…',
     this.onStop,
     this.controller,
+    this.focusNode,
     this.extraBottomPadding = 0,
     this.allowAttachments = true,
   });
@@ -234,6 +236,7 @@ class _MessageInputState extends State<MessageInput> {
                   Expanded(
                     child: AuraTextField(
                       controller: _controller,
+                      focusNode: widget.focusNode,
                       hint: widget.hint,
                       enabled: !widget.isLoading,
                       onSubmitted: (_) => _send(),

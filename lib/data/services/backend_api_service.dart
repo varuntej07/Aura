@@ -270,6 +270,30 @@ class BackendApiService implements ChatServiceProvider {
     return _apiClient.delete('/account', (json) {});
   }
 
+  /// Regenerates the main Buddy chat suggestion pills from the user's latest
+  /// activity (queries + interests). The server never fails this call; we ignore the body.
+  Future<Result<Map<String, dynamic>>> refreshBuddyPills() async {
+    return _apiClient.post(
+      '/chat/buddy-pills/refresh',
+      const {},
+      (json) => json,
+    );
+  }
+
+  /// Seeds the user's declared onboarding interests into UserAura on the server
+  /// (consent-gated there). The users/{uid} doc fields are the source of truth for
+  /// the picker and allow-list; this call just gives the signal engine a day-one
+  /// starting direction. Returns the raw 200 body.
+  Future<Result<Map<String, dynamic>>> seedOnboardingInterests(
+    List<String> interestSlugs,
+  ) async {
+    return _apiClient.post(
+      '/onboarding/profile',
+      {'interests': interestSlugs},
+      (json) => json,
+    );
+  }
+
   /// Post one or more signal-engine events. Fire-and-forget on the server
   /// side; the response is 202 with `{ "accepted": <int> }`.
   Future<Result<Map<String, dynamic>>> postSignalEvents(
@@ -279,6 +303,24 @@ class BackendApiService implements ChatServiceProvider {
       '/events',
       {'events': events},
       (json) => json,
+    );
+  }
+
+  /// Loads a curiosity thread's server-authoritative conversation (the silent
+  /// shade-reply exchange), oldest first. Each entry is
+  /// `{role, content, created_at}`. Returns an empty list on any failure so the
+  /// chat surface can fall back to seeding the opener fresh.
+  ///
+  /// Deliberately concrete (not on [ChatServiceProvider]) so the chat interface
+  /// and its generated mocks stay untouched.
+  Future<List<Map<String, dynamic>>> fetchThreadMessages(String threadId) async {
+    final result = await _apiClient.get(
+      '/threads/$threadId/messages',
+      (json) => (json['messages'] as List?)?.cast<Map<String, dynamic>>() ?? const <Map<String, dynamic>>[],
+    );
+    return result.when(
+      success: (messages) => messages,
+      failure: (_) => const <Map<String, dynamic>>[],
     );
   }
 }
