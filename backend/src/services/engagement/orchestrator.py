@@ -25,6 +25,7 @@ from langfuse import observe
 
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
+from ...services.notification_budget import try_claim_proactive_slot
 from .agent_registry import get_agent_registry
 from .decision_engine import (
     MAX_DAILY_PROACTIVE_NOTIFICATIONS,
@@ -97,6 +98,20 @@ async def _orchestrate(
 
     # Step 3: Atomically claim engagement slot — prevents TOCTOU race
     is_interaction_triggered = trigger_event == "calendar_event"
+
+    # Proactive engagements also draw from the unified cross-decider budget
+    # (no-op while the flag is off). Claimed before the engagement slot so a
+    # global block never strands a consumed engagement slot. Interaction-
+    # triggered (calendar) engagements are committed, never blocked here.
+    if not is_interaction_triggered:
+        budget = await try_claim_proactive_slot(user_id, source="engagement")
+        if not budget.allowed:
+            logger.info("orchestrator: global budget blocked proactive engagement", {
+                "user_id": user_id,
+                "reason": budget.reason,
+            })
+            return
+
     claimed, suppression_reason = await asyncio.to_thread(
         _claim_engagement_slot_sync, user_id, now, is_interaction_triggered
     )

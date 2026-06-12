@@ -19,6 +19,7 @@ from typing import Any
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
+from ..services.notification_budget import record_committed_send
 from ..services.notification_service import send_notification
 
 
@@ -124,6 +125,13 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
         await _update_meeting_reminder_engagement_guard(user_id, sent_at)
     else:
         await _update_engagement_guard(user_id, sent_at)
+
+    # Committed send: calendar reminders fire regardless but are recorded in the
+    # unified budget so a proactive push is spaced away (no-op while flag off).
+    await record_committed_send(
+        user_id,
+        source="meeting_reminder" if is_meeting_reminder_slot else "daily_nudge",
+    )
 
     logger.info("daily_notification: nudge sent", {
         "user_id": user_id,

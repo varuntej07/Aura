@@ -15,14 +15,12 @@ from ..services.signal_engine.content_ingest import run_ingest
 async def handle_signal_content_ingest() -> dict:
     summary = await run_ingest()
     logger.info("signal_content_ingest: completed", {
-        "hackernews": summary.hackernews_fetched,
-        "arxiv":      summary.arxiv_fetched,
-        "cricket":    summary.cricket_fetched,
-        "written":    summary.total_written,
+        "google_news": summary.google_news_fetched,
+        "newsdata":    summary.newsdata_fetched,
+        "written":     summary.total_written,
     })
     return {
-        "hackernews_fetched": summary.hackernews_fetched,
-        "arxiv_fetched":      summary.arxiv_fetched,
-        "cricket_fetched":    summary.cricket_fetched,
-        "total_written":      summary.total_written,
+        "google_news_fetched": summary.google_news_fetched,
+        "newsdata_fetched":    summary.newsdata_fetched,
+        "total_written":       summary.total_written,
     }

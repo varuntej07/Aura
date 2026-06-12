@@ -43,6 +43,10 @@ class SignalStoreState:
     last_notification_at: datetime | None = None
     sends_today: int = 0
     sends_today_date: str = ""
+    # Breaking-lane sends today (subset of sends_today). Capped per day by
+    # scoring.MAX_BREAKING_SENDS_PER_DAY and reset alongside sends_today when the
+    # user-local calendar day flips. Legacy docs default 0.
+    breaking_sends_today: int = 0
     bootstrap_done: bool = False
     last_updated: datetime | None = None
     # Timestamp of the last UserAura-driven vector refresh (bootstrap or periodic).
@@ -92,6 +96,7 @@ def _decode_state(raw: dict[str, Any]) -> SignalStoreState:
         last_notification_at=raw.get("last_notification_at"),
         sends_today=int(raw.get("sends_today", 0)),
         sends_today_date=str(raw.get("sends_today_date", "")),
+        breaking_sends_today=int(raw.get("breaking_sends_today", 0)),
         bootstrap_done=bool(raw.get("bootstrap_done", False)),
         last_updated=raw.get("last_updated"),
         last_bootstrap_at=raw.get("last_bootstrap_at"),
@@ -107,6 +112,7 @@ def _encode_state(state: SignalStoreState) -> dict[str, Any]:
         "last_notification_at": state.last_notification_at,
         "sends_today": state.sends_today,
         "sends_today_date": state.sends_today_date,
+        "breaking_sends_today": state.breaking_sends_today,
         "bootstrap_done": state.bootstrap_done,
         "last_updated": datetime.now(UTC),
         "last_bootstrap_at": state.last_bootstrap_at,
@@ -196,13 +202,20 @@ async def write_outcome_pending(
     score: float,
     scored_at: datetime,
     sent_at: datetime,
+    relevance_reason: str = "",
 ) -> None:
-    """Record a sent notification awaiting outcome (opened / dismissed / timeout)."""
+    """Record a sent notification awaiting outcome (opened / dismissed / timeout).
+
+    relevance_reason is the framer's defensible justification for why this
+    notification fired (the named interest it matched). Persisted so every send is
+    auditable after the fact, not just a bare score.
+    """
     doc = {
         "content_id": content_id,
         "score": score,
         "scored_at": scored_at,
         "sent_at": sent_at,
+        "relevance_reason": relevance_reason,
         "outcome": "pending",
         "outcome_at": None,
     }
@@ -277,11 +290,38 @@ async def list_active_user_ids(inactivity_days: int = 7) -> list[str]:
     """Async wrapper over ``fcm_token_registry.list_active_user_ids`` — the single
     source of truth for the ``fcm_tokens`` schema and the active-user query. The
     scoring loop and the agent orchestrator both go through that one query so they
-    target the same audience and can never disagree on the field name."""
+    target the same audience and can never disagree on the field name.
+
+    Dark-test gate: when ``settings.PROACTIVE_NOTIFICATION_UID_ALLOWLIST`` is set,
+    the audience is intersected with that allowlist so a candidate revision can
+    send a proactive-notification change to only the tester's phone. Unset (the
+    live/production default) means no restriction — every active user is returned,
+    exactly as before. The agent orchestrator is intentionally NOT gated: it calls
+    ``fcm_token_registry.list_active_user_ids`` directly and only fetches data, it
+    never sends."""
+    from ...config.settings import settings
     from ..fcm_token_registry import list_active_user_ids as _list_active_user_ids
 
     try:
-        return await asyncio.to_thread(_list_active_user_ids, inactivity_days)
+        user_ids = await asyncio.to_thread(_list_active_user_ids, inactivity_days)
     except Exception as exc:
         logger.error("feature_store.list_active_user_ids failed", {"error": str(exc)})
         return []
+
+    allowlist = settings.proactive_notification_uid_allowlist
+    if not allowlist:
+        return user_ids
+
+    allowed = set(allowlist)
+    restricted = [uid for uid in user_ids if uid in allowed]
+    logger.warn(
+        "feature_store.list_active_user_ids: PROACTIVE_NOTIFICATION_UID_ALLOWLIST is set — "
+        "proactive notifications restricted to allowlisted uids. This MUST be unset on the "
+        "live/production revision or most users receive nothing.",
+        {
+            "allowlist_size": len(allowed),
+            "active_before": len(user_ids),
+            "active_after": len(restricted),
+        },
+    )
+    return restricted

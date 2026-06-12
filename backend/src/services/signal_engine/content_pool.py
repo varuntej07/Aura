@@ -1,7 +1,8 @@
 """
 content_candidates collection — the shared pool of notifiable items.
 
-Fetchers (HN, arXiv, jobs, sports, RSS) add items here after each fetch.
+Fetchers (HN, arXiv, ESPN Cricinfo RSS, Google News, cricbuzz live) add items
+here after each fetch.
 The scoring loop reads from here via find_nearest using Firestore native
 vector search against the user's user_vector.
 
@@ -20,10 +21,11 @@ from google.cloud.firestore_v1.vector import Vector
 
 from ...lib.logger import logger
 from ..firebase import admin_firestore
+from .content_category_map import to_taxonomy_slug
 from .embedder import embed_texts
 
-# Default candidate lifetime. News, HN, sports go stale fast. Jobs survive
-# the standard week. Per-source overrides are passed in via add_candidates.
+# Default candidate lifetime for any source that does not pass an explicit
+# ttl_hours. Per-source overrides are passed in via add_candidates.
 DEFAULT_CONTENT_TTL_HOURS = 36
 
 # Hard ceiling on how many candidates find_nearest pulls back per user per scoring tick. 
@@ -44,6 +46,17 @@ class CandidateInput:
     ttl_hours: int | None = None
     extra: dict[str, Any] | None = None
     sub_category: str = ""  # optional league/tournament tag e.g. "ipl", "premier_league"
+    # False marks an item that may appear in the in-app feed but must NEVER fire a
+    # push notification — e.g. a story whose body is only engagement counts (no
+    # substance to frame). The scoring loop drops these from the notification
+    # candidate set; the feed ignores the flag.
+    push_eligible: bool = True
+    # Global salience 0..1 (how big worldwide, independent of any user). Set at
+    # ingest from cross-edition overlap (see signal_engine/salience.py). Drives the
+    # breaking lane (a value >= scoring.BREAKING_SALIENCE_BAR can reach every user)
+    # and gives a mild nudge to the personal lane. 0 for region-agnostic / single-
+    # source items (newsdata, arXiv-era docs), which therefore never go "breaking".
+    salience: float = 0.0
 
 
 @dataclass
@@ -60,6 +73,18 @@ class ScoredCandidate:
     freshness_ts: datetime
     cosine_similarity: float
     sub_category: str = ""
+    # Locale edition the candidate was fetched from ("US" | "IN" | "GB" | ""),
+    # carried in the stored doc's extra.region. Drives the scoring loop's soft
+    # region preference. Empty when the source is region-agnostic (HN, arXiv).
+    region: str = ""
+    # Mirrors CandidateInput.push_eligible read back from the stored doc. Legacy docs
+    # written before this field default True (so existing content keeps sending). The
+    # scoring loop excludes push_eligible=False from the notification path only.
+    push_eligible: bool = True
+    # Global salience 0..1 read back from the stored doc. Legacy docs without the
+    # field default 0.0 — so a pre-deploy candidate is personal-lane only and can
+    # never be mistaken for breaking news.
+    salience: float = 0.0
 
 
 def _build_content_id(source: str, url: str, title: str) -> str:
@@ -74,7 +99,7 @@ def _candidate_doc_ref(content_id: str):
 
 
 def _content_text_for_embedding(title: str, body: str) -> str:
-    """The string handed to text-embedding-004 for a candidate."""
+    """The string handed to gemini-embedding-001 for a candidate."""
     title_part = (title or "").strip()
     body_part = (body or "").strip()
     if title_part and body_part:
@@ -119,9 +144,12 @@ async def add_candidates(items: list[CandidateInput]) -> int:
         count = 0
         for (content_id, item, text), vector in zip(new_only, vectors):
             ttl_hours = item.ttl_hours or DEFAULT_CONTENT_TTL_HOURS
+            # Normalise the raw fetcher category to a taxonomy slug at this single
+            # write choke point so the pool only ever stores one vocabulary — the
+            # gate, diversity, affinity, and feed all read taxonomy slugs.
             doc = {
                 "source": item.source,
-                "category": item.category,
+                "category": to_taxonomy_slug(item.category),
                 "sub_category": item.sub_category,
                 "title": item.title,
                 "body": item.body,
@@ -132,6 +160,8 @@ async def add_candidates(items: list[CandidateInput]) -> int:
                 "expires_at": now + timedelta(hours=ttl_hours),
                 "freshness_ts": item.freshness_ts or now,
                 "extra": item.extra or {},
+                "push_eligible": item.push_eligible,
+                "salience": float(item.salience),
             }
             batch.set(_candidate_doc_ref(content_id), doc)
             count += 1
@@ -215,6 +245,8 @@ async def find_nearest_for_user(
                 embedding = [float(x) for x in (vec_field or [])]
             distance = float(data.get("cosine_distance", 1.0))
             similarity = max(0.0, 1.0 - distance)
+            extra_field = data.get("extra")
+            extra = extra_field if isinstance(extra_field, dict) else {}
             results.append(ScoredCandidate(
                 content_id=snap.id,
                 source=str(data.get("source", "")),
@@ -226,6 +258,9 @@ async def find_nearest_for_user(
                 embedding=embedding,
                 freshness_ts=data.get("freshness_ts") or current_time,
                 cosine_similarity=similarity,
+                region=str(extra.get("region", "")),
+                push_eligible=bool(data.get("push_eligible", True)),
+                salience=float(data.get("salience", 0.0) or 0.0),
             ))
         return results
 
@@ -249,6 +284,144 @@ async def find_nearest_for_user(
             )
         else:
             logger.error("content_pool.find_nearest_for_user failed", {"error": message})
+        return []
+
+
+@dataclass
+class RecentHeadline:
+    """A lightweight pool item for the icebreaker context bundle — just enough to
+    turn a fresh local headline into a conversation hook. No embedding/url needed."""
+
+    title: str
+    category: str
+    region: str
+    source: str
+
+
+async def list_recent_candidates(
+    *,
+    limit: int = 30,
+    region: str | None = None,
+    now: datetime | None = None,
+) -> list[RecentHeadline]:
+    """Most recent non-expired pool items, newest first, optionally region-filtered.
+
+    Orders by ``created_at`` descending only — a single-field order that Firestore
+    auto-indexes at collection scope, so this needs NO declared composite index.
+    The region filter is applied in Python (not a Firestore ``where``) precisely to
+    avoid a composite index, and the result set is small (``limit`` rows). Returns
+    an empty list on any error so the icebreaker simply proceeds without headlines.
+    """
+    current_time = now or datetime.now(UTC)
+    target_region = (region or "").strip().upper()
+
+    def _query() -> list[RecentHeadline]:
+        db = admin_firestore()
+        snaps = (
+            db.collection("content_candidates")
+            .order_by("created_at", direction="DESCENDING")
+            .limit(max(1, limit))
+            .stream()
+        )
+        out: list[RecentHeadline] = []
+        for snap in snaps:
+            data = snap.to_dict() or {}
+            expires_at = data.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at < current_time:
+                continue
+            extra = data.get("extra")
+            item_region = str((extra or {}).get("region", "")).upper() if isinstance(extra, dict) else ""
+            # Region filter in Python: keep region-agnostic items (HN/arXiv, region
+            # "") and items matching the user's region; drop foreign-region news.
+            if target_region and item_region and item_region != target_region:
+                continue
+            title = str(data.get("title", "")).strip()
+            if not title:
+                continue
+            out.append(RecentHeadline(
+                title=title,
+                category=str(data.get("category", "")),
+                region=item_region,
+                source=str(data.get("source", "")),
+            ))
+        return out
+
+    try:
+        return await asyncio.to_thread(_query)
+    except Exception as exc:
+        logger.warn("content_pool.list_recent_candidates failed", {"error": str(exc)})
+        return []
+
+
+async def list_recent_breaking_candidates(
+    *,
+    min_salience: float,
+    limit: int = 40,
+    now: datetime | None = None,
+) -> list[ScoredCandidate]:
+    """Most recent non-expired, push-eligible candidates whose salience clears
+    ``min_salience``, newest first. Powers the breaking lane.
+
+    This is deliberately VECTOR-INDEPENDENT: a globally huge story is usually far
+    from any one user's interest vector, so ``find_nearest`` would never surface
+    it. We instead scan the freshest pool items and filter by salience in Python.
+
+    Orders by ``created_at`` descending only — a single-field order Firestore
+    auto-indexes at collection scope, so this needs NO declared composite index
+    (same pattern as ``list_recent_candidates``). Returns [] on any error so the
+    breaking lane simply falls through to the personal lane."""
+    current_time = now or datetime.now(UTC)
+
+    def _query() -> list[ScoredCandidate]:
+        db = admin_firestore()
+        snaps = (
+            db.collection("content_candidates")
+            .order_by("created_at", direction="DESCENDING")
+            .limit(max(1, limit))
+            .stream()
+        )
+        out: list[ScoredCandidate] = []
+        for snap in snaps:
+            data = snap.to_dict() or {}
+            expires_at = data.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at < current_time:
+                continue
+            if not bool(data.get("push_eligible", True)):
+                continue
+            salience = float(data.get("salience", 0.0) or 0.0)
+            if salience < min_salience:
+                continue
+            title = str(data.get("title", "")).strip()
+            if not title:
+                continue
+            vec_field = data.get("embedding")
+            if isinstance(vec_field, Vector):
+                embedding = list(vec_field.to_map_value()["value"])  # type: ignore[attr-defined]
+            else:
+                embedding = [float(x) for x in (vec_field or [])]
+            extra_field = data.get("extra")
+            extra = extra_field if isinstance(extra_field, dict) else {}
+            out.append(ScoredCandidate(
+                content_id=snap.id,
+                source=str(data.get("source", "")),
+                category=str(data.get("category", "")),
+                sub_category=str(data.get("sub_category", "")),
+                title=title,
+                body=str(data.get("body", "")),
+                url=str(data.get("url", "")),
+                embedding=embedding,
+                freshness_ts=data.get("freshness_ts") or current_time,
+                cosine_similarity=0.0,
+                region=str(extra.get("region", "")),
+                push_eligible=True,
+                salience=salience,
+            ))
+        return out
+
+    try:
+        return await asyncio.to_thread(_query)
+    except Exception as exc:
+        logger.warn("content_pool.list_recent_breaking_candidates failed", {"error": str(exc)})
         return []
 
 
@@ -281,6 +454,8 @@ async def get_candidate(content_id: str) -> ScoredCandidate | None:
             embedding = list(vec_field.to_map_value()["value"])  # type: ignore[attr-defined]
         else:
             embedding = [float(x) for x in (vec_field or [])]
+        extra_field = data.get("extra")
+        extra = extra_field if isinstance(extra_field, dict) else {}
         return ScoredCandidate(
             content_id=snap.id,
             source=str(data.get("source", "")),
@@ -292,6 +467,9 @@ async def get_candidate(content_id: str) -> ScoredCandidate | None:
             embedding=embedding,
             freshness_ts=data.get("freshness_ts") or datetime.now(UTC),
             cosine_similarity=0.0,
+            region=str(extra.get("region", "")),
+            push_eligible=bool(data.get("push_eligible", True)),
+            salience=float(data.get("salience", 0.0) or 0.0),
         )
 
     try:

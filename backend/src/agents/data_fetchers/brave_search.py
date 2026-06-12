@@ -1,13 +1,10 @@
-"""Brave Search primitive — fast raw web search for the real-time chat + voice path.
+"""Brave Search primitive — fast raw web search backing the `web_surf` tool (chat + voice).
 
-Returns the same {text, sources, query, cached} shape as web_surf.py (Gemini grounding),
-so ToolExecutor can swap providers without touching downstream rendering or citations.
-
-Why a separate primitive: Gemini grounding searches AND synthesizes a full answer before
-returning, which costs seconds — fine for the background sports ingest (45s budget, no one
-waiting) but too slow when a user is mid-conversation. Brave returns raw snippets in ~1s;
-the agent LLM (Claude in chat, the voice model) does the synthesis as part of its normal
-streamed reply. Gemini grounding stays the engine for sports ingest; this is the user path.
+Returns {text, sources, query, cached} so ToolExecutor can swap providers without touching
+downstream rendering or citations. Brave returns raw snippets in ~1s; the agent LLM (Claude
+in chat, the voice model) does the synthesis as part of its normal streamed reply. This
+replaced an earlier Gemini google_search grounding primitive (web_surf.py, since removed)
+that synthesized a full answer server-side and cost seconds per call.
 """
 
 from __future__ import annotations
@@ -20,7 +17,8 @@ import httpx
 
 from ...config.settings import settings
 from ...lib.logger import logger
-from .web_surf import _REQUEST_TIMEOUT_S, _normalize_query, _strip_prompt_injection
+
+_REQUEST_TIMEOUT_S = 7.0  # real-time path: chat + voice (user is waiting)
 
 _BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 _RESULT_COUNT = 5  # "random recent news", not exhaustive research
@@ -32,8 +30,20 @@ _FRESHNESS_BY_RECENCY = {"fresh": "pd"}
 
 _HTML_TAG = re.compile(r"<[^>]+>")
 
+_PROMPT_INJECTION_PATTERN = re.compile(
+    r"(?im)^\s*(ignore (all )?previous|system:|<\|.*\|>).*$"
+)
+
 # Module-level in-process cache: {(uid, normalized_query, recency): (expires_at_monotonic, result_dict)}.
 _cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def _normalize_query(query: str) -> str:
+    return " ".join(query.lower().strip().split())
+
+
+def _strip_prompt_injection(text: str) -> str:
+    return _PROMPT_INJECTION_PATTERN.sub("", text).strip()
 
 
 def _cache_get(key: tuple[str, str, str]) -> dict[str, Any] | None:

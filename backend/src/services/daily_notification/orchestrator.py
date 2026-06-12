@@ -28,6 +28,7 @@ from langfuse import observe
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
 from ...services.model_provider import ModelProvider
+from ...services.user_aura_schema import top_interest_subjects
 from .calendar_notification_agent import CalendarNotificationAgent
 from .models import CalendarNotificationContent, MeetingReminderPlan
 from .suggestion_pills_agent import SuggestionPillsAgent
@@ -81,10 +82,12 @@ async def _run(user_id: str) -> None:
     # Step 2: Load timezone
     user_timezone = await _load_user_timezone(user_id)
 
-    # Step 3: Fetch calendar events and recent queries in parallel
-    upcoming_events, queries = await asyncio.gather(
+    # Step 3: Fetch calendar events, recent queries, and (consent-gated) interest
+    # subjects in parallel. Interests ground the main Buddy chat suggestion pills.
+    upcoming_events, queries, interest_subjects = await asyncio.gather(
         _fetch_upcoming_calendar_events(user_id, days_ahead=7),
         _fetch_last_10_queries(user_id),
+        _fetch_interest_subjects_if_consented(user_id),
     )
 
     pills_agent, cal_agent = _get_agents()
@@ -131,7 +134,9 @@ async def _run(user_id: str) -> None:
 
     # Step 7: Generate daily home-screen suggestion pills. Failure must not affect reminders.
     try:
-        await pills_agent.generate_all_agent_suggestion_pills(user_id, queries)
+        await pills_agent.generate_all_agent_suggestion_pills(
+            user_id, queries, interest_subjects
+        )
     except Exception as exc:
         logger.exception("daily_notification: suggestion pills generation failed", {
             "user_id": user_id,
@@ -184,6 +189,30 @@ async def _fetch_last_10_queries(user_id: str) -> list[dict]:
         return await asyncio.to_thread(_fetch)
     except Exception as exc:
         logger.warn("daily_notification: queries fetch failed", {"error": str(exc)})
+        return []
+
+
+async def _fetch_interest_subjects_if_consented(user_id: str) -> list[str]:
+    """Top UserAura interest subjects, only when Aura consent is granted. Grounds
+    the main Buddy chat suggestion pills. Returns [] without consent or on error."""
+    def _fetch() -> list[str]:
+        db = admin_firestore()
+        user_snap = db.collection("users").document(user_id).get()
+        consent = (
+            bool((user_snap.to_dict() or {}).get("aura_consent_granted", False))
+            if user_snap.exists
+            else False
+        )
+        if not consent:
+            return []
+        aura_snap = db.collection("UserAura").document(user_id).get()
+        profile = (aura_snap.to_dict() or {}) if aura_snap.exists else {}
+        return top_interest_subjects(profile, k=5)
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        logger.warn("daily_notification: interest subjects fetch failed", {"error": str(exc)})
         return []
 
 

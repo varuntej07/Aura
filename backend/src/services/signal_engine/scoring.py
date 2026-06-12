@@ -18,8 +18,33 @@ from .feature_store import TIME_SLOTS_PER_DAY
 # Score below this means do not send. Tune via experimentation, not env.
 NOTIFICATION_SCORE_THRESHOLD = 0.45
 
-# Hard daily ceiling. Counted in feature_store state.sends_today.
-DAILY_HARD_CAP = 3
+# Hard daily ceiling for the signal engine alone (personal + breaking news),
+# counted in feature_store state.sends_today. Sits at the unified proactive budget
+# (4) so the engine on its own can never exceed the cross-decider ceiling.
+DAILY_NOTIFICATION_HARD_CAP = 4
+
+# Global-salience constants for the breaking lane (see scoring_loop Lane B and
+# services/signal_engine/salience.py).
+#   BREAKING_SALIENCE_BAR — a candidate at/above this can bypass the personal
+#     interest gate and reach EVERY user. 0.85 is only reachable by a story carried
+#     across all locale editions (salience.compute_salience), i.e. genuinely
+#     worldwide news — so single/two-edition items can never fire an everyone push.
+#   MAX_BREAKING_SENDS_PER_DAY — hard cap so a busy news day can't spam breaking.
+#   SALIENCE_NUDGE_WEIGHT — on the PERSONAL lane, a mild multiplier so a more
+#     globally-important story ranks slightly higher among already-relevant picks.
+BREAKING_SALIENCE_BAR = 0.85
+MAX_BREAKING_SENDS_PER_DAY = 1
+SALIENCE_NUDGE_WEIGHT = 0.1
+
+
+def apply_salience_nudge(base_score: float, salience: float) -> float:
+    """Personal-lane nudge: base * (1 + WEIGHT * salience), clamped to [0, 2].
+
+    Never lowers a score (salience >= 0) and never gates — it only lets a more
+    globally-important story edge ahead among candidates that already cleared the
+    threshold on personal relevance."""
+    nudged = base_score * (1.0 + SALIENCE_NUDGE_WEIGHT * max(0.0, min(1.0, salience)))
+    return max(0.0, min(2.0, nudged))
 
 # Freshness half-life. After this many hours, freshness multiplier is 0.5.
 FRESHNESS_HALF_LIFE_HOURS = 24.0
@@ -30,7 +55,7 @@ RECENCY_FATIGUE_KICK = 0.4
 
 # Same-category diversity penalty. 0.6 means a same-category second send is
 # multiplied by 0.6 vs a fresh category.
-SAME_CATEGORY_DIVERSITY_PENALTY = 0.6
+SAME_NOTIFICATION_CATEGORY_DIVERSITY_PENALTY = 0.6
 
 # Time-slot score clamps. Slot rate of 0 still gets a baseline 0.5 multiplier;
 # a strong slot can reach 1.5x.
@@ -38,9 +63,12 @@ TIME_SLOT_SCORE_FLOOR = 0.5
 TIME_SLOT_SCORE_CEILING = 1.5
 
 # Local quiet hours. Notifications are never delivered outside the active window,
-# regardless of score. The active window is [QUIET_HOURS_END, QUIET_HOURS_START).
-QUIET_HOURS_START = 22  # 10pm — stop sending
-QUIET_HOURS_END = 8     # 8am  — resume sending
+# regardless of score. Expressed with minute precision so a half-hour edge like
+# 23:30 is exact. The active window is [end, start) in local time.
+QUIET_HOURS_START_HOUR = 23
+QUIET_HOURS_START_MINUTE = 30  # 11:30pm — stop sending
+QUIET_HOURS_END_HOUR = 7
+QUIET_HOURS_END_MINUTE = 0     # 7:00am — resume sending
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -59,16 +87,20 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (math.sqrt(norm_a) * math.sqrt(norm_b))
 
 
-def is_within_active_hours(user_local_hour: int) -> bool:
+def is_within_active_hours(user_local_hour: int, user_local_minute: int = 0) -> bool:
     """False during local quiet hours — a hard gate, independent of score.
 
-    Active window is [QUIET_HOURS_END, QUIET_HOURS_START). Handles a window that
-    wraps past midnight (e.g. END=8, START=22 -> active 08:00-21:59).
+    The active window is [end, start) in local time with minute precision, so a
+    half-hour edge (23:30) is honored exactly. With END=07:00 and START=23:30 the
+    window is active 07:00-23:29 and quiet 23:30-06:59.
     """
-    if QUIET_HOURS_END <= QUIET_HOURS_START:
-        return QUIET_HOURS_END <= user_local_hour < QUIET_HOURS_START
-    # Window wraps midnight (e.g. END=20, START=6): active outside [START, END).
-    return user_local_hour >= QUIET_HOURS_END or user_local_hour < QUIET_HOURS_START
+    now_minutes = user_local_hour * 60 + user_local_minute
+    start_minutes = QUIET_HOURS_START_HOUR * 60 + QUIET_HOURS_START_MINUTE
+    end_minutes = QUIET_HOURS_END_HOUR * 60 + QUIET_HOURS_END_MINUTE
+    if end_minutes <= start_minutes:
+        return end_minutes <= now_minutes < start_minutes
+    # Window wraps midnight: active outside [start, end).
+    return now_minutes >= end_minutes or now_minutes < start_minutes
 
 
 def cold_start_daypart_prior(user_local_hour: int) -> float:
@@ -125,7 +157,7 @@ def fatigue_penalty(
     now: datetime | None = None,
 ) -> float:
     """0 = no fatigue. 1 = fully fatigued. Combine into score as (1 - penalty)."""
-    base = min(1.0, sends_today / float(DAILY_HARD_CAP))
+    base = min(1.0, sends_today / float(DAILY_NOTIFICATION_HARD_CAP))
     if last_notification_at is None:
         return base
     current = now or datetime.now(UTC)
@@ -138,12 +170,12 @@ def fatigue_penalty(
 
 
 def diversity_penalty(category: str, recent_categories: list[str]) -> float:
-    """Returns a multiplier in [SAME_CATEGORY_DIVERSITY_PENALTY, 1.0]."""
+    """Returns a multiplier in [SAME_NOTIFICATION_CATEGORY_DIVERSITY_PENALTY, 1.0]."""
     if not recent_categories:
         return 1.0
     most_recent = recent_categories[0]
     if category and category == most_recent:
-        return SAME_CATEGORY_DIVERSITY_PENALTY
+        return SAME_NOTIFICATION_CATEGORY_DIVERSITY_PENALTY
     return 1.0
 
 
@@ -170,8 +202,8 @@ def is_sendable(
     user_local_date: str,
 ) -> tuple[bool, str | None]:
     """Final gate. Returns (allowed, reason_when_blocked)."""
-    if sends_today_date == user_local_date and sends_today >= DAILY_HARD_CAP:
-        return False, "daily_hard_cap"
+    if sends_today_date == user_local_date and sends_today >= DAILY_NOTIFICATION_HARD_CAP:
+        return False, "daily_notification_hard_cap"
     if score < NOTIFICATION_SCORE_THRESHOLD:
         return False, "below_threshold"
     return True, None

@@ -17,7 +17,7 @@ from ..firebase import admin_firestore
 from .content_pool import ScoredCandidate, find_nearest_for_user
 from .feature_store import read_state
 from .scoring import (
-    SAME_CATEGORY_DIVERSITY_PENALTY,
+    SAME_NOTIFICATION_CATEGORY_DIVERSITY_PENALTY,
     cosine_similarity,
     freshness_decay,
 )
@@ -26,7 +26,7 @@ DEFAULT_FEED_LIMIT = 20
 MAX_FEED_LIMIT = 50
 
 # Stronger same-category penalty so the in-app feed never feels repetitive.
-SESSION_DIVERSITY_PENALTY = SAME_CATEGORY_DIVERSITY_PENALTY * 0.8
+SESSION_DIVERSITY_PENALTY = SAME_NOTIFICATION_CATEGORY_DIVERSITY_PENALTY * 0.8
 
 
 @dataclass

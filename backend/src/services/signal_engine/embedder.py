@@ -1,5 +1,5 @@
 """
-Thin async wrapper around Gemini text-embedding-004.
+Thin async wrapper around Gemini gemini-embedding-001.
 
 One responsibility: turn a string into a 768-dim list[float]. Used by:
   - content_pool when a fetcher inserts a new candidate

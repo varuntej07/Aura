@@ -45,16 +45,22 @@ SLOT_EMA_ALPHA = 0.2
 CATEGORY_AFFINITY_EMA_ALPHA = 0.1
 
 # Per-event weights driving the user_vector EMA.
+# Opening a notification is NOT an endorsement, it only means the copy earned a
+# tap. The full positive signal lives in what the user does next: actually reading
+# the content (content_opened, mild) or replying about it (the chat path, which
+# enriches UserAura and re-blends the vector on refresh). So notification_opened is
+# a small nudge (0.3), not the old 1.0 that over-trained the vector on curiosity.
 EVENT_WEIGHTS: dict[str, float] = {
-    "notification_opened": 1.0,
+    "notification_opened": 0.3,
     "notification_dismissed": -0.6,
+    "content_opened": 0.5,      # opened the article in the in-app browser (read tap)
     "content_view_long": 0.8,
     "content_view_short": -0.4,
     "content_liked": 1.0,
     "content_shared": 1.2,
     "content_skipped": -0.5,
     "search_query": 0.5,
-    # app_open and timeout are zero-weight for the vector. 
+    # app_open and timeout are zero-weight for the vector.
     # They still update other features (time-slot rate, outcome resolution).
     "app_open": 0.0,
     "notification_timeout": -0.2,
@@ -138,8 +144,8 @@ async def _apply_event_inner(
             user_local_minute=user_local_minute,
         )
 
-    elif event_type in ("content_view_long", "content_view_short", "content_liked",
-                        "content_shared", "content_skipped"):
+    elif event_type in ("content_opened", "content_view_long", "content_view_short",
+                        "content_liked", "content_shared", "content_skipped"):
         if content_id:
             cand = await content_pool.get_candidate(content_id)
             if cand:
@@ -165,7 +171,7 @@ async def _apply_event_inner(
             _apply_category_ema(state, target_category, weight)
 
     # Any positive engagement resets the exploration drift counter.
-    if event_type in ("notification_opened", "content_liked", "content_shared"):
+    if event_type in ("notification_opened", "content_opened", "content_liked", "content_shared"):
         state.consecutive_no_open_ticks = 0
 
     state.last_updated = datetime.now(UTC)
