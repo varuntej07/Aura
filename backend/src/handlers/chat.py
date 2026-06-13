@@ -432,14 +432,14 @@ def _build_system_blocks(
         {
             "type": "text",
             "text": stable_text,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         },
     ]
     if aura_suffix:
         blocks.append({
             "type": "text",
             "text": aura_suffix,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
         })
     blocks.append({
         "type": "text",

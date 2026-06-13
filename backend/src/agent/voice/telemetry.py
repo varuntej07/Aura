@@ -86,6 +86,17 @@ def log_turn_metrics(
     else:
         return
 
+    if role == "assistant" and all(
+        payload.get(field) is None
+        for field in ("llm_ttft_ms", "tts_ttfb_ms", "eou_to_first_audio_ms")
+    ):
+        logger.warn("VoiceSession: turn metrics present but all latency fields null", {
+            "session_id": session_id,
+            "user_id": user_id,
+            "role": role,
+            "available_metric_keys": sorted(metrics.keys()),
+        })
+
     logger.info("VoiceSession: turn metrics", payload)
 
 

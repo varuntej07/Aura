@@ -1,0 +1,26 @@
+{
+  "name": "voice_eou_to_first_audio_ms",
+  "description": "Voice per-turn end-of-utterance to first audio out (perceived response gap), in ms. Source: 'VoiceSession: turn metrics' logs, assistant turns. Not retroactive: only fills from turns logged after this metric is created.",
+  "filter": "jsonPayload.message=\"VoiceSession: turn metrics\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "DISTRIBUTION",
+    "unit": "ms",
+    "labels": [
+      { "key": "llm_provider", "valueType": "STRING" },
+      { "key": "tier", "valueType": "STRING" }
+    ]
+  },
+  "valueExtractor": "EXTRACT(jsonPayload.eou_to_first_audio_ms)",
+  "labelExtractors": {
+    "llm_provider": "EXTRACT(jsonPayload.llm_provider)",
+    "tier": "EXTRACT(jsonPayload.tier)"
+  },
+  "bucketOptions": {
+    "exponentialBuckets": {
+      "numFiniteBuckets": 64,
+      "growthFactor": 1.25,
+      "scale": 1.0
+    }
+  }
+}

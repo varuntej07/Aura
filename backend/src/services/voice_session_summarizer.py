@@ -160,7 +160,7 @@ async def _write_session_doc(
             "num_of_assistant_turns": num_of_assistant_turns,
             "tool_calls_made": tool_calls,
             "num_of_tool_calls": len(tool_calls),
-            "model_used": settings.ANTHROPIC_CHAT_MODEL,
+            "model_used": settings.ANTHROPIC_VOICE_MODEL,
             "summary": summary,
             "archived": False,
             "raw_turns": raw_turns,

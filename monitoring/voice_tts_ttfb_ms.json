@@ -1,0 +1,26 @@
+{
+  "name": "voice_tts_ttfb_ms",
+  "description": "Voice per-turn TTS time-to-first-byte, in ms. Source: 'VoiceSession: turn metrics' logs, assistant turns. Not retroactive.",
+  "filter": "jsonPayload.message=\"VoiceSession: turn metrics\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "DISTRIBUTION",
+    "unit": "ms",
+    "labels": [
+      { "key": "tts_provider", "valueType": "STRING" },
+      { "key": "tier", "valueType": "STRING" }
+    ]
+  },
+  "valueExtractor": "EXTRACT(jsonPayload.tts_ttfb_ms)",
+  "labelExtractors": {
+    "tts_provider": "EXTRACT(jsonPayload.tts_provider)",
+    "tier": "EXTRACT(jsonPayload.tier)"
+  },
+  "bucketOptions": {
+    "exponentialBuckets": {
+      "numFiniteBuckets": 64,
+      "growthFactor": 1.25,
+      "scale": 1.0
+    }
+  }
+}

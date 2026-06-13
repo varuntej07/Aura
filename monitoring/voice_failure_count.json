@@ -1,0 +1,15 @@
+{
+  "name": "voice_failure_count",
+  "description": "Count of voice session failures, labelled by failure code. Source: 'VoiceSession: failure' logs (log_voice_failure in backend/src/agent/voice/telemetry.py).",
+  "filter": "jsonPayload.message=\"VoiceSession: failure\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "INT64",
+    "labels": [
+      { "key": "code", "valueType": "STRING" }
+    ]
+  },
+  "labelExtractors": {
+    "code": "EXTRACT(jsonPayload.code)"
+  }
+}

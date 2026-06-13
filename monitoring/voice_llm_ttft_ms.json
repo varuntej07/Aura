@@ -1,0 +1,26 @@
+{
+  "name": "voice_llm_ttft_ms",
+  "description": "Voice per-turn LLM time-to-first-token, in ms. Source: 'VoiceSession: turn metrics' logs, assistant turns. Not retroactive.",
+  "filter": "jsonPayload.message=\"VoiceSession: turn metrics\"",
+  "metricDescriptor": {
+    "metricKind": "DELTA",
+    "valueType": "DISTRIBUTION",
+    "unit": "ms",
+    "labels": [
+      { "key": "llm_provider", "valueType": "STRING" },
+      { "key": "tier", "valueType": "STRING" }
+    ]
+  },
+  "valueExtractor": "EXTRACT(jsonPayload.llm_ttft_ms)",
+  "labelExtractors": {
+    "llm_provider": "EXTRACT(jsonPayload.llm_provider)",
+    "tier": "EXTRACT(jsonPayload.tier)"
+  },
+  "bucketOptions": {
+    "exponentialBuckets": {
+      "numFiniteBuckets": 64,
+      "growthFactor": 1.25,
+      "scale": 1.0
+    }
+  }
+}

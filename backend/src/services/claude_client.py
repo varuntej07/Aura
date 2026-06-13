@@ -85,7 +85,7 @@ class ClaudeClient:
         if user_tier == "free":
             tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
         if tools:
-            tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
+            tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
 
         # Build message list: prior history + current user turn
         prior: list[dict[str, Any]] = history or []
@@ -263,7 +263,7 @@ class ClaudeClient:
         if user_tier == "free":
             tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
         if tools:
-            tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
+            tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         prior: list[dict[str, Any]] = history or []
         messages: list[dict[str, Any]] = [*prior, {"role": "user", "content": user_content}]
         tool_names_used: list[str] = []

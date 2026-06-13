@@ -261,6 +261,13 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
     if (!_sessionTitleSet && _currentSessionId != null) {
       _sessionTitleSet = true;
+      // First message of this session means a new conversation just began. 
+      // This branch only runs while no title is set yet, so it fires once per session.
+      unawaited(postHogAnalytics.trackEvent(
+        'chat_session_started',
+        properties: {'agent_id': agentId ?? 'general'},
+      ));
+
       final title = trimmed.length > 60 ? '${trimmed.substring(0, 57)}...' : trimmed;
       unawaited(_persistSessionTitle(_currentSessionId!, title));
     }
@@ -286,6 +293,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
     unawaited(_chatRepository.deleteMessage(_messages[errorIndex].id));
     _messages.removeAt(errorIndex);
+    _error = null;
     safeNotifyListeners();
 
     _setState(ViewState.loading);
@@ -687,6 +695,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             _isStreaming = false;
             _streamingText = '';
             _thinkingMessage = null;
+
             final exc = AppException.unexpected(message);
             final errMsg = ChatMessageModel(
               id: _uuid.v4(),
@@ -699,8 +708,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
               errorReason: _friendlyError(exc),
             );
             unawaited(_persistMessage(errMsg));
-            _error = exc;
-            _setState(ViewState.error);
+            _setState(ViewState.loaded);
             AppLogger.warning('Stream error: $message', tag: 'ChatViewModel');
         }
       },
@@ -710,6 +718,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         _streamingText = '';
         _thinkingMessage = null;
         final exc = AppException.unexpected(e.toString(), error: e, stackTrace: st);
+        // Bubble only, no banner.
         final errMsg = ChatMessageModel(
           id: _uuid.v4(),
           text: '',
@@ -721,8 +730,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
           errorReason: _friendlyError(exc),
         );
         unawaited(_persistMessage(errMsg));
-        _error = exc;
-        _setState(ViewState.error);
+        _setState(ViewState.loaded);
       },
     );
   }

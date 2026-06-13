@@ -50,7 +50,7 @@ def build_llm_pipeline(user_id: str) -> lk_llm.FallbackAdapter:
     # so the long voice prompt is read from cache on turn 2+ (lower TTFT).
     llm_adapters.append(
         anthropic.LLM(
-            model=settings.ANTHROPIC_CHAT_MODEL,
+            model=settings.ANTHROPIC_VOICE_MODEL,
             api_key=settings.ANTHROPIC_API_KEY.strip(),
             caching="ephemeral",
         )
