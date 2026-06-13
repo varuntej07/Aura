@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'app_colors.dart';
 
 class AppTheme {
@@ -7,19 +8,19 @@ class AppTheme {
   static ThemeData get dark {
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: Brightness.light,
       fontFamily: 'PlusJakartaSans',
-      colorScheme: ColorScheme.dark(
+      colorScheme: ColorScheme.light(
         surface: AppColors.background,
         primary: AppColors.accent,
         secondary: AppColors.accentLight,
         error: AppColors.error,
         onSurface: AppColors.textPrimary,
-        onPrimary: AppColors.textPrimary,
+        onPrimary: Colors.white,
         outline: AppColors.border,
       ),
       scaffoldBackgroundColor: AppColors.background,
-      textTheme: ThemeData(brightness: Brightness.dark).textTheme.copyWith(
+      textTheme: ThemeData(brightness: Brightness.light).textTheme.copyWith(
         // Display sizes use Outfit.
         displayLarge: const TextStyle(
           fontFamily: 'Outfit',
@@ -82,6 +83,8 @@ class AppTheme {
         foregroundColor: AppColors.textPrimary,
         elevation: 0,
         centerTitle: false,
+        // Dark status-bar icons over the cream app bar.
+        systemOverlayStyle: SystemUiOverlayStyle.dark,
         titleTextStyle: TextStyle(
           fontFamily: 'Outfit',
           color: AppColors.textPrimary,
@@ -97,7 +100,7 @@ class AppTheme {
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: AppColors.accent,
-          foregroundColor: AppColors.background,
+          foregroundColor: Colors.white,
           minimumSize: const Size(double.infinity, 52),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),

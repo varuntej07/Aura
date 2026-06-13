@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 
 /// Glowing voice sphere — the AI-provider speech-to-speech orb.
 ///
-/// The body is a flowing red / blue / white / teal gas (rendered by
+/// The body is a flowing teal / aqua / amber / warm-white gas (rendered by
 /// `shaders/voice_sphere.frag`). Purely presentational (Widget Purity):
 /// [intensity] is passed in by the screen.
 ///
@@ -117,10 +117,12 @@ class _SpherePainter extends CustomPainter {
   }
 
   // Multi-color gradient sphere used when the fragment shader is unavailable.
+  // Palette mirrors the .frag, tuned for the cream theme.
   void _paintFallback(Canvas canvas, Size size) {
     const teal = Color(0xFF1ACCB0);
-    const blue = Color(0xFF3D73FF);
-    const red = Color(0xFFF74362);
+    const aqua = Color(0xFF4FA3C9);
+    const amber = Color(0xFFE69A52);
+    const warmWhite = Color(0xFFFDF7EC);
     final center = size.center(Offset.zero);
     final bodyRadius = size.width * 0.36;
     final glowAlpha = 0.7 + 0.3 * intensity;
@@ -140,7 +142,7 @@ class _SpherePainter extends CustomPainter {
     final bodyPaint = Paint()
       ..shader = RadialGradient(
         center: const Alignment(-0.3, -0.4),
-        colors: const [Colors.white, teal, blue, red],
+        colors: const [warmWhite, teal, aqua, amber],
         stops: const [0.0, 0.4, 0.72, 1.0],
       ).createShader(Rect.fromCircle(center: center, radius: bodyRadius));
     canvas.drawCircle(center, bodyRadius, bodyPaint);

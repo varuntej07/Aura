@@ -12,43 +12,43 @@ class AppColors {
   // Only accentLight/accentDark/accentGlow are getters, not const.
   static const accent = accentBase;
   static Color get accentLight => Color.lerp(accentBase, Colors.white, 0.20)!;
-  static Color get accentDark => Color.lerp(accentBase, Colors.black, 0.30)!;
-  static Color get accentGlow => accentBase.withValues(alpha: 0.20);
-  static Color get glassOrb1 => accentBase.withValues(alpha: 0.13);
-  static Color get glassOrb2 => accentBase.withValues(alpha: 0.08);
-  static Color get micGlow => accentBase.withValues(alpha: 0.27);
+  static Color get accentDark => Color.lerp(accentBase, Colors.black, 0.34)!;
+  static Color get accentGlow => accentBase.withValues(alpha: 0.18);
+  static Color get glassOrb1 => accentBase.withValues(alpha: 0.10);
+  static Color get glassOrb2 => accentBase.withValues(alpha: 0.06);
+  static Color get micGlow => accentBase.withValues(alpha: 0.24);
 
-  // Backgrounds
-  static const background = Color(0xFF0B0B0D);
-  static const surface = Color(0xFF111114);
-  static const surfaceVariant = Color(0xFF18181C);
-  static const cardBackground = Color(0xFF111114);
+  // Backgrounds: warm cream theme.
+  static const background = Color(0xFFF4EEE2);
+  static const surface = Color(0xFFFBF7EF);         // raised, near-white warm
+  static const surfaceVariant = Color(0xFFEAE2D2);  // selected/active tint, darker than bg
+  static const cardBackground = Color(0xFFFBF7EF);
 
-  // Text
-  static const textPrimary = Color(0xFFF2F2F0);
-  static const textSecondary = Color(0xFFB0B0B8);
-  static const textTertiary = Color(0xFF7A7A82);
-  static const textDisabled = Color(0xFF4A4A52);
+  // Text: warm charcoal on cream
+  static const textPrimary = Color(0xFF272622);
+  static const textSecondary = Color(0xFF504D45);
+  static const textTertiary = Color(0xFF79746A);
+  static const textDisabled = Color(0xFFB8B2A6);
 
-  // Status
-  static const error = Color(0xFFF06060);
-  static const errorSurface = Color(0xFF2A1515);
-  static const success = Color(0xFF3DD68C);
-  static const warning = Color(0xFFFFAA44);
+  // Status (tuned for contrast on light)
+  static const error = Color(0xFFD64545);
+  static const errorSurface = Color(0xFFF7E4E0);
+  static const success = Color(0xFF1FA37A);
+  static const warning = Color(0xFFD68A1F);
 
-  // Dividers / borders
-  static const divider = Color(0xFF1E1E22);
-  static const border = Color(0xFF242428);
+  // Dividers / borders: warm, low-contrast on cream
+  static const divider = Color(0xFFE4DCCB);
+  static const border = Color(0xFFDCD3C0);
 
-  // Glass morphism (white-based — not accent-derived, stay const)
-  static const deepBackground = Color(0xFF0B0B0D);
-  static const glassWhiteFill = Color(0x0AFFFFFF);
-  static const glassBorderLight = Color(0x14FFFFFF);
-  static const glassBorderDim = Color(0x0DFFFFFF);
-  static const glassHighlight = Color(0x06FFFFFF);
+  // Glass morphism: warm-tint tokens
+  static const deepBackground = Color(0xFFF4EEE2);
+  static const glassWhiteFill = Color(0x0A2B2A26);
+  static const glassBorderLight = Color(0x1F2B2A26);
+  static const glassBorderDim = Color(0x122B2A26);
+  static const glassHighlight = Color(0x14FFFFFF);
 
   // Mic states
   static const micIdle = accentBase;
-  static const micListening = Color(0xFF44BBFF);
-  static const micProcessing = Color(0xFFFFAA44);
+  static const micListening = Color(0xFF2E86C9);
+  static const micProcessing = Color(0xFFD68A1F);
 }

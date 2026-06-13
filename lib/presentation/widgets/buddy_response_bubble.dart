@@ -383,7 +383,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
         fontStyle: FontStyle.italic,
       ),
       code: TextStyle(
-        color: AppColors.accentLight,
+        color: AppColors.accentDark,
         backgroundColor: AppColors.surfaceVariant,
         fontSize: 13.5,
         fontFamily: 'monospace',
@@ -402,7 +402,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
       blockquotePadding: const EdgeInsets.only(left: 12, top: 4, bottom: 4),
       listBullet: const TextStyle(color: AppColors.textSecondary),
       a: TextStyle(
-        color: AppColors.accentLight,
+        color: AppColors.accentDark,
         decoration: TextDecoration.underline,
       ),
       horizontalRuleDecoration: BoxDecoration(

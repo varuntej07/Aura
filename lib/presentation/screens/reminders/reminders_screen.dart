@@ -318,14 +318,13 @@ class _ReminderTileState extends State<_ReminderTile> {
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
-              Colors.white.withValues(alpha: _showAsCompleted ? 0.04 : 0.10),
-              Colors.white.withValues(alpha: _showAsCompleted ? 0.01 : 0.04),
+              AppColors.textPrimary.withValues(alpha: _showAsCompleted ? 0.03 : 0.07),
+              AppColors.textPrimary.withValues(alpha: _showAsCompleted ? 0.01 : 0.03),
             ],
           ),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: Colors.white
-                .withValues(alpha: _showAsCompleted ? 0.06 : 0.14),
+            color: AppColors.textPrimary.withValues(alpha: _showAsCompleted ? 0.05 : 0.12),
           ),
         ),
         child: Row(

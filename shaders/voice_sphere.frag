@@ -2,10 +2,10 @@
 #include <flutter/runtime_effect.glsl>
 
 // Glowing voice sphere — the AI-provider speech orb.
-// The body is a flowing red / blue / white / teal gas: several noise fields are
-// advected in DIFFERENT directions and domain-warped so the colors churn
-// non-uniformly, like gas. Voice state only changes motion speed + brightness
-// (uIntensity), never the palette.
+// The body is a flowing teal / aqua / amber / warm-white gas tuned for the cream
+// theme: several noise fields are advected in DIFFERENT directions and
+// domain-warped so the colors churn non-uniformly, like gas. Voice state only
+// changes motion speed + brightness (uIntensity), never the palette.
 //
 // Float uniform indices (declaration order; used by setFloat on the Dart side):
 //   0 uTime | 1 uSize.x | 2 uSize.y | 3 uIntensity
@@ -78,17 +78,18 @@ void main() {
   );
   float f = fbm(g * 2.3 + 2.4 * w);
 
-  // Palette — the four gases.
-  vec3 TEAL = vec3(0.10, 0.80, 0.69);
-  vec3 BLUE = vec3(0.24, 0.45, 1.00);
-  vec3 RED = vec3(0.97, 0.26, 0.38);
-  vec3 WHITE = vec3(0.95, 0.97, 1.00);
+  // Palette — the four gases, tuned to sit on cream (teal accent anchor,
+  // softened aqua, warm amber/clay instead of harsh red, warm-white highlight).
+  vec3 TEAL = vec3(0.12, 0.78, 0.69);
+  vec3 AQUA = vec3(0.30, 0.62, 0.78);
+  vec3 AMBER = vec3(0.90, 0.62, 0.34);
+  vec3 WARM = vec3(0.99, 0.96, 0.90);
 
   // Layer the gases by the independent fields.
   vec3 col = TEAL;
-  col = mix(col, BLUE,  smoothstep(0.30, 0.85, q.x));
-  col = mix(col, RED,   smoothstep(0.35, 0.95, w.y));
-  col = mix(col, WHITE, smoothstep(0.55, 1.05, pow(f, 1.6) * 1.4));
+  col = mix(col, AQUA,  smoothstep(0.30, 0.85, q.x));
+  col = mix(col, AMBER, smoothstep(0.35, 0.95, w.y));
+  col = mix(col, WARM,  smoothstep(0.55, 1.05, pow(f, 1.6) * 1.4));
 
   // Sphere shading as brightness on top of the gas color.
   float shade = mix(0.45, 1.0, diffuse);

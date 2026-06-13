@@ -132,7 +132,7 @@ class _SessionTile extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: isActive ? AppColors.accentLight : AppColors.textPrimary,
+                color: isActive ? AppColors.accentDark : AppColors.textPrimary,
                 fontSize: 14,
                 fontWeight:
                     isActive ? FontWeight.w500 : FontWeight.w400,

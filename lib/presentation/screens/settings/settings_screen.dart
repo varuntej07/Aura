@@ -9,6 +9,7 @@ import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/settings_viewmodel.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/loading_indicator.dart';
+import '../connectors/connectors_screen.dart';
 import '../reminders/reminders_screen.dart';
 import 'aura_profile_screen.dart';
 
@@ -34,7 +35,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _signOut(BuildContext context) async {
     final authVm = context.read<AuthViewModel>();
     await authVm.signOut();
-    if (!mounted) return;
+    if (!context.mounted) return;
     // Settings was pushed via Navigator (not GoRouter), so the redirect won't
     // clear this screen on its own — navigating to the sign-in screen explicitly.
     context.go('/login');
@@ -82,31 +83,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         SnackBar(
           content: Text(errorMessage),
           backgroundColor: AppColors.error,
-        ),
-      );
-    }
-  }
-
-  Future<void> _showFeedbackSheet(BuildContext context) async {
-    final settingsVm = context.read<SettingsViewModel>();
-    final messenger = ScaffoldMessenger.of(context);
-    final sent = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _FeedbackSheet(
-        onSubmit: (text, category) =>
-            settingsVm.submitFeedback(text: text, category: category),
-      ),
-    );
-    if (sent == true && mounted) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Got it — thanks for the feedback.',
-            style: TextStyle(color: AppColors.textPrimary),
-          ),
-          backgroundColor: AppColors.surfaceVariant,
         ),
       );
     }
@@ -196,6 +172,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
 
+                        _SectionLabel('Connectors'),
+                        _GlassNavTile(
+                          icon: Icons.hub_rounded,
+                          title: 'Connectors',
+                          subtitle: 'Calendar, Gmail & more',
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute<void>(
+                              builder: (_) => const ConnectorsScreen(),
+                            ),
+                          ),
+                        ),
+
                         // Aura profile
                         _SectionLabel('Aura Memory'),
                         _GlassNavTile(
@@ -233,7 +222,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           icon: Icons.feedback_outlined,
                           title: 'Send Feedback',
                           subtitle: 'Tell us what to change or fix',
-                          onTap: () => _showFeedbackSheet(context),
+                          onTap: () => showFeedbackSheet(context),
                         ),
 
                         // ── Legal ────────────────────────────────────────────
@@ -270,7 +259,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const SizedBox(height: 28),
                         Center(
                           child: Text(
-                            'Aura v1.0.0',
+                            'Aura v1.1.0',
                             style: const TextStyle(
                               color: AppColors.textTertiary,
                               fontSize: 12,
@@ -285,6 +274,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Opens the beta feedback bottom sheet and shows an acknowledgement on success.
+/// Shared by the Settings screen and the home drawer's "Help & feedback" row.
+Future<void> showFeedbackSheet(BuildContext context) async {
+  final settingsVm = context.read<SettingsViewModel>();
+  // The drawer can open this before Settings has ever run loadUser, so seed the
+  // user from auth when needed — submitFeedback requires it.
+  if (settingsVm.user == null) {
+    final authUser = context.read<AuthViewModel>().user;
+    if (authUser != null) settingsVm.loadUser(authUser);
+  }
+  final messenger = ScaffoldMessenger.of(context);
+  final sent = await showModalBottomSheet<bool>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _FeedbackSheet(
+      onSubmit: (text, category) =>
+          settingsVm.submitFeedback(text: text, category: category),
+    ),
+  );
+  if (sent == true && context.mounted) {
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Got it — thanks for the feedback.',
+          style: TextStyle(color: AppColors.textPrimary),
+        ),
+        backgroundColor: AppColors.surfaceVariant,
       ),
     );
   }
@@ -414,10 +436,10 @@ class _GlassNavTile extends StatelessWidget {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: AppColors.accent.withValues(alpha: 0.12),
+                color: AppColors.accent.withValues(alpha: 0.20),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Icon(icon, size: 18, color: AppColors.accent),
+              child: Icon(icon, size: 18, color: AppColors.accentDark),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -628,11 +650,14 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                       color: AppColors.textPrimary, fontSize: 15, height: 1.4),
                   cursorColor: AppColors.accent,
                   decoration: const InputDecoration(
-                    hintText: 'Tell us anything — what you love, what feels off, '
+                    hintText: 'Tell us anything, what you love, what feels off, '
                         'what you wish it did.',
-                    hintStyle:
-                        TextStyle(color: AppColors.textTertiary, fontSize: 14),
+                    hintStyle: TextStyle(color: AppColors.textTertiary, fontSize: 14),
+                    filled: false,
                     border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
                     isCollapsed: true,
                     counterText: '',
                   ),

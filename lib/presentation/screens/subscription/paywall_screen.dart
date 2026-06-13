@@ -567,8 +567,8 @@ class _BillingCard extends StatelessWidget {
                       AppColors.accent.withValues(alpha: 0.08),
                     ]
                   : [
-                      const Color(0x14FFFFFF),
-                      const Color(0x08FFFFFF),
+                      const Color(0x0F2B2A26),
+                      const Color(0x082B2A26),
                     ],
             ),
             borderRadius: BorderRadius.circular(18),

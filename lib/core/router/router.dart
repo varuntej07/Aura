@@ -15,10 +15,10 @@ import '../../data/services/feedback_service.dart';
 import '../../data/services/posthog_analytics_service.dart';
 import '../../core/network/connectivity_service.dart';
 import '../../presentation/screens/app_shell.dart';
-import '../../presentation/screens/agents/agents_screen.dart';
 import '../../presentation/screens/agents/agent_thread_screen.dart';
 import '../../presentation/screens/auth/login_screen.dart';
 import '../../presentation/screens/chat/chat_screen.dart';
+import '../../presentation/screens/get_better/get_better_screen.dart';
 import '../../presentation/screens/home/home_screen.dart';
 import '../../presentation/screens/onboarding/onboarding_screen.dart';
 import '../../presentation/screens/reminders/reminders_screen.dart';
@@ -96,7 +96,9 @@ GoRouter buildRouter(
         builder: (_, _) => const OnboardingScreen(),
       ),
 
-      // Shell: Home + Agents tabs — bottom nav persists across both
+      // Shell: single Home surface — provides the ambient background + analytics
+      // observer. Notification deep links still open agent threads via the
+      // top-level '/agents/:agentId' route below.
       ShellRoute(
         observers: [shellRouteObserver],
         builder: (context, state, child) => AppShell(child: child),
@@ -105,11 +107,6 @@ GoRouter buildRouter(
             path: '/home',
             name: 'Home',
             builder: (_, _) => const HomeScreen(),
-          ),
-          GoRoute(
-            path: '/agents',
-            name: 'Agents',
-            builder: (_, _) => const AgentsScreen(),
           ),
         ],
       ),
@@ -188,6 +185,12 @@ GoRouter buildRouter(
         name: 'Reminders',
         pageBuilder: (context, state) =>
             _slidePage(state, const RemindersScreen()),
+      ),
+      GoRoute(
+        path: '/get-better',
+        name: 'Get Better',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const GetBetterScreen()),
       ),
     ],
   );

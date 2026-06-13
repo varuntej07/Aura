@@ -23,6 +23,7 @@ import '../../viewmodels/home_viewmodel.dart';
 import '../../viewmodels/notification_chat_seed.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
+import '../settings/aura_profile_screen.dart';
 import '../settings/settings_screen.dart';
 import '../../widgets/voice_sphere.dart';
 
@@ -211,6 +212,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   void _setMode(_HomeMode mode) {
     if (_mode == mode) return;
+    // Leaving the text panel for voice: drop the keyboard so it never lingers
+    // over the voice screen.
+    if (mode == _HomeMode.voice) FocusScope.of(context).unfocus();
     setState(() => _mode = mode);
     _pageController.animateToPage(
       mode.index,
@@ -219,12 +223,35 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
   }
 
+  void _handleHorizontalSwipe(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    if (velocity.abs() < 200) return;     // ignore slow / ambiguous drags
+    final swipingRight = velocity > 0;
+    if (swipingRight) {
+      // Rightward = pull the left drawer in. On Voice that opens history; 
+      // on Text it steps back to Voice.
+      if (_mode == _HomeMode.voice) {
+        FocusScope.of(context).unfocus();
+        _scaffoldKey.currentState?.openDrawer();
+      } else {
+        _setMode(_HomeMode.voice);
+      }
+    } else if (_mode == _HomeMode.voice) {
+      // Leftward = advance to Text (no-op when already there).
+      _setMode(_HomeMode.chat);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: Colors.transparent,
       resizeToAvoidBottomInset: false,
+      drawerScrimColor: AppColors.textPrimary.withValues(alpha: 0.28),
+      // The Scaffold's own edge-swipe is disabled: on phones with gesture
+      // navigation it fights the OS back-swipe.
+      drawerEnableOpenDragGesture: false,
       drawer: _ChatDrawer(
         onNewChat: () {
           Navigator.of(context).pop();
@@ -257,34 +284,37 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     ),
                   ),
                   const SizedBox(width: 14),
-                  GlassIconButton(
-                    icon: Icons.settings_outlined,
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                          builder: (_) => const SettingsScreen()),
-                    ),
-                  ),
+                  // Settings moved into the drawer; this spacer (same width as a
+                  // GlassIconButton) keeps the Voice/Text switch centered.
+                  const SizedBox(width: 44),
                 ],
               ),
             ),
             Expanded(
-              child: PageView(
-                controller: _pageController,
-                onPageChanged: (index) {
-                  setState(() => _mode = _HomeMode.values[index]);
-                },
-                children: [
-                  _VoicePanel(
-                    breathAnimation: _breathAnimation,
-                    rippleAnimation: _rippleAnimation,
-                    onMicTap: _handleMicTap,
-                  ),
-                  ChangeNotifierProvider.value(
-                    value: _textChatViewModel,
-                    child: const EmbeddedChatPanel(),
-                  ),
-                ],
+              // The pager itself no longer handles drags (NeverScrollable); the
+              // wrapping detector owns horizontal swipes so they also open the
+              // drawer (see [_handleHorizontalSwipe]). Taps and vertical scrolls
+              // inside the pages pass through untouched.
+              child: GestureDetector(
+                onHorizontalDragEnd: _handleHorizontalSwipe,
+                child: PageView(
+                  controller: _pageController,
+                  physics: const NeverScrollableScrollPhysics(),
+                  onPageChanged: (index) {
+                    setState(() => _mode = _HomeMode.values[index]);
+                  },
+                  children: [
+                    _VoicePanel(
+                      breathAnimation: _breathAnimation,
+                      rippleAnimation: _rippleAnimation,
+                      onMicTap: _handleMicTap,
+                    ),
+                    ChangeNotifierProvider.value(
+                      value: _textChatViewModel,
+                      child: const EmbeddedChatPanel(),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -367,7 +397,7 @@ class _HomeModeButton extends StatelessWidget {
             child: AnimatedDefaultTextStyle(
               duration: const Duration(milliseconds: 200),
               style: TextStyle(
-                color: selected ? AppColors.accentLight : AppColors.textTertiary,
+                color: selected ? AppColors.accentDark : AppColors.textTertiary,
                 fontSize: 13,
                 fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
               ),
@@ -393,14 +423,17 @@ class _VoicePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bottomReserve = MediaQuery.of(context).viewPadding.bottom + 110;
+    final bottomReserve = MediaQuery.of(context).viewPadding.bottom + 48;
 
     return Consumer<HomeViewModel>(
       builder: (context, vm, _) {
         final endedSummary = vm.endedSummary;
         return Stack(
           children: [
-            Positioned.fill(
+            Positioned(
+              top: 40,
+              left: 0,
+              right: 0,
               bottom: bottomReserve + 132,
               child: Align(
                 alignment: Alignment.topCenter,
@@ -640,7 +673,7 @@ class _VoiceStatusCardState extends State<_VoiceStatusCard> {
                 blendMode: BlendMode.dstIn,
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(context).size.height * 0.46,
+                    maxHeight: MediaQuery.of(context).size.height * 0.55,
                   ),
                   child: ListView.separated(
                     controller: _scrollController,
@@ -670,10 +703,10 @@ class _VoiceTranscriptLine extends StatelessWidget {
     final isUser = entry.role == VoiceTranscriptRole.user;
     final isTool = entry.role == VoiceTranscriptRole.tool;
     final color = isUser
-        ? Colors.white.withValues(alpha: 0.96)
+        ? AppColors.textPrimary
         : isTool
-            ? AppColors.accentLight.withValues(alpha: 0.72)
-            : Colors.white.withValues(alpha: 0.78);
+            ? AppColors.accentDark.withValues(alpha: 0.80)
+            : AppColors.textSecondary;
 
     return AnimatedOpacity(
       duration: const Duration(milliseconds: 180),
@@ -896,6 +929,14 @@ class _VoiceFeedbackDialogState extends State<_VoiceFeedbackDialog> {
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
                 ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
               ),
             ),
           ],
@@ -962,68 +1003,88 @@ class _ChatDrawer extends StatelessWidget {
 
   const _ChatDrawer({required this.onNewChat, required this.onSelectSession});
 
+  void _openSettings(BuildContext context) {
+    Navigator.of(context).pop();
+    Navigator.push(
+      context,
+      MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
     return Drawer(
-      backgroundColor: AppColors.deepBackground,
+      backgroundColor: AppColors.background,
+      width: width * 0.82,
       child: SafeArea(
         child: Consumer<AuthViewModel>(
           builder: (_, authVm, _) {
             final isLoggedIn = authVm.user != null;
 
             return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Profile / sign-in header
-                if (isLoggedIn)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 16),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 40,
-                          height: 40,
-                          decoration: BoxDecoration(
-                            color: AppColors.accent.withValues(alpha: 0.15),
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                                color: AppColors.glassBorderDim, width: 1),
-                          ),
-                          child: const Icon(Icons.person_rounded,
-                              color: AppColors.accent, size: 22),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                authVm.user?.displayName ?? 'User',
-                                style: const TextStyle(
-                                  color: AppColors.textPrimary,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              if ((authVm.user?.email ?? '').isNotEmpty)
-                                Text(
-                                  authVm.user?.email ?? '',
-                                  style: const TextStyle(
-                                      color: AppColors.textTertiary,
-                                      fontSize: 12),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
+                // Wordmark
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(24, 18, 24, 16),
+                  child: Text(
+                    'Aura',
+                    style: TextStyle(
+                      fontFamily: 'Outfit',
+                      color: AppColors.textPrimary,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
                     ),
-                  )
-                else
+                  ),
+                ),
+
+                if (isLoggedIn) ...[
+                  _DrawerNavRow(
+                    icon: Icons.edit_outlined,
+                    label: 'New chat',
+                    onTap: onNewChat,
+                  ),
+                  _DrawerNavRow(
+                    icon: Icons.auto_awesome_outlined,
+                    label: 'Your Aura Profile',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      Navigator.push(context, AuraProfileScreen.route());
+                    },
+                  ),
+                  _DrawerNavRow(
+                    icon: Icons.trending_up_rounded,
+                    label: 'Get Better',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      context.push('/get-better');
+                    },
+                  ),
+                  const SizedBox(height: 6),
+                  Expanded(
+                    child: _SessionList(onSelectSession: onSelectSession),
+                  ),
+                  const _DrawerDivider(),
+                  _DrawerNavRow(
+                    icon: Icons.help_outline_rounded,
+                    label: 'Help & feedback',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      showFeedbackSheet(context);
+                    },
+                  ),
+                  _DrawerNavRow(
+                    icon: Icons.settings_outlined,
+                    label: 'Settings',
+                    onTap: () => _openSettings(context),
+                  ),
+                  const SizedBox(height: 8),
+                ] else ...[
+                  // Signed-out: sign-in prompt, then Settings pinned at bottom.
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 32, 20, 24),
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
                     child: GestureDetector(
                       onTap: () {
                         Navigator.of(context).pop();
@@ -1037,20 +1098,20 @@ class _ChatDrawer extends StatelessWidget {
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
                           colors: [
-                            AppColors.accent.withValues(alpha: 0.18),
-                            AppColors.accent.withValues(alpha: 0.08),
+                            AppColors.accent.withValues(alpha: 0.16),
+                            AppColors.accent.withValues(alpha: 0.07),
                           ],
                         ),
-                        child: const Row(
+                        child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(Icons.login_rounded,
-                                color: AppColors.accent, size: 18),
-                            SizedBox(width: 8),
+                                color: AppColors.accentDark, size: 18),
+                            const SizedBox(width: 8),
                             Text(
                               'Sign In',
                               style: TextStyle(
-                                color: AppColors.accent,
+                                color: AppColors.accentDark,
                                 fontSize: 15,
                                 fontWeight: FontWeight.w600,
                               ),
@@ -1060,32 +1121,15 @@ class _ChatDrawer extends StatelessWidget {
                       ),
                     ),
                   ),
-
-                const Divider(color: AppColors.divider, height: 1),
-
-                if (isLoggedIn) ...[
-                  ListTile(
-                    leading: const Icon(Icons.add_rounded,
-                        color: AppColors.accent),
-                    title: const Text('New Chat',
-                        style: TextStyle(
-                            color: AppColors.textPrimary, fontSize: 14)),
-                    onTap: onNewChat,
-                  ),
-                  const Divider(color: AppColors.divider, height: 1),
-                  Expanded(
-                    child: _SessionList(onSelectSession: onSelectSession),
-                  ),
-                ] else
-                  Expanded(
+                  const Expanded(
                     child: Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.history_rounded,
+                          Icon(Icons.history_rounded,
                               color: AppColors.textTertiary, size: 40),
-                          const SizedBox(height: 12),
-                          const Text(
+                          SizedBox(height: 12),
+                          Text(
                             'Sign in to see your chat history',
                             style: TextStyle(
                               color: AppColors.textTertiary,
@@ -1096,11 +1140,71 @@ class _ChatDrawer extends StatelessWidget {
                       ),
                     ),
                   ),
+                  const _DrawerDivider(),
+                  _DrawerNavRow(
+                    icon: Icons.settings_outlined,
+                    label: 'Settings',
+                    onTap: () => _openSettings(context),
+                  ),
+                  const SizedBox(height: 8),
+                ],
               ],
             );
           },
         ),
       ),
+    );
+  }
+}
+
+// A single Pi-style drawer row: outline icon + label, no card.
+class _DrawerNavRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _DrawerNavRow({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 13),
+          child: Row(
+            children: [
+              Icon(icon, color: AppColors.textSecondary, size: 22),
+              const SizedBox(width: 16),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DrawerDivider extends StatelessWidget {
+  const _DrawerDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(horizontal: 16),
+      child: Divider(color: AppColors.divider, height: 1),
     );
   }
 }
@@ -1200,72 +1304,112 @@ class _SessionListState extends State<_SessionList> {
     }
     if (_sessions.isEmpty) {
       return const Padding(
-        padding: EdgeInsets.all(20),
+        padding: EdgeInsets.fromLTRB(24, 12, 24, 0),
         child: Text('No recent chats',
             style: TextStyle(color: AppColors.textTertiary, fontSize: 13)),
       );
     }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Text(
-            'RECENT CHATS',
-            style: TextStyle(
-              color: AppColors.textTertiary,
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.5,
+
+    // Flatten sessions into header + tile rows, inserting a date-group header
+    // whenever the group changes. The list is already newest-first.
+    final rows = <Widget>[];
+    String? currentGroup;
+    for (final s in _sessions) {
+      final group = _groupLabel(s.startedAt);
+      if (group != currentGroup) {
+        currentGroup = group;
+        rows.add(_DrawerSectionHeader(group));
+      }
+      rows.add(_DrawerSessionTile(
+        label: s.title?.isNotEmpty == true ? s.title! : 'New chat',
+        onTap: () => widget.onSelectSession(s.id),
+      ));
+    }
+
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.only(top: 2),
+      itemCount: rows.length + (_loadingMore ? 1 : 0),
+      itemBuilder: (_, i) {
+        if (i == rows.length) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Center(
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 1.5),
+              ),
             ),
-          ),
-        ),
-        Expanded(
-          child: ListView.builder(
-            controller: _scrollController,
-            itemCount: _sessions.length + (_loadingMore ? 1 : 0),
-            itemBuilder: (_, i) {
-              if (i == _sessions.length) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Center(
-                    child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 1.5),
-                    ),
-                  ),
-                );
-              }
-              final s = _sessions[i];
-              final label = s.title?.isNotEmpty == true ? s.title! : 'Chat ${i + 1}';
-              return ListTile(
-                title: Text(
-                  label,
-                  style: const TextStyle(
-                      color: AppColors.textPrimary, fontSize: 13),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Text(
-                  _formatDate(s.startedAt),
-                  style: const TextStyle(
-                      color: AppColors.textTertiary, fontSize: 11),
-                ),
-                onTap: () => widget.onSelectSession(s.id),
-              );
-            },
-          ),
-        ),
-      ],
+          );
+        }
+        return rows[i];
+      },
     );
   }
 
-  String _formatDate(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inDays == 0) return 'Today';
-    if (diff.inDays == 1) return 'Yesterday';
-    if (diff.inDays < 7) return '${diff.inDays} days ago';
-    return '${dt.month}/${dt.day}/${dt.year}';
+  String _groupLabel(DateTime dt) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(dt.year, dt.month, dt.day);
+    final diff = today.difference(day).inDays;
+    if (diff <= 0) return 'Today';
+    if (diff == 1) return 'Yesterday';
+    if (diff < 7) return 'Previous 7 days';
+    if (diff < 30) return 'Previous 30 days';
+    return 'Older';
+  }
+}
+
+class _DrawerSectionHeader extends StatelessWidget {
+  final String label;
+  const _DrawerSectionHeader(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 6),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: AppColors.textTertiary,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+class _DrawerSessionTile extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _DrawerSessionTile({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 1),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 15,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

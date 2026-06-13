@@ -280,7 +280,7 @@ class _ThreadSuggestionPills extends StatelessWidget {
               child: FauxGlassCard.pill(
                 child: Text(
                   reply,
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
                 ),
               ),
             ),

@@ -218,7 +218,7 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
           gradient: const LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0x14FFFFFF), Color(0x08FFFFFF)],
+            colors: [Color(0x0F2B2A26), Color(0x082B2A26)],
           ),
           borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(4),
@@ -226,7 +226,7 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
             bottomLeft: Radius.circular(18),
             bottomRight: Radius.circular(18),
           ),
-          border: Border.all(color: Color(0x1AFFFFFF), width: 1),
+          border: Border.all(color: Color(0x1F2B2A26), width: 1),
         ),
         child: _buildStreamingText(theme),
       ),

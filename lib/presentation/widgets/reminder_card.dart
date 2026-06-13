@@ -157,7 +157,7 @@ class _ReminderCardState extends State<ReminderCard>
                       Text(
                         _countdown,
                         style: TextStyle(
-                          color: AppColors.accentLight,
+                          color: AppColors.accentDark,
                           fontSize: 11,
                           fontWeight: FontWeight.w500,
                         ),

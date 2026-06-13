@@ -206,7 +206,7 @@ class _MessageInputState extends State<MessageInput> {
           gradient: const LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0x00080812), Color(0xCC080812)],
+            colors: [Color(0x00F4EEE2), Color(0xCCF4EEE2)],
           ),
           border: Border(
             top: BorderSide(color: AppColors.glassBorderDim, width: 0.5),

@@ -214,7 +214,7 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
               curve: Curves.easeOut,
               height: _keyboardHeight > 100
                   ? 0
-                  : MediaQuery.viewPaddingOf(context).bottom + 99,
+                  : MediaQuery.viewPaddingOf(context).bottom + 12,
             ),
           ],
         );

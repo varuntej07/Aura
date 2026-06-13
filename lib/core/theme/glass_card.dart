@@ -53,7 +53,7 @@ class GlassCard extends StatelessWidget {
                 boxShadow: shadows ??
                     const [
                       BoxShadow(
-                        color: Color(0x40000000),
+                        color: Color(0x1A3A3228),
                         blurRadius: 24,
                         offset: Offset(0, 6),
                       ),
@@ -133,19 +133,19 @@ class FauxGlassCard extends StatelessWidget {
         borderColor = null,
         gradient = null;
 
-  // borderColor = AppColors.error.withValues(alpha: 0.3) = 0x4DF06060
-  // gradient colors = alpha 0.10 (0x1A) / 0.04 (0x0A)
+  // borderColor = AppColors.error.withValues(alpha: 0.3) = 0x4DD64545
+  // gradient colors = alpha 0.10 (0x1A) / 0.04 (0x0A) of error 0xD64545
   const FauxGlassCard.destructiveButton({
     super.key,
     required this.child,
   })  : borderRadius = 16,
         padding = const EdgeInsets.symmetric(vertical: 16),
         margin = null,
-        borderColor = const Color(0x4DF06060),
+        borderColor = const Color(0x4DD64545),
         gradient = const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0x1AF06060), Color(0x0AF06060)],
+          colors: [Color(0x1AD64545), Color(0x0AD64545)],
         );
 
   @override
@@ -158,7 +158,7 @@ class FauxGlassCard extends StatelessWidget {
             const LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
-              colors: [Color(0x14FFFFFF), Color(0x08FFFFFF)],
+              colors: [Color(0x0F2B2A26), Color(0x082B2A26)],
             ),
         borderRadius: BorderRadius.circular(borderRadius),
         border: Border.all(

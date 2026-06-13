@@ -153,13 +153,13 @@ class UserModel {
       onboardingComplete: onboardingComplete ?? this.onboardingComplete,
       auraConsentGranted: auraConsentGranted ?? this.auraConsentGranted,
       dateOfBirth: dateOfBirth ?? this.dateOfBirth,
-      lastLoginAt: this.lastLoginAt,
-      loginCount: this.loginCount,
-      lastLogoutAt: this.lastLogoutAt,
-      logoutCount: this.logoutCount,
-      isActive: this.isActive,
-      signInMethod: this.signInMethod,
-      platform: this.platform,
+      lastLoginAt: lastLoginAt,
+      loginCount: loginCount,
+      lastLogoutAt: lastLogoutAt,
+      logoutCount: logoutCount,
+      isActive: isActive,
+      signInMethod: signInMethod,
+      platform: platform,
     );
   }
 }
