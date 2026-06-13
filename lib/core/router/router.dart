@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
+import '../analytics/app_route_observer.dart';
 import '../logging/app_logger.dart';
 
 import '../../data/repositories/agent_suggestion_pills_repository.dart';
@@ -26,9 +27,16 @@ import '../../presentation/screens/subscription/paywall_screen.dart';
 import '../../presentation/viewmodels/agent_viewmodel.dart';
 import '../../presentation/viewmodels/auth_viewmodel.dart';
 import '../../presentation/viewmodels/text_chat_viewmodel.dart';
-GoRouter buildRouter(AuthViewModel authViewModel) {
+GoRouter buildRouter(
+  AuthViewModel authViewModel,
+  PostHogAnalyticsService postHogAnalyticsService,
+) {
+  final rootRouteObserver = AppRouteObserver(postHogAnalyticsService: postHogAnalyticsService);
+  final shellRouteObserver = AppRouteObserver(postHogAnalyticsService: postHogAnalyticsService);
+
   return GoRouter(
     initialLocation: '/home',
+    observers: [rootRouteObserver],
     refreshListenable: authViewModel,
     redirect: (context, state) {
       final auth = context.read<AuthViewModel>();
@@ -79,23 +87,28 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
     routes: [
       GoRoute(
         path: '/login',
+        name: 'Login',
         builder: (_, _) => const LoginScreen(),
       ),
       GoRoute(
         path: '/onboarding',
+        name: 'Onboarding',
         builder: (_, _) => const OnboardingScreen(),
       ),
 
       // Shell: Home + Agents tabs — bottom nav persists across both
       ShellRoute(
+        observers: [shellRouteObserver],
         builder: (context, state, child) => AppShell(child: child),
         routes: [
           GoRoute(
             path: '/home',
+            name: 'Home',
             builder: (_, _) => const HomeScreen(),
           ),
           GoRoute(
             path: '/agents',
+            name: 'Agents',
             builder: (_, _) => const AgentsScreen(),
           ),
         ],
@@ -104,6 +117,7 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
       // Full-screen: Agent chat thread — slides over the shell, no bottom nav
       GoRoute(
         path: '/agents/:agentId',
+        name: 'Agent Thread',
         pageBuilder: (context, state) {
           final agentId = state.pathParameters['agentId']!;
           final chatOpener = state.extra as String?;
@@ -132,6 +146,7 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
       // sessionId == 'new' means create a fresh session
       GoRoute(
         path: '/chat/:sessionId',
+        name: 'Chat',
         pageBuilder: (context, state) {
           final raw = state.pathParameters['sessionId']!;
           final existingId = raw == 'new' ? null : raw;
@@ -158,16 +173,19 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
 
       GoRoute(
         path: '/settings',
+        name: 'Settings',
         pageBuilder: (context, state) =>
             _slidePage(state, const SettingsScreen()),
       ),
       GoRoute(
         path: '/paywall',
+        name: 'Paywall',
         pageBuilder: (context, state) =>
             _slidePage(state, const PaywallScreen()),
       ),
       GoRoute(
         path: '/reminders',
+        name: 'Reminders',
         pageBuilder: (context, state) =>
             _slidePage(state, const RemindersScreen()),
       ),
@@ -179,6 +197,7 @@ GoRouter buildRouter(AuthViewModel authViewModel) {
 CustomTransitionPage<void> _slidePage(GoRouterState state, Widget child) {
   return CustomTransitionPage<void>(
     key: state.pageKey,
+    name: state.name,
     child: child,
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       const begin = Offset(1.0, 0.0);

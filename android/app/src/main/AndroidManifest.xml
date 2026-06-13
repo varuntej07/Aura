@@ -39,13 +39,24 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
             android:resource="@drawable/ic_notification" />
-        <!-- PostHog analytics -->
+        <!-- PostHog analytics.
+             Initialization happens in Dart (main.dart -> PostHogAnalyticsService.initialize) -->
+        <meta-data android:name="com.posthog.posthog.AUTO_INIT"
+            android:value="false" />
         <meta-data android:name="com.posthog.posthog.API_KEY"
             android:value="phc_CDtz3DmNraHdnJ2w9W7WJNkJ8VANYPBWAcqV2Uf77k5s" />
         <meta-data android:name="com.posthog.posthog.POSTHOG_HOST"
             android:value="https://us.i.posthog.com" />
         <meta-data android:name="com.posthog.posthog.CAPTURE_APPLICATION_LIFECYCLE_EVENTS"
             android:value="true" />
+        <!-- Firebase Analytics: turn off automatic native screen tracking. Flutter
+             runs inside one Activity, so the automatic screen_view only ever reports
+             MainActivity. Real screen names are logged from the route observer
+             instead (see AppRouteObserver), so this keeps the dashboard free of that
+             native-container noise. -->
+        <meta-data
+            android:name="google_analytics_automatic_screen_reporting_enabled"
+            android:value="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

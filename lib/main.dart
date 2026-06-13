@@ -11,6 +11,7 @@ import 'core/config/firebase_config.dart';
 import 'core/errors/error_handler.dart';
 import 'core/logging/app_logger.dart';
 import 'data/services/analytics_service.dart';
+import 'data/services/posthog_analytics_service.dart';
 import 'data/services/thread_notification_handler.dart';
 import 'di/providers.dart';
 
@@ -47,6 +48,9 @@ void main() {
       // ensureInitialized and runApp must be in the same zone to avoid the
       // "Zone mismatch" binding assertion introduced in Flutter 3.x.
       WidgetsFlutterBinding.ensureInitialized();
+
+      // Initialize PostHog explicitly before runApp so the earliest events are captured. 
+      await PostHogAnalyticsService.initialize();
 
       firebaseReady = await FirebaseConfig.initialize();
 

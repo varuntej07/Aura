@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import 'core/router/router.dart';
 import 'core/theme/app_theme.dart';
+import 'data/services/posthog_analytics_service.dart';
 import 'presentation/viewmodels/auth_viewmodel.dart';
 
 class AuraApp extends StatefulWidget {
@@ -20,7 +21,10 @@ class _AuraAppState extends State<AuraApp> {
   void initState() {
     super.initState();
     // context.read is safe in initState — widget is already in the tree.
-    _router = buildRouter(context.read<AuthViewModel>());
+    _router = buildRouter(
+      context.read<AuthViewModel>(),
+      context.read<PostHogAnalyticsService>(),
+    );
     // Defer initialize() to after the first frame so notifyListeners() doesn't
     // fire while the widget tree is still being mounted (setState-during-build).
     WidgetsBinding.instance.addPostFrameCallback((_) {

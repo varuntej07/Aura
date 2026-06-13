@@ -55,4 +55,9 @@ class AnalyticsService {
     if (!_canLog) return;
     await FirebaseAnalytics.instance.logEvent(name: 'voice_started');
   }
+
+  static Future<void> logScreenView(String screenName) async {
+    if (!_canLog) return;
+    await FirebaseAnalytics.instance.logScreenView(screenName: screenName);
+  }
 }
