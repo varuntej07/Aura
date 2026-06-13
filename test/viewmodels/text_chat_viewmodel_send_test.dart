@@ -7,8 +7,10 @@ import 'package:aura/core/network/api_response.dart';
 import 'package:aura/core/network/connectivity_service.dart';
 import 'package:aura/data/local/app_database.dart';
 import 'package:aura/data/models/chat_message_model.dart';
+import 'package:aura/data/repositories/agent_suggestion_pills_repository.dart';
 import 'package:aura/data/repositories/chat_repository.dart';
 import 'package:aura/data/services/backend_api_service.dart';
+import 'package:aura/data/services/buddy_pills_refresher.dart';
 import 'package:aura/data/services/chat_backup_service.dart';
 import 'package:aura/data/services/chat_service_provider.dart';
 import 'package:aura/data/services/chat_session_manager.dart';
@@ -27,6 +29,8 @@ import 'text_chat_viewmodel_send_test.mocks.dart';
   MockSpec<FeedbackService>(),
   MockSpec<ChatSessionManager>(),
   MockSpec<PostHogAnalyticsService>(),
+  MockSpec<AgentSuggestionPillsRepository>(),
+  MockSpec<BuddyPillsRefresher>(),
 ])
 /// Stubs `sendMessageStream` (all-matcher form) to emit [events].
 void _stubStream(MockChatServiceProvider chatService, List<ChatStreamEvent> events) {
@@ -86,6 +90,8 @@ void main() {
       feedbackService: feedbackService,
       chatSessionManager: sessionManager,
       postHogAnalyticsService: postHog,
+      suggestionPillsRepository: MockAgentSuggestionPillsRepository(),
+      buddyPillsRefresher: MockBuddyPillsRefresher(),
     );
   });
 
@@ -151,7 +157,8 @@ void main() {
     expect(vm.messages.last.reminderPayload!.message, 'Call mom');
   });
 
-  test('ErrorStreamEvent surfaces an error message', () async {
+  test('ErrorStreamEvent surfaces ONLY the error bubble, never the banner',
+      () async {
     _stubStream(chatService, [ErrorStreamEvent('overloaded')]);
 
     await vm.sendMessage('hi', 'uid-1');
@@ -161,8 +168,57 @@ void main() {
     expect(last.isUser, isFalse);
     expect(last.status, MessageStatus.error);
     expect(last.errorReason, isNotNull);
-    expect(vm.state, ViewState.error);
-    expect(vm.error, isNotNull);
+    // A stream failure must not also set the banner error (vm.error), or the
+    // user sees two error messages at once and retry clears only the bubble.
+    expect(vm.error, isNull);
+    expect(vm.state, ViewState.loaded);
+  });
+
+  test('stream onError surfaces ONLY the error bubble, never the banner',
+      () async {
+    when(
+      chatService.sendMessageStream(
+        any,
+        any,
+        history: anyNamed('history'),
+        sessionId: anyNamed('sessionId'),
+        clientMessageId: anyNamed('clientMessageId'),
+        agentId: anyNamed('agentId'),
+        attachments: anyNamed('attachments'),
+      ),
+    ).thenAnswer((_) => Stream.error(AppException.serverError(500, '')));
+
+    await vm.sendMessage('hi', 'uid-1');
+    await pumpEventQueue();
+
+    final last = vm.messages.last;
+    expect(last.isUser, isFalse);
+    expect(last.status, MessageStatus.error);
+    expect(last.errorReason, isNotNull);
+    expect(vm.error, isNull);
+    expect(vm.state, ViewState.loaded);
+  });
+
+  test('retryLastMessage removes the error bubble and clears any banner error',
+      () async {
+    _stubStream(chatService, [ErrorStreamEvent('overloaded')]);
+    when(chatRepository.deleteMessage(any))
+        .thenAnswer((_) async => const Result.success(null));
+
+    await vm.sendMessage('hi', 'uid-1');
+    await pumpEventQueue();
+    final errorBubble = vm.messages.last;
+    expect(errorBubble.status, MessageStatus.error);
+
+    // Retry succeeds this time.
+    _stubStream(chatService, [TextDeltaEvent('Hello'), DoneEvent()]);
+    await vm.retryLastMessage(errorBubble.id);
+    await pumpEventQueue();
+
+    expect(vm.messages.any((m) => m.status == MessageStatus.error), isFalse);
+    expect(vm.messages.last.text, 'Hello');
+    expect(vm.error, isNull);
+    expect(vm.state, ViewState.loaded);
   });
 
   test('ChatLimitReachedEvent sets the flag and can be cleared', () async {
