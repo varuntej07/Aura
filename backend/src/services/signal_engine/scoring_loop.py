@@ -47,6 +47,7 @@ from ..user_aura_schema import (
     LOCALE_FIELD,
     ONBOARDING_INTERESTS_FIELD,
     active_category_slugs,
+    category_label,
     top_interest_subjects,
 )
 from ..analytics import posthog_client
@@ -107,6 +108,14 @@ OUTCOME_TIMEOUT_HOURS = 6
 
 # Consecutive ticks with no engagement before exploration drift activates.
 EXPLORATION_DRIFT_THRESHOLD = 20
+
+# Gate B fall-through: how many top-ranked eligible candidates to frame (one LLM
+# call each) in search of one that passes the relevance gate, before giving up for
+# this tick. The math ranker and the LLM relevance judge often disagree — the math
+# #1 is frequently a broad-category match the framer rejects while the #2 is the
+# exact match it would approve — so abandoning the tick on the first rejection
+# silently drops good sends. Bounds the per-tick framer cost; still at most one send.
+MAX_FRAME_ATTEMPTS = 3
 
 # Re-blend the user_vector from UserAura after this many days of inactivity.
 AURA_REFRESH_INTERVAL_DAYS = 3
@@ -429,16 +438,15 @@ async def _score_one_user(
         eligible = threshold_clearers
 
     if eligible:
-        best_score, _, best_cand, components = max(
-            eligible, key=lambda item: item[0] * item[1]
-        )
+        chosen = max(eligible, key=lambda item: item[0] * item[1])
         have_pick = True
     else:
         # Either nothing cleared the threshold, or nothing in-interest did. Keep the
         # strongest overall match for logging; do NOT send it (Gate A would be
         # violated). have_pick=False routes to the below-threshold block path.
-        best_score, _, best_cand, components = max(scored, key=lambda item: item[0])
+        chosen = max(scored, key=lambda item: item[0])
         have_pick = False
+    best_score, _, best_cand, components = chosen
 
     # Exploration drift: the ONE exit that reaches outside the allow-list. After
     # enough consecutive missed ticks, swap in a low-affinity candidate (often
@@ -451,7 +459,8 @@ async def _score_one_user(
             and exploration[2].category != best_cand.category
             and exploration[0] >= NOTIFICATION_SCORE_THRESHOLD
         ):
-            best_score, _, best_cand, components = exploration
+            chosen = exploration
+            best_score, _, best_cand, components = chosen
             have_pick = True
             logger.info("signal_engine.scoring_loop: applying exploration drift", {
                 "user_id": user_id,
@@ -525,56 +534,76 @@ async def _score_one_user(
         )
         return
 
-    # Build the framing context from the UserAura already read for the allow-set,
+    # Build the framing context once from the UserAura already read for the allow-set,
     # plus gender/language from the user doc (tone + output language). No new read.
+    # Shared across all framing attempts below.
     user_context = _build_framing_context(aura, user_doc, user_local_now)
 
-    try:
-        framed = await asyncio.wait_for(
-            frame_notification(models, best_cand, user_context), timeout=10.0
-        )
-    except TimeoutError:
-        logger.warn("signal_engine.scoring_loop: framer LLM timed out, using fallback", {
-            "user_id": user_id,
-            "content_id": best_cand.content_id,
-        })
-        framed = _safe_fallback(best_cand)
+    # Gate B fall-through (Fix): frame the top few eligible candidates in rank order
+    # and send the FIRST that passes the relevance gate, rather than abandoning the
+    # whole tick when only the #1 is rejected. The chosen pick (incl. exploration
+    # drift) is tried first. Capped at MAX_FRAME_ATTEMPTS LLM calls; still one send.
+    attempts = _ordered_frame_attempts(eligible, chosen, MAX_FRAME_ATTEMPTS)
+    framed = None
+    relevance_reason = ""
+    for attempt_score, _, attempt_cand, attempt_components in attempts:
+        try:
+            candidate_framed = await asyncio.wait_for(
+                frame_notification(models, attempt_cand, user_context), timeout=10.0
+            )
+        except TimeoutError:
+            logger.warn("signal_engine.scoring_loop: framer LLM timed out, using fallback", {
+                "user_id": user_id,
+                "content_id": attempt_cand.content_id,
+            })
+            candidate_framed = _safe_fallback(attempt_cand)
 
-    # Gate B — the relevance contract, fail-CLOSED on a missing reason. A send fires
-    # only when the framer affirmed relevance AND named the specific interest it
-    # matches (relevance_reason). An is_relevant=false, an empty reason, or the
-    # framer-unavailable sentinel all suppress the send — so every notification that
-    # DOES fire carries a defensible, recorded reason.
-    relevance_reason = (framed.relevance_reason or "").strip()
-    if framed.relevance_reason == FRAMER_UNAVAILABLE_REASON:
-        # Infra outage, NOT a content rejection. Defer this tick and scream so a
-        # sustained framer outage never looks like "nothing was relevant" (fail-loud).
-        state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state)
-        summary.blocked_below_threshold += 1
-        logger.warn(
-            "signal_engine.scoring_loop: not sending — framer UNAVAILABLE "
-            "(deferring this tick, infra not relevance; retries next tick)",
+        # Framer infra outage (not a content rejection): the framer is down for this
+        # tick, so trying more candidates is pointless. Defer the whole tick and
+        # scream so a sustained outage never looks like "nothing was relevant".
+        if candidate_framed.relevance_reason == FRAMER_UNAVAILABLE_REASON:
+            state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
+            await _safe_write_state(user_id, state)
+            summary.blocked_below_threshold += 1
+            logger.warn(
+                "signal_engine.scoring_loop: not sending — framer UNAVAILABLE "
+                "(deferring this tick, infra not relevance; retries next tick)",
+                {
+                    "user_id": user_id,
+                    "content_id": attempt_cand.content_id,
+                    "category": attempt_cand.category,
+                },
+            )
+            return
+
+        # Gate B — relevance contract, fail-CLOSED on a missing reason. A send fires
+        # only when the framer affirmed relevance AND named the interest it matches.
+        attempt_reason = (candidate_framed.relevance_reason or "").strip()
+        if candidate_framed.is_relevant and attempt_reason:
+            framed = candidate_framed
+            best_score, best_cand, components = attempt_score, attempt_cand, attempt_components
+            relevance_reason = attempt_reason
+            break
+        logger.info(
+            "signal_engine.scoring_loop: candidate failed relevance gate, trying next "
+            f"({'no reason given' if candidate_framed.is_relevant else 'not relevant'})",
             {
                 "user_id": user_id,
-                "content_id": best_cand.content_id,
-                "category": best_cand.category,
+                "content_id": attempt_cand.content_id,
+                "category": attempt_cand.category,
             },
         )
-        return
-    if not framed.is_relevant or not relevance_reason:
+
+    if framed is None:
+        # Every attempted candidate failed the relevance gate this tick. Recover next
+        # tick as the pool refreshes — never a permanent mute.
         state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
         await _safe_write_state(user_id, state)
         summary.blocked_below_threshold += 1
         logger.info(
-            "signal_engine.scoring_loop: not sending (relevance gate: "
-            f"{'no reason given' if framed.is_relevant else 'not relevant'})",
-            {
-                "user_id": user_id,
-                "content_id": best_cand.content_id,
-                "category": best_cand.category,
-                "relevance_reason": framed.relevance_reason,
-            },
+            f"signal_engine.scoring_loop: not sending (relevance gate: all "
+            f"{len(attempts)} attempted candidate(s) rejected)",
+            {"user_id": user_id, "content_id": best_cand.content_id},
         )
         return
 
@@ -714,6 +743,24 @@ def _find_exploration_candidate(
     base, div, cand, comps = max(in_target_category, key=lambda item: item[0])
     boosted_score = min(2.0, base + 0.15)
     return (boosted_score, div, cand, {**comps, "exploration_bonus": 0.15})
+
+
+def _ordered_frame_attempts(
+    eligible: list[tuple[float, float, ScoredCandidate, dict[str, float]]],
+    chosen: tuple[float, float, ScoredCandidate, dict[str, float]],
+    cap: int,
+) -> list[tuple[float, float, ScoredCandidate, dict[str, float]]]:
+    """Frame-attempt order for the Gate B fall-through: the chosen pick first (it may
+    be an exploration-drift candidate that is not the top of `eligible`), then the
+    remaining threshold-clearing, in-allow-set candidates by base * diversity, deduped
+    by content_id and capped at `cap`. Sending stops at the first that passes Gate B."""
+    chosen_id = chosen[2].content_id
+    rest = sorted(
+        (item for item in eligible if item[2].content_id != chosen_id),
+        key=lambda item: item[0] * item[1],
+        reverse=True,
+    )
+    return ([chosen] + rest)[:cap]
 
 
 async def _load_user_doc(user_id: str) -> dict[str, Any]:
@@ -1034,10 +1081,29 @@ def _build_framing_context(
     interests + tone + depth come from UserAura. language defaults to English.
     """
     # Specific subjects (e.g. "KCR", "XUV 3XO") give the framer a concrete hook to
-    # personalise copy; falls back to legacy free-text interests for old profiles.
-    top_interests = top_interest_subjects(aura, k=3)
+    # personalise copy. A brand-new user has none yet (onboarding seeds categories
+    # with no subjects), which used to leave the framer with "none recorded yet" and
+    # made its name-a-subject relevance gate reject everything — cold-start starvation.
+    # Fall back to the declared category LABELS so the framer's cold-start branch can
+    # match at category level until the extractor learns subjects from chat.
+    subjects = top_interest_subjects(aura, k=3)
+    has_specific = bool(subjects)
+    if has_specific:
+        top_interests = subjects
+    else:
+        slugs = active_category_slugs(aura)
+        if not slugs:
+            declared = user_doc.get(ONBOARDING_INTERESTS_FIELD)
+            slugs = [str(s) for s in declared if s] if isinstance(declared, list) else []
+        top_interests = [category_label(s) for s in slugs[:3]]
+
     language = str(user_doc.get(LANGUAGE_FIELD, "") or "").strip() or "English"
     gender = str(user_doc.get(GENDER_FIELD, "") or "").strip() or None
+    # display_name is the field the writer (UserModel.toJson) stores and the voice
+    # fetcher (voice/fetchers.py) already reads. Drop the literal "User" creation
+    # fallback so the framer never addresses someone as "User".
+    raw_name = str(user_doc.get("display_name", "") or "").strip()
+    name = raw_name if raw_name and raw_name != "User" else None
 
     return UserFramingContext(
         top_interests=top_interests,
@@ -1046,6 +1112,8 @@ def _build_framing_context(
         depth_level=int(aura.get("emotional_engagement_level", 1) or 1),
         gender=gender,
         language=language,
+        has_specific_interests=has_specific,
+        name=name,
     )
 
 

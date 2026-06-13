@@ -97,6 +97,15 @@ class UserFramingContext(BaseModel):
     # Language the push copy is written in. Defaults to English; a Hindi/Telugu/
     # Spanish user gets copy in their language.
     language: str = "English"
+    # True when top_interests holds specific subjects (e.g. "Verstappen"); False
+    # when we only know the broad areas the user picked at signup (e.g. "Sports").
+    # A cold-start user with no learned subjects gets a looser, category-level
+    # relevance gate so they are not starved until the extractor learns subjects
+    # from chat. Defaults True so established users keep the strict subject gate.
+    has_specific_interests: bool = True
+    # What Buddy calls the user, when known. Optional warmth only: the prompt is
+    # told to use it sparingly, never to open every push with it. None when unknown.
+    name: str | None = None
 
 
 _FRAMER_SYSTEM_PROMPT = f"""\
@@ -116,6 +125,13 @@ Format, all hard:
 - gender is provided for natural tone only. It must NEVER change the topic, the
   register, or introduce any gender stereotype. Copy for the same content must be
   the same regardless of gender. Do not mention or imply the user's gender.
+- NEVER end the body or the opener with "what do you think?", "thoughts?", or "what
+  do you make of this?". Those are dead-end questions that kill the tap. The invite
+  is light and forward instead: "peek?", "worth two minutes", "go look".
+- NEVER restate the title back to them ("this article is about X"). React to it like
+  a friend who knows they care, and keep the actual payoff behind the tap.
+- You MAY use their name occasionally for warmth when it lands naturally, but do NOT
+  open every push with it. Most pushes should not use the name at all.
 
 Relevance (is_relevant + relevance_reason), the hard gate:
 - Set is_relevant=true ONLY if you can name the specific interest or subject this
@@ -123,6 +139,12 @@ Relevance (is_relevant + relevance_reason), the hard gate:
   that in relevance_reason. A shared broad category is NOT enough: an item that is
   merely tagged the same bucket as the user's interest, with no concrete subject in
   common, is is_relevant=false.
+- COLD-START EXCEPTION: when the USER CONTEXT says their interests are "broad areas
+  they picked at signup, no specific subjects learned yet", a clear, confident match
+  to one of those areas IS relevant. Name the area in relevance_reason ("a cricket
+  series result, and they picked Sports at signup"). The "broad category is not
+  enough" rule applies only once specific subjects are known. Reject items with no
+  real substance regardless of cold-start.
 - If the content body has no real substance to assess (e.g. only engagement counts
   like "120 points, 60 comments", no article text), set is_relevant=false.
 - relevance_reason is REQUIRED whenever is_relevant=true. Write it as ONE full
@@ -153,6 +175,21 @@ CONTENT source: google_news, category: tech, title: "A new productivity app prom
 USER top_interests: cricket, KCR
 CONTENT source: google_news, category: news, title: "Travel locally, where you are", body: ""
 {{"title":"","body":"","opening_chat_message":"","is_relevant":false,"relevance_reason":"This is a travel piece that matches none of the user's named interests in cricket or KCR, and it carries no article text to judge relevance against.","content_kind":"discuss"}}
+
+4) Cold-start user, only broad declared areas, a confident category match is fine:
+USER top_interests (broad areas they picked at signup, no specific subjects learned yet): Sports, Technology, News
+CONTENT source: newsdata, category: sports, title: "India chase down 320 in the final over to take the series", body: "<real match summary with the chase detail>"
+{{"title":"your team did not make that easy","body":"it came down to the very last over and the way it ended is a little ridiculous. take a look","opening_chat_message":"India just chased 320 and sealed the series in the final over. want how the chase actually went down?","is_relevant":true,"relevance_reason":"A cricket series-decider result, and the user picked Sports at signup with no narrower subject learned yet, so a confident Sports match applies.","content_kind":"read"}}
+
+5) Relevant, specific subject, the opener withholds the payoff:
+USER top_interests: Tesla, EVs, KCR
+CONTENT source: newsdata, category: business, title: "Tesla quietly cuts Model Y price in two markets", body: "<real summary with the figure>"
+{{"title":"Tesla just moved on the Model Y","body":"a quiet price change in two markets that buyers are going to feel. worth two minutes","opening_chat_message":"Tesla cut the Model Y price in two markets out of nowhere. want the numbers and which ones?","is_relevant":true,"relevance_reason":"A Tesla Model Y pricing change, a direct match for the user's stated interest in Tesla and EVs.","content_kind":"read"}}
+
+NEVER WRITE LIKE THESE (the exact failures this prompt exists to kill):
+- "this hacker news article 'every frame perfect' is about achieving perfect frames. what do you think?"  -> names the source, restates the title, closes the loop, dead-end question.
+- "Found an active article. Might be useful."  -> filler, no specific subject, no hook.
+- "Big news in tech today!"  -> exclamation, generic, names no specific thing.
 
 Output ONLY valid JSON matching the schema. No markdown fences. No prose.
 
@@ -207,13 +244,20 @@ Schema:
 def _build_framer_prompt(candidate: ScoredCandidate, user_context: UserFramingContext) -> str:
     interests_line = (
         ", ".join(user_context.top_interests[:3])
-        if user_context.top_interests else "no strong interests recorded yet"
+        if user_context.top_interests else "none recorded yet"
+    )
+    interest_kind = (
+        "specific subjects they care about"
+        if user_context.has_specific_interests
+        else "broad areas they picked at signup, no specific subjects learned yet"
     )
     tone_line = user_context.dominant_tone or "neutral"
     gender_line = user_context.gender or "unspecified"
+    name_line = user_context.name or "unknown"
     return f"""\
             USER CONTEXT
-            top_interests: {interests_line}
+            name: {name_line}
+            top_interests ({interest_kind}): {interests_line}
             dominant_tone: {tone_line}
             language: {user_context.language}
             gender: {gender_line}
@@ -335,3 +379,57 @@ def derive_local_time_band(local_datetime: datetime) -> str:
     if 18 <= h < 22:
         return "evening"
     return "late"
+
+
+# ── Copy quality linter ───────────────────────────────────────────────────────
+# Hard-rule checks for a framed push, factored out so the stress-test harness and
+# its unit test share ONE definition of "bad copy". NOT used in the hot path (the
+# framer prompt is the primary control); it exists to catch regressions and to
+# eyeball what the live model actually produces. Mirrors the NEVER rules in
+# buddy_voice.py + the framer prompt so a drift there is caught by the test.
+_SOURCE_MENTIONS = (
+    "hacker news", "hackernews", "google news", "arxiv", "reddit", "newsdata",
+    "an article", "this article", "the article", "a thread", "a post",
+)
+_LAZY_QUESTIONS = (
+    "what do you think", "thoughts?", "what do you make of", "what are your thoughts",
+)
+_BANNED_PUNCTUATION = ("!", "—", "–", "--")
+
+
+def copy_violations(framed: FramedNotification) -> list[str]:
+    """Return hard-rule violations in a framed push. Empty list == clean copy.
+
+    A rejection (is_relevant=false) carries no copy to lint but must still carry a
+    reason (the Gate B contract). A relevant push is linted for length, banned
+    punctuation, naming the source, and lazy dead-end questions."""
+    issues: list[str] = []
+    if not framed.is_relevant:
+        if not (framed.relevance_reason or "").strip():
+            issues.append("rejected without a relevance_reason")
+        return issues
+
+    title = framed.title or ""
+    body = framed.body or ""
+    blob = f"{title}\n{body}\n{framed.opening_chat_message or ''}".lower()
+
+    if len(title) > NOTIFICATION_TITLE_MAX_CHARS:
+        issues.append(f"title over {NOTIFICATION_TITLE_MAX_CHARS} chars")
+    if len(body) > NOTIFICATION_BODY_MAX_CHARS:
+        issues.append(f"body over {NOTIFICATION_BODY_MAX_CHARS} chars")
+    if not title.strip() or not body.strip():
+        issues.append("relevant push with an empty title or body")
+    if not (framed.relevance_reason or "").strip():
+        issues.append("relevant push without a relevance_reason")
+    for punct in _BANNED_PUNCTUATION:
+        if punct in title or punct in body:
+            issues.append(f"banned punctuation {punct!r} in title/body")
+    for mention in _SOURCE_MENTIONS:
+        if mention in blob:
+            issues.append(f"names the source/medium ({mention!r})")
+    for question in _LAZY_QUESTIONS:
+        if question in blob:
+            issues.append(f"lazy dead-end question ({question!r})")
+    if framed.content_kind not in (CONTENT_KIND_READ, CONTENT_KIND_DISCUSS):
+        issues.append(f"invalid content_kind {framed.content_kind!r}")
+    return issues

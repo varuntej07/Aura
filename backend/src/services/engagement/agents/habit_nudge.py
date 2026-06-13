@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from ...buddy_voice import BUDDY_VOICE_CORE
 from ...model_provider import ModelProvider
 from ..models import NotificationOutput
 from .base_agent import BaseAgent
 
-_SYSTEM_PROMPT = """You are Buddy. You pay attention to what the user does and does not do.
+_SYSTEM_PROMPT = BUDDY_VOICE_CORE + """
+
+THE TASK
+You pay attention to what the user does and does not do.
 
         Generate a push notification that calls out a behavioural pattern directly.
         Name the exact behaviour — number of times, how many days, what they said vs what they did.

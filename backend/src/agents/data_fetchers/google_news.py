@@ -28,6 +28,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote_plus
 
+import httpx
+
 from ...config.settings import settings
 from ...lib.logger import logger
 
@@ -71,6 +73,19 @@ _DEFAULT_LIMIT_PER_FEED = 8
 
 # Cap on concurrent feed parses so 20+ feeds don't run sequentially for ~20s.
 _MAX_FEED_WORKERS = 8
+
+# Bound EVERY per-feed HTTP fetch. feedparser.parse(url) fetches via urllib, which
+# only honours socket.getdefaulttimeout() — unset process-wide here — so a single
+# hung Google News endpoint would stall the whole hourly ingest with no timeout (an
+# unbounded wait, forbidden by the project's error doctrine). We instead fetch the
+# bytes ourselves with this explicit timeout and hand them to feedparser. 10s is
+# generous for one RSS document; the multi-locale change tripled the feed count
+# (~8 -> ~23), so the odds of at least one slow endpoint went up materially.
+_FEED_FETCH_TIMEOUT_SECONDS = 10.0
+
+# A plain browser UA. Google News serves RSS to feedparser's own UA fine; now that
+# we fetch the bytes ourselves a normal UA keeps any edition from 403ing the fetch.
+_FEED_USER_AGENT = "Mozilla/5.0 (compatible; AuraSignalEngine/1.0; +https://varuntej.dev/aura)"
 
 
 def _clean(text: str) -> str:
@@ -144,9 +159,20 @@ def _fetch_sync(limit_per_feed: int) -> list[dict[str, Any]]:
     def _parse_one(spec: tuple[str, str, str, str, bool]) -> list[dict[str, Any]]:
         url, category, sub_category, region, is_world = spec
         try:
-            feed = feedparser.parse(url)
+            # Fetch with an explicit timeout (see _FEED_FETCH_TIMEOUT_SECONDS) instead
+            # of letting feedparser do its own unbounded urllib fetch. follow_redirects
+            # because the Google News RSS endpoints 3xx-redirect; without it httpx would
+            # hand feedparser the redirect body. feedparser parses raw bytes identically.
+            resp = httpx.get(
+                url,
+                timeout=_FEED_FETCH_TIMEOUT_SECONDS,
+                follow_redirects=True,
+                headers={"User-Agent": _FEED_USER_AGENT},
+            )
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
         except Exception as exc:
-            logger.warn("google_news: feed parse failed", {"url": url, "error": str(exc)})
+            logger.warn("google_news: feed fetch/parse failed", {"url": url, "error": str(exc)})
             return []
         out: list[dict[str, Any]] = []
         for rank, entry in enumerate((feed.entries or [])[:limit_per_feed]):

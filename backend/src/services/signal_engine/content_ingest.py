@@ -48,6 +48,27 @@ SOURCE_TTL_HOURS: dict[str, int] = {
     "newsdata": 24,      # 12h-delayed already; a day of pool life is plenty
 }
 
+# A candidate is push-eligible only if it carries a real body to build a curiosity
+# hook from. Title-only / near-empty items (e.g. an RSS entry whose summary is just
+# the headline echoed back) may still rank in the in-app feed, but must never fire a
+# notification — a push with nothing to tease becomes the vapid "this article is
+# about X, what do you think" failure. The framer's own no-substance gate is the
+# backstop; this keeps the thinnest items out of the notification set up front.
+# Tunable: raising it trades push volume for copy quality (no notification beats a
+# bad one). Google News RSS summaries are often thin, so most pushes come from
+# newsdata (full publisher bodies); Google News still feeds the feed + salience.
+MIN_PUSH_BODY_CHARS = 40
+
+
+def _is_push_worthy(title: str, body: str) -> bool:
+    """True if the body has enough real text to frame a hook from (not title-only)."""
+    cleaned = (body or "").strip()
+    if len(cleaned) < MIN_PUSH_BODY_CHARS:
+        return False
+    if cleaned.lower() == (title or "").strip().lower():
+        return False
+    return True
+
 
 @dataclass
 class IngestSummary:
@@ -155,17 +176,19 @@ def _map_google_news(items: list[dict], freshness_ts: datetime) -> list[Candidat
             feed_rank=int(item.get("feed_rank", 0) or 0),
             is_world_section=bool(item.get("is_world", False)),
         )
+        body = str(item.get("body") or "").strip()
         candidates.append(CandidateInput(
             source="google_news",
             category=str(item.get("category") or "news"),
             sub_category=str(item.get("sub_category") or ""),
             title=title,
-            body=str(item.get("body") or "").strip(),
+            body=body,
             url=str(item.get("url") or "").strip(),
             freshness_ts=freshness_ts,
             ttl_hours=SOURCE_TTL_HOURS["google_news"],
             extra={"region": region} if region else None,
             salience=salience,
+            push_eligible=_is_push_worthy(title, body),
         ))
     return candidates
 
@@ -192,17 +215,19 @@ def _map_newsdata(items: list[dict], freshness_ts: datetime) -> list[CandidateIn
         image_url = str(item.get("image_url") or "").strip()
         if image_url:
             extra["image_url"] = image_url
+        body = str(item.get("body") or "").strip()
         candidates.append(CandidateInput(
             source="newsdata",
             category=str(item.get("category") or "news"),
             sub_category=str(item.get("sub_category") or ""),
             title=title,
-            body=str(item.get("body") or "").strip(),
+            body=body,
             url=url,
             freshness_ts=published_at if isinstance(published_at, datetime) else freshness_ts,
             ttl_hours=SOURCE_TTL_HOURS["newsdata"],
             extra=extra or None,
             salience=0.0,
+            push_eligible=_is_push_worthy(title, body),
         ))
     return candidates
 
