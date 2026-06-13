@@ -1,155 +1,13 @@
-import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/glass_card.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/loading_indicator.dart';
-
-// Orbital particle data
-
-class _OrbitalParticle {
-  final double radiusX;
-  final double radiusY;
-  final double phase;
-  final double angularSpeed;
-  final double dotSize;
-  final double maxOpacity;
-  final double hue; // 0–360
-
-  const _OrbitalParticle({
-    required this.radiusX,
-    required this.radiusY,
-    required this.phase,
-    required this.angularSpeed,
-    required this.dotSize,
-    required this.maxOpacity,
-    required this.hue,
-  });
-}
-
-// Black hole CustomPainter
-
-class _BlackHolePainter extends CustomPainter {
-  final double t;
-
-  static const int _trailSteps = 30;
-  static const double _trailArcSpan = 0.65;
-
-  static final List<_OrbitalParticle> _particles = _buildParticles();
-
-  static List<_OrbitalParticle> _buildParticles() {
-    final rng = math.Random(42);
-    const bandBaseRadii = [70.0, 110.0, 155.0, 200.0];
-    const bandCounts = [15, 20, 22, 18];
-    final result = <_OrbitalParticle>[];
-    for (int b = 0; b < bandBaseRadii.length; b++) {
-      for (int i = 0; i < bandCounts[b]; i++) {
-        final rx = bandBaseRadii[b] + (rng.nextDouble() - 0.5) * 18;
-        final ry = rx * (0.24 + rng.nextDouble() * 0.10);
-        result.add(_OrbitalParticle(
-          radiusX: rx,
-          radiusY: ry,
-          phase: rng.nextDouble() * math.pi * 2,
-          angularSpeed: 0.4 + rng.nextDouble() * 0.5 + (3 - b) * 0.25,
-          dotSize: 0.8 + rng.nextDouble() * 1.4,
-          maxOpacity: 0.25 + rng.nextDouble() * 0.50,
-          hue: 230 + rng.nextDouble() * 60, // blue-indigo-violet
-        ));
-      }
-    }
-    return result;
-  }
-
-  _BlackHolePainter(this.t);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height * 0.42);
-    _drawSpaceBackground(canvas, size, center);
-    _drawOrbitalParticles(canvas, center);
-    _drawAccretionRing(canvas, center);
-    _drawSingularity(canvas, center);
-  }
-
-  void _drawSpaceBackground(Canvas canvas, Size size, Offset center) {
-    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
-    canvas.drawRect(rect, Paint()..color = const Color(0xFF04040F));
-    final glowPaint = Paint()
-      ..shader = RadialGradient(
-        colors: [const Color(0xFF0D0D2B), const Color(0xFF04040F)],
-        stops: const [0.0, 1.0],
-      ).createShader(Rect.fromCircle(center: center, radius: size.width * 0.55));
-    canvas.drawRect(rect, glowPaint);
-  }
-
-  void _drawOrbitalParticles(Canvas canvas, Offset center) {
-    for (final p in _particles) {
-      final angle = p.phase + p.angularSpeed * t * math.pi * 2;
-      final stepSize = _trailArcSpan / _trailSteps;
-      for (int i = 0; i < _trailSteps; i++) {
-        final trailAngle = angle - i * stepSize;
-        final fade = 1.0 - i / _trailSteps;
-        final opacity = (p.maxOpacity * fade * fade).clamp(0.0, 1.0);
-        final x = center.dx + p.radiusX * math.cos(trailAngle);
-        final y = center.dy + p.radiusY * math.sin(trailAngle);
-        canvas.drawCircle(
-          Offset(x, y),
-          p.dotSize * (0.4 + 0.6 * fade),
-          Paint()
-            ..color = HSVColor.fromAHSV(opacity, p.hue, 0.65, 0.95).toColor(),
-        );
-      }
-    }
-  }
-
-  void _drawAccretionRing(Canvas canvas, Offset center) {
-    const double rx = 105;
-    const double ry = 29;
-    final rect = Rect.fromCenter(center: center, width: rx * 2, height: ry * 2);
-
-    canvas.drawOval(
-      rect,
-      Paint()
-        ..color = const Color(0xFF6B5BD2).withValues(alpha: 0.12)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 14
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14),
-    );
-    canvas.drawOval(
-      rect,
-      Paint()
-        ..color = const Color(0xFF7C6FCD).withValues(alpha: 0.22)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 5
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6),
-    );
-    canvas.drawOval(
-      rect,
-      Paint()
-        ..color = const Color(0xFF9D8FF0).withValues(alpha: 0.55)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.2,
-    );
-  }
-
-  void _drawSingularity(Canvas canvas, Offset center) {
-    canvas.drawCircle(
-      center,
-      52,
-      Paint()
-        ..shader = RadialGradient(
-          colors: [Colors.black, Colors.transparent],
-          stops: const [0.55, 1.0],
-        ).createShader(Rect.fromCircle(center: center, radius: 52)),
-    );
-  }
-
-  @override
-  bool shouldRepaint(_BlackHolePainter old) => old.t != t;
-}
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
@@ -164,7 +22,6 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen>
     with TickerProviderStateMixin {
-  late final AnimationController _orbitController;
   late final AnimationController _fadeController;
   late final Animation<double> _nameFade;
   late final Animation<double> _taglineFade;
@@ -182,10 +39,6 @@ class _LoginScreenState extends State<LoginScreen>
   @override
   void initState() {
     super.initState();
-    _orbitController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 18),
-    )..repeat();
     _fadeController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1600),
@@ -206,7 +59,6 @@ class _LoginScreenState extends State<LoginScreen>
 
   @override
   void dispose() {
-    _orbitController.dispose();
     _fadeController.dispose();
     _nameController.dispose();
     _emailController.dispose();
@@ -244,8 +96,10 @@ class _LoginScreenState extends State<LoginScreen>
     return GestureDetector(
       onTap: () => setState(() => _obscurePassword = !_obscurePassword),
       child: Icon(
-        _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-        color: Colors.white38,
+        _obscurePassword
+            ? Icons.visibility_off_outlined
+            : Icons.visibility_outlined,
+        color: AppColors.textTertiary,
         size: 20,
       ),
     );
@@ -257,7 +111,7 @@ class _LoginScreenState extends State<LoginScreen>
       builder: (context, vm, _) {
         if (vm.state == ViewState.loading) {
           return Scaffold(
-            backgroundColor: const Color(0xFF04040F),
+            backgroundColor: AppColors.background,
             body: FullScreenLoader(message: _loadingMessage),
           );
         }
@@ -265,43 +119,22 @@ class _LoginScreenState extends State<LoginScreen>
         final bottomPadding = MediaQuery.of(context).viewPadding.bottom;
 
         return Scaffold(
-          backgroundColor: const Color(0xFF04040F),
-          body: SingleChildScrollView(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(
-                minHeight: MediaQuery.of(context).size.height,
-              ),
-              child: IntrinsicHeight(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // Black hole hero
-                    SizedBox(
-                      height: 260,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          AnimatedBuilder(
-                            animation: _orbitController,
-                            builder: (_, _) => CustomPaint(
-                              painter: _BlackHolePainter(_orbitController.value),
-                            ),
-                          ),
-                          Container(
-                            decoration: BoxDecoration(
-                              gradient: RadialGradient(
-                                center: const Alignment(0.0, -0.25),
-                                radius: 0.7,
-                                colors: [
-                                  Colors.transparent,
-                                  const Color(0xFF04040F).withValues(alpha: 0.3),
-                                  const Color(0xFF04040F).withValues(alpha: 0.8),
-                                ],
-                                stops: const [0.0, 0.5, 1.0],
-                              ),
-                            ),
-                          ),
-                          Column(
+          backgroundColor: AppColors.background,
+          body: AmbientBackground(
+            child: SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minHeight: MediaQuery.of(context).size.height,
+                ),
+                child: IntrinsicHeight(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Cream hero — wordmark + tagline
+                      SizedBox(
+                        height: 260,
+                        child: Center(
+                          child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               FadeTransition(
@@ -311,8 +144,8 @@ class _LoginScreenState extends State<LoginScreen>
                                   style: TextStyle(
                                     fontFamily: 'CormorantGaramond',
                                     fontSize: 72,
-                                    fontWeight: FontWeight.w300,
-                                    color: Colors.white,
+                                    fontWeight: FontWeight.w400,
+                                    color: AppColors.textPrimary,
                                     letterSpacing: 3,
                                   ),
                                 ),
@@ -327,147 +160,148 @@ class _LoginScreenState extends State<LoginScreen>
                                     fontSize: 12,
                                     fontWeight: FontWeight.w400,
                                     letterSpacing: 2.0,
-                                    color: Colors.white,
+                                    color: AppColors.textSecondary,
                                   ),
                                 ),
                               ),
                             ],
                           ),
-                        ],
-                      ),
-                    ),
-
-                    // Auth form
-                    FadeTransition(
-                      opacity: _buttonsFade,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 28),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            const SizedBox(height: 8),
-                            if (vm.error != null) ...[
-                              ErrorDisplay(
-                                error: vm.error!,
-                                onDismiss: vm.clearError,
-                              ),
-                              const SizedBox(height: 12),
-                            ],
-
-                            // ── No email form open ─────────────────────────────
-                            if (_formMode == _EmailFormMode.none) ...[
-                              _GoogleSignInButton(
-                                onTap: () => context
-                                    .read<AuthViewModel>()
-                                    .signInWithGoogle(),
-                              ),
-                              const SizedBox(height: 16),
-                              const Center(
-                                child: Text(
-                                  'or',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 16),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: _EmailActionButton(
-                                      label: 'Sign in',
-                                      filled: false,
-                                      onTap: () => setState(
-                                          () => _formMode = _EmailFormMode.signIn),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: _EmailActionButton(
-                                      label: 'Create account',
-                                      filled: true,
-                                      onTap: () => setState(
-                                          () => _formMode = _EmailFormMode.signUp),
-                                    ),
-                                  ),
-                                ],
-                              ),
-
-                            // ── Sign in form ───────────────────────────────────
-                            ] else if (_formMode == _EmailFormMode.signIn) ...[
-                              _BackLink(
-                                onTap: () => _goBackToOptions(context),
-                              ),
-                              const SizedBox(height: 16),
-                              _DarkTextField(
-                                controller: _emailController,
-                                hint: 'Email address',
-                                keyboardType: TextInputType.emailAddress,
-                                textInputAction: TextInputAction.next,
-                              ),
-                              const SizedBox(height: 10),
-                              _DarkTextField(
-                                controller: _passwordController,
-                                hint: 'Password',
-                                obscureText: _obscurePassword,
-                                textInputAction: TextInputAction.done,
-                                onSubmitted: (_) => _submitSignIn(context),
-                                suffixIcon: _buildPasswordToggle(),
-                              ),
-                              const SizedBox(height: 14),
-                              _EmailActionButton(
-                                label: 'Sign in',
-                                icon: Icons.arrow_forward,
-                                filled: true,
-                                onTap: () => _submitSignIn(context),
-                              ),
-
-                            // ── Create account form ────────────────────────────
-                            ] else ...[
-                              _BackLink(
-                                onTap: () => _goBackToOptions(context),
-                              ),
-                              const SizedBox(height: 16),
-                              _DarkTextField(
-                                controller: _nameController,
-                                hint: 'Full name',
-                                keyboardType: TextInputType.name,
-                                textInputAction: TextInputAction.next,
-                              ),
-                              const SizedBox(height: 10),
-                              _DarkTextField(
-                                controller: _emailController,
-                                hint: 'Email address',
-                                keyboardType: TextInputType.emailAddress,
-                                textInputAction: TextInputAction.next,
-                              ),
-                              const SizedBox(height: 10),
-                              _DarkTextField(
-                                controller: _passwordController,
-                                hint: 'Password',
-                                obscureText: _obscurePassword,
-                                textInputAction: TextInputAction.done,
-                                onSubmitted: (_) => _submitSignUp(context),
-                                suffixIcon: _buildPasswordToggle(),
-                              ),
-                              const SizedBox(height: 14),
-                              _EmailActionButton(
-                                label: 'Create account',
-                                icon: Icons.arrow_forward,
-                                filled: true,
-                                onTap: () => _submitSignUp(context),
-                              ),
-                            ],
-
-                            const SizedBox(height: 20),
-                            _LegalFooter(),
-                            SizedBox(height: bottomPadding + 16),
-                          ],
                         ),
                       ),
-                    ),
-                  ],
+
+                      // Auth form
+                      FadeTransition(
+                        opacity: _buttonsFade,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 28),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              const SizedBox(height: 8),
+                              if (vm.error != null) ...[
+                                ErrorDisplay(
+                                  error: vm.error!,
+                                  onDismiss: vm.clearError,
+                                ),
+                                const SizedBox(height: 12),
+                              ],
+
+                              // ── No email form open ─────────────────────────────
+                              if (_formMode == _EmailFormMode.none) ...[
+                                _GoogleSignInButton(
+                                  onTap: () => context
+                                      .read<AuthViewModel>()
+                                      .signInWithGoogle(),
+                                ),
+                                const SizedBox(height: 16),
+                                const Center(
+                                  child: Text(
+                                    'or',
+                                    style: TextStyle(
+                                      color: AppColors.textTertiary,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: _EmailActionButton(
+                                        label: 'Sign in',
+                                        filled: false,
+                                        onTap: () => setState(() =>
+                                            _formMode = _EmailFormMode.signIn),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: _EmailActionButton(
+                                        label: 'Create account',
+                                        filled: true,
+                                        onTap: () => setState(() =>
+                                            _formMode = _EmailFormMode.signUp),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+
+                              // ── Sign in form ───────────────────────────────────
+                              ] else if (_formMode ==
+                                  _EmailFormMode.signIn) ...[
+                                _BackLink(
+                                  onTap: () => _goBackToOptions(context),
+                                ),
+                                const SizedBox(height: 16),
+                                _LoginTextField(
+                                  controller: _emailController,
+                                  hint: 'Email address',
+                                  keyboardType: TextInputType.emailAddress,
+                                  textInputAction: TextInputAction.next,
+                                ),
+                                const SizedBox(height: 10),
+                                _LoginTextField(
+                                  controller: _passwordController,
+                                  hint: 'Password',
+                                  obscureText: _obscurePassword,
+                                  textInputAction: TextInputAction.done,
+                                  onSubmitted: (_) => _submitSignIn(context),
+                                  suffixIcon: _buildPasswordToggle(),
+                                ),
+                                const SizedBox(height: 14),
+                                _EmailActionButton(
+                                  label: 'Sign in',
+                                  icon: Icons.arrow_forward,
+                                  filled: true,
+                                  onTap: () => _submitSignIn(context),
+                                ),
+
+                              // ── Create account form ────────────────────────────
+                              ] else ...[
+                                _BackLink(
+                                  onTap: () => _goBackToOptions(context),
+                                ),
+                                const SizedBox(height: 16),
+                                _LoginTextField(
+                                  controller: _nameController,
+                                  hint: 'Full name',
+                                  keyboardType: TextInputType.name,
+                                  textInputAction: TextInputAction.next,
+                                ),
+                                const SizedBox(height: 10),
+                                _LoginTextField(
+                                  controller: _emailController,
+                                  hint: 'Email address',
+                                  keyboardType: TextInputType.emailAddress,
+                                  textInputAction: TextInputAction.next,
+                                ),
+                                const SizedBox(height: 10),
+                                _LoginTextField(
+                                  controller: _passwordController,
+                                  hint: 'Password',
+                                  obscureText: _obscurePassword,
+                                  textInputAction: TextInputAction.done,
+                                  onSubmitted: (_) => _submitSignUp(context),
+                                  suffixIcon: _buildPasswordToggle(),
+                                ),
+                                const SizedBox(height: 14),
+                                _EmailActionButton(
+                                  label: 'Create account',
+                                  icon: Icons.arrow_forward,
+                                  filled: true,
+                                  onTap: () => _submitSignUp(context),
+                                ),
+                              ],
+
+                              const SizedBox(height: 20),
+                              _LegalFooter(),
+                              SizedBox(height: bottomPadding + 16),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -491,15 +325,13 @@ class _GoogleSignInButton extends StatelessWidget {
       child: Container(
         height: 52,
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.04),
+          color: AppColors.surface,
           borderRadius: BorderRadius.circular(26),
-          border: Border.all(
-            color: Colors.white.withValues(alpha: 0.15),
-          ),
+          border: Border.all(color: AppColors.border),
         ),
-        child: Row(
+        child: const Row(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: const [
+          children: [
             Image(
               image: AssetImage('assets/icons/google.png'),
               width: 20,
@@ -509,9 +341,9 @@ class _GoogleSignInButton extends StatelessWidget {
             Text(
               'Continue with Google',
               style: TextStyle(
-                color: Colors.white,
+                color: AppColors.textPrimary,
                 fontSize: 15,
-                fontWeight: FontWeight.w400,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ],
@@ -538,32 +370,29 @@ class _EmailActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final foreground = filled ? Colors.white : AppColors.textPrimary;
     return GestureDetector(
       onTap: onTap,
       child: Container(
         height: 52,
         decoration: BoxDecoration(
-          color: filled
-              ? const Color(0xFF5C6BC0).withValues(alpha: 0.85)
-              : Colors.transparent,
+          color: filled ? AppColors.accent : Colors.transparent,
           borderRadius: BorderRadius.circular(26),
-          border: filled
-              ? null
-              : Border.all(color: Colors.white.withValues(alpha: 0.18)),
+          border: filled ? null : Border.all(color: AppColors.border),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             if (icon != null) ...[
-              Icon(icon, color: Colors.white, size: 18),
+              Icon(icon, color: foreground, size: 18),
               const SizedBox(width: 10),
             ],
             Text(
               label,
-              style: const TextStyle(
-                color: Colors.white,
+              style: TextStyle(
+                color: foreground,
                 fontSize: 15,
-                fontWeight: FontWeight.w400,
+                fontWeight: FontWeight.w500,
               ),
             ),
           ],
@@ -584,21 +413,21 @@ class _BackLink extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 4),
+      child: const Padding(
+        padding: EdgeInsets.only(bottom: 4),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
               Icons.arrow_back_ios,
               size: 12,
-              color: Colors.white.withValues(alpha: 0.45),
+              color: AppColors.textTertiary,
             ),
-            const SizedBox(width: 4),
+            SizedBox(width: 4),
             Text(
               'Back',
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.45),
+                color: AppColors.textTertiary,
                 fontSize: 13,
               ),
             ),
@@ -611,7 +440,7 @@ class _BackLink extends StatelessWidget {
 
 // Text field
 
-class _DarkTextField extends StatelessWidget {
+class _LoginTextField extends StatelessWidget {
   final TextEditingController controller;
   final String hint;
   final bool obscureText;
@@ -620,7 +449,7 @@ class _DarkTextField extends StatelessWidget {
   final ValueChanged<String>? onSubmitted;
   final Widget? suffixIcon;
 
-  const _DarkTextField({
+  const _LoginTextField({
     required this.controller,
     required this.hint,
     this.obscureText = false,
@@ -634,9 +463,9 @@ class _DarkTextField extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        border: Border.all(color: AppColors.border),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
       child: TextField(
@@ -645,10 +474,11 @@ class _DarkTextField extends StatelessWidget {
         keyboardType: keyboardType,
         textInputAction: textInputAction,
         onSubmitted: onSubmitted,
-        style: const TextStyle(color: Colors.white, fontSize: 15),
+        cursorColor: AppColors.accent,
+        style: const TextStyle(color: AppColors.textPrimary, fontSize: 15),
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.white70),
+          hintStyle: const TextStyle(color: AppColors.textTertiary),
           border: InputBorder.none,
           enabledBorder: InputBorder.none,
           focusedBorder: InputBorder.none,
@@ -673,15 +503,15 @@ class _LegalFooter extends StatelessWidget {
     return Text.rich(
       TextSpan(
         style: const TextStyle(
-          color: Colors.white,
+          color: AppColors.textTertiary,
           fontSize: 11,
         ),
         children: [
           const TextSpan(text: 'By continuing you agree to our '),
           TextSpan(
             text: 'Terms of Service',
-            style: const TextStyle(
-              color: Colors.white,
+            style: TextStyle(
+              color: AppColors.accentDark,
               decoration: TextDecoration.underline,
             ),
             recognizer: TapGestureRecognizer()
@@ -691,8 +521,8 @@ class _LegalFooter extends StatelessWidget {
           const TextSpan(text: '  ·  '),
           TextSpan(
             text: 'Privacy Policy',
-            style: const TextStyle(
-              color: Colors.white,
+            style: TextStyle(
+              color: AppColors.accentDark,
               decoration: TextDecoration.underline,
             ),
             recognizer: TapGestureRecognizer()

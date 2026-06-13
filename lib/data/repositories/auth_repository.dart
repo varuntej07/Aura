@@ -48,48 +48,33 @@ class AuthRepository {
   }
 
   /// Runs only after a real, user-initiated sign-in (not a silent session
-  /// restore through [userModelStream]): ensures the user doc exists, then
-  /// records login metadata. A metadata write failure is logged but never
-  /// fails the sign-in.
+  /// restore through [userModelStream]): ensures the user doc exists and folds
+  /// the login metadata into that same doc write, so one sign-in is one Firestore write. 
+  /// The silent-restore path calls [_getOrCreateUser] with no metadata and only refreshes activity.
   Future<Result<UserModel>> _completeSignIn(
     User firebaseUser, {
     required String? name,
     required String signInMethod,
-  }) async {
-    final result = await _getOrCreateUser(firebaseUser, name: name);
-    return result.when(
-      success: (user) async {
-        await _recordLoginMetadata(firebaseUser.uid, signInMethod);
-        return Result.success(user);
-      },
-      failure: (error) => Result.failure(error),
+  }) {
+    return _getOrCreateUser(
+      firebaseUser,
+      name: name,
+      loginMetadata: _loginMetadataFields(signInMethod),
     );
   }
 
-  /// Stamps last_login_at, increments login_count, marks the session active, and
-  /// records how/where they signed in. Uses [FieldValue.increment] so the counter
-  /// is atomic and starts from 0 on docs written by older app clients.
-  Future<void> _recordLoginMetadata(String uid, String signInMethod) async {
-    final result = await _firestoreService.updateDocument(
-      AppConstants.usersCollection,
-      uid,
-      {
+  /// Builds the login metadata stamped onto the user doc on a real sign-in:
+  /// last_login_at, an atomic login_count bump, the active flag, and how/where
+  /// they signed in. Merged into the single get-or-create doc write rather than
+  /// written on its own, so a sign-in touches the doc once. [FieldValue.increment]
+  /// keeps the counter atomic and starts from 0 on docs written by older clients.
+  Map<String, dynamic> _loginMetadataFields(String signInMethod) => {
         UserModel.fieldLastLoginAt: DateTime.now().toUtc().toIso8601String(),
         UserModel.fieldLoginCount: FieldValue.increment(1),
         UserModel.fieldIsActive: true,
         UserModel.fieldSignInMethod: signInMethod,
         UserModel.fieldPlatform: _platformName(),
-      },
-    );
-    result.when(
-      success: (_) {},
-      failure: (error) => AppLogger.warning(
-        'Failed to record login metadata (non-blocking)',
-        tag: 'AuthRepository',
-        metadata: {'uid': uid, 'error': error.message},
-      ),
-    );
-  }
+      };
 
   /// Stamps last_logout_at, increments logout_count, and clears the active flag.
   /// Must run while Firebase auth is still valid — Firestore rules reject the
@@ -125,8 +110,14 @@ class AuthRepository {
     }
   }
 
+  /// Loads the user doc (creating it if missing) and refreshes activity on every
+  /// call. [loginMetadata] is non-null only on a real sign-in (not silent session
+  /// restore); when present it is merged into the same doc write so the sign-in
+  /// touches Firestore once instead of twice.
   Future<Result<UserModel>> _getOrCreateUser(
-      User firebaseUser, {required String? name}) async {
+      User firebaseUser, {
+      required String? name,
+      Map<String, dynamic>? loginMetadata}) async {
     final existingResult = await _firestoreService.getDocument(
       AppConstants.usersCollection,
       firebaseUser.uid,
@@ -137,23 +128,33 @@ class AuthRepository {
       success: (user) async {
         // Detect timezone on every sign-in so it stays accurate if the user travels
         final timezone = await _detectTimezone();
+        final now = DateTime.now();
         final updated = user.copyWith(
-          lastActiveAt: DateTime.now(),
+          lastActiveAt: now,
           timezone: timezone,
         );
-        await _firestoreService.updateDocument(
+        final writeResult = await _firestoreService.updateDocument(
           AppConstants.usersCollection,
           firebaseUser.uid,
           {
-            'last_active_at': DateTime.now().toUtc().toIso8601String(),
+            'last_active_at': now.toUtc().toIso8601String(),
             'timezone': timezone,
+            ...?loginMetadata,
           },
+        );
+        writeResult.when(
+          success: (_) {},
+          failure: (error) => AppLogger.warning(
+            'Failed to refresh activity/login metadata (non-blocking)',
+            tag: 'AuthRepository',
+            metadata: {'uid': firebaseUser.uid, 'error': error.message},
+          ),
         );
         return Result.success(updated);
       },
       failure: (error) async {
         if (error.code == ErrorCode.documentNotFound) {
-          return _createUser(firebaseUser, name: name);
+          return _createUser(firebaseUser, name: name, loginMetadata: loginMetadata);
         }
         return Result.failure(error);
       },
@@ -161,7 +162,9 @@ class AuthRepository {
   }
 
   Future<Result<UserModel>> _createUser(
-      User firebaseUser, {required String? name}) async {
+      User firebaseUser, {
+      required String? name,
+      Map<String, dynamic>? loginMetadata}) async {
     final now = DateTime.now();
     final timezone = await _detectTimezone();
     final resolvedName =
@@ -186,6 +189,9 @@ class AuthRepository {
 
     final json = user.toJson();
     json.remove('id'); // Firestore uses doc ID separately
+    // Fold login metadata (when this is a real sign-in) into the create write so
+    // a new user is stamped in one write instead of a create + follow-up update.
+    if (loginMetadata != null) json.addAll(loginMetadata);
 
     final result = await _firestoreService.setDocument(
       AppConstants.usersCollection,

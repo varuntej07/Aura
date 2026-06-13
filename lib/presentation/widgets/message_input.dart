@@ -202,14 +202,11 @@ class _MessageInputState extends State<MessageInput> {
 
     return RepaintBoundary(
       child: Container(
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
             colors: [Color(0x00F4EEE2), Color(0xCCF4EEE2)],
-          ),
-          border: Border(
-            top: BorderSide(color: AppColors.glassBorderDim, width: 0.5),
           ),
         ),
         child: Column(
@@ -274,10 +271,9 @@ class _AttachButton extends StatelessWidget {
         child: Container(
           width: 44,
           height: 44,
-          decoration: BoxDecoration(
+          decoration: const BoxDecoration(
             color: AppColors.surfaceVariant,
             shape: BoxShape.circle,
-            border: Border.all(color: AppColors.glassBorderDim),
           ),
           child: isProcessing
               ? const Padding(
@@ -289,7 +285,7 @@ class _AttachButton extends StatelessWidget {
                 )
               : const Icon(
                   Icons.add_rounded,
-                  size: 22,
+                  size: 20,
                   color: AppColors.textSecondary,
                 ),
         ),

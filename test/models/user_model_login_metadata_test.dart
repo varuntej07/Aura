@@ -18,7 +18,7 @@ void main() {
 
   group('UserModel login metadata', () {
     test('reads every field a login/logout write produces', () {
-      // Mirrors exactly what AuthRepository._recordLoginMetadata and
+      // Mirrors exactly what AuthRepository._loginMetadataFields and
       // _recordLogoutMetadata persist (counters land as ints post-increment).
       final doc = baseDoc()
         ..addAll({
