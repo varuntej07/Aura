@@ -32,12 +32,22 @@ def _python_contract_values() -> set[str]:
         funnel_events.EVENT_NOTIFICATION_TAPPED,
         funnel_events.EVENT_SESSION_FROM_NOTIFICATION,
         funnel_events.EVENT_ACTION_AFTER_NOTIFICATION,
+        funnel_events.EVENT_CONTENT_OPENED,
         funnel_events.PROP_NOTIFICATION_ID,
         funnel_events.PROP_CONTENT_ID,
         funnel_events.PROP_CATEGORY,
         funnel_events.PROP_NOTIFICATION_ORIGIN,
         funnel_events.PROP_FIREBASE_UID,
         funnel_events.NOTIFICATION_ORIGIN_SIGNAL_ENGINE,
+        funnel_events.EVENT_THREAD_FOLLOWUP_SENT,
+        funnel_events.EVENT_THREAD_SESSION_FROM_NOTIFICATION,
+        funnel_events.EVENT_THREAD_REPLY,
+        funnel_events.PROP_THREAD_ID,
+        funnel_events.NOTIFICATION_ORIGIN_THREAD_ENGINE,
+        funnel_events.EVENT_ICEBREAKER_SENT,
+        funnel_events.EVENT_ICEBREAKER_SESSION_FROM_NOTIFICATION,
+        funnel_events.EVENT_ICEBREAKER_REPLY,
+        funnel_events.NOTIFICATION_ORIGIN_ICEBREAKER,
     }
 
 

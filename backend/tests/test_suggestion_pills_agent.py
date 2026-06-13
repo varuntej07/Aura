@@ -41,6 +41,7 @@ class TestSuggestionPillsAgent:
                 '["IPL today", "Points table", "Next match", "Top scorer"]',
                 '["AI news", "Open source", "Startup funding", "Dev tools"]',
                 '["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]',
+                '["Back to the gym plan?", "Catch me up", "Set a reminder"]',
             ]
         )
         doc_ref = MagicMock()
@@ -58,15 +59,19 @@ class TestSuggestionPillsAgent:
                 await SuggestionPillsAgent(model).generate_all_agent_suggestion_pills(
                     "uid1",
                     [{"text": "find remote ml jobs"}],
+                    ["machine learning"],
                 )
 
-        assert model.cheap.call_count == 3
+        assert model.cheap.call_count == 4
         db.collection.assert_called_once_with("agent_suggestion_pills")
         db.collection.return_value.document.assert_called_once_with("uid1")
         written = doc_ref.set.call_args[0][0]
         assert written["sports"] == ["IPL today", "Points table", "Next match", "Top scorer"]
         assert written["technews"] == ["AI news", "Open source", "Startup funding", "Dev tools"]
         assert written["posts"] == ["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]
+        assert written["buddy"] == ["Back to the gym plan?", "Catch me up", "Set a reminder"]
+        # The daily run owns the doc, so it stamps buddy freshness when buddy is included.
+        assert "buddy_generated_at" in written
         assert "updated_at" in written
 
     @pytest.mark.asyncio
@@ -79,6 +84,7 @@ class TestSuggestionPillsAgent:
                 "[]",
                 "[]",
                 '["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]',
+                '["Catch me up", "What\'s on my plate?"]',
             ]
         )
         doc_ref = MagicMock()
@@ -99,6 +105,7 @@ class TestSuggestionPillsAgent:
                 )
 
         written = doc_ref.set.call_args[0][0]
-        assert set(written) >= {"posts", "updated_at"}
+        # posts and buddy are query-grounded, so they survive an RSS outage.
+        assert set(written) >= {"posts", "buddy", "updated_at"}
         assert "sports" not in written
         assert "technews" not in written

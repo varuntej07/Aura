@@ -214,6 +214,26 @@ class MockNotificationService extends _i1.Mock
           as _i3.Stream<_i8.SignalNotificationTapPayload>);
 
   @override
+  _i3.Stream<_i8.ThreadFollowUpTapPayload> get threadFollowUpTapStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#threadFollowUpTapStream),
+            returnValue: _i3.Stream<_i8.ThreadFollowUpTapPayload>.empty(),
+            returnValueForMissingStub:
+                _i3.Stream<_i8.ThreadFollowUpTapPayload>.empty(),
+          )
+          as _i3.Stream<_i8.ThreadFollowUpTapPayload>);
+
+  @override
+  _i3.Stream<_i8.IcebreakerTapPayload> get icebreakerTapStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#icebreakerTapStream),
+            returnValue: _i3.Stream<_i8.IcebreakerTapPayload>.empty(),
+            returnValueForMissingStub:
+                _i3.Stream<_i8.IcebreakerTapPayload>.empty(),
+          )
+          as _i3.Stream<_i8.IcebreakerTapPayload>);
+
+  @override
   _i3.Future<void> initialize(String? userId) =>
       (super.noSuchMethod(
             Invocation.method(#initialize, [userId]),
@@ -240,6 +260,23 @@ class MockNotificationService extends _i1.Mock
             Invocation.method(#reportContentSkipped, [], {
               #contentId: contentId,
               #category: category,
+            }),
+            returnValue: _i3.Future<void>.value(),
+            returnValueForMissingStub: _i3.Future<void>.value(),
+          )
+          as _i3.Future<void>);
+
+  @override
+  _i3.Future<void> reportContentOpened({
+    required String? contentId,
+    String? category,
+    String? notificationId,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#reportContentOpened, [], {
+              #contentId: contentId,
+              #category: category,
+              #notificationId: notificationId,
             }),
             returnValue: _i3.Future<void>.value(),
             returnValueForMissingStub: _i3.Future<void>.value(),
@@ -382,6 +419,50 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
           as _i3.Future<_i6.Result<void>>);
 
   @override
+  _i3.Future<_i6.Result<Map<String, dynamic>>> refreshBuddyPills() =>
+      (super.noSuchMethod(
+            Invocation.method(#refreshBuddyPills, []),
+            returnValue: _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+              _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#refreshBuddyPills, []),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+                  _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#refreshBuddyPills, []),
+                  ),
+                ),
+          )
+          as _i3.Future<_i6.Result<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<_i6.Result<Map<String, dynamic>>> seedOnboardingInterests(
+    List<String>? interestSlugs,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#seedOnboardingInterests, [interestSlugs]),
+            returnValue: _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+              _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#seedOnboardingInterests, [interestSlugs]),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+                  _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#seedOnboardingInterests, [
+                      interestSlugs,
+                    ]),
+                  ),
+                ),
+          )
+          as _i3.Future<_i6.Result<Map<String, dynamic>>>);
+
+  @override
   _i3.Future<_i6.Result<Map<String, dynamic>>> postSignalEvents(
     List<Map<String, dynamic>>? events,
   ) =>
@@ -402,6 +483,22 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
                 ),
           )
           as _i3.Future<_i6.Result<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<List<Map<String, dynamic>>> fetchThreadMessages(
+    String? threadId,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#fetchThreadMessages, [threadId]),
+            returnValue: _i3.Future<List<Map<String, dynamic>>>.value(
+              <Map<String, dynamic>>[],
+            ),
+            returnValueForMissingStub:
+                _i3.Future<List<Map<String, dynamic>>>.value(
+                  <Map<String, dynamic>>[],
+                ),
+          )
+          as _i3.Future<List<Map<String, dynamic>>>);
 }
 
 /// A class which mocks [PostHogAnalyticsService].

@@ -52,6 +52,27 @@ void main() {
     expect(received.first.openingChatMessage, 'Saw this and thought of you.');
   });
 
+  test('carries content_kind and url for read-vs-discuss routing', () async {
+    final received = <SignalNotificationTapPayload>[];
+    sut.signalNotificationTapStream.listen(received.add);
+
+    sut.dispatchNotificationTap({
+      'notification_type': FunnelEvents.originSignalEngine,
+      FunnelEvents.propNotificationId: 'notif-2',
+      FunnelEvents.propContentId: 'content-2',
+      FunnelEvents.propCategory: 'news',
+      'opening_chat_message': 'Saw this.',
+      'content_kind': 'read',
+      'url': 'https://example.com/a',
+    });
+
+    await Future<void>.delayed(Duration.zero);
+
+    expect(received, hasLength(1));
+    expect(received.first.contentKind, 'read');
+    expect(received.first.url, 'https://example.com/a');
+  });
+
   test('does not emit when notificationId is empty', () async {
     final received = <SignalNotificationTapPayload>[];
     sut.signalNotificationTapStream.listen(received.add);

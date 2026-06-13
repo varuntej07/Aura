@@ -64,8 +64,9 @@ def patched_send_path(monkeypatch):
     cand = _sendable_candidate()
 
     monkeypatch.setattr(
-        scoring_loop, "_load_user_timezone", AsyncMock(return_value="UTC")
+        scoring_loop, "_load_user_doc", AsyncMock(return_value={"timezone": "UTC"})
     )
+    monkeypatch.setattr(scoring_loop, "_read_user_aura", AsyncMock(return_value={}))
     monkeypatch.setattr(scoring_loop, "_sweep_timeouts", AsyncMock(return_value=0))
     monkeypatch.setattr(scoring_loop, "_should_refresh_user_vector", lambda state: False)
     # Pin active hours so this funnel test never flakes at night UTC.
@@ -76,19 +77,22 @@ def patched_send_path(monkeypatch):
     monkeypatch.setattr(
         scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=[])
     )
-    # Force the send decision so the test doesn't depend on scoring math.
+    # Force everything sendable so the test doesn't depend on time-of-day scoring.
+    monkeypatch.setattr(scoring_loop, "NOTIFICATION_SCORE_THRESHOLD", 0.0)
     monkeypatch.setattr(scoring_loop, "is_sendable", lambda *a, **k: (True, None))
     monkeypatch.setattr(
         scoring_loop,
         "_build_framing_context",
-        AsyncMock(return_value=scoring_loop.UserFramingContext()),
+        lambda *a, **k: scoring_loop.UserFramingContext(),
     )
     monkeypatch.setattr(
         scoring_loop,
         "frame_notification",
         AsyncMock(
             return_value=SimpleNamespace(
-                title="t", body="b", opening_chat_message="hey, saw this"
+                title="t", body="b", opening_chat_message="hey, saw this",
+                is_relevant=True, relevance_reason="matches your tech interest",
+                content_kind="read",
             )
         ),
     )

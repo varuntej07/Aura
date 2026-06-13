@@ -6,8 +6,10 @@ import 'package:aura/core/analytics/funnel_events.dart';
 import 'package:aura/core/network/api_response.dart';
 import 'package:aura/core/network/connectivity_service.dart';
 import 'package:aura/data/local/app_database.dart';
+import 'package:aura/data/repositories/agent_suggestion_pills_repository.dart';
 import 'package:aura/data/repositories/chat_repository.dart';
 import 'package:aura/data/services/backend_api_service.dart';
+import 'package:aura/data/services/buddy_pills_refresher.dart';
 import 'package:aura/data/services/chat_backup_service.dart';
 import 'package:aura/data/services/chat_service_provider.dart';
 import 'package:aura/data/services/chat_session_manager.dart';
@@ -29,6 +31,8 @@ import 'text_chat_viewmodel_funnel_test.mocks.dart';
   MockSpec<FeedbackService>(),
   MockSpec<ChatSessionManager>(),
   MockSpec<PostHogAnalyticsService>(),
+  MockSpec<AgentSuggestionPillsRepository>(),
+  MockSpec<BuddyPillsRefresher>(),
 ])
 void _stubStream(MockChatServiceProvider chatService, List<ChatStreamEvent> events) {
   when(
@@ -87,6 +91,8 @@ void main() {
       feedbackService: feedbackService,
       chatSessionManager: sessionManager,
       postHogAnalyticsService: postHog,
+      suggestionPillsRepository: MockAgentSuggestionPillsRepository(),
+      buddyPillsRefresher: MockBuddyPillsRefresher(),
     );
   });
 
@@ -196,6 +202,98 @@ void main() {
 
       verifyNever(postHog.trackEvent(
         FunnelEvents.actionAfterNotification,
+        properties: anyNamed('properties'),
+      ));
+    });
+  });
+
+  group('loadIcebreakerContext', () {
+    test('renders opener bubble, fires session, arms reply once', () async {
+      _stubStream(chatService, [DoneEvent()]);
+
+      await vm.loadIcebreakerContext(
+        notificationId: 'ib-1',
+        openingMessage: "How's Bruno doing?",
+      );
+      await pumpEventQueue();
+
+      // The opener actually renders — the exact bug that left the chat empty
+      // because chat_screen had no icebreaker branch and no load method existed.
+      expect(vm.messages, hasLength(1));
+      expect(vm.messages.first.isUser, isFalse);
+      expect(vm.messages.first.text, "How's Bruno doing?");
+
+      final session = verify(postHog.trackEvent(
+        FunnelEvents.icebreakerSessionFromNotification,
+        properties: captureAnyNamed('properties'),
+      )).captured.single as Map<String, Object>;
+      expect(session[FunnelEvents.propNotificationId], 'ib-1');
+      expect(session[FunnelEvents.propNotificationOrigin],
+          FunnelEvents.originIcebreaker);
+
+      await vm.sendMessage('he is great', 'uid-1');
+      await pumpEventQueue();
+      await vm.sendMessage('second reply', 'uid-1');
+      await pumpEventQueue();
+
+      // Reply step fires exactly once, then disarms (no double-count).
+      final reply = verify(postHog.trackEvent(
+        FunnelEvents.icebreakerReply,
+        properties: captureAnyNamed('properties'),
+      )).captured.single as Map<String, Object>;
+      expect(reply[FunnelEvents.propNotificationId], 'ib-1');
+      expect(reply[FunnelEvents.propNotificationOrigin],
+          FunnelEvents.originIcebreaker);
+    });
+  });
+
+  group('loadThreadFollowUpContext — unified arming parity', () {
+    test('fires thread session + arms thread reply when no shade exchange',
+        () async {
+      _stubStream(chatService, [DoneEvent()]);
+
+      await vm.loadThreadFollowUpContext(
+        threadId: 'thr-1',
+        question: "what's that about?",
+        suggestedReplies: const ['tell me more'],
+      );
+      await pumpEventQueue();
+
+      verify(postHog.trackEvent(
+        FunnelEvents.threadSessionFromNotification,
+        properties: anyNamed('properties'),
+      )).called(1);
+
+      await vm.sendMessage('it is a side project', 'uid-1');
+      await pumpEventQueue();
+
+      verify(postHog.trackEvent(
+        FunnelEvents.threadReply,
+        properties: anyNamed('properties'),
+      )).called(1);
+    });
+
+    test('does NOT arm thread reply when already answered in the shade',
+        () async {
+      _stubStream(chatService, [DoneEvent()]);
+
+      await vm.loadThreadFollowUpContext(
+        threadId: 'thr-1',
+        question: "what's that about?",
+        suggestedReplies: const [],
+        priorMessages: const [
+          {'role': 'assistant', 'content': "what's that about?"},
+          {'role': 'user', 'content': 'already answered in shade'},
+        ],
+      );
+      await pumpEventQueue();
+
+      await vm.sendMessage('another message', 'uid-1');
+      await pumpEventQueue();
+
+      // Shade replies are counted server-side; arming would double-count.
+      verifyNever(postHog.trackEvent(
+        FunnelEvents.threadReply,
         properties: anyNamed('properties'),
       ));
     });

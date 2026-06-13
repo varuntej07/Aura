@@ -5,7 +5,9 @@ import 'package:aura/core/network/api_response.dart';
 import 'package:aura/core/network/connectivity_service.dart';
 import 'package:aura/data/local/app_database.dart';
 import 'package:aura/data/models/chat_message_model.dart';
+import 'package:aura/data/repositories/agent_suggestion_pills_repository.dart';
 import 'package:aura/data/repositories/chat_repository.dart';
+import 'package:aura/data/services/buddy_pills_refresher.dart';
 import 'package:aura/data/services/chat_backup_service.dart';
 import 'package:aura/data/services/chat_service_provider.dart';
 import 'package:aura/data/services/chat_session_manager.dart';
@@ -28,6 +30,11 @@ class MockFeedbackService extends Mock implements FeedbackService {}
 class MockChatSessionManager extends Mock implements ChatSessionManager {}
 
 class MockPostHogAnalyticsService extends Mock implements PostHogAnalyticsService {}
+
+class MockAgentSuggestionPillsRepository extends Mock
+    implements AgentSuggestionPillsRepository {}
+
+class MockBuddyPillsRefresher extends Mock implements BuddyPillsRefresher {}
 
 class _FakeChatMessageModel extends Fake implements ChatMessageModel {}
 
@@ -73,6 +80,8 @@ TextChatViewModel _buildVm({
     feedbackService: feedbackService,
     chatSessionManager: sessionManager,
     postHogAnalyticsService: postHogAnalyticsService,
+    suggestionPillsRepository: MockAgentSuggestionPillsRepository(),
+    buddyPillsRefresher: MockBuddyPillsRefresher(),
   );
 }
 

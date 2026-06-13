@@ -6,8 +6,10 @@ from __future__ import annotations
 
 from src.services.signal_engine.feature_store import TIME_SLOTS_PER_DAY
 from src.services.signal_engine.scoring import (
-    QUIET_HOURS_END,
-    QUIET_HOURS_START,
+    QUIET_HOURS_END_HOUR,
+    QUIET_HOURS_END_MINUTE,
+    QUIET_HOURS_START_HOUR,
+    QUIET_HOURS_START_MINUTE,
     TIME_SLOT_SCORE_FLOOR,
     cold_start_daypart_prior,
     is_within_active_hours,
@@ -17,18 +19,25 @@ from src.services.signal_engine.scoring import (
 
 class TestQuietHours:
     def test_night_hours_are_blocked(self):
-        # Every hour inside [22:00, 08:00) must be quiet.
-        for hour in [22, 23, 0, 1, 2, 3, 4, 5, 6, 7]:
-            assert is_within_active_hours(hour) is False, f"hour {hour} should be quiet"
+        # Quiet window is [23:30, 07:00). Whole night hours must be quiet.
+        for hour in [0, 1, 2, 3, 4, 5, 6]:
+            assert is_within_active_hours(hour, 0) is False, f"hour {hour} should be quiet"
+        # 23:30 onward is quiet; 23:00-23:29 is still active.
+        assert is_within_active_hours(23, 30) is False
+        assert is_within_active_hours(23, 45) is False
+        assert is_within_active_hours(23, 0) is True
+        assert is_within_active_hours(23, 29) is True
 
     def test_day_hours_are_active(self):
-        for hour in [8, 9, 12, 15, 18, 21]:
-            assert is_within_active_hours(hour) is True, f"hour {hour} should be active"
+        for hour in [7, 8, 9, 12, 15, 18, 21, 23]:
+            assert is_within_active_hours(hour, 0) is True, f"hour {hour} should be active"
 
     def test_boundaries(self):
-        # Active window is [END, START): END inclusive, START exclusive.
-        assert is_within_active_hours(QUIET_HOURS_END) is True
-        assert is_within_active_hours(QUIET_HOURS_START) is False
+        # Active window is [end, start): end inclusive, start exclusive.
+        assert is_within_active_hours(QUIET_HOURS_END_HOUR, QUIET_HOURS_END_MINUTE) is True
+        assert is_within_active_hours(QUIET_HOURS_START_HOUR, QUIET_HOURS_START_MINUTE) is False
+        # 06:59 is still quiet; 07:00 resumes.
+        assert is_within_active_hours(6, 59) is False
 
 
 class TestColdStartDaypartPrior:

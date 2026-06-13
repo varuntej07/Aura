@@ -10,8 +10,11 @@ import 'package:aura/core/network/connectivity_service.dart' as _i6;
 import 'package:aura/data/local/app_database.dart' as _i9;
 import 'package:aura/data/models/chat_attachment.dart' as _i5;
 import 'package:aura/data/models/chat_message_model.dart' as _i11;
+import 'package:aura/data/repositories/agent_suggestion_pills_repository.dart'
+    as _i16;
 import 'package:aura/data/repositories/chat_repository.dart' as _i7;
 import 'package:aura/data/services/backend_api_service.dart' as _i4;
+import 'package:aura/data/services/buddy_pills_refresher.dart' as _i17;
 import 'package:aura/data/services/chat_backup_service.dart' as _i12;
 import 'package:aura/data/services/chat_service_provider.dart' as _i2;
 import 'package:aura/data/services/chat_session_manager.dart' as _i14;
@@ -723,6 +726,47 @@ class MockPostHogAnalyticsService extends _i1.Mock
   _i3.Future<void> reset() =>
       (super.noSuchMethod(
             Invocation.method(#reset, []),
+            returnValue: _i3.Future<void>.value(),
+            returnValueForMissingStub: _i3.Future<void>.value(),
+          )
+          as _i3.Future<void>);
+}
+
+/// A class which mocks [AgentSuggestionPillsRepository].
+///
+/// See the documentation for Mockito's code generation for more information.
+class MockAgentSuggestionPillsRepository extends _i1.Mock
+    implements _i16.AgentSuggestionPillsRepository {
+  @override
+  _i3.Future<List<String>> fetchSuggestionPillsForAgent(
+    String? uid,
+    String? agentId,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#fetchSuggestionPillsForAgent, [uid, agentId]),
+            returnValue: _i3.Future<List<String>>.value(<String>[]),
+            returnValueForMissingStub: _i3.Future<List<String>>.value(
+              <String>[],
+            ),
+          )
+          as _i3.Future<List<String>>);
+}
+
+/// A class which mocks [BuddyPillsRefresher].
+///
+/// See the documentation for Mockito's code generation for more information.
+class MockBuddyPillsRefresher extends _i1.Mock
+    implements _i17.BuddyPillsRefresher {
+  @override
+  void markActivity() => super.noSuchMethod(
+    Invocation.method(#markActivity, []),
+    returnValueForMissingStub: null,
+  );
+
+  @override
+  _i3.Future<void> refreshIfActivity(String? uid) =>
+      (super.noSuchMethod(
+            Invocation.method(#refreshIfActivity, [uid]),
             returnValue: _i3.Future<void>.value(),
             returnValueForMissingStub: _i3.Future<void>.value(),
           )
