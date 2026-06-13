@@ -167,8 +167,9 @@ async def _get_user_timezone(uid: str) -> str:
 
 
 class ToolExecutor:
-    def __init__(self, user_id: str) -> None:
+    def __init__(self, user_id: str, created_via: str = "text") -> None:
         self._user_id = user_id
+        self._created_via = created_via     # How reminders created in this session are tagged
 
     def _db(self) -> fs.Client:
         return admin_firestore()
@@ -287,7 +288,7 @@ class ToolExecutor:
             "trigger_at": trigger_at,
             "status": "pending",
             "priority": priority,
-            "created_via": "voice",
+            "created_via": self._created_via,
             "snooze_count": 0,
             "created_at": now_iso,
         }
@@ -304,6 +305,17 @@ class ToolExecutor:
             reminder_id=reminder_id,
             message=message,
             trigger_at_iso=trigger_at,
+        ))
+
+        # Mirror the creation into PostHog so the product dashboard can count how
+        # many reminders users actually set. Fire-and-forget: capture_event never
+        # raises, and the task is detached so it cannot slow the tool response.
+        from .analytics.posthog_client import capture_event
+
+        asyncio.create_task(capture_event(
+            distinct_id=self._user_id,
+            event="reminder_created",
+            properties={"priority": priority},
         ))
 
         return {

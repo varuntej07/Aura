@@ -50,7 +50,8 @@ def _executor_for_request() -> ToolExecutor:
     uid = _current_uid.get()
     if not uid:
         raise PermissionError("MCP: tool invoked with no authenticated user")
-    return ToolExecutor(uid)
+    
+    return ToolExecutor(uid, created_via="voice")
 
 
 # streamable_http_path="/" so when this app is mounted at /mcp on the parent
@@ -258,18 +259,29 @@ def register_mcp(app: FastAPI) -> None:
     Starlette does not propagate lifespan into mounted sub-apps, so we run
     the FastMCP session manager ourselves via an AsyncExitStack stored on
     the module.
+
+    NOTE: using @app.on_event (deprecated) here is deliberate, not an oversight.
+    Switching to a FastAPI `lifespan` is all-or-nothing: it disables EVERY
+    on_event app-wide, including main.on_startup (env checks + Langfuse init). It
+    is also behavior-identical for our case (the session manager already runs for
+    the whole container lifetime, which is what keeps voice tool calls off the
+    2026-05-29 Cloud Run 404/hang path, together with stateless_http=True). And the
+    parent-app boot of this session manager is NOT covered by tests
+    (test_mcp_stateless.py runs the manager directly, bypassing this wiring). So
+    migrate only when bumping FastAPI/Starlette, bundled with a lifespan-boot test
+    that hits /mcp and a dark-deploy voice smoke test. See lessons-learnt 2026-05-29.
     """
     app.mount("/mcp", _build_mcp_asgi_app())
 
-    @app.on_event("startup")
-    async def _start_mcp_session_manager() -> None:
+    @app.on_event("startup")  # pyright: ignore[reportDeprecated]
+    async def _start_mcp_session_manager() -> None:  # pyright: ignore[reportUnusedFunction]
         global _mcp_lifespan_stack
         _mcp_lifespan_stack = contextlib.AsyncExitStack()
         await _mcp_lifespan_stack.enter_async_context(mcp_server.session_manager.run())
         logger.info("MCP: streamable_http session manager started at /mcp")
 
-    @app.on_event("shutdown")
-    async def _stop_mcp_session_manager() -> None:
+    @app.on_event("shutdown")  # pyright: ignore[reportDeprecated]
+    async def _stop_mcp_session_manager() -> None:  # pyright: ignore[reportUnusedFunction]
         global _mcp_lifespan_stack
         if _mcp_lifespan_stack is not None:
             await _mcp_lifespan_stack.aclose()

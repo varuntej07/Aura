@@ -73,7 +73,10 @@ def _format_local_display(value: datetime | None, tz: ZoneInfo) -> str | None:
     """
     if value is None:
         return None
-    return value.astimezone(tz).strftime("%a, %b %-d, %-I:%M %p %Z")
+    
+    local = value.astimezone(tz)
+    hour12 = local.hour % 12 or 12
+    return local.strftime(f"%a, %b {local.day}, {hour12}:%M %p %Z")
 
 
 def _event_range_to_utc(

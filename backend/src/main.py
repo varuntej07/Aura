@@ -415,7 +415,10 @@ def _check_env() -> None:
         logger.warn("LiveKit not fully configured, voice sessions will fail...")
 
 
-@app.on_event("startup")
+# on_event is deprecated but intentional here: it is part of the same "all or nothing"
+# group as the MCP session-manager handlers in handlers/mcp.py Do not migrate this one without the others. 
+# See the NOTE in mcp.register_mcp and lessons-learnt 2026-05-29.
+@app.on_event("startup")  # pyright: ignore[reportDeprecated]
 async def on_startup() -> None:
     _check_env()
     # Initialize Langfuse — reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST from env

@@ -77,7 +77,7 @@ async def _get_user_local_datetime(uid: str) -> str:
         tz = UTC
 
     now = datetime.now(tz)
-    return now.strftime("%A, %-d %B %Y %H:%M %Z")
+    return now.strftime(f"%A, {now.day} %B %Y %H:%M %Z")
 
 
 def _resolve_user_id(event: dict[str, Any], body: dict[str, Any]) -> str | None:
@@ -585,7 +585,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
 
     async def _generate() -> AsyncGenerator[str, None]:
         try:
-            tool_executor = ToolExecutor(user_id)
+            tool_executor = ToolExecutor(user_id, created_via="text")
             claude = ClaudeClient(tool_executor)
             async for sse_event in claude.send_text_turn_stream(
                 system_prompt=system_prompt_blocks,
