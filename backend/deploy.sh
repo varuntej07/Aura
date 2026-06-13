@@ -20,6 +20,7 @@
 #   gcloud secrets create juno-openai-api-key --project=<PROJECT_ID>         # voice worker: primary voice LLM (gpt-4.1-mini)
 #   gcloud secrets create juno-gemini-api-key --project=<PROJECT_ID>         # voice worker + signal engine LLM fallback
 #   gcloud secrets create juno-brave-api-key --project=<PROJECT_ID>          # backend: real-time web_surf (chat + voice)
+#   gcloud secrets create juno-newsdata-api-key --project=<PROJECT_ID>       # backend: signal-engine news pool (newsdata.io)
 #
 # Cloud Scheduler prerequisite (one-time, NOT created by this script):
 #   The juno-scheduler service account must exist, and the Cloud Scheduler
@@ -115,6 +116,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="GOOGLE_CLIENT_SECRET=juno-google-client-secret:latest" \
   --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
   --set-secrets="BRAVE_API_KEY=juno-brave-api-key:latest" \
+  --set-secrets="NEWSDATA_API_KEY=juno-newsdata-api-key:latest" \
   --set-secrets="/run/secrets/service-account.json=juno-firebase-service-account:latest" \
   --set-secrets="LANGFUSE_SECRET_KEY=juno-langfuse-secret-key:latest" \
   --set-env-vars="GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/service-account.json" \

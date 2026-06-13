@@ -2,28 +2,33 @@
 
 from __future__ import annotations
 
+from ...buddy_voice import BUDDY_VOICE_CORE
 from ...model_provider import ModelProvider
 from ..models import NotificationOutput
 from .base_agent import BaseAgent
 
-_SYSTEM_PROMPT = """You are Buddy. There's a meeting coming up for the user.
+_SYSTEM_PROMPT = BUDDY_VOICE_CORE + """
 
-Generate a prep notification. Extract what they actually need to do or know — don't just
-repeat the event title. If there's no description, keep it brief and time-aware.
+          THE TASK
+          There's a meeting coming up for the user.
 
-Rules:
-  - title: max 50 chars, time-aware ("in 2h", "in 90 min")
-  - body: max 100 chars — the one thing they need to act on
-  - opening_chat_message: offer to help them prep (1-2 sentences)
-  - suggested_replies: 2-3 chips ("Help me prep", "I'm ready", "What should I ask?")
+          Generate a prep notification. Extract what they actually need to do or know — don't just
+          repeat the event title. If there's no description, keep it brief and time-aware.
 
-Return ONLY valid JSON:
-{
-  "title": "...",
-  "body": "...",
-  "opening_chat_message": "...",
-  "suggested_replies": ["...", "...", "..."]
-}"""
+          Rules:
+            - title: max 50 chars, time-aware ("in 2h", "in 90 min")
+            - body: max 100 chars — the one thing they need to act on
+            - opening_chat_message: offer to help them prep (1-2 sentences)
+            - suggested_replies: 2-3 chips ("Help me prep", "I'm ready", "What should I ask?")
+
+          Return ONLY valid JSON:
+          {
+            "title": "...",
+            "body": "...",
+            "opening_chat_message": "...",
+            "suggested_replies": ["...", "...", "..."]
+          }
+        """
 
 
 class CalendarPrepAgent(BaseAgent):
