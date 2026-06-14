@@ -144,11 +144,15 @@ class ApiClient {
     } on TimeoutException {
       return Result.failure(AppException.requestTimeout());
     } on HttpException catch (e) {
+      
       if (attempt < AppConstants.maxApiRetries - 1) {
         await _backoffDelay(attempt);
         return _executeWithRetry(method, path, body, fromJson, attempt + 1, timeout: timeout);
       }
+
       return Result.failure(AppException.unexpected(e.message, error: e));
+    } on http.ClientException {
+      return Result.failure(AppException.networkUnavailable());
     } catch (e, st) {
       AppLogger.error(
         'Unexpected API client failure',
@@ -242,6 +246,15 @@ class ApiClient {
           continue;
         }
         throw AppException.unexpected(e.message, error: e);
+      } on http.ClientException {
+        // Same transport-failure wrapping as in _executeWithRetry: a dropped
+        // connection is a network failure, not an unexpected crash. Retry only
+        // before the stream is accepted (after, a retry could replay text).
+        if (!streamAccepted && attempt < AppConstants.maxApiRetries - 1) {
+          await _backoffDelay(attempt);
+          continue;
+        }
+        throw AppException.networkUnavailable();
       } catch (e, st) {
         if (e is AppException) rethrow;
         AppLogger.error(

@@ -1,7 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-
 import '../../core/theme/app_colors.dart';
 import '../../data/models/chat_message_model.dart';
+import '../../data/models/streaming_snapshot.dart';
 import 'clarification_card.dart';
 import 'buddy_response_bubble.dart';
 import 'streaming_message_bubble.dart';
@@ -16,30 +17,27 @@ typedef OnFeedback = void Function(String messageId, MessageFeedback? feedback);
 class ChatMessageList extends StatelessWidget {
   final List<ChatMessageModel> messages;
   final bool isStreaming;
-  final String streamingText;
-  final String? thinkingMessage;
+  /// Live streaming output. The streaming bubble binds to this so a token
+  /// repaints only that bubble — the rest of the list stays put.
+  final ValueListenable<StreamingSnapshot>? streamingOutput;
   final ScrollController scrollController;
   final OnRetry? onRetry;
   final OnEdit? onEdit;
   final OnFeedback? onFeedback;
   final VoidCallback? onViewReminders;
   final void Function(String clarificationId, List<String> options)? onClarificationSubmit;
-  /// Forwarded to [StreamingMessageBubble] to select context-appropriate
-  final String? streamingContextTag;
 
   const ChatMessageList({
     super.key,
     required this.messages,
     required this.scrollController,
     this.isStreaming = false,
-    this.streamingText = '',
-    this.thinkingMessage,
+    this.streamingOutput,
     this.onRetry,
     this.onEdit,
     this.onFeedback,
     this.onViewReminders,
     this.onClarificationSubmit,
-    this.streamingContextTag,
   });
 
   @override
@@ -52,50 +50,62 @@ class ChatMessageList extends StatelessWidget {
       }
     }
 
-    final totalItems =
-        messages.length + (isStreaming ? 1 : 0);
+    final totalItems = messages.length + (isStreaming ? 1 : 0);
 
     return RepaintBoundary(
-      child: ListView.builder(
-        controller: scrollController,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        itemCount: totalItems,
-        itemBuilder: (context, index) {
-          if (index < messages.length) {
-            final msg = messages[index];
+      // One SelectionArea for the whole list keeps text selectable (even across
+      // bubbles) without paying the per-bubble `selectable` cost on every build.
+      child: SelectionArea(
+        child: ListView.builder(
+          controller: scrollController,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          itemCount: totalItems,
+          itemBuilder: (context, index) {
+            if (index < messages.length) {
+              final msg = messages[index];
 
-            if (msg.clarificationPayload != null) {
-              return ClarificationCard(
-                payload: msg.clarificationPayload!,
-                onSubmit: (options) => onClarificationSubmit?.call(
-                  msg.clarificationPayload!.clarificationId,
-                  options,
-                ),
+              if (msg.clarificationPayload != null) {
+                return ClarificationCard(
+                  payload: msg.clarificationPayload!,
+                  onSubmit: (options) => onClarificationSubmit?.call(
+                    msg.clarificationPayload!.clarificationId,
+                    options,
+                  ),
+                );
+              }
+
+              return BuddyResponseBubble(
+                message: msg,
+                isLastAssistantMessage: index == lastAssistantIdx,
+                onRetry: onRetry,
+                onEdit: onEdit,
+                onFeedback: onFeedback,
+                onViewReminders: onViewReminders,
               );
             }
 
-            return BuddyResponseBubble(
-              message: msg,
-              isLastAssistantMessage: index == lastAssistantIdx,
-              onRetry: onRetry,
-              onEdit: onEdit,
-              onFeedback: onFeedback,
-              onViewReminders: onViewReminders,
+            // Streaming slot - binds to the live notifier so a token repaints
+            // only this bubble (not the list), and keeps it pinned to the bottom.
+            final output = streamingOutput;
+            if (output == null) return const SizedBox.shrink();
+            return ValueListenableBuilder<StreamingSnapshot>(
+              valueListenable: output,
+              builder: (context, snapshot, _) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (scrollController.hasClients) {
+                    scrollController
+                        .jumpTo(scrollController.position.maxScrollExtent);
+                  }
+                });
+                return StreamingMessageBubble(
+                  streamingText: snapshot.text,
+                  thinkingMessage: snapshot.thinkingMessage,
+                  isLoading: true,
+                );
+              },
             );
-          }
-
-          // Streaming bubble — only when actively receiving a response
-          if (isStreaming && index == messages.length) {
-            return StreamingMessageBubble(
-              streamingText: streamingText,
-              thinkingMessage: thinkingMessage,
-              isLoading: true,
-              contextTag: streamingContextTag,
-            );
-          }
-
-          return const SizedBox.shrink();
-        },
+          },
+        ),
       ),
     );
   }

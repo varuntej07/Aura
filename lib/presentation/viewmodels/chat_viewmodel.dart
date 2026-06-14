@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/analytics/funnel_events.dart';
@@ -13,6 +14,7 @@ import '../../data/local/app_database.dart';
 import '../../data/models/chat_attachment.dart';
 import '../../data/models/chat_message_model.dart';
 import '../../data/models/clarification_payload.dart';
+import '../../data/models/streaming_snapshot.dart';
 import '../../data/repositories/chat_repository.dart';
 import '../../data/services/analytics_service.dart';
 import '../../data/services/backend_api_service.dart';
@@ -56,8 +58,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   List<ChatSession> _sessions = const [];
   bool _isOffline = false;
   bool _isStreaming = false;
-  String _streamingText = '';
-  String? _thinkingMessage;
+  // Live streaming output, published per token WITHOUT notifyListeners so only
+  // the streaming bubble repaints (the finalized message list and the rest of
+  // the screen stay put). See [StreamingSnapshot].
+  final ValueNotifier<StreamingSnapshot> _streamingOutput =
+      ValueNotifier(StreamingSnapshot.empty);
   String? _currentSessionId;
   String? _currentUserId;
   bool _sessionTitleSet = false;
@@ -104,8 +109,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   List<ChatSession> get sessions => List.unmodifiable(_sessions);
   bool get isOffline => _isOffline;
   bool get isStreaming => _isStreaming;
-  String get streamingText => _streamingText;
-  String? get thinkingMessage => _thinkingMessage;
+
+  /// Listenable stream of the in-flight assistant turn. The chat list binds the
+  /// streaming bubble to this so a token repaints only that bubble.
+  ValueListenable<StreamingSnapshot> get streamingOutput => _streamingOutput;
+  String get streamingText => _streamingOutput.value.text;
+  String? get thinkingMessage => _streamingOutput.value.thinkingMessage;
   String? get currentSessionId => _currentSessionId;
 
   /// True when the backend reports the free-tier daily chat limit has been hit.
@@ -195,8 +204,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _streamSub = null;
     _messages.clear();
     _isStreaming = false;
-    _streamingText = '';
-    _thinkingMessage = null;
+    _streamingOutput.value = StreamingSnapshot.empty;
     _error = null;
     // Reuse an existing empty session rather than creating a new one every time,
     // so the history list doesn't fill up with empty placeholder sessions.
@@ -374,8 +382,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _streamSub?.cancel();
     _streamSub = null;
     _isStreaming = false;
-    _streamingText = '';
-    _thinkingMessage = null;
+    _streamingOutput.value = StreamingSnapshot.empty;
     _setState(_messages.isEmpty ? ViewState.idle : ViewState.loaded);
   }
 
@@ -591,6 +598,38 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     );
   }
 
+  /// Pre-loads the opener from the daily briefing's "Chat about this" FAB. Unlike
+  /// the notification origins, the screen-open funnel step (`briefing_opened`)
+  /// already fired when the briefing screen loaded, so this only seeds Buddy's
+  /// opener and arms the `briefing_chat_started` action to fire once on the user's
+  /// first reply (via the same [_pendingReply] mechanism every origin uses).
+  Future<void> loadBriefingContext({required String openingMessage}) async {
+    _messages.clear();
+    _error = null;
+
+    if (openingMessage.isNotEmpty) {
+      final msg = ChatMessageModel(
+        id: _uuid.v4(),
+        text: openingMessage,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+      );
+      await _persistMessage(msg);
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+
+    _pendingReply = _PendingNotificationReply(
+      FunnelEvents.briefingChatStarted,
+      {
+        FunnelEvents.propNotificationOrigin: FunnelEvents.originBriefing,
+        'channel': 'in_chat',
+      },
+    );
+  }
+
   // Subclass hooks
 
   /// Inserts [msg] at the front of the in-memory message list without
@@ -606,9 +645,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
   void _streamResponse(String text, ChatMessageModel userMsg) {
     _isStreaming = true;
-    _streamingText = '';
-    _thinkingMessage = null;
+    _streamingOutput.value = StreamingSnapshot.empty;
     _streamSub?.cancel();
+    safeNotifyListeners();
 
     _streamSub = _backendService
         .sendMessageStream(
@@ -624,12 +663,19 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       (event) {
         switch (event) {
           case TextDeltaEvent(:final delta):
-            _streamingText += delta;
-            safeNotifyListeners();
+            // Per-token update on the notifier only — repaints the streaming
+            // bubble, not the whole screen.
+            final current = _streamingOutput.value;
+            _streamingOutput.value = StreamingSnapshot(
+              text: current.text + delta,
+              thinkingMessage: current.thinkingMessage,
+            );
 
           case ToolThinkingEvent(:final message):
-            _thinkingMessage = message;
-            safeNotifyListeners();
+            _streamingOutput.value = StreamingSnapshot(
+              text: _streamingOutput.value.text,
+              thinkingMessage: message,
+            );
 
           case ClarificationUiEvent(
               :final clarificationId,
@@ -638,8 +684,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
               :final multiSelect,
             ):
             _isStreaming = false;
-            _streamingText = '';
-            _thinkingMessage = null;
+            _streamingOutput.value = StreamingSnapshot.empty;
             final clarMsg = ChatMessageModel(
               id: _uuid.v4(),
               text: '',
@@ -664,7 +709,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             final reminderJson = metadata?['reminder'] as Map<String, dynamic>?;
             final assistantMsg = ChatMessageModel(
               id: _uuid.v4(),
-              text: _streamingText,
+              text: _streamingOutput.value.text,
               isUser: false,
               timestamp: DateTime.now(),
               channel: ChatMessageChannel.text,
@@ -672,8 +717,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
               reminderPayload:
                   reminderJson != null ? ReminderPayload.fromJson(reminderJson) : null,
             );
-            _streamingText = '';
-            _thinkingMessage = null;
+            _streamingOutput.value = StreamingSnapshot.empty;
             unawaited(_persistMessage(assistantMsg));
             _error = null;
             _setState(ViewState.loaded);
@@ -686,15 +730,13 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
           case ChatLimitReachedEvent():
             _isStreaming = false;
-            _streamingText = '';
-            _thinkingMessage = null;
+            _streamingOutput.value = StreamingSnapshot.empty;
             _chatLimitReached = true;
             _setState(_messages.isEmpty ? ViewState.idle : ViewState.loaded);
 
           case ErrorStreamEvent(:final message):
             _isStreaming = false;
-            _streamingText = '';
-            _thinkingMessage = null;
+            _streamingOutput.value = StreamingSnapshot.empty;
 
             final exc = AppException.unexpected(message);
             final errMsg = ChatMessageModel(
@@ -715,8 +757,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       onError: (Object e, StackTrace st) {
         ErrorHandler.handle(e, st);
         _isStreaming = false;
-        _streamingText = '';
-        _thinkingMessage = null;
+        _streamingOutput.value = StreamingSnapshot.empty;
         final exc = AppException.unexpected(e.toString(), error: e, stackTrace: st);
         // Bubble only, no banner.
         final errMsg = ChatMessageModel(
@@ -741,8 +782,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _currentSessionId = sessionId;
     _messages.clear();
     _isStreaming = false;
-    _streamingText = '';
-    _thinkingMessage = null;
+    _streamingOutput.value = StreamingSnapshot.empty;
 
     ChatSession? session;
     for (final s in _sessions) {
@@ -902,6 +942,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   void dispose() {
     _connectivitySub?.cancel();
     _streamSub?.cancel();
+    _streamingOutput.dispose();
     super.dispose();
   }
 }

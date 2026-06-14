@@ -158,11 +158,6 @@ class _AgentThreadScreenState extends State<AgentThreadScreen> {
 
     return Consumer<AgentViewModel>(
       builder: (context, vm, _) {
-        if (vm.isStreaming) {
-          WidgetsBinding.instance
-              .addPostFrameCallback((_) => _scrollToBottom());
-        }
-
         return Scaffold(
           key: _scaffoldKey,
           backgroundColor: AppColors.deepBackground,
@@ -244,9 +239,7 @@ class _AgentThreadScreenState extends State<AgentThreadScreen> {
                           messages: vm.messages,
                           scrollController: _scrollController,
                           isStreaming: vm.isStreaming,
-                          streamingText: vm.streamingText,
-                          thinkingMessage: vm.thinkingMessage,
-                          streamingContextTag: widget.agentId,
+                          streamingOutput: vm.streamingOutput,
                           onRetry: vm.retryLastMessage,
                           onEdit: vm.editAndResend,
                           onFeedback: vm.setFeedback,

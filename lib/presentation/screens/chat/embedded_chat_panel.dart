@@ -132,11 +132,6 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
 
     return Consumer<TextChatViewModel>(
       builder: (context, vm, _) {
-        if (vm.isStreaming) {
-          WidgetsBinding.instance
-              .addPostFrameCallback((_) => _scrollToBottom());
-        }
-
         if (vm.chatLimitReached) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             vm.clearChatLimitReached();
@@ -172,8 +167,7 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
                       messages: vm.messages,
                       scrollController: _scrollController,
                       isStreaming: vm.isStreaming,
-                      streamingText: vm.streamingText,
-                      thinkingMessage: vm.thinkingMessage,
+                      streamingOutput: vm.streamingOutput,
                       onRetry: vm.retryLastMessage,
                       onEdit: vm.editAndResend,
                       onFeedback: vm.setFeedback,

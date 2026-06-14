@@ -42,26 +42,22 @@ class BuddyResponseBubble extends StatefulWidget {
 
 class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
   bool _isEditing = false;
-  late TextEditingController _editController;
-
-  @override
-  void initState() {
-    super.initState();
-    _editController = TextEditingController(text: widget.message.text);
-  }
+  // Created lazily on first edit (long-press) so the common case — every
+  // assistant message and every un-edited user message — allocates nothing.
+  TextEditingController? _editController;
 
   @override
   void didUpdateWidget(covariant BuddyResponseBubble oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.message.id != widget.message.id) {
-      _editController.text = widget.message.text;
+      _editController?.text = widget.message.text;
       _isEditing = false;
     }
   }
 
   @override
   void dispose() {
-    _editController.dispose();
+    _editController?.dispose();
     super.dispose();
   }
 
@@ -75,7 +71,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
   void _startEditing() {
     setState(() {
       _isEditing = true;
-      _editController.text = widget.message.text;
+      (_editController ??= TextEditingController()).text = widget.message.text;
     });
   }
 
@@ -84,7 +80,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
   }
 
   void _submitEdit() {
-    final newText = _editController.text.trim();
+    final newText = (_editController?.text ?? '').trim();
     if (newText.isEmpty || newText == widget.message.text) {
       _cancelEditing();
       return;
@@ -99,54 +95,58 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     final isUser = msg.isUser;
     final isError = msg.status == MessageStatus.error;
 
+    // Buddy's normal replies render straight onto the cream canvas
+    final useBubble = isUser || isError;
+
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
+          maxWidth: MediaQuery.of(context).size.width * (useBubble ? 0.82 : 1.0),
         ),
         margin: const EdgeInsets.symmetric(vertical: 4),
         child: Column(
           crossAxisAlignment:
               isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            // Message content 
+            // Message content
             GestureDetector(
               onLongPress: isUser ? _startEditing : null,
-              child: FauxGlassCard(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                borderRadius: 18,
-                borderColor: isUser
-                    ? AppColors.accent.withValues(alpha: 0.30)
-                    : isError
-                        ? AppColors.error.withValues(alpha: 0.25)
-                        : AppColors.glassBorderDim,
-                gradient: isUser
-                    ? LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          AppColors.accent.withValues(alpha: 0.20),
-                          AppColors.accent.withValues(alpha: 0.08),
-                        ],
-                      )
-                    : isError
-                        ? LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              AppColors.error.withValues(alpha: 0.12),
-                              AppColors.error.withValues(alpha: 0.05),
-                            ],
-                          )
-                        : null,
-                child: _isEditing
-                    ? _buildEditField()
-                    : isUser
-                        ? _buildUserContent(msg)
-                        : _buildAssistantContent(msg, isError),
-              ),
+              child: useBubble
+                  ? FauxGlassCard(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 12),
+                      borderRadius: 18,
+                      borderColor: isUser
+                          ? AppColors.accent.withValues(alpha: 0.30)
+                          : AppColors.error.withValues(alpha: 0.25),
+                      gradient: isUser
+                          ? LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                AppColors.accent.withValues(alpha: 0.20),
+                                AppColors.accent.withValues(alpha: 0.08),
+                              ],
+                            )
+                          : LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                AppColors.error.withValues(alpha: 0.12),
+                                AppColors.error.withValues(alpha: 0.05),
+                              ],
+                            ),
+                      child: _isEditing
+                          ? _buildEditField()
+                          : isUser
+                              ? _buildUserContent(msg)
+                              : _buildAssistantContent(msg, isError),
+                    )
+                  : Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: _buildAssistantContent(msg, isError),
+                    ),
             ),
 
             // ── Action row ──────────────────────────────────────────────
@@ -161,7 +161,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
 
   Widget _buildUserContent(ChatMessageModel msg) {
     final attachments = msg.attachments;
-    final textWidget = SelectableText(
+    final textWidget = Text(
       msg.text,
       style: const TextStyle(
         color: AppColors.textPrimary,
@@ -212,7 +212,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
 
     final body = MarkdownBody(
       data: msg.text,
-      selectable: true,
+      selectable: false,
       onTapLink: (text, href, title) {
         if (href != null) {
           launchUrl(Uri.parse(href), mode: LaunchMode.externalApplication);
@@ -246,7 +246,7 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         TextField(
-          controller: _editController,
+          controller: _editController!,
           autofocus: true,
           maxLines: null,
           style: const TextStyle(
