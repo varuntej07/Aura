@@ -60,4 +60,15 @@ class FunnelEvents {
 
   // Origin value identifying icebreaker notifications.
   static const String originIcebreaker = 'icebreaker';
+
+  // Daily Briefing funnel. The tap opens the briefing SCREEN, then a FAB opens chat
+  static const String briefingSent = 'daily_briefing_sent';
+  static const String briefingOpened = 'briefing_opened';
+  static const String briefingChatStarted = 'briefing_chat_started';
+
+  // Origin value identifying daily-briefing notifications.
+  static const String originBriefing = 'daily_briefing';
+
+  // On-demand "Catch me up on the world" snapshot.
+  static const String worldBriefingFetched = 'world_briefing_fetched';
 }

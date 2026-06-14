@@ -47,6 +47,7 @@ from .handlers.engagement import (
 )
 from .handlers.mcp import register_mcp
 from .handlers.notification_reply import handle_notification_reply_request
+from .handlers.briefing import handle_get_today_briefing, handle_post_world_briefing
 from .handlers.buddy_pills import handle_refresh_buddy_pills
 from .handlers.onboarding_profile import handle_onboarding_profile
 from .handlers.scheduler import handle_scheduler_tick
@@ -321,6 +322,18 @@ async def signal_events_endpoint(request: Request) -> JSONResponse:
 @app.get("/feed/recommend")
 async def signal_feed_endpoint(request: Request) -> JSONResponse:
     return await handle_signal_feed(request)
+
+
+# Daily Briefing: the signed-in user's synthesized morning digest for today.
+@app.get("/briefing/today")
+async def briefing_today_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_today_briefing(request)
+
+
+# On-demand "Catch me up on the world" snapshot (cold-start fill + refresh icon).
+@app.post("/briefing/world")
+async def briefing_world_endpoint(request: Request) -> JSONResponse:
+    return await handle_post_world_briefing(request)
 
 
 @app.post("/internal/signal-engine/tick")

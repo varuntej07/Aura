@@ -74,3 +74,15 @@ EVENT_ICEBREAKER_REPLY = "icebreaker_reply"
 
 # Origin value identifying icebreaker notifications.
 NOTIFICATION_ORIGIN_ICEBREAKER = "icebreaker"
+
+# --- Daily Briefing funnel ---
+EVENT_BRIEFING_SENT = "daily_briefing_sent"
+EVENT_BRIEFING_OPENED = "briefing_opened"
+EVENT_BRIEFING_CHAT_STARTED = "briefing_chat_started"
+
+# Origin value identifying daily-briefing notifications.
+NOTIFICATION_ORIGIN_BRIEFING = "daily_briefing"
+
+# On-demand "Catch me up on the world" snapshot. Fired CLIENT-side when the world
+# snapshot loads in the briefing screen (the empty-state button or the refresh icon)
+EVENT_WORLD_BRIEFING_FETCHED = "world_briefing_fetched"

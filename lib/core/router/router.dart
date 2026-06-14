@@ -7,6 +7,7 @@ import '../logging/app_logger.dart';
 
 import '../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../data/repositories/chat_repository.dart';
+import '../../data/services/backend_api_service.dart';
 import '../../data/services/buddy_pills_refresher.dart';
 import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_backup_service.dart';
@@ -17,6 +18,7 @@ import '../../core/network/connectivity_service.dart';
 import '../../presentation/screens/app_shell.dart';
 import '../../presentation/screens/agents/agent_thread_screen.dart';
 import '../../presentation/screens/auth/login_screen.dart';
+import '../../presentation/screens/briefing/briefing_screen.dart';
 import '../../presentation/screens/chat/chat_screen.dart';
 import '../../presentation/screens/get_better/get_better_screen.dart';
 import '../../presentation/screens/home/home_screen.dart';
@@ -26,6 +28,7 @@ import '../../presentation/screens/settings/settings_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
 import '../../presentation/viewmodels/agent_viewmodel.dart';
 import '../../presentation/viewmodels/auth_viewmodel.dart';
+import '../../presentation/viewmodels/briefing_viewmodel.dart';
 import '../../presentation/viewmodels/text_chat_viewmodel.dart';
 GoRouter buildRouter(
   AuthViewModel authViewModel,
@@ -191,6 +194,22 @@ GoRouter buildRouter(
         name: 'Get Better',
         pageBuilder: (context, state) =>
             _slidePage(state, const GetBetterScreen()),
+      ),
+
+      // Full-screen: Daily briefing - opened from the drawer or a briefing push.
+      GoRoute(
+        path: '/briefing',
+        name: 'Briefing',
+        pageBuilder: (context, state) => _slidePage(
+          state,
+          ChangeNotifierProvider(
+            create: (_) => BriefingViewModel(
+              backendApiService: context.read<BackendApiService>(),
+              postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
+            ),
+            child: const BriefingScreen(),
+          ),
+        ),
       ),
     ],
   );

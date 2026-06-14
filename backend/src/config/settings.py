@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     # TIER_REASONING -> Opus, kept available for rare hard-synthesis steps (not the default).
     # claude-opus-4-8 uses adaptive thinking (no budget_tokens, no temperature — both 400).
     TIER_REASONING: str = "claude-opus-4-8"
+    
+    # TIER_GROUNDED -> Gemini with Google Search grounding (live web search + synthesis in ONE call)
+    TIER_GROUNDED: str = "gemini-2.5-flash"
 
     # Staged reasoning funnel (reason_step tool) — off until verified on a dark deploy.
     # Sonnet drives one step at a time: clarify -> web_surf fetch -> present -> final.
@@ -223,6 +226,29 @@ class Settings(BaseSettings):
     # first for the life-aware openers; weather/headline openers work without any
     # facts. Dark-deploy before enabling.
     ICEBREAKER_ENABLED: bool = False
+
+    # Daily Briefing: the signed-in user's synthesized morning digest for today.
+    DAILY_BRIEFING_ENABLED: bool = False
+
+    # Local hour-of-day (0-23) at which the morning briefing fan-out generates and
+    # sends. The fan-out rides the per-minute scheduler tick on a 15-minute gate, so
+    # the once-per-day claim fires on the first tick where it is this local hour.
+    BRIEFING_LOCAL_HOUR: int = 6
+
+    # How many top-ranked pool items the BriefingAgent feeds into its single LLM
+    # call. The model weaves in only the ones that genuinely fit; the rest bound the
+    # prompt size. Kept small so one Gemini Flash call per user per day stays cheap.
+    BRIEFING_CANDIDATE_POOL: int = 8
+
+    # The world snapshot is identical for everyone in a region, so the grounded result
+    # is cached PER REGION (not per user) for this TTL — one grounded call serves every
+    # user in a region per window, which is what makes grounding cheap at scale (a ~50
+    # region ceiling caps it at ~50 grounded calls per window globally). News does not
+    # move faster than this, so a 30-min window stays fresh.
+    WORLD_BRIEFING_CACHE_TTL_SECONDS: int = 1800
+
+    # Per-user cooldown on a FORCED refresh (the refresh icon).
+    WORLD_BRIEFING_REFRESH_COOLDOWN_SECONDS: int = 300
 
     # Dark-test audience restriction. When set, EVERY proactive notification
     # fan-out that resolves its audience through feature_store.list_active_user_ids

@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 import anthropic
@@ -41,6 +42,7 @@ _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0           # Anthropic backoff: 1s, 2s, 4s
 _GEMINI_BASE_DELAY_S = 5.0    # Gemini backoff: 5s, 10s, 20s — background tasks, 503s need time to clear
 _TIMEOUT_S = 30.0             # per-call budget for background LLM work
+_GROUNDED_TIMEOUT_S = 45.0    # grounded search+synthesis runs longer (server-side search) than a plain call
 _REASON_TIMEOUT_S = 90.0      # deep reasoning (Opus + adaptive thinking) runs long; streamed
 
 # Anthropic exceptions that are worth retrying (transient / server-side)
@@ -90,6 +92,69 @@ def is_quota_exhausted(exc: BaseException) -> bool:
     if isinstance(exc, anthropic.RateLimitError):
         return True
     return "RESOURCE_EXHAUSTED" in str(exc).upper()
+
+
+@dataclass(frozen=True)
+class GroundedResult:
+    """Return value of ``ModelProvider.grounded``. ``sources`` are the grounded web
+    references ({title, url}); ``supports`` map text spans the model wrote to the
+    source indices that ground them ({text, source_indices}), which lets a caller
+    attach a per-sentence / per-item citation without any byte-offset math."""
+
+    text: str
+    sources: list[dict[str, str]] = field(default_factory=list)
+    supports: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _extract_grounding_supports(resp: Any) -> list[dict[str, Any]]:
+    """Pull grounding supports off a Gemini grounding response: for each supported
+    span, its text and the indices (into ``grounding_chunks``) that ground it. Fully
+    defensive — any missing field or shape change yields an empty list, never raises,
+    so a metadata change degrades citations to "none" rather than breaking a briefing."""
+    supports: list[dict[str, Any]] = []
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        if not candidates:
+            return supports
+        meta = getattr(candidates[0], "grounding_metadata", None)
+        raw = (getattr(meta, "grounding_supports", None) or []) if meta else []
+        for item in raw:
+            seg = getattr(item, "segment", None)
+            seg_text = (getattr(seg, "text", "") or "").strip() if seg else ""
+            idxs = getattr(item, "grounding_chunk_indices", None) or []
+            clean = [i for i in idxs if isinstance(i, int) and i >= 0]
+            if seg_text and clean:
+                supports.append({"text": seg_text, "source_indices": clean})
+    except Exception:
+        return supports
+    return supports
+
+
+def _extract_grounding_sources(resp: Any) -> list[dict[str, str]]:
+    """Pull the grounded web references off a Gemini grounding response: ONE entry per
+    grounding chunk, IN ORDER, no de-dup and no skipping. Keeping it 1:1 with
+    ``grounding_chunks`` is deliberate, a grounding support's ``grounding_chunk_indices``
+    are indices into this same list, so preserving order/length is what keeps per-item
+    citations pointing at the right source. Each entry is ``{title, url}``; ``url`` may
+    be empty for a chunk with no web uri (kept as a placeholder so the indexing holds).
+    The uri is usually a Google redirect that resolves to the publisher on tap. Fully
+    defensive: any missing field or shape change yields an empty list rather than raising.
+    """
+    sources: list[dict[str, str]] = []
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        if not candidates:
+            return sources
+        meta = getattr(candidates[0], "grounding_metadata", None)
+        chunks = (getattr(meta, "grounding_chunks", None) or []) if meta else []
+        for chunk in chunks:
+            web = getattr(chunk, "web", None)
+            uri = (getattr(web, "uri", "") or "").strip() if web else ""
+            title = (getattr(web, "title", "") or "").strip() if web else ""
+            sources.append({"title": title or uri, "url": uri})
+    except Exception:
+        return sources
+    return sources
 
 
 class ModelProvider:
@@ -173,6 +238,35 @@ class ModelProvider:
             tools=tools,
             history=history,
             response_model=response_model,
+            temperature=temperature,
+        )
+
+    async def grounded(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float = 0.7,
+    ) -> GroundedResult:
+        """Gemini with Google Search grounding: ONE call does live web search +
+        synthesis. Returns a :class:`GroundedResult` (text + grounded ``sources``,
+        each ``{"title", "url"}``, + ``supports`` mapping spans to source indices).
+
+        This is the DELIBERATE, non-real-time path. Grounding searches and
+        synthesizes server-side (seconds of latency) and carries a premium
+        per-call grounding fee, so it is intentionally kept off the latency-critical
+        chat/voice path — that uses Brave (``tool_executor.web_surf``, ~1s). Use this
+        only where fresh web facts matter and a few seconds is acceptable (the
+        on-demand world briefing). Grounding and a forced JSON ``response_model`` are
+        mutually exclusive in the google-genai SDK, so this returns free text plus
+        metadata, never a parsed model — the caller parses the text itself.
+        """
+        model_id = settings.TIER_GROUNDED
+        logger.debug("ModelProvider.grounded", {"model": model_id, "prompt_len": len(prompt)})
+        return await self._call_gemini_grounded(
+            model_id=model_id,
+            prompt=prompt,
+            system=system,
             temperature=temperature,
         )
 
@@ -435,6 +529,97 @@ class ModelProvider:
                 await asyncio.sleep(delay)
         # retry loop always returns or raises; this line is unreachable
         raise RuntimeError("ModelProvider: Gemini retry loop exited unexpectedly")
+
+    @observe(name="gemini_grounded_call")
+    async def _call_gemini_grounded(
+        self,
+        *,
+        model_id: str,
+        prompt: str,
+        system: str | None,
+        temperature: float,
+    ) -> GroundedResult:
+        client = self._get_gemini_client()
+        from google.genai import types  # type: ignore
+
+        # The Google Search grounding tool is what makes this call live: Gemini issues
+        # its own web searches and synthesizes from the results. No response_schema —
+        # grounding and forced JSON output cannot be combined in the SDK.
+        search_tool = types.Tool(google_search=types.GoogleSearch())
+        config_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_output_tokens": 4096,
+            "tools": [search_tool],
+        }
+        if system:
+            config_kwargs["system_instruction"] = system
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        def _sync() -> GroundedResult:
+            resp = client.models.generate_content(
+                model=model_id,
+                contents=[prompt],
+                config=config,
+            )
+            return GroundedResult(
+                text=(resp.text or ""),
+                sources=_extract_grounding_sources(resp),
+                supports=_extract_grounding_supports(resp),
+            )
+
+        last_exc: BaseException | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_sync), timeout=_GROUNDED_TIMEOUT_S
+                )
+            except TimeoutError as exc:
+                last_exc = exc
+                if attempt == _MAX_RETRIES:
+                    logger.exception("ModelProvider: grounded() timeout after retries", {
+                        "model": model_id,
+                        "timeout_s": _GROUNDED_TIMEOUT_S,
+                    })
+                    raise
+            except Exception as exc:
+                last_exc = exc
+                # Same transient classification as _call_gemini. No fallback chain: a
+                # grounded call must run on a grounding-capable model, and silently
+                # falling back to one without grounding would drop the live search.
+                code = getattr(exc, "code", None)
+                error_str = str(exc).upper()
+                retryable = (
+                    code == 429
+                    or (isinstance(code, int) and 500 <= code < 600)
+                    or "UNAVAILABLE" in error_str
+                    or "RESOURCE_EXHAUSTED" in error_str
+                )
+                if not retryable or attempt == _MAX_RETRIES:
+                    if is_quota_exhausted(exc):
+                        logger.error(
+                            "ModelProvider: Gemini grounding quota/credits EXHAUSTED "
+                            "(429 RESOURCE_EXHAUSTED) — the world briefing is failing. "
+                            "Check GEMINI_API_KEY billing at https://ai.studio/projects.",
+                            {"model": model_id, "code": code, "error": str(exc)[:300]},
+                        )
+                    logger.exception("ModelProvider: grounded() call failed", {
+                        "model": model_id,
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "code": code,
+                        "error": str(exc)[:300],
+                    })
+                    raise
+            delay = _GEMINI_BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+            logger.debug("ModelProvider: grounded() retryable error, backing off", {
+                "model": model_id,
+                "attempt": attempt,
+                "delay_s": round(delay, 2),
+                "error": str(last_exc)[:300],
+            })
+            await asyncio.sleep(delay)
+        # retry loop always returns or raises; this line is unreachable
+        raise RuntimeError("ModelProvider: grounded() retry loop exited unexpectedly")
 
     @observe(name="anthropic_call")
     async def _call_anthropic(

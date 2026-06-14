@@ -82,6 +82,11 @@ class _ChatScreenState extends State<ChatScreen> {
               notificationId: extra.notificationId,
               openingMessage: extra.openingMessage,
             );
+          case NotificationChatOrigin.briefing:
+            await chatVm.loadBriefingContext(
+              openingMessage: extra.openingMessage,
+              firstUserMessage: extra.firstUserMessage,
+            );
         }
         _jumpToBottom();
       }
@@ -138,11 +143,6 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     return Consumer<TextChatViewModel>(
       builder: (context, vm, _) {
-        if (vm.isStreaming) {
-          WidgetsBinding.instance
-              .addPostFrameCallback((_) => _scrollToBottom());
-        }
-
         return Scaffold(
           key: _scaffoldKey,
           backgroundColor: AppColors.deepBackground,
@@ -199,8 +199,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           messages: vm.messages,
                           scrollController: _scrollController,
                           isStreaming: vm.isStreaming,
-                          streamingText: vm.streamingText,
-                          thinkingMessage: vm.thinkingMessage,
+                          streamingOutput: vm.streamingOutput,
                           onRetry: vm.retryLastMessage,
                           onEdit: vm.editAndResend,
                           onFeedback: vm.setFeedback,

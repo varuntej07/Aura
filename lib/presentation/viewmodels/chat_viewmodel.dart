@@ -603,7 +603,10 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   /// already fired when the briefing screen loaded, so this only seeds Buddy's
   /// opener and arms the `briefing_chat_started` action to fire once on the user's
   /// first reply (via the same [_pendingReply] mechanism every origin uses).
-  Future<void> loadBriefingContext({required String openingMessage}) async {
+  Future<void> loadBriefingContext({
+    required String openingMessage,
+    String firstUserMessage = '',
+  }) async {
     _messages.clear();
     _error = null;
 
@@ -628,6 +631,16 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         'channel': 'in_chat',
       },
     );
+
+    // FAB handoff from the briefing: the user already typed a message in the in-place
+    // input, so auto-send it as their first turn. This consumes [_pendingReply] (firing
+    // briefing_chat_started) and streams Buddy's reply, so opening chat lands mid-
+    // conversation rather than on a dead opener. _currentUserId is set by init(), which
+    // chat_screen always calls before this (mirrors the option-select path).
+    final firstReply = firstUserMessage.trim();
+    if (firstReply.isNotEmpty && _currentUserId != null) {
+      await sendMessage(firstReply, _currentUserId!);
+    }
   }
 
   // Subclass hooks

@@ -148,6 +148,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       };
 
+      vm.onDailyBriefingTap = (_) {
+        // A briefing tap opens the briefing screen
+        context.push('/briefing');
+      };
+
       if (uid != null && uid.isNotEmpty) {
         // Warm the voice stack before the user taps the mic. Fire-and-forget so
         // it never blocks wake-word init or the first frame.
@@ -252,6 +257,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       // The Scaffold's own edge-swipe is disabled: on phones with gesture
       // navigation it fights the OS back-swipe.
       drawerEnableOpenDragGesture: false,
+      // Pause the ambient orb animations while the history drawer is open: the
+      // voice panel keeps repainting at 60fps behind the scrim and would steal
+      // frame budget from the drawer's scroll. Resumed on close.
+      onDrawerChanged: (isOpen) {
+        if (isOpen) {
+          _breathController.stop();
+          _rippleController.stop();
+        } else {
+          _breathController.repeat(reverse: true);
+          _rippleController.repeat();
+        }
+      },
       drawer: _ChatDrawer(
         onNewChat: () {
           Navigator.of(context).pop();
@@ -1055,6 +1072,14 @@ class _ChatDrawer extends StatelessWidget {
                     },
                   ),
                   _DrawerNavRow(
+                    icon: Icons.article_outlined,
+                    label: 'Daily briefing',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      context.push('/briefing');
+                    },
+                  ),
+                  _DrawerNavRow(
                     icon: Icons.trending_up_rounded,
                     label: 'Get Better',
                     onTap: () {
@@ -1209,6 +1234,18 @@ class _DrawerDivider extends StatelessWidget {
   }
 }
 
+class _SolidScrollBehavior extends ScrollBehavior {
+  const _SolidScrollBehavior();
+
+  @override
+  Widget buildOverscrollIndicator(
+    BuildContext context,
+    Widget child,
+    ScrollableDetails details,
+  ) =>
+      child;
+}
+
 class _SessionList extends StatefulWidget {
   final void Function(String sessionId) onSelectSession;
   const _SessionList({required this.onSelectSession});
@@ -1310,42 +1347,61 @@ class _SessionListState extends State<_SessionList> {
       );
     }
 
-    // Flatten sessions into header + tile rows, inserting a date-group header
-    // whenever the group changes. The list is already newest-first.
-    final rows = <Widget>[];
+    // Flatten sessions into a lightweight row model (header markers + session
+    // refs). The model is cheap data work; ListView.builder then inflates only
+    // the visible header/tile WIDGETS on demand, so scrolling and pagination
+    // never reconstruct the whole list. The list is already newest-first.
+    final rows = _buildRowModel();
+
+    return ScrollConfiguration(
+      behavior: const _SolidScrollBehavior(),
+      child: ListView.builder(
+        controller: _scrollController,
+        padding: const EdgeInsets.only(top: 2),
+        itemCount: rows.length + (_loadingMore ? 1 : 0),
+        itemBuilder: (_, i) {
+          if (i == rows.length) {
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Center(
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 1.5),
+                ),
+              ),
+            );
+          }
+          final row = rows[i];
+          if (row.header) return _DrawerSectionHeader(row.text);
+          return _DrawerSessionTile(
+            key: ValueKey(row.id),
+            label: row.text,
+            onTap: () => widget.onSelectSession(row.id!),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Cheap data model for the drawer list: a date-group header marker followed
+  /// by its session rows. Headers carry no id; sessions carry their id + title.
+  List<({bool header, String text, String? id})> _buildRowModel() {
+    final rows = <({bool header, String text, String? id})>[];
     String? currentGroup;
     for (final s in _sessions) {
       final group = _groupLabel(s.startedAt);
       if (group != currentGroup) {
         currentGroup = group;
-        rows.add(_DrawerSectionHeader(group));
+        rows.add((header: true, text: group, id: null));
       }
-      rows.add(_DrawerSessionTile(
-        label: s.title?.isNotEmpty == true ? s.title! : 'New chat',
-        onTap: () => widget.onSelectSession(s.id),
+      rows.add((
+        header: false,
+        text: s.title?.isNotEmpty == true ? s.title! : 'New chat',
+        id: s.id,
       ));
     }
-
-    return ListView.builder(
-      controller: _scrollController,
-      padding: const EdgeInsets.only(top: 2),
-      itemCount: rows.length + (_loadingMore ? 1 : 0),
-      itemBuilder: (_, i) {
-        if (i == rows.length) {
-          return const Padding(
-            padding: EdgeInsets.symmetric(vertical: 12),
-            child: Center(
-              child: SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
-              ),
-            ),
-          );
-        }
-        return rows[i];
-      },
-    );
+    return rows;
   }
 
   String _groupLabel(DateTime dt) {
@@ -1385,7 +1441,7 @@ class _DrawerSessionTile extends StatelessWidget {
   final String label;
   final VoidCallback onTap;
 
-  const _DrawerSessionTile({required this.label, required this.onTap});
+  const _DrawerSessionTile({super.key, required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {

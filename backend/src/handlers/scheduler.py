@@ -98,6 +98,24 @@ async def _run_icebreaker() -> None:
         logger.error("scheduler: icebreaker tick failed", {"error": str(exc)})
 
 
+async def _run_daily_briefing() -> None:
+    """Daily-briefing fan-out, on a 15-minute gate.
+
+    Fire-and-forget so the scheduler tick returns its 200 before the LLM-bound
+    briefing generation runs. The engine self-gates: it only generates for users
+    whose local time is BRIEFING_LOCAL_HOUR and claims once per local date, so
+    firing it every 15 minutes is cheap (most users fall out at the hour gate). A
+    no-op while DAILY_BRIEFING_ENABLED is off, and internally isolated per user, so
+    it can never delay or fail the reminder tick.
+    """
+    from ..services.briefing.briefing_engine import run_briefing_tick
+
+    try:
+        await run_briefing_tick()
+    except Exception as exc:
+        logger.error("scheduler: daily briefing tick failed", {"error": str(exc)})
+
+
 async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one scheduler tick.
 
@@ -149,6 +167,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # cheap no-op until the full icebreaker path is dogfooded on a dark candidate.
         if now_minute == 15:
             asyncio.create_task(_run_icebreaker())
+
+        # Daily briefing fan-out, every 15 minutes at minutes 5/20/35/50 — offset
+        # from the thread reflector (minute 0) and icebreaker (minute 15) so the LLM
+        # passes never burst together. The engine self-gates to each user's local
+        # BRIEFING_LOCAL_HOUR and claims once per local date, so running it 4x/hour
+        # is cheap. Fire-and-forget; gated internally by DAILY_BRIEFING_ENABLED.
+        if now_minute % 15 == 5:
+            asyncio.create_task(_run_daily_briefing())
 
         delivered = 0
 

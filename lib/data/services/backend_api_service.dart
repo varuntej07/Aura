@@ -6,6 +6,7 @@ import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_response.dart';
 import '../models/chat_attachment.dart';
+import '../models/daily_briefing.dart';
 import 'chat_service_provider.dart';
 
 // SSE stream events
@@ -321,6 +322,48 @@ class BackendApiService implements ChatServiceProvider {
     return result.when(
       success: (messages) => messages,
       failure: (_) => const <Map<String, dynamic>>[],
+    );
+  }
+
+  /// Fetches the signed-in user's daily briefing for today (server resolves the
+  /// user-local date). Returns null when none is ready yet or on any failure, so
+  /// the briefing screen shows its empty state rather than an error.
+  Future<DailyBriefing?> fetchTodayBriefing() async {
+    final result = await _apiClient.get<DailyBriefing?>(
+      '/briefing/today',
+      (json) {
+        final raw = json['briefing'];
+        return raw is Map<String, dynamic> ? DailyBriefing.fromJson(raw) : null;
+      },
+    );
+    return result.when(
+      success: (briefing) => briefing,
+      failure: (_) => null,
+    );
+  }
+
+  /// Fetches an on-demand "Catch me up on the world" snapshot (2-3 globally buzzing
+  /// stories + 1 local one for the user's region). Fills the briefing empty state for
+  /// new/cold-start users (no interest vector yet, so the scheduled digest is empty) and
+  /// backs the refresh icon. [refresh] forces a server regenerate (bounded by a per-user
+  /// cooldown). Returns null when disabled or on any failure, so the screen shows its
+  /// empty state rather than an error. Shares the DailyBriefing shape with the scheduled
+  /// digest, so the same model + screen render it.
+  Future<DailyBriefing?> fetchWorldBriefing({bool refresh = false}) async {
+    final result = await _apiClient.post<DailyBriefing?>(
+      '/briefing/world',
+      {'refresh': refresh},
+      (json) {
+        final raw = json['briefing'];
+        return raw is Map<String, dynamic> ? DailyBriefing.fromJson(raw) : null;
+      },
+      // Grounded search + synthesis runs server-side for several seconds; give a cold
+      // (cache-miss) fetch room beyond the default per-call timeout so it isn't cut off.
+      timeout: const Duration(seconds: 50),
+    );
+    return result.when(
+      success: (briefing) => briefing,
+      failure: (_) => null,
     );
   }
 }
