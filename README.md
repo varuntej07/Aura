@@ -26,7 +26,7 @@ The guiding principle is one clear working path over broad architecture. Every e
 | Mobile app | Flutter (Dart), MVVM with Provider, go_router, drift (local SQLite) |
 | Backend API | Python FastAPI on Cloud Run |
 | Voice worker | LiveKit Agents, a separate Cloud Run worker |
-| Chat LLM | Anthropic Claude (Haiku 4.5) |
+| Chat LLM | Anthropic Claude (Sonnet 4.6) |
 | Voice LLM | OpenAI GPT-4.1 mini, falling back to Anthropic Claude, then Gemini Flash |
 | Cheap-tier LLM | Gemini Flash for copy framing and passive profiling |
 | Embeddings | Gemini `gemini-embedding-001`, 768 dimensions |
@@ -105,12 +105,21 @@ Public and user-authenticated endpoints (Firebase ID token):
 | `GET /voice/token` | Mint a LiveKit room token for the signed-in user |
 | `POST /chat` | Text conversation with Claude, streamed over SSE |
 | `POST /notification-reply` | Reply to a notification, routed into chat |
+| `POST /chat/buddy-pills/refresh` | Regenerate the chat empty-state suggestion pills |
+| `POST /onboarding/profile` | Seed declared interests into the passive profile |
+| `GET /briefing/today` | Today's synthesized morning briefing for the signed-in user (flag-gated) |
+| `POST /briefing/world` | On-demand "catch me up on the world" snapshot (flag-gated) |
 | `DELETE /account` | Delete the user account and data |
 | `POST /devices/register` | Register an FCM device token |
 | `POST /events` | Report user events for the signal engine |
 | `GET /feed/recommend` | Ranked in-app content feed |
+| `GET /connectors` | List the user's connected integrations |
 | `POST /connectors/google-calendar/...` | Connect, disconnect, sync calendar |
 | `POST /connectors/gmail/...` | Connect or disconnect Gmail |
+| `POST /integrations/google-calendar/webhook` | Receive Google Calendar push notifications |
+| `POST /internal/engage/responded` | Mark an engagement nudge as responded to |
+| `POST /threads/reply` | Reply to a curiosity thread from the notification shade (flag-gated) |
+| `GET /threads/{id}/messages` | Fetch a thread's server-side message history (flag-gated) |
 | `POST /mcp` | MCP server exposing tools to the voice worker |
 
 Internal endpoints, callable only by Cloud Scheduler or Cloud Tasks and verified by a signed OIDC token from the scheduler service account:
@@ -121,6 +130,9 @@ Internal endpoints, callable only by Cloud Scheduler or Cloud Tasks and verified
 | `POST /internal/signal-engine/tick` | every 15 min | Score candidates and send notifications |
 | `POST /internal/signal-engine/content-ingest` | hourly | Pull fresh content into the pool |
 | `POST /internal/agents/tick` | scheduled | Fan out scheduled domain agents |
+| `POST /internal/agents/{agent_id}/run/{user_id}` | fan-out | Run one agent for one user (Cloud Tasks) |
+| `POST /internal/engage/orchestrate` | fan-out | Plan the engagement chain for a user (Cloud Tasks) |
+| `POST /internal/engage/notify` | fan-out | Send one engagement nudge (Cloud Tasks) |
 | `POST /internal/daily-notify/send` | on demand | Send a calendar meeting reminder |
 
 The `/scheduler/tick` job runs once a minute. Periodic work at wider intervals is gated inside the handler with a simple `minute % N == 0` check, so new background jobs do not need new scheduler entries.
@@ -133,7 +145,7 @@ Voice is a separate LiveKit Agents worker, not part of the FastAPI request path.
 
 - **STT**: Deepgram Nova, with `nova-3` falling back to `nova-2`
 - **LLM**: OpenAI GPT-4.1 mini, falling back to Anthropic Claude, then Gemini Flash (`build_llm_pipeline`)
-- **TTS**: Cartesia, with `sonic-3` falling back to `sonic-2`
+- **TTS**: Cartesia `sonic-3` (conditioned), falling back to Deepgram `aura-2`, then Cartesia `sonic-2`
 - **Turn taking**: Silero VAD plus the LiveKit multilingual turn detector
 
 **Connection flow.** The Flutter client calls `GET /voice/token` to get a LiveKit room token, then joins room `voice-{uid}`. The worker is waiting on LiveKit Cloud, sees the participant join, and starts a session. Audio flows over WebRTC the whole time.
