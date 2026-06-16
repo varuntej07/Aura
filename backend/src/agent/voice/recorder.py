@@ -9,6 +9,7 @@ names, the done signal) and the AgentSession event handlers that fill it. Call
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import UTC, datetime
 
 from livekit.agents import AgentSession, JobContext
@@ -17,21 +18,66 @@ from ...lib.logger import logger
 from .errors import classify_pipeline_error, publish_client_error
 from .telemetry import log_turn_metrics, log_voice_failure
 
-# Spoken in parallel with each MCP tool round-trip so the user hears on-line
+# Spoken in parallel with each MCP tool round-trip so the user hears live
 # feedback that the agent is working on it.
-TOOL_THINKING_PHRASES: dict[str, str] = {
-    "get_upcoming_events": "Alright pulling up your calendar right now!",
-    "create_calendar_event": "Cool, adding that to your calendar now!",
-    "set_reminder": "Gotcha, setting that reminder for you!",
-    "cancel_reminder": "Heard that, taking care of that reminder now...",
-    "list_reminders": "pulling up your reminders for you!",
-    "store_memory": "Ah huh, got it, I'll keep that in mind!",
-    "query_memory": "thinking through what I remember about you...",
-    "get_user_context": "pulling up your details for this!",
-    "web_surf": "Alright, Lemme surf the web for that!",
-    "list_emails": "checking your inbox right now!",
-    "read_email": "opening that email for you...",
-    "send_email": "alright, firing off that email now!",
+TOOL_THINKING_PHRASES: dict[str, list[str]] = {
+    "get_upcoming_events": [
+        "lemme peek at your calendar",
+        "one sec, pulling up your schedule",
+        "checking what you've got coming up",
+    ],
+    "create_calendar_event": [
+        "cool, popping that on your calendar",
+        "alright, getting that on the calendar",
+        "on it, adding that now",
+    ],
+    "set_reminder": [
+        "gotcha, setting that up",
+        "say no more, locking that in",
+        "yep, setting that reminder now",
+    ],
+    "cancel_reminder": [
+        "yep, clearing that one out",
+        "on it, scrapping that reminder",
+        "gotcha, getting rid of that one",
+    ],
+    "list_reminders": [
+        "lemme pull up what you've got",
+        "one sec, grabbing your reminders",
+        "checking your reminders real quick",
+    ],
+    "store_memory": [
+        "ooh good to know, filing that away",
+        "noted, I'll hang onto that",
+        "got it, tucking that away",
+    ],
+    "query_memory": [
+        "lemme think back for a sec",
+        "digging through what I remember",
+        "one sec, jogging my memory",
+    ],
+    "get_user_context": [
+        "lemme pull up your stuff real quick",
+        "one sec, grabbing your details",
+    ],
+    "web_surf": [
+        "ooh good question, lemme look that up",
+        "hang on, let me actually check that",
+        "one sec, looking that up real quick",
+        "lemme make sure I get this right",
+    ],
+    "list_emails": [
+        "lemme peek at your inbox",
+        "one sec, checking your inbox",
+    ],
+    "read_email": [
+        "pulling that email up now",
+        "one sec, opening that up",
+    ],
+    "send_email": [
+        "alright, sending that off",
+        "on it, firing that email out",
+    ],
 }
 
 # Spoken (LLM-framed) when the user has gone silent long enough
@@ -163,8 +209,9 @@ class VoiceSessionRecorder:
             tool_name = getattr(tool_calls[0], "name", "") or ""
             if tool_name:
                 self.tool_calls.append(tool_name)
-            phrase = TOOL_THINKING_PHRASES.get(tool_name)
-            if phrase:
+            phrases = TOOL_THINKING_PHRASES.get(tool_name)
+            if phrases:
+                phrase = random.choice(phrases)
                 async def _speak_tool_phrase(p: str = phrase, name: str = tool_name) -> None:
                     if str(getattr(self._session, "agent_state", "")) != "thinking":
                         logger.info("VoiceSession: tool phrase skipped (not thinking)", {
