@@ -90,6 +90,30 @@ class IcebreakerTapPayload {
   });
 }
 
+/// Payload emitted when the user taps a daily-briefing notification. The briefing
+/// content is fetched by the briefing screen from `GET /briefing/today`, so the tap
+/// only needs to open that screen; [briefingDate] rides along for reference.
+class DailyBriefingTapPayload {
+  final String briefingDate;
+
+  const DailyBriefingTapPayload({this.briefingDate = ''});
+}
+
+/// Payload emitted when the user taps a topic-tracker live-update notification.
+/// Opens chat seeded with Buddy's update opener; [topicKey]/[trackerId] ride along
+/// so the chat surface can attribute the session back to the tracker.
+class TrackerUpdateTapPayload {
+  final String topicKey;
+  final String trackerId;
+  final String openingChatMessage;
+
+  const TrackerUpdateTapPayload({
+    required this.openingChatMessage,
+    this.topicKey = '',
+    this.trackerId = '',
+  });
+}
+
 const _tag = 'NotificationService';
 
 /// Android notification channel used for all Aura notifications.
@@ -137,6 +161,10 @@ class NotificationService {
       StreamController<ThreadFollowUpTapPayload>.broadcast();
   final _icebreakerTapController =
       StreamController<IcebreakerTapPayload>.broadcast();
+  final _dailyBriefingTapController =
+      StreamController<DailyBriefingTapPayload>.broadcast();
+  final _trackerUpdateTapController =
+      StreamController<TrackerUpdateTapPayload>.broadcast();
 
   // Emits when the user taps an engagement notification.
   Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
@@ -157,6 +185,16 @@ class NotificationService {
   // seeded with Buddy's opener.
   Stream<IcebreakerTapPayload> get icebreakerTapStream =>
       _icebreakerTapController.stream;
+
+  // Emits when the user taps a daily-briefing notification — opens the briefing
+  // screen, which fetches today's briefing from the backend.
+  Stream<DailyBriefingTapPayload> get dailyBriefingTapStream =>
+      _dailyBriefingTapController.stream;
+
+  // Emits when the user taps a topic-tracker live-update notification — the chat
+  // surface opens seeded with Buddy's update.
+  Stream<TrackerUpdateTapPayload> get trackerUpdateTapStream =>
+      _trackerUpdateTapController.stream;
 
   // Public API
 
@@ -279,6 +317,8 @@ class NotificationService {
     await _signalNotificationTapController.close();
     await _threadFollowUpTapController.close();
     await _icebreakerTapController.close();
+    await _dailyBriefingTapController.close();
+    await _trackerUpdateTapController.close();
   }
 
   // Private helpers
@@ -606,6 +646,20 @@ class NotificationService {
         _icebreakerTapController.add(IcebreakerTapPayload(
           notificationId: notificationId,
           openingChatMessage: openingChatMessage,
+        ));
+      }
+    } else if (notificationType == FunnelEvents.originBriefing) {
+      _dailyBriefingTapController.add(DailyBriefingTapPayload(
+        briefingDate: data['briefing_date'] as String? ?? '',
+      ));
+    } else if (notificationType == 'tracker_update') {
+      // Topic-tracker live update tapped: open chat seeded with Buddy's update.
+      final openingChatMessage = data['opening_chat_message'] as String? ?? '';
+      if (openingChatMessage.isNotEmpty) {
+        _trackerUpdateTapController.add(TrackerUpdateTapPayload(
+          openingChatMessage: openingChatMessage,
+          topicKey: data['topic_key'] as String? ?? '',
+          trackerId: data['tracker_id'] as String? ?? '',
         ));
       }
     }

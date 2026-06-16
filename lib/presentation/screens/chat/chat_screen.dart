@@ -87,6 +87,11 @@ class _ChatScreenState extends State<ChatScreen> {
               openingMessage: extra.openingMessage,
               firstUserMessage: extra.firstUserMessage,
             );
+          case NotificationChatOrigin.tracker:
+            // Topic-tracker live update: seed Buddy's update as the opener.
+            await chatVm.loadTrackerContext(
+              openingMessage: extra.openingMessage,
+            );
         }
         _jumpToBottom();
       }

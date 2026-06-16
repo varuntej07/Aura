@@ -643,6 +643,30 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     }
   }
 
+  /// Pre-loads the opener from a topic-tracker live-update notification tap. Seeds
+  /// Buddy's update as the first bubble. v1 has no funnel attribution for trackers,
+  /// so unlike the other notification origins this only seeds the opener.
+  Future<void> loadTrackerContext({
+    required String openingMessage,
+  }) async {
+    _messages.clear();
+    _error = null;
+
+    if (openingMessage.isNotEmpty) {
+      final msg = ChatMessageModel(
+        id: _uuid.v4(),
+        text: openingMessage,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+      );
+      await _persistMessage(msg);
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+  }
+
   // Subclass hooks
 
   /// Inserts [msg] at the front of the in-memory message list without

@@ -116,6 +116,51 @@ async def _run_daily_briefing() -> None:
         logger.error("scheduler: daily briefing tick failed", {"error": str(exc)})
 
 
+async def _sweep_expired_candidates() -> None:
+    """Delete expired content-pool candidates, on a 15-minute gate.
+
+    Fire-and-forget so the scheduler tick returns its 200 before the (bounded)
+    batched delete runs. Expired docs are already ignored by every pool reader, so
+    this only removes dead weight that was crowding out fresh items in the per-user
+    find_nearest top-K (the 2026-06-15 "pool HAS fresh content but vector search
+    returned nothing for 1 user" warning). A Firestore native TTL on expires_at is
+    the eventual backstop; this gives the immediacy the TTL lag cannot. Internally
+    bounded + isolated, so it can never delay or fail the reminder tick.
+    """
+    from ..services.signal_engine.content_pool import delete_expired_candidates
+
+    try:
+        await delete_expired_candidates()
+    except Exception as exc:
+        logger.error("scheduler: expired-candidate sweep failed", {"error": str(exc)})
+
+
+async def _run_tracking_checkpoints() -> None:
+    """Topic-tracking checkpoint due-scan. Fire-and-forget so the tick returns its 200
+    before any fetch/LLM work runs. The due-query is cheap and returns nothing most
+    minutes; only genuinely-due checkpoints do any work, and atomic claims prevent a
+    double fire under overlapping ticks. Internally isolated so it can never delay or
+    fail the reminder tick."""
+    from ..services.tracking.tracking_engine import run_checkpoint_tick
+
+    try:
+        await run_checkpoint_tick()
+    except Exception as exc:
+        logger.error("scheduler: tracking checkpoint tick failed", {"error": str(exc)})
+
+
+async def _run_tracking_reconcile() -> None:
+    """Topic-tracking reconcile — re-research each active topic and self-heal its
+    schedule. Fire-and-forget; isolated per topic so one bad topic can never fail the
+    tick."""
+    from ..services.tracking.tracking_engine import run_reconcile_tick
+
+    try:
+        await run_reconcile_tick()
+    except Exception as exc:
+        logger.error("scheduler: tracking reconcile tick failed", {"error": str(exc)})
+
+
 async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run one scheduler tick.
 
@@ -175,6 +220,26 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # is cheap. Fire-and-forget; gated internally by DAILY_BRIEFING_ENABLED.
         if now_minute % 15 == 5:
             asyncio.create_task(_run_daily_briefing())
+
+        # Expired content-pool sweep, every 15 minutes at minute 10 — offset from the
+        # thread reflector (0), briefing (5), icebreaker (15), and calendar sync (30).
+        # Deletes content_candidates past expires_at so the tombstone pile can't crowd
+        # out fresh items in the per-user find_nearest top-K (2026-06-15). Fire-and-
+        # forget; bounded + isolated inside the helper so it never delays/fails the tick.
+        if now_minute % 15 == 10:
+            asyncio.create_task(_sweep_expired_candidates())
+
+        # Topic-tracking checkpoint due-scan, EVERY minute (like the reminder scan) so
+        # a pre/live/post update fires near its exact moment. The due-query is cheap and
+        # empty most minutes; only due checkpoints do fetch/LLM work, and atomic claims
+        # make overlapping ticks safe. Fire-and-forget; no-op while the flag is off.
+        asyncio.create_task(_run_tracking_checkpoints())
+
+        # Topic-tracking reconcile (re-research + schedule self-heal), every 15 min at
+        # minute 12 — offset from briefing(5)/sweep(10)/icebreaker(15)/thread(0) so the
+        # LLM passes never burst together. Fire-and-forget; no-op while the flag is off.
+        if now_minute % 15 == 12:
+            asyncio.create_task(_run_tracking_reconcile())
 
         delivered = 0
 

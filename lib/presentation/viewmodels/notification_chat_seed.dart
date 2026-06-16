@@ -7,7 +7,7 @@ import 'package:flutter/foundation.dart';
 /// decider therefore surfaces as a COMPILE-time non-exhaustive-switch warning if
 /// its branch is forgotten, instead of a silently empty chat — the exact failure
 /// the icebreaker hit when it routed to `/chat/new` with no handler downstream.
-enum NotificationChatOrigin { engagement, signal, thread, icebreaker, briefing }
+enum NotificationChatOrigin { engagement, signal, thread, icebreaker, briefing, tracker }
 
 /// The single typed object carried in `/chat/new` route extras when a proactive
 /// notification is tapped. It replaces the four ad-hoc `extra` maps

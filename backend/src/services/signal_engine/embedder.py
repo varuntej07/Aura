@@ -26,6 +26,9 @@ _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0
 _TIMEOUT_S = 15.0
 
+# Gemini's BatchEmbedContents hard cap: at most 100 texts per request
+_MAX_EMBED_BATCH_SIZE = 100
+
 _client_singleton: Any = None
 
 
@@ -51,10 +54,27 @@ async def embed_text(text: str) -> list[float]:
 
 
 async def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Batch embed. Empty list returns empty list."""
+    """Batch embed. Empty list returns empty list.
+
+    Splits into sequential sub-batches of at most _MAX_EMBED_BATCH_SIZE so a list
+    larger than Gemini's 100-per-request BatchEmbedContents cap never 400s (the
+    full-pool content-ingest can hand this >100 fresh items at once). Results are
+    concatenated in input order. Sequential, not concurrent: this runs in the
+    hourly ingest, not a latency path, so serial calls avoid adding parallel load
+    (and extra 429 risk) on the embed API."""
     if not texts:
         return []
 
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), _MAX_EMBED_BATCH_SIZE):
+        chunk = texts[start:start + _MAX_EMBED_BATCH_SIZE]
+        vectors.extend(await _embed_batch(chunk))
+    return vectors
+
+
+async def _embed_batch(texts: list[str]) -> list[list[float]]:
+    """Embed a single batch of at most _MAX_EMBED_BATCH_SIZE texts. Callers go
+    through embed_texts, which enforces the batch ceiling."""
     client = _get_client()
 
     def _sync() -> list[list[float]]:
@@ -67,7 +87,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         # google-genai returns either resp.embeddings (list with .values) or resp.embedding (single). handling both
         vectors: list[list[float]] = []
         embeddings = getattr(resp, "embeddings", None)
-        
+
         if embeddings is None:
             single = getattr(resp, "embedding", None)
             if single is None:

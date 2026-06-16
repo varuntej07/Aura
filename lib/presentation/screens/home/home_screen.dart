@@ -153,6 +153,17 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         context.push('/briefing');
       };
 
+      vm.onTrackerUpdateTap = (payload) {
+        // A topic-tracker live update always opens chat seeded with Buddy's update.
+        context.push(
+          '/chat/new',
+          extra: NotificationChatSeed(
+            origin: NotificationChatOrigin.tracker,
+            openingMessage: payload.openingChatMessage,
+          ),
+        );
+      };
+
       if (uid != null && uid.isNotEmpty) {
         // Warm the voice stack before the user taps the mic. Fire-and-forget so
         // it never blocks wake-word init or the first frame.
