@@ -33,6 +33,7 @@ class AppConstants {
   static const remindersCollection = 'reminders';
   static const calendarCacheCollection = 'calendar_cache';
   static const usersCollection = 'users';
-  // Root-level collection for beta "Send Feedback" submissions
-  static const appFeedbackCollection = 'app_feedback';
+  // Root-level collection for explicit, user-submitted feedback. Distinct from `observed_feedback`, 
+  // which the backend writes when Buddy notices feedback mid-conversation.
+  static const userFeedbackCollection = 'user_feedback';
 }

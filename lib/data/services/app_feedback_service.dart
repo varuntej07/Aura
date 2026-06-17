@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:package_info_plus/package_info_plus.dart';
+
 import '../../core/constants/app_constants.dart';
 import '../../core/logging/app_logger.dart';
 import 'firestore_service.dart';
@@ -9,7 +11,7 @@ import 'posthog_analytics_service.dart';
 /// The single write path for all user feedback.
 ///
 /// Every report — typed feedback from Settings and like/dislike ratings from
-/// the voice orb lands in the root `app_feedback/{timestamp}_{uid}` collection and 
+/// the voice orb lands in the root `user_feedback/{timestamp}_{uid}` collection and
 /// fires a PostHog `feedback_submitted` event.
 class AppFeedbackService {
   final FirestoreService _firestoreService;
@@ -40,19 +42,31 @@ class AppFeedbackService {
       properties: {'category': category, ...extraEventProperties},
     ));
 
+    // Read the real shipped version/build at submit time so the record can't
+    // silently lie when the app version is bumped. Non-critical metadata, so a
+    // failed platform read degrades to 'unknown' rather than blocking the send.
+    String appVersion = 'unknown';
+    try {
+      final packageInfo = await PackageInfo.fromPlatform();
+      appVersion = '${packageInfo.version}+${packageInfo.buildNumber}';
+    } catch (error) {
+      AppLogger.warning('Could not read app version for feedback: $error',
+          tag: 'AppFeedbackService');
+    }
+
     // Timestamp prefix keeps the console's lexicographic doc ordering
     // chronological; the uid suffix prevents collisions across users.
     final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch.toString();
     final docId = '${timestamp}_$uid';
     final result = await _firestoreService.setDocument<Map<String, dynamic>>(
-      AppConstants.appFeedbackCollection,
+      AppConstants.userFeedbackCollection,
       docId,
       {
         'uid': uid,
         'text': text.trim(),
         'category': category,
         'created_at': DateTime.now().toUtc().toIso8601String(),
-        'app_version': '1.0.0',
+        'app_version': appVersion,
         'platform': Platform.isIOS ? 'ios' : 'android',
         ...extraFields,
       },

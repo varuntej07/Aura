@@ -273,6 +273,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       // frame budget from the drawer's scroll. Resumed on close.
       onDrawerChanged: (isOpen) {
         if (isOpen) {
+          FocusScope.of(context).unfocus();      // Drops the keyboard so opening the drawer
           _breathController.stop();
           _rippleController.stop();
         } else {
