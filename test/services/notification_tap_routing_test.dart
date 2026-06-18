@@ -145,42 +145,40 @@ void main() {
     });
   });
 
-  group('dispatchNotificationTap — agent_nudge (regression)', () {
-    test('emits on agentNudgeTapStream with agentId and chatOpener', () async {
-      final received = <AgentNudgeTapPayload>[];
-      sut.agentNudgeTapStream.listen(received.add);
+  group('dispatchNotificationTap — daily_briefing', () {
+    test('emits on dailyBriefingTapStream carrying the briefing date', () async {
+      final received = <DailyBriefingTapPayload>[];
+      sut.dailyBriefingTapStream.listen(received.add);
 
       sut.dispatchNotificationTap({
-        'notification_type': 'agent_nudge',
-        'agent_id': 'sports',
-        'opening_chat_message': 'Big match tonight!',
+        'notification_type': 'daily_briefing',
+        'notification_origin': 'daily_briefing',
+        'briefing_date': '2026-06-13',
       });
 
       await Future<void>.delayed(Duration.zero);
 
       expect(received, hasLength(1));
-      expect(received.first.agentId, 'sports');
-      expect(received.first.chatOpener, 'Big match tonight!');
+      expect(received.first.briefingDate, '2026-06-13');
     });
 
-    test('does not emit when agent_id is missing', () async {
-      final received = <AgentNudgeTapPayload>[];
-      sut.agentNudgeTapStream.listen(received.add);
+    test('still emits when briefing_date is absent (screen fetches today)', () async {
+      final received = <DailyBriefingTapPayload>[];
+      sut.dailyBriefingTapStream.listen(received.add);
 
-      sut.dispatchNotificationTap({'notification_type': 'agent_nudge'});
+      sut.dispatchNotificationTap({'notification_type': 'daily_briefing'});
 
       await Future<void>.delayed(Duration.zero);
 
-      expect(received, isEmpty);
+      expect(received, hasLength(1));
+      expect(received.first.briefingDate, isEmpty);
     });
   });
 
   group('dispatchNotificationTap — unknown type', () {
     test('emits nothing on either stream for an unrecognised notification_type', () async {
       final engagements = <EngagementTapPayload>[];
-      final nudges = <AgentNudgeTapPayload>[];
       sut.engagementTapStream.listen(engagements.add);
-      sut.agentNudgeTapStream.listen(nudges.add);
 
       sut.dispatchNotificationTap({
         'notification_type': 'reminder',
@@ -190,7 +188,6 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(engagements, isEmpty);
-      expect(nudges, isEmpty);
     });
 
     test('emits nothing when notification_type key is absent', () async {

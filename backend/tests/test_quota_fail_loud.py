@@ -94,7 +94,7 @@ async def test_run_tick_warns_when_zero_sends_and_pool_empty(monkeypatch):
         summary = await scoring_loop.run_tick()
 
     assert summary.notifications_sent == 0
-    pool_warnings = [c for c in mock_warn.call_args_list if "pool is EMPTY" in str(c)]
+    pool_warnings = [c for c in mock_warn.call_args_list if "NO FRESH candidates" in str(c)]
     assert len(pool_warnings) == 1
 
 
@@ -106,7 +106,7 @@ async def test_run_tick_no_pool_warn_when_pool_has_content(monkeypatch):
     with patch.object(scoring_loop.logger, "warn") as mock_warn:
         await scoring_loop.run_tick()
 
-    pool_warnings = [c for c in mock_warn.call_args_list if "pool is EMPTY" in str(c)]
+    pool_warnings = [c for c in mock_warn.call_args_list if "NO FRESH candidates" in str(c)]
     assert pool_warnings == []
 
 

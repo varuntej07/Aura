@@ -48,6 +48,11 @@ def _python_contract_values() -> set[str]:
         funnel_events.EVENT_ICEBREAKER_SESSION_FROM_NOTIFICATION,
         funnel_events.EVENT_ICEBREAKER_REPLY,
         funnel_events.NOTIFICATION_ORIGIN_ICEBREAKER,
+        funnel_events.EVENT_BRIEFING_SENT,
+        funnel_events.EVENT_BRIEFING_OPENED,
+        funnel_events.EVENT_BRIEFING_CHAT_STARTED,
+        funnel_events.NOTIFICATION_ORIGIN_BRIEFING,
+        funnel_events.EVENT_WORLD_BRIEFING_FETCHED,
     }
 
 

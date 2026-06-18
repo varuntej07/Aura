@@ -31,8 +31,6 @@ def _every_raw_fetcher_category() -> set[str]:
         raw.add(category)
     for _topic, category in google_news._GLOBAL_TOPIC_FEEDS:
         raw.add(category)
-    for _query, category, _sub in google_news._KEYWORD_FEEDS:
-        raw.add(category)
     # newsdata maps its categories onto this same source vocab before tagging a
     # candidate — every target value must be mappable too.
     raw.update(newsdata._CATEGORY_TO_SOURCE_VOCAB.values())

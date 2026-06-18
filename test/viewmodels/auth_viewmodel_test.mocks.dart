@@ -7,11 +7,12 @@ import 'dart:async' as _i3;
 
 import 'package:aura/core/network/api_response.dart' as _i6;
 import 'package:aura/data/models/chat_attachment.dart' as _i10;
+import 'package:aura/data/models/daily_briefing.dart' as _i11;
 import 'package:aura/data/models/user_model.dart' as _i5;
 import 'package:aura/data/repositories/auth_repository.dart' as _i2;
 import 'package:aura/data/services/backend_api_service.dart' as _i9;
 import 'package:aura/data/services/notification_service.dart' as _i8;
-import 'package:aura/data/services/posthog_analytics_service.dart' as _i11;
+import 'package:aura/data/services/posthog_analytics_service.dart' as _i12;
 import 'package:firebase_auth/firebase_auth.dart' as _i4;
 import 'package:mockito/mockito.dart' as _i1;
 import 'package:mockito/src/dummies.dart' as _i7;
@@ -168,6 +169,28 @@ class MockAuthRepository extends _i1.Mock implements _i2.AuthRepository {
           as _i3.Future<_i6.Result<void>>);
 
   @override
+  _i3.Future<_i6.Result<void>> setAuraConsentGranted(
+    String? uid,
+    bool? granted,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#setAuraConsentGranted, [uid, granted]),
+            returnValue: _i3.Future<_i6.Result<void>>.value(
+              _i7.dummyValue<_i6.Result<void>>(
+                this,
+                Invocation.method(#setAuraConsentGranted, [uid, granted]),
+              ),
+            ),
+            returnValueForMissingStub: _i3.Future<_i6.Result<void>>.value(
+              _i7.dummyValue<_i6.Result<void>>(
+                this,
+                Invocation.method(#setAuraConsentGranted, [uid, granted]),
+              ),
+            ),
+          )
+          as _i3.Future<_i6.Result<void>>);
+
+  @override
   _i3.Future<String?> getIdToken() =>
       (super.noSuchMethod(
             Invocation.method(#getIdToken, []),
@@ -191,16 +214,6 @@ class MockNotificationService extends _i1.Mock
                 _i3.Stream<_i8.EngagementTapPayload>.empty(),
           )
           as _i3.Stream<_i8.EngagementTapPayload>);
-
-  @override
-  _i3.Stream<_i8.AgentNudgeTapPayload> get agentNudgeTapStream =>
-      (super.noSuchMethod(
-            Invocation.getter(#agentNudgeTapStream),
-            returnValue: _i3.Stream<_i8.AgentNudgeTapPayload>.empty(),
-            returnValueForMissingStub:
-                _i3.Stream<_i8.AgentNudgeTapPayload>.empty(),
-          )
-          as _i3.Stream<_i8.AgentNudgeTapPayload>);
 
   @override
   _i3.Stream<_i8.SignalNotificationTapPayload>
@@ -232,6 +245,26 @@ class MockNotificationService extends _i1.Mock
                 _i3.Stream<_i8.IcebreakerTapPayload>.empty(),
           )
           as _i3.Stream<_i8.IcebreakerTapPayload>);
+
+  @override
+  _i3.Stream<_i8.DailyBriefingTapPayload> get dailyBriefingTapStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#dailyBriefingTapStream),
+            returnValue: _i3.Stream<_i8.DailyBriefingTapPayload>.empty(),
+            returnValueForMissingStub:
+                _i3.Stream<_i8.DailyBriefingTapPayload>.empty(),
+          )
+          as _i3.Stream<_i8.DailyBriefingTapPayload>);
+
+  @override
+  _i3.Stream<_i8.TrackerUpdateTapPayload> get trackerUpdateTapStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#trackerUpdateTapStream),
+            returnValue: _i3.Stream<_i8.TrackerUpdateTapPayload>.empty(),
+            returnValueForMissingStub:
+                _i3.Stream<_i8.TrackerUpdateTapPayload>.empty(),
+          )
+          as _i3.Stream<_i8.TrackerUpdateTapPayload>);
 
   @override
   _i3.Future<void> initialize(String? userId) =>
@@ -499,13 +532,42 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
                 ),
           )
           as _i3.Future<List<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<_i11.DailyBriefing?> fetchTodayBriefing() =>
+      (super.noSuchMethod(
+            Invocation.method(#fetchTodayBriefing, []),
+            returnValue: _i3.Future<_i11.DailyBriefing?>.value(),
+            returnValueForMissingStub: _i3.Future<_i11.DailyBriefing?>.value(),
+          )
+          as _i3.Future<_i11.DailyBriefing?>);
+
+  @override
+  _i3.Future<_i11.DailyBriefing?> generateTodayBriefing({
+    bool? force = false,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#generateTodayBriefing, [], {#force: force}),
+            returnValue: _i3.Future<_i11.DailyBriefing?>.value(),
+            returnValueForMissingStub: _i3.Future<_i11.DailyBriefing?>.value(),
+          )
+          as _i3.Future<_i11.DailyBriefing?>);
+
+  @override
+  _i3.Future<_i11.DailyBriefing?> fetchWorldBriefing({bool? refresh = false}) =>
+      (super.noSuchMethod(
+            Invocation.method(#fetchWorldBriefing, [], {#refresh: refresh}),
+            returnValue: _i3.Future<_i11.DailyBriefing?>.value(),
+            returnValueForMissingStub: _i3.Future<_i11.DailyBriefing?>.value(),
+          )
+          as _i3.Future<_i11.DailyBriefing?>);
 }
 
 /// A class which mocks [PostHogAnalyticsService].
 ///
 /// See the documentation for Mockito's code generation for more information.
 class MockPostHogAnalyticsService extends _i1.Mock
-    implements _i11.PostHogAnalyticsService {
+    implements _i12.PostHogAnalyticsService {
   @override
   _i3.Future<void> trackEvent(
     String? event, {

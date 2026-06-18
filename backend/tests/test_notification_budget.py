@@ -68,30 +68,19 @@ def test_spacing_allows_past_window():
 
 
 def test_naive_last_timestamp_is_treated_as_utc():
+    # Spacing is currently 0 (proactive sends uncapped during beta), so a naive timestamp
+    # no longer produces a spacing block to assert against. Pin the tz-coercion helper the
+    # spacing comparison relies on directly, so it stays covered for when a real spacing
+    # window is restored (otherwise a naive vs aware subtraction would raise).
     naive = (NOW - timedelta(minutes=1)).replace(tzinfo=None)
-    data = {FIELD_SENDS_TODAY_DATE: TODAY, FIELD_LAST_NOTIFICATION_AT: naive}
-    decision = evaluate_proactive_claim(data, local_date=TODAY, now=NOW)
-    assert not decision.allowed and decision.reason == "global_spacing"
+    coerced = nb._aware(naive)
+    assert coerced.tzinfo == UTC
+    assert coerced == naive.replace(tzinfo=UTC)
 
 
-# ── Flag-off and fail-open safety ────────────────────────────────────────────
+# ── Fail-open safety ─────────────────────────────────────────────────────────
 
-async def test_claim_is_noop_when_flag_off(monkeypatch):
-    monkeypatch.setattr(nb.settings, "UNIFIED_NOTIFICATION_BUDGET_ENABLED", False)
-    # Must not touch Firestore at all when disabled.
-    with patch.object(nb, "admin_firestore", side_effect=AssertionError("must not be called")):
-        result = await nb.try_claim_proactive_slot("u1", source="signal_engine", user_local_date=TODAY)
-    assert result.allowed
-
-
-async def test_committed_is_noop_when_flag_off(monkeypatch):
-    monkeypatch.setattr(nb.settings, "UNIFIED_NOTIFICATION_BUDGET_ENABLED", False)
-    with patch.object(nb, "admin_firestore", side_effect=AssertionError("must not be called")):
-        await nb.record_committed_send("u1", source="reminder")  # no raise = pass
-
-
-async def test_claim_fails_open_on_error(monkeypatch):
-    monkeypatch.setattr(nb.settings, "UNIFIED_NOTIFICATION_BUDGET_ENABLED", True)
+async def test_claim_fails_open_on_error():
     # A Firestore explosion must never silence notifications.
     with patch.object(nb, "admin_firestore", side_effect=RuntimeError("firestore down")):
         result = await nb.try_claim_proactive_slot("u1", source="signal_engine", user_local_date=TODAY)

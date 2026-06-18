@@ -122,6 +122,75 @@ void main() {
     });
   });
 
+  group('auraMemoryEnabled', () {
+    test('explicit consent granted → enabled', () async {
+      await vm.initialize();
+      authStream.add(_user(auraConsentGranted: true));
+      await pumpEventQueue();
+      expect(vm.auraMemoryEnabled, isTrue);
+    });
+
+    test('consent absent (legacy account) → disabled', () async {
+      await vm.initialize();
+      authStream.add(_user(auraConsentGranted: null));
+      await pumpEventQueue();
+      expect(vm.auraMemoryEnabled, isFalse);
+    });
+
+    test('consent explicitly false (declined / withdrawn) → disabled', () async {
+      await vm.initialize();
+      authStream.add(_user(auraConsentGranted: false));
+      await pumpEventQueue();
+      expect(vm.auraMemoryEnabled, isFalse);
+    });
+
+    test('no user → disabled', () async {
+      await vm.initialize();
+      authStream.add(null);
+      await pumpEventQueue();
+      expect(vm.auraMemoryEnabled, isFalse);
+    });
+  });
+
+  group('revokeAuraMemory', () {
+    test('success → writes false and flips in-memory consent off', () async {
+      when(authRepository.signInWithGoogle())
+          .thenAnswer((_) async => Result.success(_user(auraConsentGranted: true)));
+      await vm.signInWithGoogle();
+      expect(vm.auraMemoryEnabled, isTrue);
+
+      when(authRepository.setAuraConsentGranted('uid-1', false))
+          .thenAnswer((_) async => const Result.success(null));
+
+      final ok = await vm.revokeAuraMemory();
+
+      expect(ok, isTrue);
+      expect(vm.auraMemoryEnabled, isFalse);
+      expect(vm.user?.auraConsentGranted, isFalse);
+      verify(authRepository.setAuraConsentGranted('uid-1', false)).called(1);
+    });
+
+    test('write failure → returns false, consent unchanged', () async {
+      when(authRepository.signInWithGoogle())
+          .thenAnswer((_) async => Result.success(_user(auraConsentGranted: true)));
+      await vm.signInWithGoogle();
+
+      when(authRepository.setAuraConsentGranted(any, any))
+          .thenAnswer((_) async => Result.failure(AppException.unexpected('nope')));
+
+      final ok = await vm.revokeAuraMemory();
+
+      expect(ok, isFalse);
+      expect(vm.auraMemoryEnabled, isTrue);
+    });
+
+    test('no user → returns false without writing', () async {
+      final ok = await vm.revokeAuraMemory();
+      expect(ok, isFalse);
+      verifyNever(authRepository.setAuraConsentGranted(any, any));
+    });
+  });
+
   group('signInWithGoogle', () {
     test('success → loaded + user set', () async {
       when(authRepository.signInWithGoogle())

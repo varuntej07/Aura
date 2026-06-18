@@ -104,12 +104,14 @@ async def test_breaking_capped_once_per_day(monkeypatch):
     send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
     monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
 
-    # Already used today's breaking slot; vector empty + bootstrapped so the personal
-    # lane simply skips. No second breaking send. sends_today_date must be today's
-    # local date or the per-day reset would wipe breaking_sends_today back to 0.
+    # Breaking quota already exhausted for today (the per-day breaking cap is
+    # MAX_BREAKING_SENDS_PER_DAY; uncapped to a high number during beta, so reference the
+    # constant rather than a literal). Vector empty + bootstrapped so the personal lane
+    # simply skips. No second breaking send. sends_today_date must be today's local date
+    # or the per-day reset would wipe breaking_sends_today back to 0.
     state = feature_store.SignalStoreState()
     state.bootstrap_done = True
-    state.breaking_sends_today = 1
+    state.breaking_sends_today = scoring_loop.MAX_BREAKING_SENDS_PER_DAY
     state.sends_today_date = datetime.now(UTC).date().isoformat()
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):

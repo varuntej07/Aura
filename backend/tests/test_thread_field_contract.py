@@ -76,10 +76,7 @@ def test_from_dict_tolerates_iso_string_timestamps():
 async def test_writer_produces_a_readable_document(monkeypatch):
     # The reminder writer must emit a document the reader can rebuild — the real
     # writer -> reader contract, end to end.
-    from src.config.settings import settings
     from src.services.threads import thread_store, thread_writer
-
-    monkeypatch.setattr(settings, "THREAD_ENGINE_ENABLED", True)
 
     captured: dict[str, Thread] = {}
 
@@ -102,23 +99,3 @@ async def test_writer_produces_a_readable_document(monkeypatch):
     assert rebuilt.trigger_text == "send a cold DM to a recruiter"
     assert rebuilt.status == ThreadStatus.OPEN
     assert rebuilt.expected_resolution_at == datetime(2026, 6, 10, 15, 0, tzinfo=UTC)
-
-
-async def test_writer_is_noop_when_engine_disabled(monkeypatch):
-    from src.config.settings import settings
-    from src.services.threads import thread_store, thread_writer
-
-    monkeypatch.setattr(settings, "THREAD_ENGINE_ENABLED", False)
-
-    called = False
-
-    async def _should_not_run(user_id: str, thread: Thread) -> None:
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(thread_store, "create_thread", _should_not_run)
-
-    await thread_writer.record_reminder_thread(
-        "u_1", reminder_id="rem_1", message="anything", trigger_at_iso="",
-    )
-    assert called is False

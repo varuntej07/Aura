@@ -13,99 +13,76 @@ class TestParsePills:
     def test_parse_valid_json_array(self):
         from src.services.daily_notification.suggestion_pills_agent import _parse_pills
 
-        raw = '["IPL today", "Points table", "Next match"]'
+        raw = '["help me prep", "back to the gym", "next match plan"]'
 
-        assert _parse_pills(raw, "sports") == ["IPL today", "Points table", "Next match"]
+        assert _parse_pills(raw) == ["help me prep", "back to the gym", "next match plan"]
 
     def test_strips_markdown_fences_and_filters_long_pills(self):
         from src.services.daily_notification.suggestion_pills_agent import _parse_pills
 
         raw = '```json\n["Short pill", "This pill has too many words to fit well"]\n```'
 
-        assert _parse_pills(raw, "posts") == ["Short pill"]
+        assert _parse_pills(raw) == ["Short pill"]
 
     def test_returns_empty_on_invalid_json(self):
         from src.services.daily_notification.suggestion_pills_agent import _parse_pills
 
-        assert _parse_pills("not json", "technews") == []
+        assert _parse_pills("not json") == []
 
 
 class TestSuggestionPillsAgent:
     @pytest.mark.asyncio
-    async def test_generates_all_agents_and_writes_firestore_shape(self):
+    async def test_generate_buddy_pills_writes_buddy_set(self):
         from src.services.daily_notification.suggestion_pills_agent import SuggestionPillsAgent
 
         model = MagicMock()
         model.cheap = AsyncMock(
-            side_effect=[
-                '["IPL today", "Points table", "Next match", "Top scorer"]',
-                '["AI news", "Open source", "Startup funding", "Dev tools"]',
-                '["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]',
-                '["Back to the gym plan?", "Catch me up", "Set a reminder"]',
-            ]
+            return_value='["help me prep for my interview", "hold me to the gym today", "recommend me a sci-fi book"]'
         )
         doc_ref = MagicMock()
         db = MagicMock()
         db.collection.return_value.document.return_value = doc_ref
 
         with patch(
-            "src.services.daily_notification.suggestion_pills_agent.rss_client.fetch_news",
-            new=AsyncMock(return_value=[{"title": "Headline"}]),
+            "src.services.daily_notification.suggestion_pills_agent.admin_firestore",
+            return_value=db,
         ):
-            with patch(
-                "src.services.daily_notification.suggestion_pills_agent.admin_firestore",
-                return_value=db,
-            ):
-                await SuggestionPillsAgent(model).generate_all_agent_suggestion_pills(
-                    "uid1",
-                    [{"text": "find remote ml jobs"}],
-                    ["machine learning"],
-                )
+            pills = await SuggestionPillsAgent(model).generate_buddy_pills(
+                "uid1",
+                [{"text": "find remote ml jobs"}],
+                ["machine learning"],
+            )
 
-        assert model.cheap.call_count == 4
+        assert pills == [
+            "help me prep for my interview",
+            "hold me to the gym today",
+            "recommend me a sci-fi book",
+        ]
+        assert model.cheap.call_count == 1
         db.collection.assert_called_once_with("agent_suggestion_pills")
         db.collection.return_value.document.assert_called_once_with("uid1")
         written = doc_ref.set.call_args[0][0]
-        assert written["sports"] == ["IPL today", "Points table", "Next match", "Top scorer"]
-        assert written["technews"] == ["AI news", "Open source", "Startup funding", "Dev tools"]
-        assert written["posts"] == ["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]
-        assert written["buddy"] == ["Back to the gym plan?", "Catch me up", "Set a reminder"]
-        # The daily run owns the doc, so it stamps buddy freshness when buddy is included.
+        assert written["buddy"] == pills
         assert "buddy_generated_at" in written
         assert "updated_at" in written
+        # merge=True so any legacy per-agent keys for old clients are never clobbered.
+        assert doc_ref.set.call_args.kwargs.get("merge") is True
 
     @pytest.mark.asyncio
-    async def test_rss_failure_does_not_block_query_context_agents(self):
+    async def test_generate_buddy_pills_skips_write_when_empty(self):
         from src.services.daily_notification.suggestion_pills_agent import SuggestionPillsAgent
 
         model = MagicMock()
-        model.cheap = AsyncMock(
-            side_effect=[
-                "[]",
-                "[]",
-                '["Draft a tweet", "Thread starter", "LinkedIn idea", "Hot take"]',
-                '["Catch me up", "What\'s on my plate?"]',
-            ]
-        )
+        model.cheap = AsyncMock(return_value="not json")
         doc_ref = MagicMock()
         db = MagicMock()
         db.collection.return_value.document.return_value = doc_ref
 
         with patch(
-            "src.services.daily_notification.suggestion_pills_agent.rss_client.fetch_news",
-            new=AsyncMock(side_effect=RuntimeError("rss down")),
+            "src.services.daily_notification.suggestion_pills_agent.admin_firestore",
+            return_value=db,
         ):
-            with patch(
-                "src.services.daily_notification.suggestion_pills_agent.admin_firestore",
-                return_value=db,
-            ):
-                await SuggestionPillsAgent(model).generate_all_agent_suggestion_pills(
-                    "uid1",
-                    [{"text": "write a post about my job search"}],
-                )
+            pills = await SuggestionPillsAgent(model).generate_buddy_pills("uid1", [], None)
 
-        written = doc_ref.set.call_args[0][0]
-        # posts and buddy are query-grounded, so they survive an RSS outage.
-        assert set(written) >= {"posts", "buddy", "updated_at"}
-        assert "sports" not in written
-        assert "technews" not in written
+        assert pills == []
+        doc_ref.set.assert_not_called()
