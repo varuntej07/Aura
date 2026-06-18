@@ -16,7 +16,6 @@ import '../../data/services/feedback_service.dart';
 import '../../data/services/posthog_analytics_service.dart';
 import '../../core/network/connectivity_service.dart';
 import '../../presentation/screens/app_shell.dart';
-import '../../presentation/screens/agents/agent_thread_screen.dart';
 import '../../presentation/screens/auth/login_screen.dart';
 import '../../presentation/screens/briefing/briefing_screen.dart';
 import '../../presentation/screens/chat/chat_screen.dart';
@@ -26,7 +25,6 @@ import '../../presentation/screens/onboarding/onboarding_screen.dart';
 import '../../presentation/screens/reminders/reminders_screen.dart';
 import '../../presentation/screens/settings/settings_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
-import '../../presentation/viewmodels/agent_viewmodel.dart';
 import '../../presentation/viewmodels/auth_viewmodel.dart';
 import '../../presentation/viewmodels/briefing_viewmodel.dart';
 import '../../presentation/viewmodels/text_chat_viewmodel.dart';
@@ -114,34 +112,6 @@ GoRouter buildRouter(
         ],
       ),
 
-      // Full-screen: Agent chat thread — slides over the shell, no bottom nav
-      GoRoute(
-        path: '/agents/:agentId',
-        name: 'Agent Thread',
-        pageBuilder: (context, state) {
-          final agentId = state.pathParameters['agentId']!;
-          final chatOpener = state.extra as String?;
-          return _slidePage(
-            state,
-            ChangeNotifierProvider(
-              create: (_) => AgentViewModel(
-                agentId: agentId,
-                backendService: context.read<ChatServiceProvider>(),
-                chatRepository: context.read<ChatRepository>(),
-                chatBackupService: context.read<ChatBackupService>(),
-                feedbackService: context.read<FeedbackService>(),
-                connectivityService: context.read<ConnectivityService>(),
-                chatSessionManager: context.read<ChatSessionManager>(),
-                postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
-                suggestionPillsRepository:
-                    context.read<AgentSuggestionPillsRepository>(),
-              ),
-              child: AgentThreadScreen(agentId: agentId, chatOpener: chatOpener),
-            ),
-          );
-        },
-      ),
-
       // Full-screen: Buddy text chat — opened from the drawer
       // sessionId == 'new' means create a fresh session
       GoRoute(
@@ -197,16 +167,37 @@ GoRouter buildRouter(
       ),
 
       // Full-screen: Daily briefing - opened from the drawer or a briefing push.
+      // Carries BOTH the briefing VM (the news) and a scoped chat VM (the embedded
+      // in-place chat about the news), mirroring how the /chat route wires up
+      // TextChatViewModel above.
       GoRoute(
         path: '/briefing',
         name: 'Briefing',
         pageBuilder: (context, state) => _slidePage(
           state,
-          ChangeNotifierProvider(
-            create: (_) => BriefingViewModel(
-              backendApiService: context.read<BackendApiService>(),
-              postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
-            ),
+          MultiProvider(
+            providers: [
+              ChangeNotifierProvider(
+                create: (_) => BriefingViewModel(
+                  backendApiService: context.read<BackendApiService>(),
+                  postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
+                ),
+              ),
+              ChangeNotifierProvider(
+                create: (_) => TextChatViewModel(
+                  backendService: context.read<ChatServiceProvider>(),
+                  chatRepository: context.read<ChatRepository>(),
+                  chatBackupService: context.read<ChatBackupService>(),
+                  feedbackService: context.read<FeedbackService>(),
+                  connectivityService: context.read<ConnectivityService>(),
+                  chatSessionManager: context.read<ChatSessionManager>(),
+                  postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
+                  suggestionPillsRepository:
+                      context.read<AgentSuggestionPillsRepository>(),
+                  buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
+                ),
+              ),
+            ],
             child: const BriefingScreen(),
           ),
         ),

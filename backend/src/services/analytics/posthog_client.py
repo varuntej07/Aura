@@ -31,7 +31,7 @@ def _get_client() -> Any | None:
     _init_attempted = True
 
     if not settings.posthog_configured:
-        logger.info("posthog_client: no POSTHOG_API_KEY — server analytics disabled")
+        logger.info("posthog_client: no POSTHOG_API_KEY, server analytics disabled")
         return None
 
     try:
@@ -43,7 +43,7 @@ def _get_client() -> Any | None:
         )
         logger.info("posthog_client: initialised", {"host": settings.POSTHOG_HOST})
     except Exception as exc:
-        logger.warn("posthog_client: init failed — server analytics disabled", {
+        logger.warn("posthog_client: init failed, server analytics disabled", {
             "error": str(exc),
         })
         _client = None

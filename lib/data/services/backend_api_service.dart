@@ -342,6 +342,29 @@ class BackendApiService implements ChatServiceProvider {
     );
   }
 
+  /// Generates (and persists) today's briefing on demand: called when no briefing
+  /// exists for today yet (so the screen shows news straight away without waiting for
+  /// the morning tick) and by the refresh button ([force] = true). The server writes it
+  /// to Firestore, so a later reopen reads it back. Returns null on failure so the
+  /// screen falls back to its empty state. Same shape as [fetchTodayBriefing].
+  Future<DailyBriefing?> generateTodayBriefing({bool force = false}) async {
+    final result = await _apiClient.post<DailyBriefing?>(
+      '/briefing/generate',
+      {'force': force},
+      (json) {
+        final raw = json['briefing'];
+        return raw is Map<String, dynamic> ? DailyBriefing.fromJson(raw) : null;
+      },
+      // Synthesis runs server-side for several seconds; give it room beyond the
+      // default per-call timeout (the screen shows a skeleton meanwhile).
+      timeout: const Duration(seconds: 50),
+    );
+    return result.when(
+      success: (briefing) => briefing,
+      failure: (_) => null,
+    );
+  }
+
   /// Fetches an on-demand "Catch me up on the world" snapshot (2-3 globally buzzing
   /// stories + 1 local one for the user's region). Fills the briefing empty state for
   /// new/cold-start users (no interest vector yet, so the scheduled digest is empty) and

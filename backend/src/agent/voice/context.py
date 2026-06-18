@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...lib.logger import logger
-from ...services.entitlement import get_user_effective_tier
+from ...services.entitlement import (
+    get_remaining_free_voice_seconds,
+    get_user_effective_tier,
+)
 from .fetchers import (
     fetch_archive_context,
     fetch_last_session_summary,
@@ -44,6 +47,7 @@ class SessionContext:
     dominant_tone: str
     dominant_emotion: str
     user_tier: str
+    remaining_free_voice_seconds: int | None
 
     @property
     def prompt_context_vars(self) -> dict[str, str]:
@@ -81,12 +85,14 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
             {"summary": "", "dominant_tone": "", "dominant_emotion": ""},
         ),
         (get_user_effective_tier(user_id), "unknown"),
+        (get_remaining_free_voice_seconds(user_id), None),
     ]
     coroutines = [coro for coro, _ in sources]
     defaults = [default for _, default in sources]
     names = [
         "user_profile", "memory_summary", "last_session_summary",
         "archive_context", "user_aura_profile", "user_tier",
+        "remaining_free_voice_seconds",
     ]
 
     try:
@@ -111,7 +117,10 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
         else:
             resolved.append(value)
 
-    profile, memory_summary, last_session, archive_data, aura_profile, user_tier = resolved
+    (
+        profile, memory_summary, last_session, archive_data, aura_profile,
+        user_tier, remaining_free_voice_seconds,
+    ) = resolved
 
     return SessionContext(
         profile=profile,
@@ -123,4 +132,5 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
         dominant_tone=aura_profile.get("dominant_tone", ""),
         dominant_emotion=aura_profile.get("dominant_emotion", ""),
         user_tier=user_tier,
+        remaining_free_voice_seconds=remaining_free_voice_seconds,
     )

@@ -2,8 +2,8 @@
 Session-open recommender. Uses the same scoring math as scoring_loop but
 without fatigue, without daily cap, and with a stronger diversity penalty.
 
-Returned by GET /feed/recommend to power the in-app home feed when the
-user opens the app.
+Used by the Daily Briefing (``rank_session``) to pick the top-ranked pool items
+to weave into a user's morning digest.
 """
 
 from __future__ import annotations

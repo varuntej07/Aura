@@ -11,12 +11,13 @@ The claim makes "one briefing per user per local date" hold under overlapping
 ticks. Every step is isolated: one user's failure is caught and never touches
 another's, and no step can raise out of the tick. The briefing document is written
 BEFORE the push attempt, so a budget-denied or token-less user can still open today's
-briefing in-app. Gated by ``settings.DAILY_BRIEFING_ENABLED`` (default off).
+briefing in-app.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,13 +36,19 @@ from ..model_provider import ModelProvider, get_model_provider
 from ..notification_budget import try_claim_proactive_slot
 from ..notification_service import send_notification
 from ..signal_engine.feature_store import list_active_user_ids
+from ..tracking import tracking_store
 from . import briefing_agent
 from . import briefing_store as store
 from .fields import (
     NOTIFICATION_TYPE_BRIEFING,
     STATUS_FAILED,
+    STATUS_READY,
     STATUS_SKIPPED,
 )
+
+# Per-user in-process debounce for the in-app force-refresh (mirrors world_briefing's
+# cooldown). Best-effort at beta scale (one instance); never a correctness gate.
+_user_refresh_at: dict[str, float] = {}
 
 # Max users processed simultaneously in one tick (mirrors the scoring loop / icebreaker).
 BRIEFING_USER_CONCURRENCY = 5
@@ -57,6 +64,7 @@ class BriefingTickSummary:
     skipped_nothing_relevant: int = 0
     skipped_budget: int = 0
     skipped_no_tokens: int = 0
+    skipped_tracker_today: int = 0
 
 
 def _local_now(timezone_name: str) -> datetime:
@@ -64,6 +72,13 @@ def _local_now(timezone_name: str) -> datetime:
         return datetime.now(ZoneInfo(timezone_name))
     except (ZoneInfoNotFoundError, Exception):
         return datetime.now(UTC)
+
+
+def _tracker_fired_today(latest_update_at: datetime | None, local_now: datetime) -> bool:
+    """True when a tracker already delivered to this user on their local date today."""
+    if latest_update_at is None:
+        return False
+    return latest_update_at.astimezone(local_now.tzinfo).date() == local_now.date()
 
 
 async def run_briefing_tick(
@@ -78,13 +93,8 @@ async def run_briefing_tick(
         a test can target one phone with zero chance of touching another user.
       force — bypass the local-hour gate and the once-per-day claim, so a briefing
         can be generated + sent on demand (and re-generated) regardless of the time.
-    A targeted run also bypasses the DAILY_BRIEFING_ENABLED flag so it can be
-    triggered while the feature is still dark for everyone else.
     """
     summary = BriefingTickSummary()
-    if target_user_id is None and not settings.DAILY_BRIEFING_ENABLED:
-        return summary
-
     if target_user_id is not None:
         user_ids = [target_user_id]
     else:
@@ -118,6 +128,7 @@ async def run_briefing_tick(
         "skipped_nothing_relevant": summary.skipped_nothing_relevant,
         "skipped_budget": summary.skipped_budget,
         "skipped_no_tokens": summary.skipped_no_tokens,
+        "skipped_tracker_today": summary.skipped_tracker_today,
     })
 
     # Drain the funnel queue before Cloud Run freezes the container, or the
@@ -177,16 +188,28 @@ async def _process_one_user(
         return
 
     # 5. Persist the briefing FIRST so it is viewable in-app even if the push is
-    #    later budget-denied or the user has no FCM token.
+    #    later suppressed, budget-denied, or the user has no FCM token.
     await store.write_briefing(
         user_id,
         local_date=local_date,
         narrative=result.narrative,
         chat_seed_message=result.chat_seed_message,
         sources=result.sources,
+        items=result.items,
     )
 
-    # 6. Unified daily budget — priority claim so a morning briefing the user expects
+    # 6. Suppress the PUSH (not the briefing) when a topic tracker already notified this
+    #    user today — they're getting proactive news from the tracker, so the briefing
+    #    push would stack a second notification on the same day. Still fully viewable.
+    latest_tracker = await tracking_store.latest_tracker_update_at(user_id)
+    if _tracker_fired_today(latest_tracker, local_now):
+        summary.skipped_tracker_today += 1
+        logger.info("briefing.engine: tracker fired today, skipping push (briefing viewable)", {
+            "user_id": user_id,
+        })
+        return
+
+    # 7. Unified daily budget — priority claim so a morning briefing the user expects
     #    is not starved by the content engine. No-op while the budget flag is off.
     budget = await try_claim_proactive_slot(
         user_id, source="daily_briefing", user_local_date=local_date, priority=True,
@@ -198,7 +221,7 @@ async def _process_one_user(
         })
         return
 
-    # 7. Send the single morning push. Tapping it deep-links to the briefing screen.
+    # 8. Send the single morning push. Tapping it deep-links to the briefing screen.
     notification_id = str(uuid.uuid4())
     result_send = await send_notification(
         user_id,
@@ -239,3 +262,73 @@ async def _process_one_user(
         "local_date": local_date,
         "sources_used": len(result.sources),
     })
+
+
+async def generate_on_demand(user_id: str, *, force: bool = False) -> store.StoredBriefing | None:
+    """Generate and PERSIST today's briefing for one user, on demand from the screen.
+
+    This is what makes the briefing show news straight away (and survive a reopen) even
+    before the morning scheduled tick has run: it writes the same `daily_briefing/{date}`
+    doc the tick does, so `GET /briefing/today` reads it back. No push (the user is already
+    looking at it).
+
+    force=False returns today's existing ready briefing untouched if present (so opening
+    the tab twice doesn't regenerate); otherwise it generates one. force=True is the
+    refresh button: it regenerates today's briefing, debounced so rapid taps don't spam
+    the LLM. Returns the briefing, or the existing one (or None) when there's nothing new
+    to generate, so the caller never loses what was already there.
+    """
+    targeting = await store.read_user_targeting(user_id)
+    if not targeting.consent_granted:
+        return None
+
+    local_now = _local_now(targeting.timezone)
+    local_date = local_now.date().isoformat()
+
+    existing = await store.get_briefing(user_id, local_date=local_date)
+    existing_ready = existing if (existing and existing.status == STATUS_READY) else None
+
+    if not force:
+        if existing_ready is not None:
+            return existing_ready
+    else:
+        last = _user_refresh_at.get(user_id)
+        if last is not None and (time.monotonic() - last) < settings.BRIEFING_REFRESH_COOLDOWN_SECONDS:
+            return existing_ready
+
+    models = get_model_provider()
+    try:
+        result = await briefing_agent.generate(models, user_id, targeting, local_now)
+    except Exception as exc:
+        logger.warn("briefing.engine: on-demand generation raised", {
+            "user_id": user_id, "error": str(exc),
+        })
+        return existing_ready
+
+    if result is None:
+        # Nothing to assemble right now (empty pool); keep whatever was already there.
+        return existing_ready
+
+    await store.write_briefing(
+        user_id,
+        local_date=local_date,
+        narrative=result.narrative,
+        chat_seed_message=result.chat_seed_message,
+        sources=result.sources,
+        items=result.items,
+    )
+    if force:
+        _user_refresh_at[user_id] = time.monotonic()
+
+    logger.info("briefing.engine: on-demand briefing written", {
+        "user_id": user_id, "local_date": local_date, "force": force,
+        "items": len(result.items),
+    })
+    return store.StoredBriefing(
+        local_date=local_date,
+        status=STATUS_READY,
+        narrative=result.narrative,
+        chat_seed_message=result.chat_seed_message,
+        sources=result.sources,
+        items=result.items,
+    )

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 from google.cloud.firestore_v1.vector import Vector
 
@@ -28,9 +29,17 @@ from .embedder import embed_texts
 # ttl_hours. Per-source overrides are passed in via add_candidates.
 DEFAULT_CONTENT_TTL_HOURS = 36
 
-# Hard ceiling on how many candidates find_nearest pulls back per user per scoring tick. 
+# Hard ceiling on how many candidates find_nearest pulls back per user per scoring tick.
 # 50 is generous for diversity post-scoring without bloating the per-tick wire payload.
 MAX_NEAREST_CANDIDATES = 50
+
+# Per-call ceiling on the expired-candidate sweep so one scheduler tick can never run
+# an unbounded delete inside its 1-minute window. The deploy-day backlog drains across
+# a few ticks; steady state removes only what expired since the last sweep.
+EXPIRED_SWEEP_MAX_PER_TICK = 1000
+
+# Firestore hard cap on operations in a single batched commit.
+_FIRESTORE_BATCH_LIMIT = 500
 
 
 @dataclass
@@ -425,21 +434,183 @@ async def list_recent_breaking_candidates(
         return []
 
 
-async def has_any_candidate() -> bool:
-    """Cheap existence probe (limit 1) so the scoring loop can tell an empty
-    content pool apart from "pool has content but nothing cleared threshold".
-    Mirrors fcm_token_registry.any_token_registered — lets the loop fail loud
-    when 0 notifications coincide with an empty pool (ingest starved)."""
-    def _probe() -> bool:
+async def list_recent_candidates_full(
+    *,
+    limit: int = 60,
+    region: str | None = None,
+    now: datetime | None = None,
+) -> list[ScoredCandidate]:
+    """Most recent non-expired pool items as full ScoredCandidate (body, url, category,
+    salience, embedding), newest first, optionally region-filtered.
+
+    Vector-INDEPENDENT (orders by created_at, no find_nearest), so it serves a briefing
+    to a cold-start user who has no interest vector yet — the gap that left rank_session
+    returning nothing for day-one users. Region filtering keeps region-agnostic items
+    (HN/arXiv, region "") plus items matching the user's region and drops foreign-region
+    news, so the list never empties out for a region with no edition. created_at DESC is
+    auto-indexed at collection scope, so no composite index is needed.
+    """
+    current_time = now or datetime.now(UTC)
+    target_region = (region or "").strip().upper()
+
+    def _query() -> list[ScoredCandidate]:
         db = admin_firestore()
-        return len(list(db.collection("content_candidates").limit(1).stream())) > 0
+        snaps = (
+            db.collection("content_candidates")
+            .order_by("created_at", direction="DESCENDING")
+            .limit(max(1, limit))
+            .stream()
+        )
+        out: list[ScoredCandidate] = []
+        for snap in snaps:
+            data = snap.to_dict() or {}
+            expires_at = data.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at < current_time:
+                continue
+            extra_field = data.get("extra")
+            extra = extra_field if isinstance(extra_field, dict) else {}
+            item_region = str(extra.get("region", "")).upper()
+            if target_region and item_region and item_region != target_region:
+                continue
+            title = str(data.get("title", "")).strip()
+            if not title:
+                continue
+            vec_field = data.get("embedding")
+            if isinstance(vec_field, Vector):
+                embedding = list(vec_field.to_map_value()["value"])  # type: ignore[attr-defined]
+            else:
+                embedding = [float(x) for x in (vec_field or [])]
+            out.append(ScoredCandidate(
+                content_id=snap.id,
+                source=str(data.get("source", "")),
+                category=str(data.get("category", "")),
+                sub_category=str(data.get("sub_category", "")),
+                title=title,
+                body=str(data.get("body", "")),
+                url=str(data.get("url", "")),
+                embedding=embedding,
+                freshness_ts=data.get("freshness_ts") or current_time,
+                cosine_similarity=0.0,
+                region=item_region,
+                push_eligible=bool(data.get("push_eligible", True)),
+                salience=float(data.get("salience", 0.0) or 0.0),
+            ))
+        return out
+
+    try:
+        return await asyncio.to_thread(_query)
+    except Exception as exc:
+        logger.warn("content_pool.list_recent_candidates_full failed", {"error": str(exc)})
+        return []
+
+
+async def count_fresh_candidates(*, limit: int, now: datetime | None = None) -> int:
+    """Count NON-expired candidates, capped at ``limit`` (a cheap bounded probe).
+
+    The pool keeps tombstones: a doc lives in content_candidates until a later
+    sweep, but find_nearest filters out any candidate past its expires_at, so a
+    pool full of expired docs serves ZERO candidates while a naive doc-count still
+    looks non-empty. This counts only candidates whose expires_at is still in the
+    future — the number that can actually be served — so callers (the ingest floor
+    gate, the scoring-loop empty-pool alarm) reason about real, fresh content.
+
+    Bounded: streams at most ``limit`` matching docs, so it is O(limit), not O(pool).
+    ``expires_at`` is a single-field inequality → auto-indexed at collection scope,
+    so no composite index is needed. Fail-open: on a probe error it returns ``limit``
+    (treat the pool as healthy) so a transient Firestore blip never triggers a
+    needless paid Brave fallback or a false starvation alarm."""
+    current_time = now or datetime.now(UTC)
+
+    def _probe() -> int:
+        db = admin_firestore()
+        snaps = (
+            db.collection("content_candidates")
+            .where(filter=FieldFilter("expires_at", ">", current_time))
+            .limit(max(1, limit))
+            .stream()
+        )
+        return sum(1 for _ in snaps)
 
     try:
         return await asyncio.to_thread(_probe)
     except Exception as exc:
-        # Unknown pool state — return True so we never raise a false "pool empty" alarm.
-        logger.warn("content_pool.has_any_candidate probe failed", {"error": str(exc)})
-        return True
+        logger.warn("content_pool.count_fresh_candidates probe failed", {"error": str(exc)})
+        return limit
+
+
+async def has_any_candidate(*, now: datetime | None = None) -> bool:
+    """True when the pool has at least one NON-expired candidate — content the
+    scoring loop can actually serve. Counting fresh (not raw) docs is what lets the
+    loop tell a genuinely starved pool apart from "pool has fresh content but nothing
+    cleared the threshold": an all-expired pool used to read as non-empty and sent the
+    diagnosis chasing a (healthy) vector index instead of the starved ingest
+    (2026-06-14). Fail-open via count_fresh_candidates (returns True on a probe error)."""
+    return (await count_fresh_candidates(limit=1, now=now)) > 0
+
+
+async def delete_expired_candidates(
+    *,
+    max_deletes: int = EXPIRED_SWEEP_MAX_PER_TICK,
+    now: datetime | None = None,
+) -> int:
+    """Hard-delete candidates whose expires_at has passed. Returns the count deleted.
+
+    find_nearest_for_user and every other reader already SKIP expired docs, so this
+    changes NO serving behavior — it only stops the expired pile from occupying the
+    top-K slots find_nearest pulls back before its in-Python expiry filter. Left
+    unswept, that pile crowded out every fresh item for a niche-interest user even
+    though the pool had fresh content (the 2026-06-15 "pool HAS fresh content but
+    vector search returned nothing for 1 user" warning). A Firestore native TTL
+    policy on expires_at is the eventual backstop (best-effort, up to ~72h lag);
+    this sweep gives the immediacy that the TTL lag cannot.
+
+    Bounded by max_deletes per call so a single scheduler tick can never run an
+    unbounded delete: the deploy-day backlog drains over several ticks, steady state
+    removes only the handful expired since the last sweep. expires_at is a single-
+    field inequality → auto-indexed at collection scope, so no composite index is
+    needed. Never raises (logs and returns the count so far) so it can never fail the
+    scheduler tick it piggybacks on.
+    """
+    current_time = now or datetime.now(UTC)
+
+    def _sweep() -> int:
+        db = admin_firestore()
+        collection = db.collection("content_candidates")
+        deleted = 0
+        try:
+            while deleted < max_deletes:
+                page_limit = min(_FIRESTORE_BATCH_LIMIT, max_deletes - deleted)
+                snaps = list(
+                    collection
+                    .where(filter=FieldFilter("expires_at", "<", current_time))
+                    .limit(page_limit)
+                    .stream()
+                )
+                if not snaps:
+                    break
+                batch = db.batch()
+                for snap in snaps:
+                    batch.delete(snap.reference)
+                batch.commit()
+                deleted += len(snaps)
+                # Short page → no more expired docs to pull, stop early.
+                if len(snaps) < page_limit:
+                    break
+        except Exception as exc:
+            logger.error("content_pool.delete_expired_candidates failed mid-sweep", {
+                "error": str(exc),
+                "deleted_before_error": deleted,
+            })
+        return deleted
+
+    try:
+        deleted = await asyncio.to_thread(_sweep)
+    except Exception as exc:
+        logger.error("content_pool.delete_expired_candidates failed", {"error": str(exc)})
+        return 0
+    if deleted:
+        logger.info("content_pool: swept expired candidates", {"deleted": deleted})
+    return deleted
 
 
 async def get_candidate(content_id: str) -> ScoredCandidate | None:

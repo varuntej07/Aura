@@ -6,10 +6,7 @@ a user from their own independent cap. Committed sends the user asked for
 (reminders, calendar meeting reminders) are never blocked, but they are recorded
 so a proactive push is spaced away from them.
 
-SAFETY: flag-gated by ``settings.UNIFIED_NOTIFICATION_BUDGET_ENABLED`` (default
-off). When off, ``try_claim_proactive_slot`` always allows and
-``record_committed_send`` is a no-op, so every existing path behaves exactly as
-before. The claim is ADDITIVE — each decider keeps its own per-source cap as a
+SAFETY: the claim is ADDITIVE — each decider keeps its own per-source cap as a
 sub-limit; this only adds one coordinated ceiling on top. It also FAILS OPEN: any
 Firestore error allows the send, because a budget read failure must never become
 a notification outage.
@@ -27,7 +24,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.cloud import firestore as fs
 
-from ..config.settings import settings
 from ..lib.logger import logger
 from .firebase import admin_firestore
 
@@ -41,14 +37,14 @@ FIELD_SENDS_TODAY_DATE = "sends_today_date"        # "YYYY-MM-DD" in user-local 
 FIELD_LAST_NOTIFICATION_AT = "last_notification_at"  # any send (proactive or committed)
 
 # ── Tuning ──────────────────────────────────────────────────────────────────
-# Hard ceiling on PROACTIVE sends per user per day (excludes committed reminders /
-# calendar). Non-priority deciders (signal engine + breaking news, engagement,
-# threads) share these 3 slots; the icebreaker is a PRIORITY decider and may take
-# one reserved slot ON TOP (see PRIORITY_RESERVED_SLOTS), so the true system-wide
-# proactive ceiling is 3 + 1 = 4. Set to coordinate, not rubber-stamp: it sits
-# below the sum of every decider's own sub-cap.
-GLOBAL_DAILY_PROACTIVE_CAP = 3
-MIN_PROACTIVE_SPACING = timedelta(hours=2)
+# Proactive notifications are intentionally UNCAPPED during beta: Varun is dogfooding
+# on his own phone and wants to see the raw, ungated send volume before deciding what
+# (if any) ceiling to impose. These are plain tuning constants, not a feature flag —
+# to re-impose a real ceiling later, set GLOBAL_DAILY_PROACTIVE_CAP back to a small
+# number (e.g. 3) and MIN_PROACTIVE_SPACING back to a real window (e.g. 2h). The
+# claim/spacing machinery below is left in place so that is a one-line change.
+GLOBAL_DAILY_PROACTIVE_CAP = 100   # effectively unlimited
+MIN_PROACTIVE_SPACING = timedelta(0)  # no spacing between proactive sends
 
 # Reserved headroom above the cap for a PRIORITY decider (the icebreaker). The
 # content engine runs every 15 min and could otherwise consume the whole daily
@@ -135,13 +131,10 @@ async def try_claim_proactive_slot(
     """Atomically claim one slot of the shared daily proactive budget.
 
     Returns ``allowed=False`` with a reason when the daily cap is reached or the
-    last send was within the spacing window. A no-op (always allowed) while the
-    feature flag is off, and fails OPEN on any error. ``priority=True`` (the
-    icebreaker) may use one reserved slot above the cap so it is never starved.
+    last send was within the spacing window. Fails OPEN on any error.
+    ``priority=True`` (the icebreaker) may use one reserved slot above the cap so
+    it is never starved.
     """
-    if not settings.UNIFIED_NOTIFICATION_BUDGET_ENABLED:
-        return BudgetDecision(True)
-
     now = _aware(now or datetime.now(UTC))
 
     def _claim() -> BudgetDecision:
@@ -193,11 +186,8 @@ async def record_committed_send(
 
     Never blocks — the user asked for these. Bumps a committed counter and sets
     ``last_notification_at`` so a later proactive push is spaced away from it.
-    No-op while the flag is off; swallows all errors.
+    Swallows all errors.
     """
-    if not settings.UNIFIED_NOTIFICATION_BUDGET_ENABLED:
-        return
-
     now = _aware(now or datetime.now(UTC))
 
     def _record() -> None:

@@ -183,7 +183,7 @@ class SubscriptionService extends ChangeNotifier {
     ));
 
     if (uid == null) {
-      AppLogger.info('Interest captured pre-auth — PostHog only', tag: _tag);
+      AppLogger.info('Interest captured pre-auth, PostHog only', tag: _tag);
       return;
     }
 
@@ -255,7 +255,7 @@ class SubscriptionService extends ChangeNotifier {
   Future<void> _verifyAndGrantEntitlement(PurchaseDetails purchase) async {
     final uid = _authService.currentUser?.uid;
     if (uid == null) {
-      AppLogger.warning('Cannot grant entitlement — no user', tag: _tag);
+      AppLogger.warning('Cannot grant entitlement, no user', tag: _tag);
       return;
     }
 

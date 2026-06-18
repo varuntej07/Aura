@@ -34,8 +34,13 @@ STATUS_FAILED = "failed"
 # stored as a field too so a reader never has to parse the id.
 FIELD_LOCAL_DATE = "local_date"
 
-# The synthesized, on-screen briefing narrative (a few short paragraphs).
+# The synthesized, on-screen briefing narrative (blurbs joined). Kept for back-compat
+# and plain-text rendering; the scannable list is FIELD_ITEMS.
 FIELD_NARRATIVE = "narrative"
+
+# The scannable news items: a list of {text, citation, category} maps. text is the warm
+# blurb, citation indexes into FIELD_SOURCES (parallel), category is a human label.
+FIELD_ITEMS = "items"
 
 # The short Buddy opener that seeds the "Chat about this" FAB chat. Names the items
 # concretely so the seeded bubble carries enough hooks for Buddy to continue.

@@ -3,16 +3,12 @@
 v1 wedge: only user-set reminders. The reminder's own text *is* the thread —
 no LLM call at creation, so this adds zero model cost on the hot path. The
 curiosity question is generated lazily, much later, by the reflector.
-
-The whole feature is gated behind ``settings.THREAD_ENGINE_ENABLED`` so threads
-only start accumulating once the end-to-end path (reflector + client) is live.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from . import thread_store
 from .models import Thread, ThreadSource
@@ -45,12 +41,8 @@ async def record_reminder_thread(
     """Open a curiosity thread for a freshly created reminder.
 
     Safe to call fire-and-forget: it never raises (the store swallows write
-    errors) and is a no-op while the engine is disabled, so the chat/voice tool
-    path is never affected.
+    errors), so the chat/voice tool path is never affected.
     """
-    if not settings.THREAD_ENGINE_ENABLED:
-        return
-
     message = (message or "").strip()
     if not message:
         return

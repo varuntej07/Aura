@@ -23,10 +23,11 @@ the pool write choke point), so the recommender's category affinities keep worki
 
 from __future__ import annotations
 
+import random
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from urllib.parse import quote_plus
 
 import httpx
 
@@ -36,9 +37,6 @@ from ...lib.logger import logger
 _TOPIC_FEED_URL = (
     "https://news.google.com/rss/headlines/section/topic/{topic}"
     "?hl={hl}&gl={gl}&ceid={gl}:{hl}"
-)
-_SEARCH_FEED_URL = (
-    "https://news.google.com/rss/search?q={query}&hl={hl}&gl={gl}&ceid={gl}:{hl}"
 )
 
 # Region-sensitive topics: fetched once PER locale edition and tagged with that
@@ -60,14 +58,6 @@ _GLOBAL_TOPIC_FEEDS: list[tuple[str, str]] = [
     ("SCIENCE", "science"),
 ]
 
-# (search query, category, sub_category) for league-specific coverage the broad
-# topic feeds don't surface on their own. Region-agnostic.
-_KEYWORD_FEEDS: list[tuple[str, str, str]] = [
-    ("IPL cricket", "sports", "ipl"),
-    ("Premier League football", "sports", "premier_league"),
-    ("NBA basketball", "sports", "nba"),
-]
-
 _HTML_TAG = re.compile(r"<[^>]+>")
 _DEFAULT_LIMIT_PER_FEED = 8
 
@@ -83,9 +73,25 @@ _MAX_FEED_WORKERS = 8
 # (~8 -> ~23), so the odds of at least one slow endpoint went up materially.
 _FEED_FETCH_TIMEOUT_SECONDS = 10.0
 
-# A plain browser UA. Google News serves RSS to feedparser's own UA fine; now that
-# we fetch the bytes ourselves a normal UA keeps any edition from 403ing the fetch.
-_FEED_USER_AGENT = "Mozilla/5.0 (compatible; AuraSignalEngine/1.0; +https://varuntej.dev/aura)"
+# A real browser UA. Google News RSS is more likely to serve a browser-looking
+# client than a custom bot UA; this does NOT cure the datacenter-IP 503 (that block
+# is reputation-based, not UA-based) but removes the UA as a variable.
+_FEED_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+# Bounded retry for a TRANSIENT feed failure (a one-off 503/timeout/reset). Kept
+# small on purpose: a Google News 503 from a Cloud Run IP is usually a reputation
+# soft-block a retry can't cure, so we recover a genuine blip without turning a hard
+# block into a multi-second stall. newsdata + the Brave fallback carry the pool, so
+# failing fast here is correct (this source is best-effort by design).
+_FEED_MAX_ATTEMPTS = 2
+_FEED_RETRY_BASE_SLEEP_S = 0.5
+
+# Max random pre-fetch stagger per feed so the worker pool doesn't hit Google News
+# in one synchronised burst (a burst from one IP itself raises the soft-block odds).
+_FEED_START_JITTER_S = 0.4
 
 
 def _clean(text: str) -> str:
@@ -129,21 +135,13 @@ def _build_feed_specs() -> list[tuple[str, str, str, str, bool]]:
             specs.append(
                 (_TOPIC_FEED_URL.format(topic=topic, hl=hl, gl=gl), category, "", gl, topic == "WORLD")
             )
-    # Region-agnostic topic + keyword feeds use the first configured locale's
-    # language but carry no region tag and are never the WORLD section.
+    # Region-agnostic topic feeds use the first configured locale's language but
+    # carry no region tag and are never the WORLD section.
     default_hl, default_gl = settings.signal_news_locales[0]
     for topic, category in _GLOBAL_TOPIC_FEEDS:
         specs.append(
             (_TOPIC_FEED_URL.format(topic=topic, hl=default_hl, gl=default_gl), category, "", "", False)
         )
-    for query, category, sub_category in _KEYWORD_FEEDS:
-        specs.append((
-            _SEARCH_FEED_URL.format(query=quote_plus(query), hl=default_hl, gl=default_gl),
-            category,
-            sub_category,
-            "",
-            False,
-        ))
     return specs
 
 
@@ -151,28 +149,45 @@ def _fetch_sync(limit_per_feed: int) -> list[dict[str, Any]]:
     try:
         import feedparser  # type: ignore
     except ImportError:
-        logger.warn("google_news: feedparser not installed — returning no items")
+        logger.warn("google_news: feedparser not installed, returning no items")
         return []
 
     specs = _build_feed_specs()
 
     def _parse_one(spec: tuple[str, str, str, str, bool]) -> list[dict[str, Any]]:
         url, category, sub_category, region, is_world = spec
+        # Randomised pre-fetch stagger so the worker pool doesn't hit Google News in
+        # one synchronised burst.
+        time.sleep(random.uniform(0.0, _FEED_START_JITTER_S))
+
+        resp = None
+        for attempt in range(1, _FEED_MAX_ATTEMPTS + 1):
+            try:
+                # Explicit-timeout fetch (vs feedparser's own unbounded urllib fetch).
+                # follow_redirects because the Google News RSS endpoints 3xx-redirect;
+                # feedparser then parses the raw bytes identically.
+                resp = httpx.get(
+                    url,
+                    timeout=_FEED_FETCH_TIMEOUT_SECONDS,
+                    follow_redirects=True,
+                    headers={"User-Agent": _FEED_USER_AGENT},
+                )
+                resp.raise_for_status()
+                break
+            except Exception as exc:
+                if attempt >= _FEED_MAX_ATTEMPTS:
+                    logger.warn("google_news: feed fetch failed", {
+                        "url": url, "error": str(exc), "attempts": attempt,
+                    })
+                    return []
+                time.sleep(_FEED_RETRY_BASE_SLEEP_S * attempt + random.uniform(0.0, 0.3))
+
+        if resp is None:  # defensive: the loop only exits via break (resp set) or return
+            return []
         try:
-            # Fetch with an explicit timeout (see _FEED_FETCH_TIMEOUT_SECONDS) instead
-            # of letting feedparser do its own unbounded urllib fetch. follow_redirects
-            # because the Google News RSS endpoints 3xx-redirect; without it httpx would
-            # hand feedparser the redirect body. feedparser parses raw bytes identically.
-            resp = httpx.get(
-                url,
-                timeout=_FEED_FETCH_TIMEOUT_SECONDS,
-                follow_redirects=True,
-                headers={"User-Agent": _FEED_USER_AGENT},
-            )
-            resp.raise_for_status()
             feed = feedparser.parse(resp.content)
         except Exception as exc:
-            logger.warn("google_news: feed fetch/parse failed", {"url": url, "error": str(exc)})
+            logger.warn("google_news: feed parse failed", {"url": url, "error": str(exc)})
             return []
         out: list[dict[str, Any]] = []
         for rank, entry in enumerate((feed.entries or [])[:limit_per_feed]):

@@ -159,7 +159,7 @@ class VoiceSessionService {
           // Watchdog: if no agent joins within 20s the worker is likely scaled-down.
           _agentJoinWatchdog = Timer(const Duration(seconds: 20), () {
             if (_room != null && !_didReceiveAssistantOutput) {
-              AppLogger.warning('Agent join timeout — no agent joined within 20s', tag: _tag);
+              AppLogger.warning('Agent join timeout, no agent joined within 20s', tag: _tag);
               _emitSessionError(
                 code: 'agent_join_timeout',
                 message: "Buddy's taking too long to pick up. Give it another tap?",
@@ -296,7 +296,7 @@ class VoiceSessionService {
       return Result.failure(
         AppException.unexpected(
           isIceFailure
-              ? "Couldn't reach Buddy — looks like a network hiccup. Try again?"
+              ? "Couldn't reach Buddy. Looks like a network hiccup. Try again?"
               : "Couldn't start the call. Give it another shot in a sec?",
           error: e,
           stackTrace: st,
@@ -395,7 +395,7 @@ class VoiceSessionService {
     _replyWatchdog?.cancel();
     _replyWatchdog = Timer(_replyWatchdogTimeout, () {
       if (_room == null || !_awaitingAssistantReply) return;
-      AppLogger.warning('Reply watchdog fired — Buddy went silent', tag: _tag,
+      AppLogger.warning('Reply watchdog fired, Buddy went silent', tag: _tag,
           metadata: {'reason': reason});
       _emitSessionError(
         code: 'agent_silent',

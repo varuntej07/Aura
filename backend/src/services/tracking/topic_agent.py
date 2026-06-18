@@ -59,17 +59,25 @@ tournament final is played or the user's team is eliminated\"",
   "starts_at": "ISO 8601 UTC when the topic/event begins, or null",
   "ends_at": "ISO 8601 UTC when it is expected to end, or null",
   "timezone": "IANA timezone most relevant to the event, or \"UTC\"",
+  "country": "ISO 3166-1 alpha-2 country code where this topic is mainly followed, e.g. \
+\"IN\", \"BR\", \"GB\", \"JP\"; use \"US\" only when it is genuinely US-centric or global",
+  "language": "ISO 639-1 code of the language this topic is mostly covered in, e.g. \
+\"hi\", \"pt\", \"te\", \"ja\"; \"en\" if mainly English",
   "confidence": 0.0-1.0 (how sure you are about the schedule),
   "events": [
     {"label": "specific upcoming beat, e.g. \"USA vs Australia\"",
+     "kind": "span (has duration, e.g. a match or game) | point (instantaneous, e.g. \
+a verdict, a product launch, a release date, a result announcement)",
      "start_at": "ISO 8601 UTC start/kickoff time",
-     "end_at": "ISO 8601 UTC end time or null"}
+     "end_at": "ISO 8601 UTC end time, or null (only spans have an end)"}
   ]
 }
 
 Rules: all datetimes ISO 8601 with a UTC offset. List only CONCRETE upcoming events \
 you can date; omit speculative ones. If the topic is open-ended with no scheduled \
-events, return an empty events array. Return the JSON object and nothing else."""
+events (e.g. a person, a company, a developing story), return an empty events array \
+— it will still be followed with a recurring check-in. Return the JSON object and \
+nothing else."""
 
 
 def _slugify(text: str, *, fallback: str) -> str:
@@ -116,6 +124,11 @@ def _parse_research(text: str, *, now: datetime, request: str) -> TopicResearch 
     except (TypeError, ValueError):
         confidence = 0.0
 
+    # Locale codes drive the localized fetch. Sanitize to letters only; leave blank if the
+    # model gave nothing usable so the fetcher applies its US/en default rather than a bad code.
+    country = re.sub(r"[^A-Za-z]", "", str(data.get("country", ""))).upper()[:2]
+    language = re.sub(r"[^A-Za-z]", "", str(data.get("language", ""))).lower()[:2]
+
     horizon = now + timedelta(days=_EVENT_HORIZON_DAYS)
     events: list[ScheduledEvent] = []
     for raw in data.get("events", []) or []:
@@ -126,8 +139,11 @@ def _parse_research(text: str, *, now: datetime, request: str) -> TopicResearch 
         # Only keep concrete, upcoming, in-horizon events; a past or undated one is noise.
         if not start_at or not label or start_at < now or start_at > horizon:
             continue
+        kind_raw = str(raw.get("kind", "")).strip().lower()
+        event_kind = f.EVENT_KIND_POINT if kind_raw == f.EVENT_KIND_POINT else f.EVENT_KIND_SPAN
         events.append(ScheduledEvent(
             label=label, start_at=start_at, end_at=_coerce_datetime(raw.get("end_at")),
+            event_kind=event_kind,
         ))
         if len(events) >= _MAX_EVENTS:
             break
@@ -142,6 +158,8 @@ def _parse_research(text: str, *, now: datetime, request: str) -> TopicResearch 
         ends_at=ends_at,
         expires_at=expires_at,
         timezone=str(data.get("timezone", "UTC")).strip() or "UTC",
+        country=country,
+        language=language,
         confidence=confidence,
         events=events,
     )
@@ -178,11 +196,11 @@ async def research_topic(
                 "events": len(research.events), "confidence": research.confidence,
             })
             return research
-        logger.warn("topic_agent: grounded returned unparseable JSON — trying cheap fallback", {
+        logger.warn("topic_agent: grounded returned unparseable JSON, trying cheap fallback", {
             "request": request[:120],
         })
     except Exception as exc:
-        logger.warn("topic_agent: grounded research failed — trying cheap fallback", {
+        logger.warn("topic_agent: grounded research failed, trying cheap fallback", {
             "request": request[:120], "error": str(exc),
         })
 

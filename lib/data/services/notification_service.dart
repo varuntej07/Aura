@@ -27,17 +27,6 @@ class EngagementTapPayload {
   });
 }
 
-/// Payload emitted when the user taps a scheduled agent nudge notification.
-class AgentNudgeTapPayload {
-  final String agentId;
-  final String chatOpener;
-
-  const AgentNudgeTapPayload({
-    required this.agentId,
-    required this.chatOpener,
-  });
-}
-
 /// Payload emitted when the user taps a signal-engine content notification.
 /// Carries the funnel ids so the chat surface can attribute the resulting
 /// session + first reply back to the originating notification.
@@ -154,7 +143,6 @@ class NotificationService {
   final _localNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
   final _engagementTapController = StreamController<EngagementTapPayload>.broadcast();
-  final _agentNudgeTapController = StreamController<AgentNudgeTapPayload>.broadcast();
   final _signalNotificationTapController =
       StreamController<SignalNotificationTapPayload>.broadcast();
   final _threadFollowUpTapController =
@@ -168,9 +156,6 @@ class NotificationService {
 
   // Emits when the user taps an engagement notification.
   Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
-
-  // Emits when the user taps a scheduled agent nudge notification.
-  Stream<AgentNudgeTapPayload> get agentNudgeTapStream => _agentNudgeTapController.stream;
 
   // Emits when the user taps a signal-engine content notification.
   Stream<SignalNotificationTapPayload> get signalNotificationTapStream =>
@@ -222,7 +207,7 @@ class NotificationService {
 
     if (settings.authorizationStatus == AuthorizationStatus.denied) {
       AppLogger.warning(
-        'Notification permission denied — FCM will not deliver alerts',
+        'Notification permission denied, FCM will not deliver alerts',
         tag: _tag,
         metadata: {'userId': userId},
       );
@@ -262,7 +247,7 @@ class NotificationService {
     } on FirebaseException catch (e) {
       if (e.code != 'apns-token-not-set') rethrow;
       AppLogger.warning(
-        'APNS token not set (expected on iOS simulator) — skipping FCM token registration',
+        'APNS token not set (expected on iOS simulator), skipping FCM token registration',
         tag: _tag,
         metadata: {'userId': userId, 'code': e.code},
       );
@@ -279,7 +264,7 @@ class NotificationService {
     _tokenRefreshSubscription = FirebaseMessaging.instance.onTokenRefresh
         .listen((newToken) {
       AppLogger.info(
-        'FCM token refreshed — re-registering',
+        'FCM token refreshed, re-registering',
         tag: _tag,
         metadata: {'tokenPreview': newToken.substring(0, 20)},
       );
@@ -313,7 +298,6 @@ class NotificationService {
     _userId = null;
     _initialized = false;
     await _engagementTapController.close();
-    await _agentNudgeTapController.close();
     await _signalNotificationTapController.close();
     await _threadFollowUpTapController.close();
     await _icebreakerTapController.close();
@@ -586,16 +570,6 @@ class NotificationService {
           engagementId: engagementId,
           initialMessage: initialMessage,
           agentContext: agentContext,
-        ));
-      }
-    } else if (notificationType == 'agent_nudge') {
-      final agentId = data['agent_id'] as String? ?? '';
-      final chatOpener = data['opening_chat_message'] as String? ?? '';
-
-      if (agentId.isNotEmpty) {
-        _agentNudgeTapController.add(AgentNudgeTapPayload(
-          agentId: agentId,
-          chatOpener: chatOpener,
         ));
       }
     } else if (notificationType == 'daily_nudge' ||

@@ -96,7 +96,7 @@ class SubscriptionViewModel extends SafeChangeNotifier {
 
     if (product == null) {
       AppLogger.warning(
-        'Product not found — store may not be initialised',
+        'Product not found, store may not be initialised',
         tag: 'SubscriptionViewModel',
         metadata: {'productId': productId},
       );

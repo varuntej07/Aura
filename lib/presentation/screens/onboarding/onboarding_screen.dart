@@ -19,7 +19,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     _OnboardingSlide(
       title: 'Every AI app\nforgets you.',
       body:
-          'Aura doesn\'t. It builds a profile from every conversation — automatically, without you doing anything.',
+          'Aura doesn\'t. It builds a profile from every conversation, automatically, without you doing anything.',
     ),
     _OnboardingSlide(
       title: 'It reaches out\nbefore you ask.',

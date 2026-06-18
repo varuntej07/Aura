@@ -24,7 +24,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi.responses import StreamingResponse
 
-from ..agents.system_prompts import get_system_prompt
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..lib.query_logger import log_query
@@ -134,10 +133,41 @@ def _get_aura_cache_lock(uid: str) -> asyncio.Lock:
     return _aura_cache_locks[uid]
 
 
+async def _aura_consent_revoked(uid: str) -> bool:
+    """True only when the user has EXPLICITLY withdrawn Aura consent — i.e.
+    users/{uid}.aura_consent_granted is present and False. Absent or True reads as
+    not-revoked, so this never changes behavior for accounts that predate the
+    in-app memory toggle (deploy-safe: only an explicit in-app revoke stops
+    personalization). Fail-open on a read error: a transient Firestore failure
+    must not silently drop a consented user's personalization, and the next
+    successful read applies a real revoke within a turn.
+    """
+    from ..services.firebase import admin_firestore
+
+    def _fetch() -> bool:
+        try:
+            snap = admin_firestore().collection("users").document(uid).get()
+            if not snap.exists:
+                return False
+            return (snap.to_dict() or {}).get("aura_consent_granted", None) is False
+        except Exception:
+            return False
+
+    return await asyncio.to_thread(_fetch)
+
+
 async def _fetch_cached_aura_data(
     uid: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     now = datetime.now(UTC)
+
+    # GDPR withdrawal: if the user has explicitly turned Aura memory off, do not
+    # read or inject their stored profile (the writer is already consent-gated in
+    # user_aura_extractor). This makes the in-app revoke stop personalization
+    # within a turn instead of letting the frozen profile keep shaping chat.
+    if await _aura_consent_revoked(uid):
+        logger.info("Chat: Aura memory revoked, skipping profile personalization", {"user_id": uid})
+        return {}, []
 
     cached = _aura_cache.get(uid)
     if cached and (now - cached["fetched_at"]).total_seconds() < _AURA_CACHE_TTL_SECONDS:
@@ -405,7 +435,6 @@ def _build_user_content(
 
 def _build_system_blocks(
     base_system_prompt: str,
-    agent_prompt: str | None,
     aura_suffix: str,
     local_datetime: str,
 ) -> list[dict[str, Any]]:
@@ -414,7 +443,7 @@ def _build_system_blocks(
     prompt-cache breakpoints.
 
     Layout (stable → volatile, so the cache prefix is as long as possible):
-      Block 1: base prompt + optional agent prompt  [cache_control]  — never changes
+      Block 1: base prompt                          [cache_control]  — never changes
       Block 2: aura suffix                          [cache_control]  — stable for ~10 min
       Block 3: current datetime                                      — not cached
 
@@ -423,11 +452,7 @@ def _build_system_blocks(
     string only supports automatic (top-level) caching which cannot exclude the
     volatile datetime from the cached prefix.
     """
-    stable_text = (
-        f"{agent_prompt}\n\n---\n\n{base_system_prompt}"
-        if agent_prompt
-        else base_system_prompt
-    )
+    stable_text = base_system_prompt
     blocks: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -462,7 +487,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
 
     user_id = _resolve_user_id(event, body)
     if not user_id:
-        logger.warn("Chat: rejected — missing user_id")
+        logger.warn("Chat: rejected, missing user_id")
         return _sse_error_response(
             "Unauthorized: user_id required",
             status_code=401,
@@ -492,11 +517,11 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     message = str(body.get("message", "")).strip()
     raw_attachments: list[Any] = body.get("attachments") or []
     if not message and not raw_attachments:
-        logger.warn("Chat: rejected — empty message", {"user_id": user_id})
+        logger.warn("Chat: rejected, empty message", {"user_id": user_id})
         return _sse_error_response("message or attachments required", status_code=400, headers=_sse_headers)
     if len(message) > 8_000:
         logger.warn(
-            "Chat: rejected — message too long",
+            "Chat: rejected, message too long",
             {"user_id": user_id, "message_len": len(message)},
         )
         return _sse_error_response(
@@ -526,7 +551,6 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             history.append({"role": str(h["role"]), "content": str(content)})
 
     client_message_id: str | None = body.get("client_message_id") or None
-    agent_id: str | None = body.get("agent_id") or None
     validated_attachments, attachment_rejections = _validate_and_filter_attachments(raw_attachments, user_id)
 
     if attachment_rejections:
@@ -549,7 +573,6 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     aura_suffix = _build_injected_system_prompt_suffix(aura_profile, accepted_hints, user_id)
     system_prompt_blocks = _build_system_blocks(
         settings.BUDDY_CHAT_SYSTEM_PROMPT,
-        get_system_prompt(agent_id) if agent_id else None,
         aura_suffix,
         local_datetime,
     )
@@ -574,7 +597,6 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         {
             "user_id": user_id,
             "session_id": session_id,
-            "agent_id": agent_id,
             "message_len": len(message),
             "history_turns": len(history),
             "attachment_count": len(validated_attachments),
@@ -591,7 +613,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 system_prompt=system_prompt_blocks,
                 user_content=user_content,
                 history=history,
-                is_agent=bool(agent_id),
+                is_agent=False,
                 user_tier=effective_tier,
             ):
                 yield f"data: {json.dumps(sse_event)}\n\n"

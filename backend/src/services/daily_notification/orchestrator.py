@@ -134,7 +134,7 @@ async def _run(user_id: str) -> None:
 
     # Step 7: Generate daily home-screen suggestion pills. Failure must not affect reminders.
     try:
-        await pills_agent.generate_all_agent_suggestion_pills(
+        await pills_agent.generate_buddy_pills(
             user_id, queries, interest_subjects
         )
     except Exception as exc:
@@ -204,6 +204,7 @@ async def _fetch_interest_subjects_if_consented(user_id: str) -> list[str]:
             else False
         )
         if not consent:
+            logger.info("daily_notification: interest grounding skipped, no Aura consent", {"user_id": user_id})
             return []
         aura_snap = db.collection("UserAura").document(user_id).get()
         profile = (aura_snap.to_dict() or {}) if aura_snap.exists else {}

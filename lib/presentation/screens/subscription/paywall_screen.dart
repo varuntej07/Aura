@@ -786,7 +786,7 @@ class _InterestCapturedDialog extends StatelessWidget {
         ),
       ),
       content: Text(
-        "Payments aren't live yet — we're shipping the final pieces. "
+        "Payments aren't live yet. We're shipping the final pieces. "
         "We saved your interest in $tierLabel ($period) and you'll be the "
         "first to know the moment it goes live.",
         style: const TextStyle(

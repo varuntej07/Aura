@@ -103,7 +103,7 @@ class AttachmentValidator {
         AttachmentValidationError.unsupportedType =>
           'Format not supported. Try JPEG, PNG, PDF, DOCX, or TXT',
         AttachmentValidationError.totalPayloadTooLarge =>
-          'Total attachments too large — remove one and try again',
+          'Total attachments too large. Remove one and try again',
       };
 
   static ChatAttachmentType? resolveType(String mimeType) {

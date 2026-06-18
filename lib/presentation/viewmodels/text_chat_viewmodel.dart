@@ -79,6 +79,10 @@ class TextChatViewModel extends ChatViewModel {
   }) {
     // A real text turn, ground the next pill regeneration on it.
     _buddyPillsRefresher.markActivity();
-    return super.sendMessage(text, userId, attachments: attachments);
+    return super.sendMessage(
+      text,
+      userId,
+      attachments: attachments,
+    );
   }
 }

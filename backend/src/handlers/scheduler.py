@@ -49,11 +49,11 @@ async def _fan_out_daily_plans() -> None:
     try:
         user_ids = await list_active_user_ids()
     except Exception as exc:
-        logger.error("scheduler: daily plan fan-out — failed to load active users", {"error": str(exc)})
+        logger.error("scheduler: daily plan fan-out, failed to load active users", {"error": str(exc)})
         return
 
     if not user_ids:
-        logger.info("scheduler: daily plan fan-out — no active users")
+        logger.info("scheduler: daily plan fan-out, no active users")
         return
 
     # Cap concurrent LLM calls to avoid Cloud Run OOM during the morning burst.
@@ -72,8 +72,8 @@ async def _run_thread_reflection() -> None:
     """Hourly curiosity follow-up pass over all active users.
 
     Fire-and-forget so the scheduler tick returns its 200 before the LLM-bound
-    reflection runs. A no-op while THREAD_ENGINE_ENABLED is off, and internally
-    isolated per user, so it can never delay or fail the reminder tick.
+    reflection runs. Internally isolated per user, so it can never delay or fail
+    the reminder tick.
     """
     from ..services.threads.thread_reflector import run_reflection_tick
 
@@ -87,8 +87,8 @@ async def _run_icebreaker() -> None:
     """Hourly icebreaker pass over all active users.
 
     Fire-and-forget so the scheduler tick returns its 200 before the LLM-bound
-    opener generation runs. A no-op while ICEBREAKER_ENABLED is off, and
-    internally isolated per user, so it can never delay or fail the reminder tick.
+    opener generation runs. Internally isolated per user, so it can never delay or
+    fail the reminder tick.
     """
     from ..services.icebreaker.icebreaker_engine import run_icebreaker_tick
 
@@ -104,9 +104,8 @@ async def _run_daily_briefing() -> None:
     Fire-and-forget so the scheduler tick returns its 200 before the LLM-bound
     briefing generation runs. The engine self-gates: it only generates for users
     whose local time is BRIEFING_LOCAL_HOUR and claims once per local date, so
-    firing it every 15 minutes is cheap (most users fall out at the hour gate). A
-    no-op while DAILY_BRIEFING_ENABLED is off, and internally isolated per user, so
-    it can never delay or fail the reminder tick.
+    firing it every 15 minutes is cheap (most users fall out at the hour gate).
+    Internally isolated per user, so it can never delay or fail the reminder tick.
     """
     from ..services.briefing.briefing_engine import run_briefing_tick
 
@@ -200,16 +199,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         if now_utc.hour == 1 and now_minute == 30:
             asyncio.create_task(_fan_out_daily_plans())
 
-        # Curiosity follow-up reflection, once an hour. Fire-and-forget; gated
-        # internally by THREAD_ENGINE_ENABLED so this is a cheap no-op until the
-        # full thread path (client pill rendering + reply ingest) ships.
+        # Curiosity follow-up reflection, once an hour. Fire-and-forget and
+        # internally isolated per user, so it never blocks the reminder tick.
         if now_minute == 0:
             asyncio.create_task(_run_thread_reflection())
 
         # Icebreaker openers, once an hour at minute 15 (offset from the thread
         # reflector at minute 0 so the two LLM passes never burst together).
-        # Fire-and-forget; gated internally by ICEBREAKER_ENABLED so this is a
-        # cheap no-op until the full icebreaker path is dogfooded on a dark candidate.
+        # Fire-and-forget and internally isolated per user.
         if now_minute == 15:
             asyncio.create_task(_run_icebreaker())
 
@@ -217,7 +214,7 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # from the thread reflector (minute 0) and icebreaker (minute 15) so the LLM
         # passes never burst together. The engine self-gates to each user's local
         # BRIEFING_LOCAL_HOUR and claims once per local date, so running it 4x/hour
-        # is cheap. Fire-and-forget; gated internally by DAILY_BRIEFING_ENABLED.
+        # is cheap. Fire-and-forget.
         if now_minute % 15 == 5:
             asyncio.create_task(_run_daily_briefing())
 
@@ -290,7 +287,7 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                         "success_count": result.success_count,
                     })
                 else:
-                    logger.warn("Reminder not delivered — no valid tokens", {
+                    logger.warn("Reminder not delivered, no valid tokens", {
                         "user_id": user_id,
                         "reminder_id": reminder_id,
                         "tokens_targeted": result.tokens_targeted,

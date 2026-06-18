@@ -17,6 +17,7 @@ gets a valid result back; it never has to handle exceptions from here.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import cast
 
@@ -50,6 +51,29 @@ CONTENT_KIND_DISCUSS = "discuss"
 # Gate B) can never drift; a sustained framer outage must never look like "nothing
 # was relevant" (fail-loud doctrine).
 FRAMER_UNAVAILABLE_REASON = "framer_unavailable"
+
+# Stamped onto every framed notification's ledger row. Bump this whenever
+# _FRAMER_SYSTEM_PROMPT changes so a tap-rate shift can be attributed to a
+# specific copy revision (the A/B hook for "what phrasing gets the click").
+FRAMER_PROMPT_VERSION = "2026-06-17"
+
+# User-visible push copy must never contain long dashes (em "—" or en "–"); they read
+# as machine-authored and the product voice forbids them. The framer prompt already
+# tells the model to avoid them (BUDDY_VOICE_CORE), but the model occasionally slips,
+# so this is the deterministic guarantee applied to every framed push before it leaves
+# the service. Plain hyphens and double hyphens are intentionally left untouched; only
+# the long dashes are rewritten, replaced (with any surrounding spaces) by a comma so
+# the sentence still reads naturally.
+_LONG_DASH_RUN = re.compile(r"\s*[—–]\s*")
+
+
+def strip_long_dashes(text: str) -> str:
+    """Replace em/en dashes (and the spaces around them) in user-visible copy with ', '."""
+    if not text:
+        return text
+    cleaned = _LONG_DASH_RUN.sub(", ", text)
+    # Trim a comma a leading/trailing dash may have left at the very start or end.
+    return cleaned.strip().strip(",").strip()
 
 
 class FramedNotification(BaseModel):
@@ -281,12 +305,14 @@ def _content_kind_for_source(candidate: ScoredCandidate) -> str:
 
 
 def _safe_fallback(candidate: ScoredCandidate) -> FramedNotification:
-    title = (candidate.title or candidate.source or "Something for you")[:NOTIFICATION_TITLE_MAX_CHARS]
-    body = (
+    title = strip_long_dashes(
+        candidate.title or candidate.source or "Something for you"
+    )[:NOTIFICATION_TITLE_MAX_CHARS]
+    body = strip_long_dashes(
         f"From {candidate.source}. Worth a look."
         if candidate.source else "Tap to read."
     )[:NOTIFICATION_BODY_MAX_CHARS]
-    opening = (
+    opening = strip_long_dashes(
         f"Came across this and thought of you: {candidate.title}"
         if candidate.title else "Came across something I thought you might like."
     )[:OPENING_CHAT_MESSAGE_MAX_CHARS]
@@ -325,9 +351,11 @@ def _normalise(
     else:
         content_kind = CONTENT_KIND_READ if (candidate.url or "").strip() else CONTENT_KIND_DISCUSS
     return FramedNotification(
-        title=framed.title[:NOTIFICATION_TITLE_MAX_CHARS],
-        body=framed.body[:NOTIFICATION_BODY_MAX_CHARS],
-        opening_chat_message=framed.opening_chat_message[:OPENING_CHAT_MESSAGE_MAX_CHARS],
+        title=strip_long_dashes(framed.title)[:NOTIFICATION_TITLE_MAX_CHARS],
+        body=strip_long_dashes(framed.body)[:NOTIFICATION_BODY_MAX_CHARS],
+        opening_chat_message=strip_long_dashes(
+            framed.opening_chat_message
+        )[:OPENING_CHAT_MESSAGE_MAX_CHARS],
         is_relevant=framed.is_relevant,
         relevance_reason=framed.relevance_reason[:RELEVANCE_REASON_MAX_CHARS],
         content_kind=content_kind,
@@ -394,7 +422,10 @@ _SOURCE_MENTIONS = (
 _LAZY_QUESTIONS = (
     "what do you think", "thoughts?", "what do you make of", "what are your thoughts",
 )
-_BANNED_PUNCTUATION = ("!", "—", "–", "--")
+# Only long dashes are policed in copy. Exclamation marks, hyphens, and double
+# hyphens are allowed; the live path also strips long dashes via strip_long_dashes,
+# so this linter exists to catch a regression in the framer's own output.
+_BANNED_PUNCTUATION = ("—", "–")
 
 
 def copy_violations(framed: FramedNotification) -> list[str]:

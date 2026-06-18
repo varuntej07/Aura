@@ -6,10 +6,28 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/models/daily_briefing.dart';
+import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/briefing_viewmodel.dart';
-import '../../viewmodels/notification_chat_seed.dart';
-import '../../viewmodels/view_state.dart';
-import '../../widgets/aura_text_field.dart';
+import '../../viewmodels/text_chat_viewmodel.dart';
+import '../../widgets/chat_message_list.dart';
+import '../../widgets/message_input.dart';
+import '../../widgets/sign_in_gate_dialog.dart';
+import '../reminders/reminders_screen.dart';
+
+/// A muted "Yesterday" / "From M/D" label when the served briefing is a prior day's
+/// (the fallback). Null for today's briefing and the world snapshot (empty date).
+String? _priorDayLabel(String isoDate) {
+  if (isoDate.isEmpty) return null;
+  final parsed = DateTime.tryParse(isoDate);
+  if (parsed == null) return null;
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final that = DateTime(parsed.year, parsed.month, parsed.day);
+  final diff = today.difference(that).inDays;
+  if (diff <= 0) return null;
+  if (diff == 1) return 'Yesterday';
+  return 'From ${that.month}/${that.day}';
+}
 
 /// Opens a briefing source article in an in-app browser. A failed launch (or an
 /// unparseable url) is a silent no-op — never throw out of a tap.
@@ -24,11 +42,12 @@ Future<void> _launchSource(String url) async {
 }
 
 /// Full-screen daily briefing. Opened from the drawer or a briefing push tap.
-/// Shows Buddy's synthesized narrative plus the sources it drew on. When no
-/// scheduled digest is ready (a new/cold-start user, no interest vector yet), the
-/// empty state offers a "Catch me up on the world" button that fetches an on-demand
-/// world snapshot. A bottom chat launcher morphs from a pill into an in-place input
-/// that hands off into the full chat, seeded to talk about the briefing.
+/// Shows the synthesized news with an always-visible composer that turns the screen
+/// into a live chat about the news IN PLACE (no navigation): the first send seeds the
+/// briefing as the opening chat bubble (see [ChatViewModel.startBriefingConversation]),
+/// then the conversation continues below it and is saved as a normal Buddy session, so
+/// it lands in chat history. When no scheduled digest is ready (a new/cold-start user),
+/// the empty state offers a "Catch me up on the world" snapshot instead.
 class BriefingScreen extends StatefulWidget {
   const BriefingScreen({super.key});
 
@@ -37,12 +56,57 @@ class BriefingScreen extends StatefulWidget {
 }
 
 class _BriefingScreenState extends State<BriefingScreen> {
+  final _scrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
       context.read<BriefingViewModel>().load();
+      // The embedded chat shares the main Buddy session lifecycle. init opens an empty
+      // session, so the news reader shows until the first send seeds the conversation.
+      final uid = context.read<AuthViewModel>().user?.uid;
+      await context.read<TextChatViewModel>().init(uid);
     });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  // Animated — used after a send so the new turn slides into view.
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  // First send seeds the briefing as the opening bubble; later sends are ordinary turns.
+  void _handleSend(DailyBriefing briefing, TextChatViewModel chatVm, String text) {
+    final user = context.read<AuthViewModel>().user;
+    if (user == null) {
+      showSignInGateDialog(context);
+      return;
+    }
+    final chatStarted = chatVm.messages.isNotEmpty || chatVm.isStreaming;
+    if (chatStarted) {
+      chatVm.sendMessage(text, user.uid);
+    } else {
+      chatVm.startBriefingConversation(
+        newsMessage: _briefingAsMarkdown(briefing),
+        firstUserMessage: text,
+      );
+    }
+    _scrollToBottom();
   }
 
   @override
@@ -50,31 +114,23 @@ class _BriefingScreenState extends State<BriefingScreen> {
     return AmbientBackground(
       child: Scaffold(
         backgroundColor: Colors.transparent,
+        resizeToAvoidBottomInset: true,
         body: SafeArea(
-          child: Consumer<BriefingViewModel>(
-            builder: (context, vm, _) {
-              final briefing = vm.briefing;
-              return Stack(
+          child: Consumer2<BriefingViewModel, TextChatViewModel>(
+            builder: (context, briefingVm, chatVm, _) {
+              final briefing = briefingVm.briefing;
+              return Column(
                 children: [
-                  Column(
-                    children: [
-                      _Header(
-                        // The refresh icon only makes sense on the on-demand world
-                        // snapshot; the scheduled digest regenerates daily on its own.
-                        onRefresh: vm.isWorldSnapshot
-                            ? () => vm.fetchWorldNow(refresh: true)
-                            : null,
-                        refreshing: vm.fetchingWorld,
-                      ),
-                      Expanded(child: _buildContent(vm)),
-                    ],
-                  ),
+                  const _Header(),
+                  Expanded(child: _buildBody(briefingVm, chatVm)),
                   if (briefing != null)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: _ChatLauncherBar(briefing: briefing),
+                    MessageInput(
+                      isLoading: chatVm.state == ViewState.loading,
+                      hint: 'Ask Buddy about this',
+                      allowAttachments: false,
+                      onSend: (text, _) => _handleSend(briefing, chatVm, text),
+                      onStop: chatVm.stopGeneration,
+                      extraBottomPadding: 16,
                     ),
                 ],
               );
@@ -85,33 +141,66 @@ class _BriefingScreenState extends State<BriefingScreen> {
     );
   }
 
-  Widget _buildContent(BriefingViewModel vm) {
-    if (vm.state == ViewState.loading || vm.state == ViewState.idle) {
-      return const Center(
-        child: SizedBox(
-          width: 22,
-          height: 22,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
+  Widget _buildBody(BriefingViewModel briefingVm, TextChatViewModel chatVm) {
+    if (briefingVm.state == ViewState.loading || briefingVm.state == ViewState.idle) {
+      return const _BriefingSkeleton();
+    }
+    final briefing = briefingVm.briefing;
+    if (briefing == null) {
+      return _EmptyState(
+        fetching: briefingVm.fetchingWorld,
+        error: briefingVm.worldError,
+        onCatchUp: () => briefingVm.fetchWorldNow(),
       );
     }
-    final briefing = vm.briefing;
-    if (briefing != null) {
+    // News present: the reader until the user starts chatting, then the live chat in
+    // place. The news is the first chat bubble, seeded by the first send.
+    final chatStarted = chatVm.messages.isNotEmpty || chatVm.isStreaming;
+    if (!chatStarted) {
       return _BriefingBody(briefing: briefing);
     }
-    return _EmptyState(
-      fetching: vm.fetchingWorld,
-      error: vm.worldError,
-      onCatchUp: () => vm.fetchWorldNow(),
+    return ChatMessageList(
+      messages: chatVm.messages,
+      scrollController: _scrollController,
+      isStreaming: chatVm.isStreaming,
+      streamingOutput: chatVm.streamingOutput,
+      onRetry: chatVm.retryLastMessage,
+      onEdit: chatVm.editAndResend,
+      onFeedback: chatVm.setFeedback,
+      onViewReminders: () => Navigator.push(context, RemindersScreen.route()),
+      onClarificationSubmit: chatVm.submitClarification,
     );
   }
 }
 
-class _Header extends StatelessWidget {
-  final VoidCallback? onRefresh;
-  final bool refreshing;
+/// Renders the briefing into one readable assistant message (the opening chat bubble):
+/// a short lead-in, then each item as a bullet with its grounded source as a tappable
+/// markdown link. Falls back to splitting the narrative into paragraphs when there are
+/// no discrete items (the scheduled digest) — the same fallback [_BriefingBody] uses.
+String _briefingAsMarkdown(DailyBriefing briefing) {
+  final items = briefing.items.isNotEmpty
+      ? briefing.items
+      : briefing.narrative
+          .split(RegExp(r'\n\s*\n'))
+          .map((p) => p.trim())
+          .where((p) => p.isNotEmpty)
+          .map((p) => BriefingItem(text: p))
+          .toList();
 
-  const _Header({this.onRefresh, this.refreshing = false});
+  final buffer = StringBuffer("Here's what's in today's briefing:\n");
+  for (final item in items) {
+    buffer.write('\n- ${item.text}');
+    final ci = item.citationIndex;
+    if (ci != null && ci >= 0 && ci < briefing.sources.length) {
+      final url = briefing.sources[ci].url.trim();
+      if (url.isNotEmpty) buffer.write(' ([source]($url))');
+    }
+  }
+  return buffer.toString();
+}
+
+class _Header extends StatelessWidget {
+  const _Header();
 
   @override
   Widget build(BuildContext context) {
@@ -134,24 +223,6 @@ class _Header extends StatelessWidget {
               letterSpacing: -0.4,
             ),
           ),
-          const Spacer(),
-          if (refreshing)
-            const SizedBox(
-              width: 44,
-              height: 44,
-              child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            )
-          else if (onRefresh != null)
-            GlassIconButton(
-              icon: Icons.refresh_rounded,
-              onTap: onRefresh!,
-            ),
         ],
       ),
     );
@@ -189,14 +260,29 @@ class _BriefingBody extends StatelessWidget {
       if (i > 0) children.add(const SizedBox(height: 18));
       children.add(_NewsItem(
         text: item.text,
+        category: item.category,
         citationNumber: hasCitation ? ++citationCounter : null,
         citationUrl: hasCitation ? briefing.sources[ci].url : null,
       ));
     }
 
+    final priorDayLabel = _priorDayLabel(briefing.date);
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(22, 8, 22, 0),
       children: [
+        if (priorDayLabel != null) ...[
+          Text(
+            priorDayLabel,
+            style: const TextStyle(
+              color: AppColors.textTertiary,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
+            ),
+          ),
+          const SizedBox(height: 14),
+        ],
         ...children,
         // Clear the floating chat launcher and the nav bar.
         SizedBox(height: MediaQuery.of(context).viewPadding.bottom + 96),
@@ -210,42 +296,83 @@ class _BriefingBody extends StatelessWidget {
 /// grounding source.
 class _NewsItem extends StatelessWidget {
   final String text;
+  final String category;
   final int? citationNumber;
   final String? citationUrl;
 
-  const _NewsItem({required this.text, this.citationNumber, this.citationUrl});
+  const _NewsItem({
+    required this.text,
+    this.category = '',
+    this.citationNumber,
+    this.citationUrl,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Text.rich(
-      TextSpan(
-        text: text,
-        children: [
-          if (citationNumber != null && citationUrl != null)
-            WidgetSpan(
-              alignment: PlaceholderAlignment.top,
-              child: GestureDetector(
-                onTap: () => _launchSource(citationUrl!),
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 3),
-                  child: Text(
-                    '$citationNumber',
-                    style: const TextStyle(
-                      color: AppColors.accent,
-                      fontSize: 10,
-                      height: 1,
-                      fontWeight: FontWeight.w700,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (category.isNotEmpty) ...[
+          _CategoryChip(label: category),
+          const SizedBox(height: 6),
+        ],
+        Text.rich(
+          TextSpan(
+            text: text,
+            children: [
+              if (citationNumber != null && citationUrl != null)
+                WidgetSpan(
+                  alignment: PlaceholderAlignment.top,
+                  child: GestureDetector(
+                    onTap: () => _launchSource(citationUrl!),
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 3),
+                      child: Text(
+                        '$citationNumber',
+                        style: const TextStyle(
+                          color: AppColors.accent,
+                          fontSize: 10,
+                          height: 1,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ),
-        ],
+            ],
+          ),
+          style: const TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 13,
+            height: 1.5,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Small teal category tag above a news blurb, so the 3-4 categories are scannable.
+class _CategoryChip extends StatelessWidget {
+  final String label;
+  const _CategoryChip({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: AppColors.accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
       ),
-      style: const TextStyle(
-        color: AppColors.textPrimary,
-        fontSize: 13,
-        height: 1.5,
+      child: Text(
+        label.toUpperCase(),
+        style: const TextStyle(
+          color: AppColors.accent,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.5,
+        ),
       ),
     );
   }
@@ -369,148 +496,80 @@ class _CatchUpButton extends StatelessWidget {
   }
 }
 
-/// The bottom chat affordance. Collapsed, it is a small "chat" pill aligned right;
-/// tapping it animates open to the LEFT into the same text field the chat screen uses
-/// (`AuraTextField` + a send button, no attachment button), in place and WITHOUT
-/// popping the keyboard. Sending hands off into the full chat (`/chat/new`), seeded
-/// with the briefing opener and the user's typed first message, so the conversation
-/// continues seamlessly. Reuses the chat stack rather than embedding a second surface.
-class _ChatLauncherBar extends StatefulWidget {
-  final DailyBriefing briefing;
-  const _ChatLauncherBar({required this.briefing});
+/// Loading placeholder shaped like the briefing list (category chip + blurb lines per
+/// item) with a gentle pulse, so the wait reads as "content is coming" rather than a
+/// bare spinner.
+class _BriefingSkeleton extends StatefulWidget {
+  const _BriefingSkeleton();
 
   @override
-  State<_ChatLauncherBar> createState() => _ChatLauncherBarState();
+  State<_BriefingSkeleton> createState() => _BriefingSkeletonState();
 }
 
-class _ChatLauncherBarState extends State<_ChatLauncherBar> {
-  static const double _pillWidth = 86;
-
-  final TextEditingController _text = TextEditingController();
-  final FocusNode _focus = FocusNode();
-  bool _expanded = false;
+class _BriefingSkeletonState extends State<_BriefingSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..repeat(reverse: true);
 
   @override
   void dispose() {
-    _text.dispose();
-    _focus.dispose();
+    _controller.dispose();
     super.dispose();
-  }
-
-  // Open the input in place but do NOT focus it — the keyboard stays down until the
-  // user actually taps the field to type.
-  void _expand() => setState(() => _expanded = true);
-
-  void _send() {
-    final typed = _text.text.trim();
-    FocusScope.of(context).unfocus();
-    context.push(
-      '/chat/new',
-      extra: NotificationChatSeed(
-        origin: NotificationChatOrigin.briefing,
-        openingMessage: widget.briefing.chatSeedMessage,
-        firstUserMessage: typed,
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.of(context).viewPadding.bottom;
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 8,
-        bottom: bottomInset + 16,
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          return Align(
-            alignment: Alignment.centerRight,
-            child: AnimatedSize(
-              duration: const Duration(milliseconds: 260),
-              curve: Curves.easeOutCubic,
-              alignment: Alignment.centerRight,
-              child: SizedBox(
-                width: _expanded ? constraints.maxWidth : _pillWidth,
-                child: _expanded ? _buildInput() : _buildPill(),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildPill() {
-    return GestureDetector(
-      onTap: _expand,
-      child: Container(
-        height: 46,
-        decoration: BoxDecoration(
-          color: AppColors.accent,
-          borderRadius: BorderRadius.circular(23),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x331EC8B0),
-              blurRadius: 16,
-              offset: Offset(0, 5),
-            ),
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        final alpha = 0.06 + 0.08 * _controller.value;
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(22, 8, 22, 0),
+          physics: const NeverScrollableScrollPhysics(),
+          children: [
+            for (var i = 0; i < 5; i++) ...[
+              if (i > 0) const SizedBox(height: 22),
+              _SkeletonItem(alpha: alpha),
+            ],
           ],
-        ),
-        child: const Center(
-          child: Text(
-            'chat',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // Mirrors the chat composer: the same rounded field (AuraTextField) plus a send
-  // button, minus the attachment (+) button. One field, no nested glass container.
-  Widget _buildInput() {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        Expanded(
-          child: AuraTextField(
-            controller: _text,
-            focusNode: _focus,
-            hint: 'Ask Buddy about this',
-            onSubmitted: (_) => _send(),
-          ),
-        ),
-        const SizedBox(width: 10),
-        _SendCircle(onTap: _send),
-      ],
+        );
+      },
     );
   }
 }
 
-class _SendCircle extends StatelessWidget {
-  final VoidCallback onTap;
-  const _SendCircle({required this.onTap});
+class _SkeletonItem extends StatelessWidget {
+  final double alpha;
+  const _SkeletonItem({required this.alpha});
+
+  Widget _bar(double width, double height) => Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: AppColors.textPrimary.withValues(alpha: alpha),
+          borderRadius: BorderRadius.circular(6),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 44,
-        height: 44,
-        decoration: const BoxDecoration(
-          color: AppColors.accent,
-          shape: BoxShape.circle,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _bar(58, 14),
+        const SizedBox(height: 10),
+        _bar(double.infinity, 11),
+        const SizedBox(height: 7),
+        _bar(double.infinity, 11),
+        const SizedBox(height: 7),
+        FractionallySizedBox(
+          widthFactor: 0.55,
+          alignment: Alignment.centerLeft,
+          child: _bar(double.infinity, 11),
         ),
-        child: const Icon(Icons.arrow_upward_rounded, color: Colors.white, size: 20),
-      ),
+      ],
     );
   }
 }

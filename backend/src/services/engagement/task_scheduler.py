@@ -90,26 +90,6 @@ class TaskScheduler:
         })
         return task_name
 
-    def schedule_agent_run(self, agent_id: str, user_id: str, delay_seconds: int = 0) -> str:
-        """Enqueue an agent run task for one user, optionally delayed.
-
-        Targets POST /internal/agents/{agent_id}/run/{user_id}.
-        Returns the Cloud Task name.
-        """
-        payload = {"agent_id": agent_id, "user_id": user_id}
-        task_name = self._enqueue(
-            payload=payload,
-            delay_seconds=delay_seconds,
-            url_path=f"/internal/agents/{agent_id}/run/{user_id}",
-        )
-        logger.info("TaskScheduler: agent run enqueued", {
-            "agent_id": agent_id,
-            "user_id": user_id,
-            "delay_seconds": delay_seconds,
-            "task_name": task_name,
-        })
-        return task_name
-
     def cancel_task(self, task_name: str) -> None:
         """Cancel a pending Cloud Task. Safe to call if already fired (no-op)."""
         try:

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../viewmodels/auth_viewmodel.dart';
+import '../onboarding/aura_consent_screen.dart';
 
 class AuraProfileScreen extends StatelessWidget {
   const AuraProfileScreen({super.key});
@@ -15,10 +16,15 @@ class AuraProfileScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final uid = context.read<AuthViewModel>().user?.uid;
+    final authVm = context.watch<AuthViewModel>();
+    final uid = authVm.user?.uid;
     if (uid == null) {
       return const _ErrorBody(message: 'Sign in to view your Aura profile.');
     }
+    // Memory is only built (and only readable) with explicit consent. When it is
+    // off — never granted, or later turned off — show the invitation to turn it
+    // on instead of an empty profile, since there is nothing to display.
+    final memoryEnabled = authVm.auraMemoryEnabled;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -49,29 +55,43 @@ class AuraProfileScreen extends StatelessWidget {
                 ),
               ),
               Expanded(
-                child: StreamBuilder<DocumentSnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('UserAura')
-                      .doc(uid)
-                      .snapshots(),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return const Center(
-                        child: CircularProgressIndicator(
-                          color: AppColors.accent,
-                          strokeWidth: 2,
-                        ),
-                      );
-                    }
+                child: memoryEnabled
+                    ? StreamBuilder<DocumentSnapshot>(
+                        stream: FirebaseFirestore.instance
+                            .collection('UserAura')
+                            .doc(uid)
+                            .snapshots(),
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return const Center(
+                              child: CircularProgressIndicator(
+                                color: AppColors.accent,
+                                strokeWidth: 2,
+                              ),
+                            );
+                          }
 
-                    final data = snapshot.data?.data() as Map<String, dynamic>?;
-                    if (data == null || data.isEmpty) {
-                      return const _EmptyAuraProfile();
-                    }
+                          // A read error (permission denied / Firestore outage) must
+                          // not masquerade as an empty profile — show a distinct,
+                          // retryable error state instead of _EmptyAuraProfile.
+                          if (snapshot.hasError) {
+                            return const _ErrorBody(
+                              message:
+                                  "Couldn't load your Aura right now. Try again in a sec.",
+                            );
+                          }
 
-                    return _AuraProfileBody(profile: data);
-                  },
-                ),
+                          final data =
+                              snapshot.data?.data() as Map<String, dynamic>?;
+                          if (data == null || data.isEmpty) {
+                            return const _EmptyAuraProfile();
+                          }
+
+                          return _AuraProfileBody(profile: data);
+                        },
+                      )
+                    : const _AuraMemoryOffPrompt(),
               ),
             ],
           ),
@@ -478,6 +498,192 @@ class _InterestChip extends StatelessWidget {
   }
 }
 
+// Memory-off invitation — shown when Aura memory is not enabled (never granted
+// or later turned off). The "turn on" action opens the consent screen (age gate
+// + full disclosure), never a bare write, so consent stays informed and the
+// under-18 rule is enforced there.
+
+class _AuraMemoryOffPrompt extends StatelessWidget {
+  const _AuraMemoryOffPrompt();
+
+  static const _remembers = [
+    'Your topics and interests across chats',
+    'How you like Buddy to respond',
+    'Goals you mention, like fitness or learning',
+  ];
+
+  static const _neverStored = [
+    'Your actual messages',
+    'Passwords or financial data',
+    'Location',
+  ];
+
+  void _turnOn(BuildContext context) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const AuraConsentScreen()),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 32),
+      children: [
+        const SizedBox(height: 8),
+        Center(
+          child: Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: AppColors.accent.withValues(alpha: 0.08),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.auto_awesome_outlined,
+              size: 32,
+              color: AppColors.accent,
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        const Text(
+          'Let Buddy remember you',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.5,
+          ),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'Aura memory is off, so Buddy is starting fresh every time. Turn it on '
+          'and Buddy quietly learns what matters to you, so chats, briefings, and '
+          'nudges actually feel like they know you.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.textSecondary,
+            fontSize: 14,
+            height: 1.6,
+          ),
+        ),
+        const SizedBox(height: 24),
+        FauxGlassCard.section(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _DisclosureLabel('What Aura remembers'),
+              const SizedBox(height: 10),
+              ..._remembers.map((t) => _DisclosureRow(text: t, included: true)),
+              const Divider(color: AppColors.glassBorderDim, height: 22),
+              const _DisclosureLabel('Never stored'),
+              const SizedBox(height: 10),
+              ..._neverStored.map((t) => _DisclosureRow(text: t, included: false)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 20),
+        GestureDetector(
+          onTap: () => _turnOn(context),
+          child: Container(
+            height: 54,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [AppColors.accent, AppColors.accentDark],
+              ),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Turn on Aura memory',
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Icon(Icons.arrow_forward_rounded, color: Colors.black, size: 18),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        const Text(
+          'You stay in control. Turn it off anytime in Settings. Your data is '
+          'never sold. GDPR compliant.',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: AppColors.textTertiary,
+            fontSize: 11,
+            height: 1.6,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DisclosureLabel extends StatelessWidget {
+  final String text;
+  const _DisclosureLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text.toUpperCase(),
+      style: const TextStyle(
+        color: AppColors.textSecondary,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.8,
+      ),
+    );
+  }
+}
+
+class _DisclosureRow extends StatelessWidget {
+  final String text;
+  final bool included;
+  const _DisclosureRow({required this.text, required this.included});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            included ? Icons.check_rounded : Icons.block_outlined,
+            size: 16,
+            color: included ? AppColors.accent : AppColors.textTertiary,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                color: included ? AppColors.textPrimary : AppColors.textTertiary,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // Empty state — shown when no profile has been built yet
 
 class _EmptyAuraProfile extends StatelessWidget {
@@ -514,7 +720,7 @@ class _EmptyAuraProfile extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           const Text(
-            'Chat with Buddy for a while and your Aura profile will start filling in — your interests, goals, tone, and everything Buddy learns about you.',
+            'Chat with Buddy for a while and your Aura profile will start filling in: your interests, goals, tone, and everything Buddy learns about you.',
             style: TextStyle(
               color: AppColors.textSecondary,
               fontSize: 14,

@@ -115,7 +115,7 @@ async def fetch_newsdata_articles(
     an empty list when the key is unset or every call fails (Google News then
     carries the pool)."""
     if not settings.newsdata_configured:
-        logger.info("newsdata: NEWSDATA_API_KEY unset — skipping (Google News carries the pool)")
+        logger.info("newsdata: NEWSDATA_API_KEY unset, skipping (Google News carries the pool)")
         return []
 
     cats = categories or settings.newsdata_categories
@@ -143,7 +143,7 @@ async def fetch_newsdata_articles(
             # call; the rest of ingest (and Google News) proceeds. Loud so an
             # exhausted key is visible, not a silent empty pool.
             logger.warn(
-                "newsdata: 429 rate-limited / quota exhausted — skipping this fetch "
+                "newsdata: 429 rate-limited / quota exhausted, skipping this fetch "
                 "(Google News still feeds the pool). Check the free-tier 200 credits/day cap.",
                 {"category": category},
             )

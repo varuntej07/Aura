@@ -22,7 +22,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..analytics import posthog_client
@@ -167,9 +166,6 @@ async def _build_framing_context(user_id: str, local_now: datetime) -> FollowUpF
 async def run_reflection_tick() -> ReflectionSummary:
     """Public entrypoint, called from the scheduler tick on the hourly gate."""
     summary = ReflectionSummary()
-    if not settings.THREAD_ENGINE_ENABLED:
-        return summary
-
     user_ids = await list_active_user_ids()
     summary.users_considered = len(user_ids)
     if not user_ids:

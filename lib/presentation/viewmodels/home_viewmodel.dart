@@ -40,7 +40,6 @@ class HomeViewModel extends SafeChangeNotifier {
 
   StreamSubscription<VoiceServerEvent>? _voiceEventSub;
   StreamSubscription<EngagementTapPayload>? _engagementTapSub;
-  StreamSubscription<AgentNudgeTapPayload>? _agentNudgeTapSub;
   StreamSubscription<SignalNotificationTapPayload>? _signalTapSub;
   StreamSubscription<ThreadFollowUpTapPayload>? _threadTapSub;
   StreamSubscription<IcebreakerTapPayload>? _icebreakerTapSub;
@@ -60,7 +59,6 @@ class HomeViewModel extends SafeChangeNotifier {
 
   // Deep-link routing callbacks set by HomeScreen — keeps GoRouter out of VM.
   void Function(EngagementTapPayload)? onEngagementTap;
-  void Function(AgentNudgeTapPayload)? onAgentNudgeTap;
   void Function(SignalNotificationTapPayload)? onSignalNotificationTap;
   void Function(ThreadFollowUpTapPayload)? onThreadFollowUpTap;
   void Function(IcebreakerTapPayload)? onIcebreakerTap;
@@ -82,7 +80,6 @@ class HomeViewModel extends SafeChangeNotifier {
         _buddyPillsRefresher = buddyPillsRefresher {
     _voiceEventSub = _voiceService.events.listen(_handleVoiceEvent);
     _engagementTapSub = _notificationService.engagementTapStream.listen(_onEngagementTap);
-    _agentNudgeTapSub = _notificationService.agentNudgeTapStream.listen(_onAgentNudgeTap);
     _signalTapSub = _notificationService.signalNotificationTapStream.listen(_onSignalNotificationTap);
     _threadTapSub = _notificationService.threadFollowUpTapStream.listen(_onThreadFollowUpTap);
     _icebreakerTapSub = _notificationService.icebreakerTapStream.listen(_onIcebreakerTap);
@@ -203,10 +200,6 @@ class HomeViewModel extends SafeChangeNotifier {
 
   void _onEngagementTap(EngagementTapPayload payload) {
     onEngagementTap?.call(payload);
-  }
-
-  void _onAgentNudgeTap(AgentNudgeTapPayload payload) {
-    onAgentNudgeTap?.call(payload);
   }
 
   void _onSignalNotificationTap(SignalNotificationTapPayload payload) {
@@ -377,7 +370,7 @@ class HomeViewModel extends SafeChangeNotifier {
       case 'tts_pipeline_failed':
         return "Buddy hit a snag mid-call. Mind tapping to start over?";
       case 'mic_permission_denied':
-        return "I need mic access to hear you — flip it on in Settings and tap again.";
+        return "I need mic access to hear you. Flip it on in Settings and tap again.";
       default:
         // Prefer whatever specific message the service handed us; only fall
         // back to a generic line if there's genuinely nothing better.
@@ -483,7 +476,7 @@ class HomeViewModel extends SafeChangeNotifier {
   }
 
   /// Records a like/dislike on the just-ended voice call to the shared
-  /// `app_feedback` collection. Returns null on success, or a user-facing
+  /// `user_feedback` collection. Returns null on success, or a user-facing
   /// error message on failure.
   Future<String?> submitVoiceSessionRating({
     required bool liked,
@@ -518,7 +511,6 @@ class HomeViewModel extends SafeChangeNotifier {
   void dispose() {
     _voiceEventSub?.cancel();
     _engagementTapSub?.cancel();
-    _agentNudgeTapSub?.cancel();
     _signalTapSub?.cancel();
     _threadTapSub?.cancel();
     _icebreakerTapSub?.cancel();

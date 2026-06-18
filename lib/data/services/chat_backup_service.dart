@@ -495,7 +495,7 @@ class ChatBackupService {
     // message on reinstall with no signal anywhere.
     if (nextAttemptCount == _stuckJobAttemptThreshold) {
       AppLogger.error(
-        'Chat backup job stuck — repeated sync failures',
+        'Chat backup job stuck, repeated sync failures',
         tag: 'ChatBackupService',
         metadata: {
           'jobId': job.id,

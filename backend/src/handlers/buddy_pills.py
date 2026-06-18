@@ -100,6 +100,7 @@ def _fetch_interest_subjects_if_consented(user_id: str) -> list[str]:
             else False
         )
         if not consent:
+            logger.info("buddy_pills: interest grounding skipped, no Aura consent", {"user_id": user_id})
             return []
         aura_snap = db.collection("UserAura").document(user_id).get()
         profile = (aura_snap.to_dict() or {}) if aura_snap.exists else {}

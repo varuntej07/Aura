@@ -28,7 +28,7 @@ class WakeWordService {
   Future<void> start(VoidCallback onWakeWord) async {
     if (_accessKey == 'YOUR_PICOVOICE_ACCESS_KEY') {
       AppLogger.warning(
-        'WakeWordService: Picovoice access key not set — wake word disabled',
+        'WakeWordService: Picovoice access key not set, wake word disabled',
         tag: 'WakeWordService',
       );
       return;
@@ -37,7 +37,7 @@ class WakeWordService {
     final status = await Permission.microphone.request();
     if (!status.isGranted) {
       AppLogger.error(
-        'Microphone permission denied — wake word disabled',
+        'Microphone permission denied, wake word disabled',
         tag: 'WakeWordService',
       );
       return;
@@ -45,7 +45,7 @@ class WakeWordService {
 
     // Porcupine integration removed until access key is configured.
     // Re-add porcupine_flutter dependency and implement here.
-    AppLogger.info('Wake word service stub — not started', tag: 'WakeWordService');
+    AppLogger.info('Wake word service stub, not started', tag: 'WakeWordService');
   }
 
   Future<void> stop() async {

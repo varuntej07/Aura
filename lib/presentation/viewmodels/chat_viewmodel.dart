@@ -598,28 +598,36 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     );
   }
 
-  /// Pre-loads the opener from the daily briefing's "Chat about this" FAB. Unlike
-  /// the notification origins, the screen-open funnel step (`briefing_opened`)
-  /// already fired when the briefing screen loaded, so this only seeds Buddy's
-  /// opener and arms the `briefing_chat_started` action to fire once on the user's
-  /// first reply (via the same [_pendingReply] mechanism every origin uses).
-  Future<void> loadBriefingContext({
-    required String openingMessage,
-    String firstUserMessage = '',
+  /// Starts a NEW dedicated conversation about the daily briefing, embedded in the
+  /// briefing screen. The briefing is seeded as the VISIBLE first assistant bubble
+  /// [newsMessage] of a fresh session, so the user sees the news as message #1 and the
+  /// whole exchange is self-contained in chat history. [firstUserMessage] is then sent
+  /// as the next turn; because the news is now real history, no hidden context is
+  /// needed: Buddy answers informed through [_buildHistory] (its synthetic "Hey Buddy."
+  /// prefix covers the assistant-first turn). Arms `briefing_chat_started` once.
+  Future<void> startBriefingConversation({
+    required String newsMessage,
+    required String firstUserMessage,
   }) async {
-    _messages.clear();
-    _error = null;
+    final question = firstUserMessage.trim();
+    if (question.isEmpty || _currentUserId == null) return;
 
-    if (openingMessage.isNotEmpty) {
-      final msg = ChatMessageModel(
+    // Seed into a clean, empty session so the news is message[0] and we never append to
+    // an unrelated recent chat. init() already opened an empty session on screen load;
+    // only force a fresh one if something is somehow already loaded.
+    if (_messages.isNotEmpty) {
+      await _openFreshSession();
+    }
+
+    if (newsMessage.trim().isNotEmpty) {
+      await _persistMessage(ChatMessageModel(
         id: _uuid.v4(),
-        text: openingMessage,
+        text: newsMessage,
         isUser: false,
         timestamp: DateTime.now(),
         channel: ChatMessageChannel.text,
         sessionId: _currentSessionId,
-      );
-      await _persistMessage(msg);
+      ));
     }
     _setState(ViewState.loaded);
     await _refreshSessions();
@@ -632,15 +640,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       },
     );
 
-    // FAB handoff from the briefing: the user already typed a message in the in-place
-    // input, so auto-send it as their first turn. This consumes [_pendingReply] (firing
-    // briefing_chat_started) and streams Buddy's reply, so opening chat lands mid-
-    // conversation rather than on a dead opener. _currentUserId is set by init(), which
-    // chat_screen always calls before this (mirrors the option-select path).
-    final firstReply = firstUserMessage.trim();
-    if (firstReply.isNotEmpty && _currentUserId != null) {
-      await sendMessage(firstReply, _currentUserId!);
-    }
+    await sendMessage(question, _currentUserId!);
   }
 
   /// Pre-loads the opener from a topic-tracker live-update notification tap. Seeds
@@ -670,8 +670,8 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   // Subclass hooks
 
   /// Inserts [msg] at the front of the in-memory message list without
-  /// persisting to Drift. Used by AgentViewModel to surface a notification
-  /// nudge opener as the first visible bubble in a fresh thread.
+  /// persisting to Drift. A subclass hook for surfacing a notification
+  /// opener as the first visible bubble in a fresh thread.
   void insertEphemeralMessage(ChatMessageModel msg) {
     _messages.insert(0, msg);
     _state = ViewState.loaded;

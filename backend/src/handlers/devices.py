@@ -24,7 +24,7 @@ async def register_device(request: Request) -> JSONResponse:
     """Register or refresh an FCM token for the authenticated user"""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
-        logger.warn("register_device: rejected — missing user_id", {
+        logger.warn("register_device: rejected, missing user_id", {
             "client_ip": request.client.host if request.client else "unknown",
         })
         return JSONResponse({"error": "Unauthorized: valid Firebase ID token required."}, status_code=401)

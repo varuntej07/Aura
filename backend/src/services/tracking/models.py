@@ -43,15 +43,26 @@ def _coerce_datetime(value: Any) -> datetime | None:
 # ── Value objects (agent output → schedule builder input; not persisted alone) ──
 @dataclass
 class ScheduledEvent:
-    """One dated beat of a topic (a match, a hearing, a launch keynote). The
-    schedule builder turns each into up to three Checkpoint docs (pre/live/post)."""
+    """One dated beat of a topic (a match, a hearing, a launch keynote). The schedule
+    builder turns each into Checkpoint docs. The phases follow the event shape: a
+    ``span`` (has duration, e.g. a match) gets pre/live/post; a ``point`` (instantaneous,
+    e.g. a verdict, a launch, a release) gets a heads-up pre + a single milestone at the
+    moment, so an instant event never reads like a fake "live, 0-0"."""
 
     label: str
     start_at: datetime
     end_at: datetime | None = None
-    phases: list[str] = field(default_factory=lambda: [
-        f.CHECKPOINT_PHASE_PRE, f.CHECKPOINT_PHASE_LIVE, f.CHECKPOINT_PHASE_POST,
-    ])
+    event_kind: str = f.EVENT_KIND_SPAN
+    phases: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.phases is None:
+            if self.event_kind == f.EVENT_KIND_POINT:
+                self.phases = [f.CHECKPOINT_PHASE_PRE, f.CHECKPOINT_PHASE_MILESTONE]
+            else:
+                self.phases = [
+                    f.CHECKPOINT_PHASE_PRE, f.CHECKPOINT_PHASE_LIVE, f.CHECKPOINT_PHASE_POST,
+                ]
 
 
 @dataclass
@@ -68,6 +79,8 @@ class TopicResearch:
     ends_at: datetime | None = None
     expires_at: datetime | None = None
     timezone: str = "UTC"
+    country: str = ""
+    language: str = ""
     confidence: float = 0.0
     events: list[ScheduledEvent] = field(default_factory=list)
 
@@ -84,6 +97,8 @@ class TrackedTopic:
     ends_at: datetime | None = None
     expires_at: datetime | None = None
     timezone: str = "UTC"
+    country: str = ""
+    language: str = ""
     live_summary: str = ""
     live_fetched_at: datetime | None = None
     live_source_tier: str = ""
@@ -91,6 +106,7 @@ class TrackedTopic:
     last_reconciled_at: datetime | None = None
     reconcile_count: int = 0
     subscriber_count: int = 0
+    pulse_interval_seconds: int = 0
     status: str = f.TOPIC_STATUS_ACTIVE
     health: str = f.TOPIC_HEALTH_HEALTHY
     research_confidence: float = 0.0
@@ -115,6 +131,8 @@ class TrackedTopic:
             f.TOPIC_ENDS_AT: self.ends_at,
             f.TOPIC_EXPIRES_AT: self.expires_at,
             f.TOPIC_TIMEZONE: self.timezone,
+            f.TOPIC_COUNTRY: self.country,
+            f.TOPIC_LANGUAGE: self.language,
             f.TOPIC_LIVE_SUMMARY: self.live_summary,
             f.TOPIC_LIVE_FETCHED_AT: self.live_fetched_at,
             f.TOPIC_LIVE_SOURCE_TIER: self.live_source_tier,
@@ -122,6 +140,7 @@ class TrackedTopic:
             f.TOPIC_LAST_RECONCILED_AT: self.last_reconciled_at,
             f.TOPIC_RECONCILE_COUNT: self.reconcile_count,
             f.TOPIC_SUBSCRIBER_COUNT: self.subscriber_count,
+            f.TOPIC_PULSE_INTERVAL_SECONDS: self.pulse_interval_seconds,
             f.TOPIC_STATUS: self.status,
             f.TOPIC_HEALTH: self.health,
             f.TOPIC_RESEARCH_CONFIDENCE: self.research_confidence,
@@ -148,6 +167,8 @@ class TrackedTopic:
             ends_at=_coerce_datetime(data.get(f.TOPIC_ENDS_AT)),
             expires_at=_coerce_datetime(data.get(f.TOPIC_EXPIRES_AT)),
             timezone=str(data.get(f.TOPIC_TIMEZONE, "UTC") or "UTC"),
+            country=str(data.get(f.TOPIC_COUNTRY, "")),
+            language=str(data.get(f.TOPIC_LANGUAGE, "")),
             live_summary=str(data.get(f.TOPIC_LIVE_SUMMARY, "")),
             live_fetched_at=_coerce_datetime(data.get(f.TOPIC_LIVE_FETCHED_AT)),
             live_source_tier=str(data.get(f.TOPIC_LIVE_SOURCE_TIER, "")),
@@ -155,6 +176,7 @@ class TrackedTopic:
             last_reconciled_at=_coerce_datetime(data.get(f.TOPIC_LAST_RECONCILED_AT)),
             reconcile_count=int(data.get(f.TOPIC_RECONCILE_COUNT, 0) or 0),
             subscriber_count=int(data.get(f.TOPIC_SUBSCRIBER_COUNT, 0) or 0),
+            pulse_interval_seconds=int(data.get(f.TOPIC_PULSE_INTERVAL_SECONDS, 0) or 0),
             status=str(data.get(f.TOPIC_STATUS, f.TOPIC_STATUS_ACTIVE)),
             health=str(data.get(f.TOPIC_HEALTH, f.TOPIC_HEALTH_HEALTHY)),
             research_confidence=float(data.get(f.TOPIC_RESEARCH_CONFIDENCE, 0.0) or 0.0),
@@ -182,10 +204,7 @@ class Tracker:
     updated_at: datetime | None = None
     mute_until: datetime | None = None
     updates_sent: int = 0
-    updates_held: int = 0
-    updates_dropped: int = 0
     last_update_at: datetime | None = None
-    last_gatekeeper_reason: str = ""
     last_sent_summary: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -199,10 +218,7 @@ class Tracker:
             f.TRACKER_UPDATED_AT: self.updated_at,
             f.TRACKER_MUTE_UNTIL: self.mute_until,
             f.TRACKER_UPDATES_SENT: self.updates_sent,
-            f.TRACKER_UPDATES_HELD: self.updates_held,
-            f.TRACKER_UPDATES_DROPPED: self.updates_dropped,
             f.TRACKER_LAST_UPDATE_AT: self.last_update_at,
-            f.TRACKER_LAST_GATEKEEPER_REASON: self.last_gatekeeper_reason,
             f.TRACKER_LAST_SENT_SUMMARY: self.last_sent_summary,
         }
 
@@ -218,10 +234,7 @@ class Tracker:
             updated_at=_coerce_datetime(data.get(f.TRACKER_UPDATED_AT)),
             mute_until=_coerce_datetime(data.get(f.TRACKER_MUTE_UNTIL)),
             updates_sent=int(data.get(f.TRACKER_UPDATES_SENT, 0) or 0),
-            updates_held=int(data.get(f.TRACKER_UPDATES_HELD, 0) or 0),
-            updates_dropped=int(data.get(f.TRACKER_UPDATES_DROPPED, 0) or 0),
             last_update_at=_coerce_datetime(data.get(f.TRACKER_LAST_UPDATE_AT)),
-            last_gatekeeper_reason=str(data.get(f.TRACKER_LAST_GATEKEEPER_REASON, "")),
             last_sent_summary=str(data.get(f.TRACKER_LAST_SENT_SUMMARY, "")),
         )
 

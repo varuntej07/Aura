@@ -24,12 +24,14 @@ Firebase Admin SDK calls are dispatched to a thread pool via
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from firebase_admin import messaging
 
 from ..lib.logger import logger
+from . import notification_ledger
 from .fcm_token_registry import (
     get_user_tokens,
     is_permanently_invalid_token_error,
@@ -76,6 +78,7 @@ async def send_notification(
     sound: str = "default",
     apns_category: str | None = None,
     data_only: bool = False,
+    decision: "notification_ledger.NotificationDecision | None" = None,
 ) -> NotificationResult:
     """Send an FCM push notification to all registered devices for a user.
 
@@ -110,6 +113,10 @@ async def send_notification(
                            notification (action-button suggestion chips) itself
                            from the data payload. iOS still shows an alert via
                            the APNS ``aps.alert`` so it is never silent there.
+        decision:          Optional learning-substrate metadata (score, scoring
+                           components, framer relevance reason / prompt version)
+                           for LLM-framed proactive sends. Persisted on the
+                           notification ledger row; deterministic paths omit it.
 
     Returns:
         ``NotificationResult`` with delivery counts and a list of invalid
@@ -142,6 +149,12 @@ async def send_notification(
     }
     if data:
         payload.update(data)
+
+    # Every notification gets a stable id, carried in the payload so the client
+    # can report taps/dismissals against it (the signal engine already supplies
+    # one; generate it for the other paths). Also the ledger doc id.
+    notification_id = payload.get("notification_id") or str(uuid.uuid4())
+    payload["notification_id"] = notification_id
 
     # 3. Build platform-specific message
     apns_headers: dict[str, str] = {
@@ -193,6 +206,34 @@ async def send_notification(
         "collapse_key": collapse_key,
     })
 
+    # Record one ledger row per attempted send (success or failure). This is the
+    # single choke point through which every notification path flows, so writing
+    # here covers all of them. Fire-and-forget: record_send swallows its own
+    # errors and must never break or delay delivery.
+    data_in = data or {}
+
+    async def _record_to_ledger(
+        *, delivered: bool, tokens_targeted: int, success_count: int, failure_count: int
+    ) -> None:
+        await notification_ledger.record_send(
+            user_id,
+            notification_id=notification_id,
+            notification_type=notification_type,
+            origin=str(data_in.get("notification_origin", notification_type)),
+            title=title,
+            body=body,
+            url=str(data_in.get("url", "")),
+            content_id=str(data_in.get("content_id", "")),
+            source=str(data_in.get("source", "")),
+            category=str(data_in.get("category", "")),
+            content_kind=str(data_in.get("content_kind", "")),
+            delivered=delivered,
+            tokens_targeted=tokens_targeted,
+            success_count=success_count,
+            failure_count=failure_count,
+            decision=decision,
+        )
+
     # 4. Send via FCM
     try:
         batch_response: messaging.BatchResponse = await asyncio.to_thread(
@@ -206,6 +247,12 @@ async def send_notification(
             "error": str(exc),
             "error_type": type(exc).__name__,
         })
+        await _record_to_ledger(
+            delivered=False,
+            tokens_targeted=len(token_strings),
+            success_count=0,
+            failure_count=len(token_strings),
+        )
         return NotificationResult(
             tokens_targeted=len(token_strings),
             success_count=0,
@@ -262,5 +309,12 @@ async def send_notification(
         "failure_count": result.failure_count,
         "invalid_removed": len(invalid),
     })
+
+    await _record_to_ledger(
+        delivered=result.delivered,
+        tokens_targeted=result.tokens_targeted,
+        success_count=result.success_count,
+        failure_count=result.failure_count,
+    )
 
     return result

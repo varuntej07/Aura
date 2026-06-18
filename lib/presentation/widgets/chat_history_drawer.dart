@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/app_colors.dart';
 import '../../data/local/app_database.dart';
 
-/// Slide-in history drawer used by both ChatScreen and AgentThreadScreen.
+/// Slide-in history drawer used by the Buddy text chat screen.
 /// Receives data and callbacks from the parent — no direct ViewModel
 /// dependency — so it works with any ChatViewModel subtype.
 class ChatHistoryDrawer extends StatelessWidget {

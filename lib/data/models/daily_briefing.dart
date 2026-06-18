@@ -11,11 +11,16 @@ class BriefingItem {
   /// item has no grounded source to cite.
   final int? citationIndex;
 
-  const BriefingItem({required this.text, this.citationIndex});
+  /// Human category label for the on-screen chip (e.g. "Sports", "Tech & AI"). Empty
+  /// for the world snapshot, which does not tag items by category.
+  final String category;
+
+  const BriefingItem({required this.text, this.citationIndex, this.category = ''});
 
   factory BriefingItem.fromJson(Map<String, dynamic> json) => BriefingItem(
         text: json['text'] as String? ?? '',
         citationIndex: (json['citation'] as num?)?.toInt(),
+        category: json['category'] as String? ?? '',
       );
 }
 

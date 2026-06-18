@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ...lib.logger import logger
+from .. import notification_ledger
 from . import content_pool, feature_store
 from .embedder import embed_text, embed_texts
 from .feature_store import (
@@ -131,6 +132,13 @@ async def _apply_event_inner(
     if event_type in ("notification_opened", "notification_dismissed"):
         outcome_name = "opened" if event_type == "notification_opened" else "dismissed"
         if content_id:
+            # For outcome events the client sends the notification_id in content_id
+            # (it is the outcomes doc id). Mirror the tap/dismiss into the unified
+            # notification ledger, which is keyed by the same id.
+            if event_type == "notification_opened":
+                await notification_ledger.record_tap(user_id, content_id)
+            else:
+                await notification_ledger.record_dismiss(user_id, content_id)
             prev = await feature_store.resolve_outcome(user_id, content_id, outcome=outcome_name)
             if prev and prev.get("content_id"):
                 cand = await content_pool.get_candidate(str(prev["content_id"]))

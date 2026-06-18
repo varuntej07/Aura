@@ -703,7 +703,7 @@ class ToolExecutor:
         return snap.to_dict() if snap.exists else {"agent_id": agent_id, "config": {}}
 
     # Silent product-feedback capture — Buddy's report_feedback tool. Always on for every user (no
-    # flag). Persists the structured feedback to product_feedback/ and pings Telegram (both via
+    # flag). Persists the structured feedback to observed_feedback/ and pings Telegram (both via
     # capture_feedback, which never raises). Returns a benign, silent result so the model continues
     # its reply without mentioning it.
     async def _report_feedback(self, inp: dict[str, Any]) -> ToolResult:

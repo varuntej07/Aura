@@ -35,7 +35,7 @@ class BriefingViewModel extends SafeChangeNotifier {
   bool get isWorldSnapshot => _isWorldSnapshot;
 
   /// True while a "Catch me up on the world" fetch is in flight (drives the button
-  /// spinner and the refresh icon spinner).
+  /// spinner).
   bool get fetchingWorld => _fetchingWorld;
 
   /// Friendly, casual error from the last failed world fetch, or null. The mic-orb
@@ -49,7 +49,11 @@ class BriefingViewModel extends SafeChangeNotifier {
     _state = ViewState.loading;
     safeNotifyListeners();
 
-    final briefing = await _backendApiService.fetchTodayBriefing();
+    // Fast read first; if nothing is stored for today yet, generate it on demand so the
+    // screen shows news straight away (and it persists for the next open).
+    var briefing = await _backendApiService.fetchTodayBriefing();
+    briefing ??= await _backendApiService.generateTodayBriefing();
+
     _briefing = briefing;
     _state = ViewState.loaded;
     safeNotifyListeners();

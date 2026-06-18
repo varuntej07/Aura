@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from google.cloud import firestore as fs
@@ -62,6 +62,7 @@ class StoredBriefing:
     narrative: str
     chat_seed_message: str
     sources: list[dict[str, Any]] = field(default_factory=list)
+    items: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _coerce_utc(value: Any) -> datetime | None:
@@ -202,6 +203,7 @@ async def write_briefing(
     narrative: str,
     chat_seed_message: str,
     sources: list[dict[str, Any]],
+    items: list[dict[str, Any]],
 ) -> None:
     """Flip the claimed doc to ``ready`` and store the generated content (merge).
 
@@ -217,6 +219,7 @@ async def write_briefing(
             f.FIELD_NARRATIVE: narrative,
             f.FIELD_CHAT_SEED_MESSAGE: chat_seed_message,
             f.FIELD_SOURCES: sources,
+            f.FIELD_ITEMS: items,
             f.FIELD_GENERATED_AT: datetime.now(UTC),
         }, merge=True)
 
@@ -266,12 +269,15 @@ async def get_briefing(user_id: str, *, local_date: str) -> StoredBriefing | Non
         data = snap.to_dict() or {}
         raw_sources = data.get(f.FIELD_SOURCES)
         sources = [s for s in raw_sources if isinstance(s, dict)] if isinstance(raw_sources, list) else []
+        raw_items = data.get(f.FIELD_ITEMS)
+        items = [i for i in raw_items if isinstance(i, dict)] if isinstance(raw_items, list) else []
         return StoredBriefing(
             local_date=str(data.get(f.FIELD_LOCAL_DATE, local_date)),
             status=str(data.get(f.FIELD_STATUS, "")),
             narrative=str(data.get(f.FIELD_NARRATIVE, "") or ""),
             chat_seed_message=str(data.get(f.FIELD_CHAT_SEED_MESSAGE, "") or ""),
             sources=sources,
+            items=items,
         )
 
     try:
@@ -283,3 +289,28 @@ async def get_briefing(user_id: str, *, local_date: str) -> StoredBriefing | Non
             "error": str(exc),
         })
         return None
+
+
+def lookback_dates(local_date: str, days: int) -> list[str]:
+    """``local_date`` then the prior ``days-1`` dates, newest first. Pure (testable)."""
+    try:
+        start = date.fromisoformat(local_date)
+    except ValueError:
+        return [local_date]
+    return [(start - timedelta(days=i)).isoformat() for i in range(max(1, days))]
+
+
+async def get_latest_ready_briefing(
+    user_id: str, *, local_date: str, lookback_days: int,
+) -> StoredBriefing | None:
+    """Today's ready briefing, or the most recent ready one within the lookback window.
+
+    Point-reads ``daily_briefing/{date}`` by id walking back from today, so the screen
+    can show yesterday's briefing the moment it opens instead of an empty state, with no
+    collection query and no index. Stops at the first ready doc found.
+    """
+    for d in lookback_dates(local_date, lookback_days):
+        stored = await get_briefing(user_id, local_date=d)
+        if stored is not None and stored.status == f.STATUS_READY:
+            return stored
+    return None

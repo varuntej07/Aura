@@ -18,10 +18,13 @@ from .feature_store import TIME_SLOTS_PER_DAY
 # Score below this means do not send. Tune via experimentation, not env.
 NOTIFICATION_SCORE_THRESHOLD = 0.45
 
-# Hard daily ceiling for the signal engine alone (personal + breaking news),
-# counted in feature_store state.sends_today. Sits at the unified proactive budget
-# (4) so the engine on its own can never exceed the cross-decider ceiling.
-DAILY_NOTIFICATION_HARD_CAP = 4
+# Daily ceiling for the signal engine alone (personal + breaking news), counted in
+# feature_store state.sends_today. UNCAPPED during beta (Varun is dogfooding the raw
+# send volume on his own phone). Plain tuning constant, not a flag: set back to a small
+# number (e.g. 4) to re-impose a ceiling. Note this also flattens the gradual fatigue
+# ramp (fatigue_penalty divides sends_today by this), which is intended while free; the
+# 2h recency fatigue kick still applies as a mild relevance nudge.
+DAILY_NOTIFICATION_HARD_CAP = 1000
 
 # Global-salience constants for the breaking lane (see scoring_loop Lane B and
 # services/signal_engine/salience.py).
@@ -29,11 +32,12 @@ DAILY_NOTIFICATION_HARD_CAP = 4
 #     interest gate and reach EVERY user. 0.85 is only reachable by a story carried
 #     across all locale editions (salience.compute_salience), i.e. genuinely
 #     worldwide news — so single/two-edition items can never fire an everyone push.
-#   MAX_BREAKING_SENDS_PER_DAY — hard cap so a busy news day can't spam breaking.
+#   MAX_BREAKING_SENDS_PER_DAY — UNCAPPED during beta (see DAILY_NOTIFICATION_HARD_CAP);
+#     set back to 1 to re-impose the "one breaking story a day" ceiling.
 #   SALIENCE_NUDGE_WEIGHT — on the PERSONAL lane, a mild multiplier so a more
 #     globally-important story ranks slightly higher among already-relevant picks.
 BREAKING_SALIENCE_BAR = 0.85
-MAX_BREAKING_SENDS_PER_DAY = 1
+MAX_BREAKING_SENDS_PER_DAY = 1000
 SALIENCE_NUDGE_WEIGHT = 0.1
 
 

@@ -6,8 +6,7 @@ client never has to compute it (avoiding a tz/date mismatch). Returns
 ``{"briefing": null}`` with 200 when nothing is ready yet, so the Flutter screen
 shows an empty state rather than treating it as an error.
 
-Mirrors ``handlers/signal_feed.py``: thin, auth-gated, reads the same per-user
-Firestore the engine wrote.
+Thin, auth-gated: reads the same per-user Firestore the briefing engine wrote.
 """
 
 from __future__ import annotations
@@ -18,12 +17,25 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from ..config.settings import settings
 from ..lib.logger import logger
+from ..services.briefing import briefing_engine
 from ..services.briefing import briefing_store as store
 from ..services.briefing import world_briefing
-from ..services.briefing.fields import STATUS_READY
 from ..services.firebase import admin_firestore
 from ..services.request_auth import resolve_user_id_from_request
+
+
+def _briefing_payload(stored: store.StoredBriefing) -> dict:
+    return {
+        "briefing": {
+            "date": stored.local_date,
+            "narrative": stored.narrative,
+            "chat_seed_message": stored.chat_seed_message,
+            "sources": stored.sources,
+            "items": stored.items,
+        }
+    }
 
 
 def _user_local_date(user_id: str) -> str:
@@ -51,27 +63,62 @@ async def handle_get_today_briefing(request: Request) -> JSONResponse:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     local_date = _user_local_date(user_id)
-    stored = await store.get_briefing(user_id, local_date=local_date)
-
-    # Only a READY briefing is shown. generating/skipped/failed all read as "nothing
-    # for you yet" so the client renders its empty state, never a half-written doc.
-    if stored is None or stored.status != STATUS_READY:
+    # Today's ready briefing, else the most recent prior one, so the screen shows news
+    # straight away instead of an empty state. None only when nothing is ready in the
+    # window (a genuinely new user) — the client then offers "Catch me up on the world".
+    stored = await store.get_latest_ready_briefing(
+        user_id, local_date=local_date, lookback_days=settings.BRIEFING_FALLBACK_LOOKBACK_DAYS,
+    )
+    if stored is None:
         return JSONResponse({"briefing": None}, status_code=200)
 
-    payload = {
-        "briefing": {
-            "date": stored.local_date,
-            "narrative": stored.narrative,
-            "chat_seed_message": stored.chat_seed_message,
-            "sources": stored.sources,
-        }
-    }
     logger.info("briefing: served", {
         "user_id": user_id,
         "local_date": local_date,
+        "served_date": stored.local_date,
         "sources": len(stored.sources),
+        "items": len(stored.items),
     })
-    return JSONResponse(payload, status_code=200)
+    return JSONResponse(_briefing_payload(stored), status_code=200)
+
+
+async def handle_post_generate_briefing(request: Request) -> JSONResponse:
+    """POST /briefing/generate — generate (and persist) today's briefing on demand.
+
+    Called by the screen when no briefing exists for today yet (so the user sees today's
+    news straight away without waiting for the morning tick), and by the refresh button
+    (``{"force": true}``) to regenerate. Persists to the same per-user doc the scheduler
+    writes, so a reopen reads it back. Falls back to the most recent prior briefing when
+    nothing can be generated right now, so the screen is never empty. No push.
+    """
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    force = False
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            force = body.get("force", False) is True
+    except Exception:
+        force = False
+
+    stored = await briefing_engine.generate_on_demand(user_id, force=force)
+    if stored is None:
+        local_date = _user_local_date(user_id)
+        stored = await store.get_latest_ready_briefing(
+            user_id, local_date=local_date, lookback_days=settings.BRIEFING_FALLBACK_LOOKBACK_DAYS,
+        )
+    if stored is None:
+        return JSONResponse({"briefing": None}, status_code=200)
+
+    logger.info("briefing: generated on demand", {
+        "user_id": user_id,
+        "served_date": stored.local_date,
+        "force": force,
+        "items": len(stored.items),
+    })
+    return JSONResponse(_briefing_payload(stored), status_code=200)
 
 
 async def handle_post_world_briefing(request: Request) -> JSONResponse:
@@ -105,8 +152,21 @@ async def handle_post_world_briefing(request: Request) -> JSONResponse:
     if result is None:
         return JSONResponse({"briefing": None}, status_code=200)
 
+    # Persist the snapshot to today's per-user doc so reopening the tab reads it back
+    # (GET /briefing/today) instead of showing the empty state again.
+    local_date = _user_local_date(user_id)
+    await store.write_briefing(
+        user_id,
+        local_date=local_date,
+        narrative=result.narrative,
+        chat_seed_message=result.chat_seed_message,
+        sources=result.sources,
+        items=result.items,
+    )
+
     payload = {
         "briefing": {
+            "date": local_date,
             "narrative": result.narrative,
             "chat_seed_message": result.chat_seed_message,
             "sources": result.sources,

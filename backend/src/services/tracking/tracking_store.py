@@ -189,6 +189,17 @@ async def list_trackers_for_user(user_id: str) -> list[Tracker]:
         return []
 
 
+async def latest_tracker_update_at(user_id: str) -> datetime | None:
+    """The most recent time ANY of this user's trackers delivered an update, or None.
+
+    Lets a proactive decider tell whether the user already got a tracker push recently
+    (e.g. today) so it can avoid stacking another notification on the same day. Reuses
+    the auto-indexed per-user tracker query; returns None on no trackers / read error."""
+    trackers = await list_trackers_for_user(user_id)
+    stamps = [t.last_update_at for t in trackers if t.last_update_at is not None]
+    return max(stamps) if stamps else None
+
+
 async def list_active_subscribers(topic_key: str) -> list[Tracker]:
     """Active subscribers of a shared topic, for the per-checkpoint fan-out. Single
     equality (topic_key ==) at collection scope (auto-indexed); the active filter is
@@ -231,26 +242,18 @@ async def set_tracker_status(tracker_id: str, status: str) -> None:
 async def record_tracker_outcome(
     tracker_id: str,
     *,
-    decision: str,
-    reason: str,
     summary: str,
     at: datetime,
 ) -> None:
-    """Per-user delivery bookkeeping after the gatekeeper rules on a candidate.
-    Increments the matching counter (sent/held/dropped) and, on a send, advances the
-    per-user dedup cursor (last_sent_summary) so two users on one topic don't share it."""
+    """Per-user delivery bookkeeping after a tracker update is sent. Increments the sent
+    counter and advances the per-user dedup cursor (last_sent_summary) so two users on
+    one topic don't share a send cursor."""
     updates: dict[str, Any] = {
-        f.TRACKER_LAST_GATEKEEPER_REASON: reason,
+        f.TRACKER_UPDATES_SENT: fs.Increment(1),
+        f.TRACKER_LAST_UPDATE_AT: at,
+        f.TRACKER_LAST_SENT_SUMMARY: summary,
         f.TRACKER_UPDATED_AT: datetime.now(UTC),
     }
-    if decision == f.DECISION_SEND:
-        updates[f.TRACKER_UPDATES_SENT] = fs.Increment(1)
-        updates[f.TRACKER_LAST_UPDATE_AT] = at
-        updates[f.TRACKER_LAST_SENT_SUMMARY] = summary
-    elif decision == f.DECISION_HOLD:
-        updates[f.TRACKER_UPDATES_HELD] = fs.Increment(1)
-    elif decision == f.DECISION_DROP:
-        updates[f.TRACKER_UPDATES_DROPPED] = fs.Increment(1)
 
     def _update() -> None:
         _trackers_col().document(tracker_id).update(updates)
@@ -384,6 +387,46 @@ async def mark_checkpoint(checkpoint_id: str, status: str, **extra: Any) -> None
         await asyncio.to_thread(_update)
     except Exception as exc:
         logger.warn("tracking_store: mark_checkpoint failed", {"checkpoint_id": checkpoint_id, "error": str(exc)})
+
+
+async def create_checkpoint_if_absent(checkpoint: Checkpoint) -> bool:
+    """Create a checkpoint only when its id does not already exist. Returns True iff it
+    was created. Used to SEED the recurring pulse exactly once per topic (provision +
+    reconcile self-heal both call it) without ever resetting a live pulse's fire_at."""
+
+    def _write() -> bool:
+        ref = _checkpoints_col().document(checkpoint.id)
+        if ref.get().exists:
+            return False
+        ref.set(checkpoint.to_dict())
+        return True
+
+    try:
+        return await asyncio.to_thread(_write)
+    except Exception as exc:
+        logger.warn("tracking_store: create_checkpoint_if_absent failed", {
+            "checkpoint_id": checkpoint.id, "error": str(exc),
+        })
+        return False
+
+
+async def rearm_pulse(
+    checkpoint_id: str, *, fire_at: datetime, tier: str, at: datetime, summary: str | None = None,
+) -> None:
+    """Re-arm the recurring pulse: reset it to PENDING with a fresh fire_at so it fires
+    again next cycle (the pulse is the one checkpoint that is never terminal). Clears
+    claimed_at and records the last fetch tier/time; advances last_summary only when the
+    pulse actually delivered something new."""
+    extra: dict[str, Any] = {
+        f.CHECKPOINT_FIRE_AT: fire_at,
+        f.CHECKPOINT_CLAIMED_AT: None,
+        f.CHECKPOINT_LAST_FETCH_TIER: tier,
+        f.CHECKPOINT_LAST_FETCH_AT: at,
+    }
+    if summary is not None:
+        extra[f.CHECKPOINT_LAST_SUMMARY] = summary
+        extra[f.CHECKPOINT_FIRED_AT] = at
+    await mark_checkpoint(checkpoint_id, f.CHECKPOINT_STATUS_PENDING, **extra)
 
 
 async def list_checkpoints_for_topic(topic_key: str) -> list[Checkpoint]:

@@ -13,7 +13,7 @@ import '../../data/services/posthog_analytics_service.dart';
 ///   - Firebase Analytics (the Google Analytics dashboard) via [AnalyticsService]
 ///   - PostHog (the product dashboard) via [PostHogAnalyticsService]
 ///
-/// Routes are named with fixed labels (Home, Chat, Agent Thread and so on), so a
+/// Routes are named with fixed labels (Home, Chat, Briefing and so on), so a
 /// dynamic path value such as a chat session id never leaks in and never
 /// inflates the screen list with one entry per id.
 class AppRouteObserver extends NavigatorObserver {

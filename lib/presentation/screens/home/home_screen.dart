@@ -84,13 +84,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       };
 
-      vm.onAgentNudgeTap = (payload) {
-        context.push(
-          '/agents/${payload.agentId}',
-          extra: payload.chatOpener.isNotEmpty ? payload.chatOpener : null,
-        );
-      };
-
       vm.onSignalNotificationTap = (payload) async {
         // "read" content opens the source article in an in-app browser; opening
         // (not endorsing) trains the vector mildly and fires the read-path funnel
@@ -801,7 +794,7 @@ Future<void> _showVoiceFeedbackDialog(
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(
-        error ?? 'Got it — thanks for the feedback.',
+        error ?? 'Got it, thanks for the feedback.',
         style: const TextStyle(color: AppColors.textPrimary),
       ),
       backgroundColor:

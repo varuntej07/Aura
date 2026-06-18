@@ -271,5 +271,20 @@ class AuthRepository {
     return _authService.signOut();
   }
 
+  /// Writes the user's Aura memory consent decision onto their user doc, with a
+  /// timestamp for the audit trail. Used by the in-app "Aura memory" control to
+  /// withdraw consent (`granted: false`). Granting flows through the age-gated
+  /// consent screen instead, which writes the same field via OnboardingRepository.
+  Future<Result<void>> setAuraConsentGranted(String uid, bool granted) {
+    return _firestoreService.updateDocument(
+      AppConstants.usersCollection,
+      uid,
+      {
+        'aura_consent_granted': granted,
+        'aura_consent_timestamp': DateTime.now().toUtc().toIso8601String(),
+      },
+    );
+  }
+
   Future<String?> getIdToken() => _authService.getIdToken();
 }

@@ -69,7 +69,7 @@ def _fetch_news_sync(topic_keywords: list[str]) -> list[dict[str, str]]:
     try:
         import feedparser  # type: ignore
     except ImportError:
-        logger.warn("rss_client: feedparser not installed — returning empty news")
+        logger.warn("rss_client: feedparser not installed, returning empty news")
         return [_empty_news_item()]
 
     # Level 1: user-specific keywords
@@ -95,7 +95,7 @@ def _fetch_news_sync(topic_keywords: list[str]) -> list[dict[str, str]]:
             logger.warn("rss_client: fallback feed failed", {"url": feed_url, "error": str(exc)})
 
     # If everything fails, return a placeholder so the planner always has something
-    logger.warn("rss_client: all levels failed — using placeholder item")
+    logger.warn("rss_client: all levels failed, using placeholder item")
     return [_empty_news_item()]
 
 

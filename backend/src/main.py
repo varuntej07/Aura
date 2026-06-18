@@ -26,7 +26,6 @@ from livekit.api import AccessToken, VideoGrants
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
-from .agents.orchestrator import orchestrate_all_agents, run_agent_for_user
 from .handlers.account import handle_delete_account
 from .handlers.chat import handle_chat_stream
 from .handlers.connectors import (
@@ -47,13 +46,16 @@ from .handlers.engagement import (
 )
 from .handlers.mcp import register_mcp
 from .handlers.notification_reply import handle_notification_reply_request
-from .handlers.briefing import handle_get_today_briefing, handle_post_world_briefing
+from .handlers.briefing import (
+    handle_get_today_briefing,
+    handle_post_generate_briefing,
+    handle_post_world_briefing,
+)
 from .handlers.buddy_pills import handle_refresh_buddy_pills
 from .handlers.onboarding_profile import handle_onboarding_profile
 from .handlers.scheduler import handle_scheduler_tick
 from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
-from .handlers.signal_feed import handle_signal_feed
 from .handlers.signal_tick import handle_signal_tick
 from .handlers.threads import handle_thread_messages, handle_thread_reply
 from .lib.logger import logger
@@ -224,7 +226,7 @@ def _verify_scheduler_token(request: Request) -> None:
         # ERROR, not WARN: a rejected token means an internal endpoint (reminders,
         # notifications, ingest) is silently 401ing — an outage. The accepted list
         # is logged inline so the next audience drift is one grep away from the fix.
-        logger.error("scheduler_auth: OIDC token REJECTED — internal endpoint is 401ing (scheduler/tasks outage)", {
+        logger.error("scheduler_auth: OIDC token REJECTED, internal endpoint is 401ing (scheduler/tasks outage)", {
             "path": request.url.path,
             "error": str(exc),
             "accepted_audiences": settings.scheduler_oidc_audience_list,
@@ -246,25 +248,6 @@ async def scheduler_tick_endpoint(
 ) -> JSONResponse:
     result = await handle_scheduler_tick()
     return _handler_response(result)
-
-
-# Domain agents — fan-out tick + per-user run (called by Cloud Tasks)
-@app.post("/internal/agents/tick")
-async def agents_tick_endpoint(
-    _: None = Depends(_verify_scheduler_token),
-) -> JSONResponse:
-    result = await orchestrate_all_agents()
-    return JSONResponse(content=result)
-
-
-@app.post("/internal/agents/{agent_id}/run/{user_id}")
-async def agents_run_endpoint(
-    agent_id: str,
-    user_id: str,
-    _: None = Depends(_verify_scheduler_token),
-) -> JSONResponse:
-    await run_agent_for_user(agent_id, user_id)
-    return JSONResponse(content={"ok": True})
 
 
 # Engagement endpoints (internal — Cloud Tasks only)
@@ -313,21 +296,23 @@ async def refresh_buddy_pills_endpoint(request: Request) -> JSONResponse:
     return await handle_refresh_buddy_pills(request)
 
 
-# Signal engine — user events, ranked feed, scoring tick, content ingest.
+# Signal engine — user events, scoring tick, content ingest.
 @app.post("/events")
 async def signal_events_endpoint(request: Request) -> JSONResponse:
     return await handle_signal_events(request)
-
-
-@app.get("/feed/recommend")
-async def signal_feed_endpoint(request: Request) -> JSONResponse:
-    return await handle_signal_feed(request)
 
 
 # Daily Briefing: the signed-in user's synthesized morning digest for today.
 @app.get("/briefing/today")
 async def briefing_today_endpoint(request: Request) -> JSONResponse:
     return await handle_get_today_briefing(request)
+
+
+# Generate (and persist) today's briefing on demand: first open before the morning
+# tick, and the in-app refresh button (force regenerate).
+@app.post("/briefing/generate")
+async def briefing_generate_endpoint(request: Request) -> JSONResponse:
+    return await handle_post_generate_briefing(request)
 
 
 # On-demand "Catch me up on the world" snapshot (cold-start fill + refresh icon).
@@ -423,7 +408,7 @@ def _check_env() -> None:
     logger.info("Juno backend starting", checks)
 
     if not settings.ANTHROPIC_API_KEY:
-        logger.warn("ANTHROPIC_API_KEY is not set — /chat will fail")
+        logger.warn("ANTHROPIC_API_KEY is not set, /chat will fail")
     if not settings.livekit_configured:
         logger.warn("LiveKit not fully configured, voice sessions will fail...")
 
@@ -440,7 +425,7 @@ async def on_startup() -> None:
         Langfuse()
         logger.info("Langfuse initialized")
     except Exception as exc:
-        logger.warn("Langfuse initialization failed — tracing disabled", {"error": str(exc)})
+        logger.warn("Langfuse initialization failed, tracing disabled", {"error": str(exc)})
 
 
 if __name__ == "__main__":

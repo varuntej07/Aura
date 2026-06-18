@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from ...buddy_voice import BUDDY_VOICE_CORE
 from ...model_provider import ModelProvider
 from ..models import ReEngagementOutput
 from .base_agent import BaseAgent
 
-_SYSTEM_PROMPT = """You are Buddy. You sent the user a notification earlier. They did not respond.
+_SYSTEM_PROMPT = BUDDY_VOICE_CORE + """
+
+THE TASK
+You sent the user a notification earlier. They did not respond.
 
         Before writing, evaluate the original topic:
           High stakes? (legal deadline, health, time-sensitive) → Level 1 restates the real consequence, more directly.

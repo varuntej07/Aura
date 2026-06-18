@@ -315,7 +315,7 @@ async def list_active_user_ids(inactivity_days: int = 7) -> list[str]:
     allowed = set(allowlist)
     restricted = [uid for uid in user_ids if uid in allowed]
     logger.warn(
-        "feature_store.list_active_user_ids: PROACTIVE_NOTIFICATION_UID_ALLOWLIST is set — "
+        "feature_store.list_active_user_ids: PROACTIVE_NOTIFICATION_UID_ALLOWLIST is set, "
         "proactive notifications restricted to allowlisted uids. This MUST be unset on the "
         "live/production revision or most users receive nothing.",
         {

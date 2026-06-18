@@ -20,7 +20,6 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ValidationError, field_validator
 
-from ..config.settings import settings
 from ..lib.logger import logger
 from .life_facts_schema import (
     LIFE_FACT_DESCRIPTIONS,
@@ -383,11 +382,9 @@ def _merge_profile(
     for signal in insight.interests[:_MAX_INTERESTS_PER_MESSAGE]:
         apply_interest_signal(interests, signal.category, signal.subject, now)
 
-    # Life facts — the sparse, typed map that arms life-aware notifications. Gated
-    # by a flag so the feature ships dark and starts accumulating facts BEFORE any
-    # icebreaker can fire (and so it can be turned off instantly without a deploy).
+    # Life facts — the sparse, typed map that arms life-aware notifications.
     # The schema writer silently drops off-taxonomy keys, so the closed-set holds.
-    if settings.LIFE_FACTS_CAPTURE_ENABLED and insight.life_facts:
+    if insight.life_facts:
         life_facts = profile.get(LIFE_FACTS_FIELD)
         if not isinstance(life_facts, dict):
             life_facts = {}
@@ -645,9 +642,15 @@ async def extract_and_update_user_aura(
 
     All exceptions are caught and logged. This function never raises.
     """
-    # Step 0: GDPR consent gate. Skip silently if the user has not opted in.
-    # The check reads users/{uid}.aura_consent_granted which is written during onboarding.
+    # Step 0: GDPR consent gate. Skip if the user has not opted in, but log it so a
+    # frozen profile (a user actively chatting whose Aura never updates) shows up in
+    # logs instead of looking identical to "healthy and quiet". This skip being
+    # silent is exactly what hid a 5-week profile freeze. The check reads
+    # users/{uid}.aura_consent_granted, written at onboarding and by the memory toggle.
     if not await _user_has_granted_aura_consent(uid):
+        logger.info("UserAuraExtractor: extraction skipped, Aura consent not granted", {
+            "user_id": uid,
+        })
         return
 
     insight: MessageInsight | None = None

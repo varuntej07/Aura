@@ -403,7 +403,7 @@ class ModelProvider:
 
         async def _use_next_in_chain(reason: str, log_extra: dict) -> str:
             next_model = fallback_chain[0]
-            logger.warn(f"ModelProvider: {reason} — falling back", {
+            logger.warn(f"ModelProvider: {reason}, falling back", {
                 "from_model": model_id,
                 "to_model": next_model,
                 **log_extra,
@@ -486,7 +486,7 @@ class ModelProvider:
                     # in plain terms instead of hiding in a wall of identical backoff lines.
                     if is_quota_exhausted(exc):
                         logger.error(
-                            "ModelProvider: Gemini quota/credits EXHAUSTED (429 RESOURCE_EXHAUSTED) — "
+                            "ModelProvider: Gemini quota/credits EXHAUSTED (429 RESOURCE_EXHAUSTED), "
                             "background LLM work is failing. Check GEMINI_API_KEY billing at "
                             "https://ai.studio/projects.",
                             {

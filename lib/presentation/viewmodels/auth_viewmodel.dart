@@ -41,6 +41,12 @@ class AuthViewModel extends SafeChangeNotifier {
   bool get isAuthenticated => _user != null;
   bool get needsOnboarding => _user != null && !_user!.onboardingComplete;
 
+  /// True only when the user has explicitly granted Aura memory. Drives the
+  /// in-app toggle and the "turn it on" prompt: absent consent (legacy accounts
+  /// predating the consent screen) and an explicit `false` (declined / under-18 /
+  /// later withdrawn) both read as off, so both surface the prompt to turn it on.
+  bool get auraMemoryEnabled => _user?.auraConsentGranted == true;
+
   /// True immediately after onboarding completes. Used to show the guided
   /// first-message prompt in the chat panel. Consumed once by the UI.
   bool get justCompletedOnboarding => _justCompletedOnboarding;
@@ -196,6 +202,31 @@ class AuthViewModel extends SafeChangeNotifier {
     );
     _justCompletedOnboarding = true;
     safeNotifyListeners();
+  }
+
+  /// Withdraws Aura memory consent (the GDPR right to withdraw, as easy as it was
+  /// to grant). Writes `aura_consent_granted: false` to the user doc and updates
+  /// the in-memory model immediately, so every reader stops within one turn
+  /// without waiting for the auth stream (which only re-emits on auth changes,
+  /// not doc writes). Granting goes the other way, through the age-gated consent
+  /// screen, never here. Returns true on success.
+  Future<bool> revokeAuraMemory() async {
+    final uid = _user?.uid;
+    if (uid == null) return false;
+    final result = await _authRepository.setAuraConsentGranted(uid, false);
+    return result.when(
+      success: (_) {
+        _user = _user!.copyWith(auraConsentGranted: false);
+        safeNotifyListeners();
+        return true;
+      },
+      failure: (error) {
+        AppLogger.error('revokeAuraMemory failed', error: error, tag: 'AuthVM');
+        _error = error;
+        safeNotifyListeners();
+        return false;
+      },
+    );
   }
 
   Future<void> signOut() async {

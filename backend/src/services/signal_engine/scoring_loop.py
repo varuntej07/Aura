@@ -59,6 +59,7 @@ from ..analytics.funnel_events import (
     PROP_NOTIFICATION_ID,
     PROP_NOTIFICATION_ORIGIN,
 )
+from ..notification_ledger import NotificationDecision
 from ..notification_service import send_notification
 from . import event_ingester, feature_store
 from .content_category_map import POOL_PRODUCIBLE_TAXONOMY_SLUGS, to_taxonomy_slug
@@ -69,6 +70,7 @@ from .content_pool import (
     list_recent_breaking_candidates,
 )
 from .notification_framer import (
+    FRAMER_PROMPT_VERSION,
     FRAMER_UNAVAILABLE_REASON,
     UserFramingContext,
     _safe_fallback,
@@ -139,6 +141,11 @@ TICK_USER_CONCURRENCY = 10
 class TickSummary:
     users_considered: int = 0
     users_skipped_no_state: int = 0
+    # Users who HAD a vector but find_nearest returned no candidates — the pool is
+    # starved or vector search is failing. A first-class counter so this stops being
+    # an inferred guess: it used to be a silent early-return invisible in the metrics,
+    # which sent the 2026-06-14 diagnosis chasing the (healthy) vector index.
+    users_skipped_no_candidates: int = 0
     notifications_sent: int = 0
     blocked_below_threshold: int = 0
     blocked_daily_cap: int = 0
@@ -185,6 +192,7 @@ async def run_tick() -> TickSummary:
     logger.info("signal_engine.scoring_loop: tick complete", {
         "users_considered": summary.users_considered,
         "users_skipped_no_state": summary.users_skipped_no_state,
+        "users_skipped_no_candidates": summary.users_skipped_no_candidates,
         "notifications_sent": summary.notifications_sent,
         "blocked_below_threshold": summary.blocked_below_threshold,
         "blocked_daily_cap": summary.blocked_daily_cap,
@@ -199,13 +207,14 @@ async def run_tick() -> TickSummary:
     below_scores = summary.blocked_below_threshold_scores
     median_below = round(statistics.median(below_scores), 3) if below_scores else None
     logger.info(
-        f"signal_engine.scoring_loop: tick health — "
+        f"signal_engine.scoring_loop: tick health: "
         f"sent={summary.notifications_sent}/{summary.users_considered} considered | "
         f"blocked: below_threshold={summary.blocked_below_threshold}"
         f"(median_score={median_below}, threshold={NOTIFICATION_SCORE_THRESHOLD}), "
         f"daily_cap={summary.blocked_daily_cap}, "
         f"quiet_hours={summary.blocked_quiet_hours}, "
-        f"no_state={summary.users_skipped_no_state} | "
+        f"no_state={summary.users_skipped_no_state}, "
+        f"no_candidates={summary.users_skipped_no_candidates} | "
         f"timeouts_swept={summary.timeouts_swept}",
         {
             "notifications_sent": summary.notifications_sent,
@@ -215,31 +224,45 @@ async def run_tick() -> TickSummary:
         },
     )
 
-    # Fail loud: 0 notifications while the content pool is empty means ingest is
-    # starved (e.g. Gemini credits exhausted) — distinct from "pool has content but
-    # nothing cleared threshold", which is normal. Mirrors the 0-active-users guard.
+    # Fail loud on 0 sends, but name the ACTUAL cause. has_any_candidate() now counts
+    # only NON-expired docs, so the three branches below are mutually exclusive and
+    # each points at one root cause instead of the old guess that blamed the vector
+    # index for what was really a starved pool (2026-06-14).
     if summary.notifications_sent == 0 and summary.users_considered > 0:
         if not await has_any_candidate():
+            # No FRESH candidates at all (every doc expired, or none were ingested).
             logger.warn(
-                "signal_engine.scoring_loop: 0 notifications and content pool is EMPTY — "
-                "ingest is failing to refresh candidates (check Gemini billing / the "
-                "content-ingest job). Notifications cannot send with an empty pool.",
+                "signal_engine.scoring_loop: 0 notifications and the pool has NO FRESH "
+                "candidates (all expired or none ingested) — the content-ingest job is not "
+                "refreshing the pool. See the content_ingest alarm (newsdata key/quota, the "
+                "Brave fallback, Gemini embedding billing). Notifications cannot send.",
                 {"users_considered": summary.users_considered},
+            )
+        elif summary.users_skipped_no_candidates > 0:
+            # Pool HAS fresh content, yet find_nearest returned [] for real users —
+            # genuine vector search failure (now worth checking the embedding index)
+            # or those users' vectors retrieve no live candidates.
+            logger.warn(
+                "signal_engine.scoring_loop: 0 notifications, pool HAS fresh content, but "
+                f"vector search returned nothing for {summary.users_skipped_no_candidates} "
+                "user(s) — check the find_nearest_for_user error log and the "
+                "content_candidates.embedding vector index.",
+                {
+                    "users_considered": summary.users_considered,
+                    "users_skipped_no_candidates": summary.users_skipped_no_candidates,
+                },
             )
         elif (
             summary.blocked_below_threshold == 0
             and summary.blocked_daily_cap == 0
             and summary.blocked_quiet_hours == 0
         ):
-            # Pool has content and nobody was even scored — every user fell out
-            # before the threshold gate. Most likely the vector index is missing
-            # (find_nearest returns [] silently) or no user has a bootstrapped
-            # vector. Distinct from the normal "scored but nothing cleared 0.45".
+            # Nobody scored and nobody was skipped for missing candidates — almost
+            # always means no user has a bootstrapped interest vector yet.
             logger.warn(
-                "signal_engine.scoring_loop: 0 notifications but pool has content AND "
-                "no user reached the scoring gate — vector search likely failing "
-                "(missing content_candidates.embedding index) or no user has a vector. "
-                "Check the find_nearest_for_user error log.",
+                "signal_engine.scoring_loop: 0 notifications and no user reached the scoring "
+                "gate — most likely no user has a bootstrapped interest vector yet (new "
+                "beta accounts / Aura consent not granted).",
                 {
                     "users_considered": summary.users_considered,
                     "users_skipped_no_state": summary.users_skipped_no_state,
@@ -346,7 +369,11 @@ async def _score_one_user(
 
     candidates = await find_nearest_for_user(state.user_vector, limit=50)
     if not candidates:
+        # The user has a vector but vector search returned nothing — pool starved
+        # (all candidates expired) or find_nearest is failing. Count it so the tick
+        # health line and the 0-send warning name the real cause instead of guessing.
         await _safe_write_state(user_id, state)
+        summary.users_skipped_no_candidates += 1
         return
 
     recent_categories = await _load_recent_outcome_categories(user_id)
@@ -566,7 +593,7 @@ async def _score_one_user(
             await _safe_write_state(user_id, state)
             summary.blocked_below_threshold += 1
             logger.warn(
-                "signal_engine.scoring_loop: not sending — framer UNAVAILABLE "
+                "signal_engine.scoring_loop: not sending, framer UNAVAILABLE "
                 "(deferring this tick, infra not relevance; retries next tick)",
                 {
                     "user_id": user_id,
@@ -627,6 +654,17 @@ async def _score_one_user(
         },
         notification_type="signal_engine",
         collapse_key=f"signal_{notification_id}",
+        decision=NotificationDecision(
+            score=best_score,
+            components=components,
+            gate_a_active=gate_a_active,
+            matched_interest_slug=best_cand.category,
+            relevance_reason=relevance_reason,
+            framer_prompt_version=FRAMER_PROMPT_VERSION,
+            sends_today_before=state.sends_today,
+            local_hour=user_local_now.hour,
+            day_of_week=user_local_now.weekday(),
+        ),
     )
 
     if not result.delivered:
@@ -1018,6 +1056,16 @@ async def _try_send_breaking(
         },
         notification_type="signal_engine",
         collapse_key=f"signal_{notification_id}",
+        decision=NotificationDecision(
+            score=pick.salience,
+            matched_interest_slug=pick.category,
+            relevance_reason=framed.relevance_reason or "globally significant breaking news",
+            framer_prompt_version=FRAMER_PROMPT_VERSION,
+            lane="breaking",
+            sends_today_before=state.sends_today,
+            local_hour=user_local_now.hour,
+            day_of_week=user_local_now.weekday(),
+        ),
     )
     if not result.delivered:
         logger.info("signal_engine.scoring_loop: breaking send returned no delivery", {

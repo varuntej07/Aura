@@ -10,7 +10,7 @@ Scheduler job. For each active user, on each hourly tick:
 
 Most ticks send nothing — that restraint is the feature. Every step is isolated:
 one user's failure is caught and never touches another's, and no step can raise
-out of the tick. Gated by ``settings.ICEBREAKER_ENABLED`` (default off).
+out of the tick.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ..analytics import posthog_client
 from ..analytics.funnel_events import (
@@ -74,24 +73,6 @@ def _local_now(timezone_name: str) -> datetime:
 async def run_icebreaker_tick() -> IcebreakerTickSummary:
     """Public entrypoint, called from the scheduler tick on its hourly gate."""
     summary = IcebreakerTickSummary()
-    if not settings.ICEBREAKER_ENABLED:
-        return summary
-
-    # Loud guard: the icebreaker shares a daily ceiling with every other proactive
-    # decider ONLY when the unified budget is on. Running enabled without it means
-    # icebreakers are not spaced against signal-engine / thread / reminder pushes
-    # and can stack on the same day — the notification-fatigue path. Fire every
-    # tick (mirrors the scoring loop's funnel-blind WARNING) so a misconfigured
-    # rollout screams instead of silently spamming users.
-    if not settings.UNIFIED_NOTIFICATION_BUDGET_ENABLED:
-        logger.warn(
-            "icebreaker.engine: ICEBREAKER_ENABLED is on but "
-            "UNIFIED_NOTIFICATION_BUDGET_ENABLED is off — icebreakers are NOT "
-            "coordinated with other proactive pushes and may stack on the same "
-            "day. Enable the unified budget before serving real users.",
-            {},
-        )
-
     user_ids = await list_active_user_ids()
     summary.users_considered = len(user_ids)
     if not user_ids:

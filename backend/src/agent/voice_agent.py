@@ -35,10 +35,12 @@ from livekit.plugins import silero
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..services.entitlement import add_free_voice_seconds
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
 from .voice.auth import mint_firebase_id_token
 from .voice.context import gather_session_context
+from .voice.free_tier_limit import run_free_tier_voice_nudge
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -188,7 +190,7 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_detector = build_turn_detector()
         except Exception as exc:
             turn_detector = None
-            logger.warn("VoiceSession: turn detector unavailable — degrading to "
+            logger.warn("VoiceSession: turn detector unavailable, degrading to "
                         "VAD-based endpointing", {
                             "code": "turn_detector_unavailable",
                             "user_id": user_id, "room": ctx.room.name,
@@ -222,6 +224,9 @@ async def entrypoint(ctx: JobContext) -> None:
         session_start_iso = datetime.now(UTC).isoformat()
         session_start_mono = time.monotonic()
 
+        # Free-tier voice budget nudge task, armed after start, cancelled on session end.
+        nudge_task: asyncio.Task | None = None
+
         try:
             await session.start(
                 room=ctx.room,
@@ -237,10 +242,32 @@ async def entrypoint(ctx: JobContext) -> None:
                     ),
                 ),
             )
+
+            # Free tier only: warn ~60s before the daily voice budget runs out (warn-only, no cutoff)
+            if session_context.user_tier == "free":
+                nudge_task = asyncio.create_task(
+                    run_free_tier_voice_nudge(
+                        session,
+                        remaining_seconds=session_context.remaining_free_voice_seconds,
+                        session_id=session_id,
+                        user_id=user_id,
+                    ),
+                    name=f"voice-free-nudge-{session_id[:8]}",
+                )
+
             await recorder.done.wait()
 
             session_end_iso = datetime.now(UTC).isoformat()
             elapsed_ms = int((time.monotonic() - session_start_mono) * 1000)
+
+            # Free tier only: bank this call's seconds against today's voice budget so the
+            # per-day total carries across calls. Fire-and-forget; never blocks teardown.
+            if session_context.user_tier == "free":
+                asyncio.create_task(
+                    add_free_voice_seconds(user_id, elapsed_ms // 1000),
+                    name=f"voice-budget-write-{session_id[:8]}",
+                )
+
             asyncio.create_task(
                 run_post_session_pipeline(
                     user_id=user_id,
@@ -262,6 +289,9 @@ async def entrypoint(ctx: JobContext) -> None:
                 exc=exc,
             )
             raise
+        finally:
+            if nudge_task is not None:
+                nudge_task.cancel()
 
 
 if __name__ == "__main__":

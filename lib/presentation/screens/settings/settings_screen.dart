@@ -10,6 +10,7 @@ import '../../viewmodels/settings_viewmodel.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/loading_indicator.dart';
 import '../connectors/connectors_screen.dart';
+import '../onboarding/aura_consent_screen.dart';
 import '../reminders/reminders_screen.dart';
 import 'aura_profile_screen.dart';
 
@@ -54,7 +55,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w700),
         ),
         content: const Text(
-          'All your data — chats, reminders, and your Aura profile — will be permanently deleted. This cannot be undone.',
+          'All your data (chats, reminders, and your Aura profile) will be permanently deleted. This cannot be undone.',
           style: TextStyle(color: AppColors.textSecondary, height: 1.5),
         ),
         actions: [
@@ -82,6 +83,68 @@ class _SettingsScreenState extends State<SettingsScreen> {
       messenger.showSnackBar(
         SnackBar(
           content: Text(errorMessage),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
+
+  /// Toggles Aura memory consent. Turning ON opens the age-gated consent screen
+  /// (informed consent + the under-18 rule live there, never a bare write).
+  /// Turning OFF is the GDPR withdrawal: confirm, then write consent = false,
+  /// which stops Buddy learning and stops the stored profile being used.
+  Future<void> _onToggleAuraMemory(BuildContext context, bool enable) async {
+    final authVm = context.read<AuthViewModel>();
+
+    if (enable) {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const AuraConsentScreen()),
+      );
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.deepBackground,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Turn off Aura memory?',
+          style: TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w700),
+        ),
+        content: const Text(
+          'Buddy will stop learning from your conversations, and what it has '
+          'already learned will no longer be used to personalize your chats or '
+          'notifications. You can turn it back on anytime. To erase what Buddy '
+          'has learned, delete your account.',
+          style: TextStyle(color: AppColors.textSecondary, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textTertiary)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              'Turn off',
+              style: TextStyle(color: AppColors.error, fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    if (!context.mounted) return;
+
+    final ok = await authVm.revokeAuraMemory();
+    if (!context.mounted) return;
+    if (!ok) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Something went wrong. Try again in a moment.'),
           backgroundColor: AppColors.error,
         ),
       );
@@ -185,8 +248,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                         ),
 
-                        // Aura profile
+                        // Aura memory — consent toggle + profile
                         _SectionLabel('Aura Memory'),
+                        _GlassToggleTile(
+                          title: 'Aura memory',
+                          subtitle: authVm.auraMemoryEnabled
+                              ? 'Buddy learns from your chats to personalize everything'
+                              : 'Turn on to let Buddy remember what matters to you',
+                          value: authVm.auraMemoryEnabled,
+                          onChanged: (enabled) =>
+                              _onToggleAuraMemory(context, enabled),
+                        ),
+                        const SizedBox(height: 8),
                         _GlassNavTile(
                           icon: Icons.auto_awesome_outlined,
                           title: 'Your Aura Profile',
@@ -303,7 +376,7 @@ Future<void> showFeedbackSheet(BuildContext context) async {
     messenger.showSnackBar(
       const SnackBar(
         content: Text(
-          'Got it — thanks for the feedback.',
+          'Got it, thanks for the feedback.',
           style: TextStyle(color: AppColors.textPrimary),
         ),
         backgroundColor: AppColors.surfaceVariant,

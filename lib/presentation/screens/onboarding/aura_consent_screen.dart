@@ -705,7 +705,7 @@ class _WhatAuraTracksCard extends StatelessWidget {
   static const _items = [
     (Icons.interests_outlined, 'Your topics and interests across chats'),
     (Icons.tune_outlined, 'How you like Buddy to respond'),
-    (Icons.flag_outlined, 'Goals you mention — like fitness or learning'),
+    (Icons.flag_outlined, 'Goals you mention, like fitness or learning'),
   ];
 
   static const _notItems = [

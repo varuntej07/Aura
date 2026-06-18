@@ -73,14 +73,54 @@ _cache: dict[str, tuple[float, "FetchResult"]] = {}
 
 _HTML_TAG = re.compile(r"<[^>]+>")
 
-_GOOGLE_NEWS_SEARCH_URL = (
-    "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-)
+_GOOGLE_NEWS_SEARCH_BASE = "https://news.google.com/rss/search"
+
+# Locale defaults when research couldn't determine the topic's region/language.
+_DEFAULT_COUNTRY = "US"
+_DEFAULT_LANGUAGE = "en"
 # A real-browser UA — Google News RSS serves a datacenter bot UA less reliably.
 _FEED_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+@dataclass(frozen=True)
+class Locale:
+    """Resolved fetch locale for a topic. ``country`` is ISO 3166-1 alpha-2 (upper),
+    ``language`` is ISO 639-1 (lower). Built once per fetch and threaded to the tiers so
+    a non-US/non-English topic is searched in its own Google News edition / newsdata
+    region instead of the US-English default that left local topics empty."""
+
+    country: str = _DEFAULT_COUNTRY
+    language: str = _DEFAULT_LANGUAGE
+
+    @property
+    def google_hl(self) -> str:
+        return f"{self.language}-{self.country}"
+
+    @property
+    def google_ceid(self) -> str:
+        return f"{self.country}:{self.language}"
+
+    @property
+    def key(self) -> str:
+        return f"{self.country}:{self.language}"
+
+
+def _build_locale(country: str | None, language: str | None) -> Locale:
+    """Sanitize raw research codes into a usable Locale, falling back to US/en for
+    anything missing or malformed (a bad code must never break the fetch)."""
+    c = re.sub(r"[^A-Za-z]", "", country or "").upper()[:2] or _DEFAULT_COUNTRY
+    lang = re.sub(r"[^A-Za-z]", "", language or "").lower()[:2] or _DEFAULT_LANGUAGE
+    return Locale(country=c, language=lang)
+
+
+def _google_news_url(query: str, locale: Locale) -> str:
+    return (
+        f"{_GOOGLE_NEWS_SEARCH_BASE}?q={quote_plus(query)}"
+        f"&hl={locale.google_hl}&gl={locale.country}&ceid={locale.google_ceid}"
+    )
 
 
 @dataclass(frozen=True)
@@ -128,18 +168,20 @@ def _cache_put(key: str, value: FetchResult) -> None:
 
 
 # ── Tier 1: Google News RSS search (free, no key) ────────────────────────────
-def _fetch_rss_sync(query: str) -> tuple[str, list[dict[str, str]]]:
+def _fetch_rss_sync(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
     """Blocking RSS search fetch + parse. Run via asyncio.to_thread. Kept local to
     this module (not the signal-engine google_news fetcher) so a change here can
     never regress the content-pool ingest. Bounded timeout + small retry for a
-    transient 503/blip; returns ("", []) on persistent failure (the chain falls on)."""
+    transient 503/blip; returns ("", []) on persistent failure (the chain falls on).
+    The Google News edition (hl/gl/ceid) follows ``locale`` so a local topic is
+    searched in its own region, not the US-English default."""
     try:
         import feedparser  # type: ignore
     except ImportError:
-        logger.warn("topic_fetcher.rss: feedparser not installed — skipping tier")
+        logger.warn("topic_fetcher.rss: feedparser not installed, skipping tier")
         return "", []
 
-    url = _GOOGLE_NEWS_SEARCH_URL.format(query=quote_plus(query))
+    url = _google_news_url(query, locale)
     resp = None
     for attempt in range(1, _RSS_ATTEMPTS + 1):
         try:
@@ -182,23 +224,29 @@ def _fetch_rss_sync(query: str) -> tuple[str, list[dict[str, str]]]:
     return "\n\n".join(blocks), sources
 
 
-async def _fetch_rss(query: str) -> tuple[str, list[dict[str, str]]]:
-    return await asyncio.to_thread(_fetch_rss_sync, query)
+async def _fetch_rss(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
+    return await asyncio.to_thread(_fetch_rss_sync, query, locale)
 
 
 # ── Tier 2: newsdata.io query search (free tier, direct publisher URLs) ───────
-async def _fetch_newsdata(query: str) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_newsdata(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
     """newsdata.io 'latest' endpoint with a free-text ``q``. A minimal, query-shaped
     call kept local here — the signal-engine newsdata fetcher is category-shaped and
     must not be reshaped for this. A 429 (free-tier quota) returns empty so the chain
-    immediately falls through to Brave rather than hammering an exhausted key."""
+    immediately falls through to Brave rather than hammering an exhausted key.
+
+    Language follows ``locale``; the country filter is applied only for a NON-default
+    (non-US) locale, so a global/US topic keeps the broad search it had before while a
+    local topic narrows to its region's sources."""
     if not settings.newsdata_configured:
         return "", []
     params = {
         "apikey": settings.NEWSDATA_API_KEY.strip(),
         "q": query,
-        "language": (settings.NEWSDATA_LANGUAGE or "en").strip() or "en",
+        "language": locale.language,
     }
+    if locale.country != _DEFAULT_COUNTRY:
+        params["country"] = locale.country.lower()
     try:
         async with httpx.AsyncClient(timeout=_NEWSDATA_TIMEOUT_S, follow_redirects=True) as client:
             resp = await client.get(settings.NEWSDATA_BASE_URL, params=params)
@@ -208,7 +256,7 @@ async def _fetch_newsdata(query: str) -> tuple[str, list[dict[str, str]]]:
 
     if resp.status_code == 429:
         logger.warn(
-            "topic_fetcher.newsdata: 429 quota/rate-limited — falling through to next tier",
+            "topic_fetcher.newsdata: 429 quota/rate-limited, falling through to next tier",
             {"query": query},
         )
         return "", []
@@ -238,11 +286,15 @@ async def _fetch_newsdata(query: str) -> tuple[str, list[dict[str, str]]]:
 
 
 # ── Tier 3: Brave Search (fast, raw snippets) ────────────────────────────────
-async def _fetch_brave(query: str) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_brave(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
     """Reuse the existing Brave primitive. recency='fresh' biases to the last 24h
     (live scores/results). A missing key raises ValueError inside brave_search; we
     treat that as 'tier unavailable' and fall through. uid is a constant so every
-    subscriber shares Brave's own in-process cache for the same topic query."""
+    subscriber shares Brave's own in-process cache for the same topic query.
+
+    ``locale`` is accepted for a uniform tier signature but not used: brave_search is a
+    shared chat/voice primitive and is intentionally left locale-agnostic here (tiers 1-2
+    already localize; this tier is the fast fallback)."""
     from ...agents.data_fetchers.brave_search import brave_search
 
     try:
@@ -259,10 +311,11 @@ async def _fetch_brave(query: str) -> tuple[str, list[dict[str, str]]]:
 
 
 # ── Tier 4: Gemini grounded search (premium, last resort) ────────────────────
-async def _fetch_grounded(query: str) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_grounded(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
     """Last resort: grounded search SYNTHESIZES from a live web search in one call,
     so it works even when the cheap snippet sources are empty or unhelpful. Carries
-    its own 45s timeout + retries inside ModelProvider."""
+    its own 45s timeout + retries inside ModelProvider. ``locale`` is accepted for a
+    uniform tier signature; grounded search is already multilingual, so it is unused."""
     from ..model_provider import get_model_provider
 
     prompt = (
@@ -278,7 +331,7 @@ async def _fetch_grounded(query: str) -> tuple[str, list[dict[str, str]]]:
     return result.text, [{"title": s.get("title", ""), "url": s.get("url", "")} for s in result.sources]
 
 
-_TIER_FETCHERS: dict[str, Callable[[str], Awaitable[tuple[str, list[dict[str, str]]]]]] = {
+_TIER_FETCHERS: dict[str, Callable[[str, Locale], Awaitable[tuple[str, list[dict[str, str]]]]]] = {
     TIER_RSS: _fetch_rss,
     TIER_NEWSDATA: _fetch_newsdata,
     TIER_BRAVE: _fetch_brave,
@@ -286,23 +339,30 @@ _TIER_FETCHERS: dict[str, Callable[[str], Awaitable[tuple[str, list[dict[str, st
 }
 
 
-async def fetch_topic(query: str, *, use_cache: bool = True) -> FetchResult:
+async def fetch_topic(
+    query: str, *, country: str | None = None, language: str | None = None, use_cache: bool = True,
+) -> FetchResult:
     """Run the cost-ordered fetch chain for ``query`` and return the first usable
     result. Never raises — every tier failing yields a ``FetchResult`` with
     ``tier == TIER_NONE`` (``.ok`` False), which the caller treats as 'no live
     state this fetch' (skip the checkpoint, retry next reconcile), never a crash.
 
-    The chain order, the cache TTL, and which tiers exist are all settings-driven.
+    ``country``/``language`` (from the topic's research) localize the cheap tiers so a
+    non-US/non-English topic is searched in its own region; both default to US/en. The
+    chain order, the cache TTL, and which tiers exist are all settings-driven.
     """
     query = (query or "").strip()
     if not query:
         return FetchResult(text="", tier=TIER_NONE)
 
-    cache_key = _normalize_query(query)
+    locale = _build_locale(country, language)
+    # Locale is part of the cache identity: the same query in a different region is a
+    # genuinely different fetch, so it must not collide on the shared in-process cache.
+    cache_key = f"{_normalize_query(query)}|{locale.key}"
     if use_cache:
         hit = _cache_get(cache_key)
         if hit is not None:
-            logger.info("topic_fetcher: cache hit", {"query": query, "tier": hit.tier})
+            logger.info("topic_fetcher: cache hit", {"query": query, "tier": hit.tier, "locale": locale.key})
             return FetchResult(
                 text=hit.text, sources=hit.sources, tier=hit.tier,
                 latency_ms=hit.latency_ms, cached=True,
@@ -316,7 +376,7 @@ async def fetch_topic(query: str, *, use_cache: bool = True) -> FetchResult:
             continue
         tried.append(tier)
         try:
-            text, sources = await fetcher(query)
+            text, sources = await fetcher(query, locale)
         except Exception as exc:
             # Defensive: each fetcher already swallows its own errors, but never let
             # one tier's surprise abort the whole chain — fall through to the next.
@@ -334,7 +394,7 @@ async def fetch_topic(query: str, *, use_cache: bool = True) -> FetchResult:
             if use_cache:
                 _cache_put(cache_key, result)
             logger.info("topic_fetcher: served", {
-                "query": query, "tier": tier, "tried": tried,
+                "query": query, "tier": tier, "tried": tried, "locale": locale.key,
                 "chars": len(result.text), "sources": len(sources), "latency_ms": latency_ms,
             })
             return result

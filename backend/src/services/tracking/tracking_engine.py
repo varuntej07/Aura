@@ -3,9 +3,9 @@
 run_checkpoint_tick()  (every minute): drain the due-queue. For each due checkpoint,
   claim it (atomic, no double-fire), fetch the topic's LIVE state ONCE through the
   tiered fetch chain, compose one update, dedup it at the topic level, then FAN OUT to
-  the topic's active subscribers — each through the global gatekeeper and a per-user
-  dedup. One fetch + one compose serve every subscriber (the scale lever: cost tracks
-  topics, not users).
+  the topic's active subscribers — each gated only by a per-user dedup (no gatekeeper,
+  no cap: a user-requested update is always sent). One fetch + one compose serve every
+  subscriber (the scale lever: cost tracks topics, not users).
 
 run_reconcile_tick()  (daily per topic): re-research each active topic, upsert its
   checkpoints (new rounds appear, shifted times update, dropped events expire), and
@@ -24,21 +24,23 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.cloud import firestore as fs
 
 from ...lib.logger import logger
-from ..firebase import admin_firestore
 from ..model_provider import ModelProvider, get_model_provider
 from ..notification_budget import record_committed_send
 from ..notification_service import send_notification
-from ..notifications import gatekeeper
-from ..notifications.gatekeeper import NotificationCandidate
 from . import fields as f
 from . import tracking_store as store
 from .models import Checkpoint, TrackedTopic, Tracker
-from .schedule_builder import build_checkpoints, plan_reconcile
+from .schedule_builder import (
+    PULSE_INTERVAL_INITIAL_S,
+    build_checkpoints,
+    build_pulse_checkpoint,
+    next_pulse_interval,
+    plan_reconcile,
+)
 from .topic_agent import _slugify, research_topic
 from .topic_fetcher import fetch_topic
 
@@ -63,8 +65,6 @@ class CheckpointTickSummary:
     due: int = 0
     fired: int = 0
     sent: int = 0
-    held: int = 0
-    dropped: int = 0
     skipped_dedup: int = 0
     failed: int = 0
     expired: int = 0
@@ -88,30 +88,6 @@ class _ComposedUpdate:
     title: str
     body: str
     opening_chat_message: str
-
-
-def _local_now(timezone_name: str) -> datetime:
-    try:
-        return datetime.now(ZoneInfo(timezone_name))
-    except (ZoneInfoNotFoundError, Exception):
-        return datetime.now(UTC)
-
-
-async def _user_local_now(user_id: str) -> datetime:
-    """Read users/{uid}.timezone once for the gatekeeper's quiet-hours check. Defaults
-    to UTC on any miss/error so a missing tz never crashes the fan-out."""
-
-    def _fetch() -> str:
-        snap = admin_firestore().collection("users").document(user_id).get()
-        if not snap.exists:
-            return "UTC"
-        return str((snap.to_dict() or {}).get("timezone", "UTC") or "UTC")
-
-    try:
-        tz = await asyncio.to_thread(_fetch)
-    except Exception:
-        tz = "UTC"
-    return _local_now(tz)
 
 
 _COMPOSE_SYSTEM = """\
@@ -156,10 +132,13 @@ async def _compose_update(
 ) -> _ComposedUpdate | None:
     """One cheap LLM call turns the live web context into a push + a dedup summary.
     Returns None when the model judges there is nothing new/concrete to say."""
+    event_line = f"Event: {checkpoint.event_label}\n" if checkpoint.event_label else ""
     prompt = (
         f"Topic: {topic.title}\n"
-        f"Event: {checkpoint.event_label}\n"
-        f"Phase: {checkpoint.phase} (pre=before, live=during, post=after)\n"
+        f"{event_line}"
+        f"Phase: {checkpoint.phase} (pre=just before it starts, live=happening now, "
+        f"post=just finished, milestone=the moment it happens, pulse=a routine check-in "
+        f"on an ongoing topic)\n"
         f"Last known state (avoid repeating verbatim): {topic.live_summary or '(none)'}\n\n"
         f"Web context:\n{context}"
     )
@@ -181,43 +160,80 @@ async def run_checkpoint_tick() -> CheckpointTickSummary:
     """Public entrypoint, called from the scheduler tick."""
     summary = CheckpointTickSummary()
     now = datetime.now(UTC)
-    due = await store.fetch_due_checkpoints(now)
-    summary.due = len(due)
-    if not due:
-        return summary
-
     models = get_model_provider()
     sem = asyncio.Semaphore(_CONCURRENCY)
 
-    async def _process(cp: Checkpoint) -> None:
-        async with sem:
-            try:
-                await _fire_checkpoint(cp, models, now, summary)
-            except Exception as exc:
-                logger.exception("tracking_engine: checkpoint failure", {
-                    "checkpoint_id": cp.id, "error": str(exc),
-                })
+    due = await store.fetch_due_checkpoints(now)
+    summary.due = len(due)
+    if due:
+        async def _process(cp: Checkpoint) -> None:
+            async with sem:
+                try:
+                    await _fire_checkpoint(cp, models, now, summary)
+                except Exception as exc:
+                    logger.exception("tracking_engine: checkpoint failure", {
+                        "checkpoint_id": cp.id, "error": str(exc),
+                    })
 
-    await asyncio.gather(*[_process(cp) for cp in due])
+        await asyncio.gather(*[_process(cp) for cp in due])
 
     logger.info("tracking_engine: checkpoint tick complete", {
         "due": summary.due, "fired": summary.fired, "sent": summary.sent,
-        "held": summary.held, "dropped": summary.dropped,
         "skipped_dedup": summary.skipped_dedup, "failed": summary.failed,
         "expired": summary.expired,
     })
     return summary
 
 
+async def _rearm_or_settle(
+    cp: Checkpoint,
+    topic: TrackedTopic,
+    *,
+    outcome: str,
+    tier: str,
+    now: datetime,
+    summary_text: str | None = None,
+) -> None:
+    """Close out a fired checkpoint. A PULSE is recurring: it is re-armed to PENDING with
+    an adaptively-chosen next fire_at (tighter when it found something new, looser when it
+    did not) and never goes terminal here. An EVENT checkpoint is one-shot: it is moved to
+    its terminal state (fired | skipped | failed)."""
+    if cp.phase == f.CHECKPOINT_PHASE_PULSE:
+        found_new = outcome == f.CHECKPOINT_STATUS_FIRED
+        next_seconds = next_pulse_interval(
+            topic.pulse_interval_seconds or PULSE_INTERVAL_INITIAL_S, found_new=found_new,
+        )
+        await store.rearm_pulse(
+            cp.id, fire_at=now + timedelta(seconds=next_seconds),
+            tier=tier, at=now, summary=summary_text,
+        )
+        await store.update_tracked_topic(
+            cp.topic_key, {f.TOPIC_PULSE_INTERVAL_SECONDS: next_seconds},
+        )
+        return
+
+    extra: dict = {f.CHECKPOINT_LAST_FETCH_TIER: tier, f.CHECKPOINT_LAST_FETCH_AT: now}
+    if outcome == f.CHECKPOINT_STATUS_FAILED:
+        extra[f.CHECKPOINT_LAST_ERROR] = "no usable live state from any fetch tier"
+    elif outcome == f.CHECKPOINT_STATUS_FIRED:
+        extra[f.CHECKPOINT_FIRED_AT] = now
+        if summary_text is not None:
+            extra[f.CHECKPOINT_LAST_SUMMARY] = summary_text
+    await store.mark_checkpoint(cp.id, outcome, **extra)
+
+
 async def _fire_checkpoint(
     cp: Checkpoint, models: ModelProvider, now: datetime, summary: CheckpointTickSummary,
 ) -> None:
+    is_pulse = cp.phase == f.CHECKPOINT_PHASE_PULSE
+
     # Atomic claim — only one tick fires a given checkpoint.
     if not await store.claim_checkpoint(cp.id):
         return
 
     topic = await store.get_tracked_topic(cp.topic_key)
     if topic is None or topic.status != f.TOPIC_STATUS_ACTIVE:
+        # Topic gone/retired: the pulse winds down here too (it is not re-armed).
         await store.mark_checkpoint(cp.id, f.CHECKPOINT_STATUS_EXPIRED)
         summary.expired += 1
         return
@@ -231,32 +247,34 @@ async def _fire_checkpoint(
 
     subscribers = await store.list_active_subscribers(cp.topic_key)
     if not subscribers:
-        # Everyone unsubscribed - nothing to send; let reconcile mark the topic stale.
-        await store.mark_checkpoint(cp.id, f.CHECKPOINT_STATUS_SKIPPED)
+        # No one to notify. A pulse is re-armed (looser) WITHOUT a fetch, so a transient
+        # empty read can't permanently kill the heartbeat and we burn no fetch on a
+        # topic nobody follows; reconcile retires the topic (stale) and the status guard
+        # above then expires the pulse. An event checkpoint is one-shot, so it is skipped.
+        if is_pulse:
+            await _rearm_or_settle(
+                cp, topic, outcome=f.CHECKPOINT_STATUS_SKIPPED,
+                tier=cp.last_fetch_tier or f.TIER_NONE, now=now,
+            )
+        else:
+            await store.mark_checkpoint(cp.id, f.CHECKPOINT_STATUS_SKIPPED)
         return
 
-    # ONE live fetch for the whole fan-out.
-    fetched = await fetch_topic(topic.research_query or topic.title)
+    # ONE live fetch for the whole fan-out, localized to the topic's region.
+    fetched = await fetch_topic(
+        topic.research_query or topic.title, country=topic.country, language=topic.language,
+    )
     if not fetched.ok:
-        await store.mark_checkpoint(
-            cp.id, f.CHECKPOINT_STATUS_FAILED,
-            **{f.CHECKPOINT_LAST_ERROR: "no usable live state from any fetch tier",
-               f.CHECKPOINT_LAST_FETCH_TIER: fetched.tier,
-               f.CHECKPOINT_LAST_FETCH_AT: now},
-        )
-        await store.update_tracked_topic(cp.topic_key, {
-            f.TOPIC_CHECKPOINTS_FAILED: fs.Increment(1),
-        })
+        await _rearm_or_settle(cp, topic, outcome=f.CHECKPOINT_STATUS_FAILED, tier=fetched.tier, now=now)
+        if not is_pulse:
+            await store.update_tracked_topic(cp.topic_key, {f.TOPIC_CHECKPOINTS_FAILED: fs.Increment(1)})
         summary.failed += 1
         return
 
     composed = await _compose_update(models, topic, cp, fetched.text)
     if composed is None or composed.summary == topic.live_summary:
         # Nothing new since the last fetch of this topic — restraint, no fan-out.
-        await store.mark_checkpoint(
-            cp.id, f.CHECKPOINT_STATUS_SKIPPED,
-            **{f.CHECKPOINT_LAST_FETCH_TIER: fetched.tier, f.CHECKPOINT_LAST_FETCH_AT: now},
-        )
+        await _rearm_or_settle(cp, topic, outcome=f.CHECKPOINT_STATUS_SKIPPED, tier=fetched.tier, now=now)
         summary.skipped_dedup += 1
         return
 
@@ -273,61 +291,55 @@ async def _fire_checkpoint(
                 "tracker_id": sub.id, "topic_key": cp.topic_key, "error": str(exc),
             })
 
-    await store.mark_checkpoint(
-        cp.id, f.CHECKPOINT_STATUS_FIRED,
-        **{f.CHECKPOINT_FIRED_AT: now, f.CHECKPOINT_LAST_SUMMARY: composed.summary,
-           f.CHECKPOINT_LAST_FETCH_TIER: fetched.tier, f.CHECKPOINT_LAST_FETCH_AT: now},
+    await _rearm_or_settle(
+        cp, topic, outcome=f.CHECKPOINT_STATUS_FIRED, tier=fetched.tier, now=now,
+        summary_text=composed.summary,
     )
     summary.fired += 1
 
 
+async def _send_tracker_push(
+    *, user_id: str, topic_key: str, tracker_id: str,
+    title: str, body: str, opening_chat_message: str,
+):
+    """Single FCM send for a tracker update (live fan-out and deferred re-delivery share
+    this exact payload shape)."""
+    return await send_notification(
+        user_id,
+        title=title,
+        body=body,
+        data={
+            "notification_type": f.NOTIFICATION_TYPE_TRACKER_UPDATE,
+            "notification_origin": f.DECISION_ORIGIN_TRACKER,
+            "topic_key": topic_key,
+            "tracker_id": tracker_id,
+            "opening_chat_message": opening_chat_message,
+        },
+        notification_type=f.NOTIFICATION_TYPE_TRACKER_UPDATE,
+        collapse_key=f"tracker_{tracker_id}",
+    )
+
+
 async def _deliver_to_subscriber(sub, topic, composed, now, summary) -> None:
     # Per-user dedup: this user already got this exact state from another checkpoint.
+    # This is correctness (never send the identical update twice), NOT gating — a
+    # genuinely-new update always goes out. No gatekeeper, no cap: the user asked to be
+    # kept posted, so every new beat is delivered.
     if sub.last_sent_summary == composed.summary:
         summary.skipped_dedup += 1
         return
 
-    local_now = await _user_local_now(sub.user_id)
-    candidate = NotificationCandidate(
-        user_id=sub.user_id,
-        origin=f.DECISION_ORIGIN_TRACKER,
-        topic=topic.title,
-        title=composed.title,
-        body=composed.body,
-        is_requested=True,   # the user asked to be kept posted, cap-exempt, bias to send
-    )
-    decision = await gatekeeper.evaluate(candidate, local_now=local_now)
-    await store.record_tracker_outcome(
-        sub.id, decision=decision.decision, reason=decision.reason,
-        summary=composed.summary, at=now,
-    )
-
-    if not decision.should_send:
-        if decision.decision == f.DECISION_HOLD:
-            summary.held += 1
-        else:
-            summary.dropped += 1
-        return
-
-    result = await send_notification(
-        sub.user_id,
-        title=composed.title,
-        body=composed.body,
-        data={
-            "notification_type": f.NOTIFICATION_TYPE_TRACKER_UPDATE,
-            "notification_origin": f.DECISION_ORIGIN_TRACKER,
-            "topic_key": topic.topic_key,
-            "tracker_id": sub.id,
-            "opening_chat_message": composed.opening_chat_message,
-        },
-        notification_type=f.NOTIFICATION_TYPE_TRACKER_UPDATE,
-        collapse_key=f"tracker_{sub.id}",
+    result = await _send_tracker_push(
+        user_id=sub.user_id, topic_key=topic.topic_key, tracker_id=sub.id,
+        title=composed.title, body=composed.body, opening_chat_message=composed.opening_chat_message,
     )
     if not result.delivered:
         return
 
-    # Requested update: NOT blocked by the proactive cap, but recorded so OTHER
-    # proactive deciders space away from it (mirrors a committed reminder send).
+    # Advance the per-user dedup cursor + bookkeeping (sent count, last_sent_summary).
+    await store.record_tracker_outcome(sub.id, summary=composed.summary, at=now)
+    # Recorded against the shared budget purely so other proactive deciders can see the
+    # activity; a tracker update is never itself blocked (mirrors a committed reminder).
     await record_committed_send(sub.user_id, source="tracker")
     summary.sent += 1
 
@@ -401,7 +413,7 @@ async def _reconcile_topic(
         return
 
     existing = await store.list_checkpoints_for_topic(topic.topic_key)
-    upserts, expire_ids = plan_reconcile(research, existing, now=now)
+    upserts, expire_ids = plan_reconcile(research, existing, topic_key=topic.topic_key, now=now)
     await store.upsert_checkpoints(upserts)
     for eid in expire_ids:
         await store.mark_checkpoint(eid, f.CHECKPOINT_STATUS_EXPIRED)
@@ -420,7 +432,7 @@ async def _reconcile_topic(
         return
 
     health = f.TOPIC_HEALTH_HEALTHY if research.confidence >= 0.4 else f.TOPIC_HEALTH_DEGRADED
-    await store.update_tracked_topic(topic.topic_key, {
+    reconcile_updates = {
         f.TOPIC_LAST_RECONCILED_AT: now,
         f.TOPIC_RECONCILE_COUNT: topic.reconcile_count + 1,
         f.TOPIC_NEXT_RECONCILE_AT: now + _RECONCILE_INTERVAL,
@@ -432,13 +444,34 @@ async def _reconcile_topic(
         f.TOPIC_EXPIRES_AT: new_expires,
         f.TOPIC_HEALTH: health,
         f.TOPIC_CHECKPOINTS_TOTAL: len(existing) + len(upserts),
-    })
+    }
+    # Refine locale only when the fresh pass actually returned codes — never clobber a
+    # good stored locale with an empty one if this reconcile's research omitted them.
+    if research.country:
+        reconcile_updates[f.TOPIC_COUNTRY] = research.country
+    if research.language:
+        reconcile_updates[f.TOPIC_LANGUAGE] = research.language
+    await store.update_tracked_topic(topic.topic_key, reconcile_updates)
+    # Self-heal: a topic created before pulses existed (or whose pulse was never seeded)
+    # picks one up here. Idempotent — a live pulse is left untouched.
+    await _ensure_pulse(topic.topic_key, interval_seconds=topic.pulse_interval_seconds, now=now)
     summary.reconciled += 1
 
 
 # ── provisioning (called from the track_topic chat tool) ─────────────────────
 def _iso(value: datetime | None) -> str:
     return value.isoformat() if isinstance(value, datetime) else ""
+
+
+async def _ensure_pulse(topic_key: str, *, interval_seconds: int, now: datetime) -> None:
+    """Seed the recurring heartbeat for a topic if it has none yet (idempotent — a live
+    pulse is never reset). This is what makes an open-ended topic with no dated events
+    (a person, a company, a developing story) still get adaptive updates. Called from
+    both provisioning and the reconcile self-heal so a topic created before pulses
+    existed picks one up on its next reconcile."""
+    interval = interval_seconds if interval_seconds > 0 else PULSE_INTERVAL_INITIAL_S
+    cp = build_pulse_checkpoint(topic_key, fire_at=now + timedelta(seconds=interval), now=now)
+    await store.create_checkpoint_if_absent(cp)
 
 
 async def provision_tracker(user_id: str, request: str, *, created_via: str = "text") -> dict:
@@ -462,7 +495,7 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
             timeout=_PROVISION_RESEARCH_TIMEOUT_S,
         )
     except Exception as exc:
-        logger.warn("tracking_engine: provision research failed/timed out — minimal setup", {
+        logger.warn("tracking_engine: provision research failed/timed out, minimal setup", {
             "user_id": user_id, "request": request[:120], "error": str(exc),
         })
 
@@ -480,9 +513,12 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
             ends_at=(research.ends_at if research else None),
             expires_at=(research.expires_at if research else now + _FALLBACK_LIFESPAN),
             timezone=(research.timezone if research else "UTC"),
+            country=(research.country if research else ""),
+            language=(research.language if research else ""),
             status=f.TOPIC_STATUS_ACTIVE,
             health=f.TOPIC_HEALTH_HEALTHY,
             research_confidence=(research.confidence if research else 0.0),
+            pulse_interval_seconds=PULSE_INTERVAL_INITIAL_S,
             # If research failed, reconcile ASAP to build the schedule; else in 24h.
             next_reconcile_at=(now + _RECONCILE_INTERVAL if research else now),
             last_reconciled_at=(now if research else None),
@@ -492,10 +528,15 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
         )
         await store.set_tracked_topic(topic)
         if research is not None:
-            checkpoints = build_checkpoints(research, now=now)
+            checkpoints = build_checkpoints(research, topic_key=topic_key, now=now)
             await store.upsert_checkpoints(checkpoints)
             if checkpoints:
                 await store.update_tracked_topic(topic_key, {f.TOPIC_CHECKPOINTS_TOTAL: len(checkpoints)})
+
+    # Seed the recurring heartbeat (idempotent). This is what guarantees an ongoing topic
+    # with no dated events still gets adaptive updates — the gap that left "keep me posted
+    # on <person/company/story>" silent before.
+    await _ensure_pulse(topic_key, interval_seconds=topic.pulse_interval_seconds, now=now)
 
     # Already subscribed? (idempotent - don't double-count or duplicate.)
     for existing in await store.list_trackers_for_user(user_id):
