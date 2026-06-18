@@ -66,3 +66,13 @@ android/key.properties
 .agents/
 
 node_modules/
+
+# Editor / agent tooling scratch (ephemeral, never shared)
+.codex_tmp/
+.claude/worktrees/
+
+# Flutter DevTools generated local options
+devtools_options.yaml
+
+# Android Gradle build output (android/.gitignore ships without a /build/ rule)
+/android/build/

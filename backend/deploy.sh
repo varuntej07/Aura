@@ -102,7 +102,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --timeout=3600 \
   --concurrency=80 \
   --set-env-vars="ENV=production" \
-  --set-env-vars="ANTHROPIC_MODEL=claude-sonnet-4-6" \
+  --set-env-vars="ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6" \
+  --set-env-vars="ANTHROPIC_VOICE_MODEL=claude-haiku-4-5" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
   --set-env-vars="GOOGLE_REDIRECT_URI=" \
   --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
@@ -124,7 +125,9 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="LANGFUSE_PUBLIC_KEY=pk-lf-6e4f5a36-9d31-474c-b61a-3307653b6c1d" \
   --set-env-vars="LANGFUSE_HOST=https://hipaa.cloud.langfuse.com" \
   --set-env-vars="POSTHOG_API_KEY=phc_CDtz3DmNraHdnJ2w9W7WJNkJ8VANYPBWAcqV2Uf77k5s" \
-  --set-env-vars="POSTHOG_HOST=https://us.i.posthog.com"
+  --set-env-vars="POSTHOG_HOST=https://us.i.posthog.com" \
+  --set-env-vars="TELEGRAM_FEEDBACK_CHAT_ID=8599918865" \
+  --set-secrets="TELEGRAM_BOT_TOKEN=juno-telegram-bot-token:latest"
 
 # Print service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
@@ -166,8 +169,7 @@ ensure_scheduler_job() {
 
 ensure_scheduler_job "juno-reminder-tick" "* * * * *" "/scheduler/tick"
 ensure_scheduler_job "juno-signal-engine-tick" "*/15 * * * *" "/internal/signal-engine/tick"
-ensure_scheduler_job "juno-content-ingest" "0 * * * *" "/internal/signal-engine/content-ingest"
-ensure_scheduler_job "juno-agents-tick" "0 9 * * *" "/internal/agents/tick" "America/Los_Angeles"
+ensure_scheduler_job "juno-content-ingest" "0 */3 * * *" "/internal/signal-engine/content-ingest"
 
 echo "✅ Cloud Scheduler jobs reconciled"
 

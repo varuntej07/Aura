@@ -23,6 +23,22 @@
         { "fieldPath": "outcome", "order": "ASCENDING" },
         { "fieldPath": "sent_at", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "checkpoints",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "fire_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "tracked_topics",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "next_reconcile_at", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [

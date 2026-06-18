@@ -1,0 +1,67 @@
+rules_version = '2';
+
+// Aura Firestore security rules.
+//
+// Model: the BACKEND uses the Firebase Admin SDK, which bypasses these rules
+// entirely, so every server-side read/write keeps working regardless of what is
+// written here. These rules govern only the FLUTTER CLIENT, whose entire
+// legitimate footprint is the signed-in user's own data. Default is deny; each
+// block below opens exactly one client-touched path, scoped to the owner.
+//
+// Client paths covered (verified against lib/ on 2026-06-17):
+//   users/{uid} (settings is a field on this doc)            read/write  owner
+//   users/{uid}/reminders, /memories, /payment_intent,
+//     /entitlement, /feedback, /chat_sessions/**             read/write  owner
+//   UserAura/{uid}                                           read        owner  (backend writes)
+//   agent_suggestion_pills/{uid}                             read        owner  (backend writes)
+//   user_feedback/{timestamp}_{uid}                          create      owner-stamped (write-only)
+// Everything else (content_candidates, fcm_tokens, calendar_cache,
+//   notification_decisions, observed_feedback, tracked_topics, ...) is
+//   backend-only and denied to clients.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // The user's own document tree: profile doc + every per-user subcollection.
+    //
+    // NOTE: this currently lets a user write their own users/{uid}/entitlement
+    // doc, because the client seeds the trial there on first install. That is
+    // harmless while real IAP is off (everyone gets Pro via trial anyway). Before
+    // turning on payments, move entitlement authorship to the backend (deny
+    // client writes under .../entitlement/**) or add server-side Google/Apple
+    // receipt verification, so a user cannot self-grant a paid tier.
+    match /users/{uid}/{document=**} {
+      allow read, write: if isOwner(uid);
+    }
+
+    // Behavioral profile — backend-written (Admin SDK); the client reads its own only.
+    match /UserAura/{uid} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // Personalized suggestion pills — backend-written; the client reads its own only.
+    match /agent_suggestion_pills/{uid} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // Product-feedback sink (doc id is "{timestamp}_{uid}"). A signed-in user may
+    // only CREATE a doc stamped with their own uid; feedback is never client-readable.
+    match /user_feedback/{docId} {
+      allow create: if request.auth != null
+                    && request.resource.data.uid == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    // Default deny — every collection not matched above is backend-only. The
+    // Admin SDK bypasses these rules, so the backend keeps full access.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
