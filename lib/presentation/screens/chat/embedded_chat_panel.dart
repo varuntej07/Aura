@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/services/buddy_pills_refresher.dart';
+import '../../../data/services/session_consolidator.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../../widgets/chat_message_list.dart';
@@ -72,11 +73,19 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     if (!mounted) return;
     final uid = context.read<AuthViewModel>().user?.uid;
     if (uid != null && uid.isNotEmpty) {
-      context.read<TextChatViewModel>().flushPendingBackup(uid);
+      final chatVm = context.read<TextChatViewModel>();
+      chatVm.flushPendingBackup(uid);
       // Leaving the app after a session: if the user did anything, regenerate
-      // the Buddy pills so fresh ones are waiting on their next visit.
+      // the Buddy pills so fresh ones are waiting on their next visit, and ship the
+      // session to the per-session reflection tier (storylines/traits). Both are
+      // fire-and-forget, idempotent, and safe to retry.
       if (state == AppLifecycleState.paused) {
         context.read<BuddyPillsRefresher>().refreshIfActivity(uid);
+        context.read<SessionConsolidator>().consolidate(
+          uid: uid,
+          sessionId: chatVm.currentSessionId,
+          messages: chatVm.messages,
+        );
       }
     }
   }

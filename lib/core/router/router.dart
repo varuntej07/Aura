@@ -9,6 +9,7 @@ import '../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../data/repositories/chat_repository.dart';
 import '../../data/services/backend_api_service.dart';
 import '../../data/services/buddy_pills_refresher.dart';
+import '../../data/services/session_consolidator.dart';
 import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_backup_service.dart';
 import '../../data/services/chat_session_manager.dart';
@@ -134,6 +135,7 @@ GoRouter buildRouter(
                 postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
                 suggestionPillsRepository: context.read<AgentSuggestionPillsRepository>(),
                 buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
+                sessionConsolidator: context.read<SessionConsolidator>(),
               ),
               child: const ChatScreen(),
             ),
@@ -195,6 +197,7 @@ GoRouter buildRouter(
                   suggestionPillsRepository:
                       context.read<AgentSuggestionPillsRepository>(),
                   buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
+                  sessionConsolidator: context.read<SessionConsolidator>(),
                 ),
               ),
             ],

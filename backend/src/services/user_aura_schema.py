@@ -15,13 +15,13 @@ Stored shape on `UserAura/{uid}`:
 
     "interests": {
         "<category_slug>": {
-            "weight": float,            # time-decayed score (see HALF_LIFE_DAYS)
+            "weight": float,            # time-decayed score (see HALF_LIFE_BY_KIND)
             "first_seen": iso8601,
             "last_seen":  iso8601,
             "subjects": {
                 "<sanitized_key>": {
                     "display": str,     # original casing, e.g. "KCR"
-                    "weight": float,
+                    "weight": float,    # time-decayed score (see HALF_LIFE_BY_KIND)
                     "first_seen": iso8601,
                     "last_seen":  iso8601,
                 }
@@ -101,12 +101,46 @@ GENDER_FIELD = "gender"
 LOCALE_FIELD = "locale"
 LANGUAGE_FIELD = "language"
 
-# Recency half-life: a node's weight halves every this-many days of inactivity.
-HALF_LIFE_DAYS = 30.0
+# Interest / storyline KIND drives how fast a node fades. event_driven follows a
+# transient happening ("send me World Cup updates" while the Cup is on) and must
+# fade fast so a one-off ask never looks like a standing passion; durable is a real
+# standing interest; goal_instrumental is pursued in service of an active goal (a
+# blog written to land a specific job) and sits between the two.
+INTEREST_KIND_DURABLE = "durable"
+INTEREST_KIND_EVENT_DRIVEN = "event_driven"
+INTEREST_KIND_GOAL_INSTRUMENTAL = "goal_instrumental"
+INTEREST_KINDS: tuple[str, ...] = (
+    INTEREST_KIND_DURABLE,
+    INTEREST_KIND_EVENT_DRIVEN,
+    INTEREST_KIND_GOAL_INSTRUMENTAL,
+)
+# A node with no kind (every node the capture tier writes, and every pre-existing
+# prod document) is treated as durable, so the change is backward-safe: legacy data
+# keeps a sensible slow decay instead of suddenly vanishing.
+DEFAULT_INTEREST_KIND = INTEREST_KIND_DURABLE
+# Recency half-life per kind (days): a node's weight halves every this-many days of
+# inactivity. event_driven fades in a week; durable persists for a quarter.
+HALF_LIFE_BY_KIND: dict[str, float] = {
+    INTEREST_KIND_DURABLE: 90.0,
+    INTEREST_KIND_EVENT_DRIVEN: 7.0,
+    INTEREST_KIND_GOAL_INSTRUMENTAL: 45.0,
+}
 # Per-category cap on distinct subjects; lowest-weight subjects are evicted.
 MAX_SUBJECTS_PER_CATEGORY = 15
 # Max subject string length we will store (defence against runaway LLM output).
 MAX_SUBJECT_LENGTH = 80
+# Caps for the reflection-tier structures (keep the doc well under Firestore's 1 MiB).
+MAX_STORYLINES = 12
+MAX_TRAITS = 20
+# A trait is SHOWN only once corroborated: at least this much evidence AND confidence.
+# One eager or flattering inference can never become a visible permanent label, since
+# the user reads their own Aura. Promotion is a read-time decision, never stored, so
+# the thresholds can change without a migration.
+TRAIT_MIN_EVIDENCE = 2
+TRAIT_MIN_CONFIDENCE = 0.7
+# Cap on the distinct-session ids stored per trait (corroboration evidence). Plenty for
+# the >=2 gate while bounding doc growth.
+MAX_TRAIT_SESSIONS = 10
 
 # Legacy flat map produced by the pre-taxonomy extractor. Read-only fallback.
 # Intentionally RETAINED on the doc (frozen, no longer written): the shipped
@@ -154,8 +188,22 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _decayed_weight(weight: Any, last_seen: Any, now: datetime) -> float:
-    """Stored weight decayed forward to `now`. Returns 0.0 for unusable input."""
+def _half_life_for_kind(kind: Any) -> float:
+    """Half-life (days) for a node's kind. Unknown/missing kind falls back to durable."""
+    if isinstance(kind, str) and kind in HALF_LIFE_BY_KIND:
+        return HALF_LIFE_BY_KIND[kind]
+    return HALF_LIFE_BY_KIND[DEFAULT_INTEREST_KIND]
+
+
+def decayed_weight_by_kind(weight: Any, last_seen: Any, kind: Any, now: datetime) -> float:
+    """Stored weight decayed forward to `now` using the half-life for `kind`.
+
+    A missing or unknown kind decays as durable (the slow lane), so capture-written
+    nodes (which carry no kind) and every legacy document keep a sensible decay. Only
+    nodes the reflection tier has explicitly marked event_driven fade fast.
+
+    Returns 0.0 for unusable input.
+    """
     try:
         base = float(weight)
     except (TypeError, ValueError):
@@ -166,7 +214,7 @@ def _decayed_weight(weight: Any, last_seen: Any, now: datetime) -> float:
     if last is None:
         return base
     days = max(0.0, (now - last).total_seconds() / 86400.0)
-    return base * (0.5 ** (days / HALF_LIFE_DAYS))
+    return base * (0.5 ** (days / _half_life_for_kind(kind)))
 
 
 # --------------------------------------------------------------------------
@@ -211,7 +259,7 @@ def apply_interest_signal(
             "subjects": {}, "origin": origin,
         }
         interests[slug] = node
-    node["weight"] = _decayed_weight(node.get("weight"), node.get("last_seen"), now) + 1.0
+    node["weight"] = decayed_weight_by_kind(node.get("weight"), node.get("last_seen"), node.get("kind"), now) + 1.0
     node["last_seen"] = now_iso
     node["origin"] = _merge_origin(node.get("origin"), origin)
     node.setdefault("first_seen", now_iso)
@@ -232,7 +280,7 @@ def apply_interest_signal(
     if not isinstance(snode, dict):
         snode = {"display": clean, "weight": 0.0, "first_seen": now_iso, "last_seen": now_iso}
         subjects[key] = snode
-    snode["weight"] = _decayed_weight(snode.get("weight"), snode.get("last_seen"), now) + 1.0
+    snode["weight"] = decayed_weight_by_kind(snode.get("weight"), snode.get("last_seen"), snode.get("kind"), now) + 1.0
     snode["last_seen"] = now_iso
     snode["display"] = clean
     snode.setdefault("first_seen", now_iso)
@@ -245,7 +293,7 @@ def _cap_subjects(subjects: dict[str, Any], now: datetime) -> None:
         return
     ranked = sorted(
         subjects.items(),
-        key=lambda kv: _decayed_weight(kv[1].get("weight"), kv[1].get("last_seen"), now),
+        key=lambda kv: decayed_weight_by_kind(kv[1].get("weight"), kv[1].get("last_seen"), kv[1].get("kind"), now),
         reverse=True,
     )
     for stale_key, _ in ranked[MAX_SUBJECTS_PER_CATEGORY:]:
@@ -264,7 +312,7 @@ def _ranked_categories(profile: dict[str, Any], now: datetime) -> list[tuple[str
     for slug, node in interests.items():
         if not isinstance(node, dict):
             continue
-        weight = _decayed_weight(node.get("weight"), node.get("last_seen"), now)
+        weight = decayed_weight_by_kind(node.get("weight"), node.get("last_seen"), node.get("kind"), now)
         if weight > 0:
             rows.append((str(slug), weight, node))
     rows.sort(key=lambda r: r[1], reverse=True)
@@ -277,7 +325,7 @@ def _ranked_subject_displays(node: dict[str, Any], now: datetime, k: int) -> lis
         return []
     ranked = sorted(
         subjects.values(),
-        key=lambda s: _decayed_weight(s.get("weight"), s.get("last_seen"), now) if isinstance(s, dict) else 0.0,
+        key=lambda s: decayed_weight_by_kind(s.get("weight"), s.get("last_seen"), s.get("kind"), now) if isinstance(s, dict) else 0.0,
         reverse=True,
     )
     out: list[str] = []
@@ -360,7 +408,7 @@ def top_interest_subjects(
                 continue
             for s in subjects.values():
                 if isinstance(s, dict) and s.get("display"):
-                    scored.append((str(s["display"]), _decayed_weight(s.get("weight"), s.get("last_seen"), now)))
+                    scored.append((str(s["display"]), decayed_weight_by_kind(s.get("weight"), s.get("last_seen"), s.get("kind"), now)))
     scored.sort(key=lambda kv: kv[1], reverse=True)
     out = [name for name, _ in scored[:k]]
 
@@ -428,3 +476,308 @@ def seed_onboarding_interests(
         apply_interest_signal(
             interests, slug, subject=None, now=now, origin=INTEREST_ORIGIN_ONBOARDING,
         )
+
+
+# --------------------------------------------------------------------------
+# Storylines — the narrative layer (reflection-tier owned)
+# --------------------------------------------------------------------------
+#
+# A storyline is what is GOING ON in the user's life, fused from a whole session,
+# not a single message. It carries the connected meaning a flat interest cannot:
+# "wrote a blog on tensor parallelism to land an SDE role at Annapurna Labs (AWS)"
+# instead of two disconnected chips "tensor parallelism" + "Annapurna Labs".
+#
+# Stored shape on UserAura/{uid}:
+#
+#   "storylines": {
+#       "<id>": {
+#           "summary":    str,                # the narrative one-liner shown to the user
+#           "entities":   [str],              # named things in it
+#           "categories": [taxonomy slug],
+#           "intent":     str | None,         # e.g. "career_goal", "event_follow"
+#           "kind":       "durable|event_driven|goal_instrumental",
+#           "confidence": float,              # 0..1
+#           "weight": float, "first_seen": iso, "last_seen": iso,
+#       }
+#   }
+#
+# Decay reuses the kind-aware half-life, so an event_driven storyline ("wants World
+# Cup updates") fades on its own in about a week without any sweep job.
+
+
+def apply_storyline(
+    storylines: dict[str, Any],
+    storyline_id: str,
+    summary: str,
+    entities: list[str],
+    categories: list[str],
+    intent: str | None,
+    kind: str,
+    confidence: float,
+    now: datetime,
+) -> None:
+    """Insert or update one storyline in place (decay-then-increment its weight).
+
+    `storyline_id` is a stable slug the reflection tier supplies (derived from the
+    goal/entities) so the same ongoing storyline MERGES across sessions instead of
+    fragmenting into near-duplicates. Off-taxonomy kinds coerce to durable.
+    """
+    key = sanitize_firestore_key(storyline_id)
+    clean_summary = (summary or "").strip()
+    if not key or not clean_summary:
+        return
+    safe_kind = kind if kind in INTEREST_KINDS else DEFAULT_INTEREST_KIND
+    now_iso = now.isoformat()
+
+    node = storylines.get(key)
+    if not isinstance(node, dict):
+        node = {"weight": 0.0, "first_seen": now_iso, "last_seen": now_iso}
+        storylines[key] = node
+    node["weight"] = decayed_weight_by_kind(
+        node.get("weight"), node.get("last_seen"), node.get("kind"), now
+    ) + 1.0
+    node["last_seen"] = now_iso
+    node["summary"] = clean_summary
+    node["entities"] = [e.strip() for e in entities if isinstance(e, str) and e.strip()][:8]
+    node["categories"] = [c for c in categories if c in INTEREST_CATEGORIES][:4]
+    node["intent"] = intent
+    node["kind"] = safe_kind
+    try:
+        node["confidence"] = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        node["confidence"] = 0.0
+    node.setdefault("first_seen", now_iso)
+
+    _cap_storylines(storylines, now)
+
+
+def _cap_storylines(storylines: dict[str, Any], now: datetime) -> None:
+    if len(storylines) <= MAX_STORYLINES:
+        return
+    ranked = sorted(
+        storylines.items(),
+        key=lambda kv: decayed_weight_by_kind(
+            kv[1].get("weight"), kv[1].get("last_seen"), kv[1].get("kind"), now
+        ) if isinstance(kv[1], dict) else 0.0,
+        reverse=True,
+    )
+    for stale_key, _ in ranked[MAX_STORYLINES:]:
+        storylines.pop(stale_key, None)
+
+
+def ranked_storylines(
+    profile: dict[str, Any],
+    now: datetime | None = None,
+    k: int = 6,
+) -> list[dict[str, Any]]:
+    """Live storylines (decayed weight > 0), strongest first, for prompts / the Aura screen."""
+    now = now or datetime.now(UTC)
+    raw = profile.get("storylines")
+    if not isinstance(raw, dict):
+        return []
+    rows: list[tuple[float, dict[str, Any]]] = []
+    for node in raw.values():
+        if not isinstance(node, dict):
+            continue
+        weight = decayed_weight_by_kind(node.get("weight"), node.get("last_seen"), node.get("kind"), now)
+        if weight > 0:
+            rows.append((weight, node))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return [node for _, node in rows[:k]]
+
+
+def storyline_prompt_lines(
+    profile: dict[str, Any],
+    now: datetime | None = None,
+    k: int = 4,
+) -> list[str]:
+    """Narrative summaries for the chat / voice system prompt."""
+    return [
+        str(node["summary"]).strip()
+        for node in ranked_storylines(profile, now, k)
+        if node.get("summary")
+    ]
+
+
+def reclassify_interest_kind(
+    interests: dict[str, Any],
+    category: str,
+    subject: str,
+    kind: str,
+) -> bool:
+    """Reflection merge-op: set the kind on an EXISTING flat interest subject so its
+    decay changes (e.g. mark "FIFA World Cup" event_driven so it fades in a week
+    instead of looking like a standing football obsession). Returns True if applied.
+
+    Matches the subject the capture tier wrote. Capture keys subjects by raw display
+    today (the case-insensitive dedupe is a separate, deferred change), so this tries
+    an exact key, then a sanitized-casefold key, then a case-insensitive display scan.
+    A no-op (returns False) when the subject isn't present — capture may not have
+    written it, which is fine; the storyline still carries the kind.
+    """
+    if kind not in INTEREST_KINDS:
+        return False
+    node = interests.get(category)
+    if not isinstance(node, dict):
+        return False
+    subjects = node.get("subjects")
+    if not isinstance(subjects, dict):
+        return False
+
+    wanted = " ".join((subject or "").split())
+    target = subjects.get(subject) or subjects.get(sanitize_firestore_key(wanted.casefold()))
+    if not isinstance(target, dict):
+        for sval in subjects.values():
+            if isinstance(sval, dict) and str(sval.get("display", "")).casefold() == wanted.casefold():
+                target = sval
+                break
+    if not isinstance(target, dict):
+        return False
+    target["kind"] = kind
+    return True
+
+
+def prune_interest(interests: dict[str, Any], category: str, subject: str) -> bool:
+    """Reflection cleanup: remove a mis-attributed subject from a category — most often a
+    thing the fast layer stored as the user's interest that turned out to be about someone
+    else (a gift, a question on a friend's behalf). Drops the category entirely if it has
+    no subjects left. Returns True if something was removed. Matches the capture-tier
+    subject by exact key or case-insensitive display, like reclassify_interest_kind."""
+    node = interests.get(category)
+    if not isinstance(node, dict):
+        return False
+    subjects = node.get("subjects")
+    if not isinstance(subjects, dict) or not subjects:
+        return False
+
+    wanted = " ".join((subject or "").split()).casefold()
+    target_key: str | None = None
+    for sk, sval in subjects.items():
+        display = str(sval.get("display", sk)) if isinstance(sval, dict) else str(sk)
+        if str(sk).casefold() == wanted or display.casefold() == wanted:
+            target_key = sk
+            break
+    if target_key is None:
+        return False
+
+    subjects.pop(target_key, None)
+    if not subjects:
+        interests.pop(category, None)
+    return True
+
+
+# --------------------------------------------------------------------------
+# Traits — corroborated personality signals (reflection-tier owned)
+# --------------------------------------------------------------------------
+#
+# Stored shape:
+#   "traits": {
+#       "<sanitized_key>": {
+#           "display": str, "weight": float, "confidence": float,
+#           "evidence_count": int, "first_seen": iso, "last_seen": iso,
+#       }
+#   }
+#
+# A trait is STORED on every inference but only SHOWN once corroborated
+# (evidence_count >= TRAIT_MIN_EVIDENCE AND confidence >= TRAIT_MIN_CONFIDENCE), so a
+# single eager/flattering inference can never become a visible permanent label. The
+# user reads their own Aura, so a wrong "anxious" shown back is a trust hit. Traits
+# decay like everything else (a phase isn't forever); promotion is read-time, never
+# stored, so thresholds can change without a migration.
+
+
+def _trait_evidence(node: dict[str, Any]) -> int:
+    """Corroboration count = number of DISTINCT sessions that evidenced the trait. Falls
+    back to the legacy integer `evidence_count` for nodes written before session tracking."""
+    sessions = node.get("sessions")
+    if isinstance(sessions, list) and sessions:
+        return len(sessions)
+    return int(node.get("evidence_count", 0) or 0)
+
+
+def apply_trait(
+    traits: dict[str, Any],
+    name: str,
+    confidence: float,
+    now: datetime,
+    session_id: str | None = None,
+) -> None:
+    """Fold one inferred trait into the map in place: decay-then-increment its weight,
+    record corroboration, and keep the strongest confidence seen.
+
+    Corroboration counts DISTINCT sessions, not re-runs: re-reflecting the same growing
+    session must never inflate a trait toward the shown threshold. When `session_id` is
+    given it is added to a capped set (idempotent); when absent (legacy/test calls) a plain
+    counter is bumped instead, so both shapes work and old docs keep counting."""
+    clean = " ".join((name or "").split())
+    if not clean or len(clean) > 60:
+        return
+    key = sanitize_firestore_key(clean.casefold())
+    if not key:
+        return
+    try:
+        conf = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        conf = 0.0
+    now_iso = now.isoformat()
+
+    node = traits.get(key)
+    if not isinstance(node, dict):
+        node = {
+            "display": clean, "weight": 0.0, "confidence": 0.0,
+            "first_seen": now_iso, "last_seen": now_iso,
+        }
+        traits[key] = node
+    node["weight"] = decayed_weight_by_kind(node.get("weight"), node.get("last_seen"), None, now) + 1.0
+    node["confidence"] = max(conf, float(node.get("confidence", 0.0) or 0.0))
+    node["display"] = clean
+    node["last_seen"] = now_iso
+    node.setdefault("first_seen", now_iso)
+
+    if session_id:
+        sessions = node.get("sessions")
+        if not isinstance(sessions, list):
+            sessions = []
+        if session_id not in sessions:
+            sessions.append(session_id)
+        node["sessions"] = sessions[-MAX_TRAIT_SESSIONS:]
+    else:
+        node["evidence_count"] = int(node.get("evidence_count", 0) or 0) + 1
+
+    _cap_traits(traits, now)
+
+
+def _cap_traits(traits: dict[str, Any], now: datetime) -> None:
+    if len(traits) <= MAX_TRAITS:
+        return
+    ranked = sorted(
+        traits.items(),
+        key=lambda kv: decayed_weight_by_kind(
+            kv[1].get("weight"), kv[1].get("last_seen"), None, now
+        ) if isinstance(kv[1], dict) else 0.0,
+        reverse=True,
+    )
+    for stale_key, _ in ranked[MAX_TRAITS:]:
+        traits.pop(stale_key, None)
+
+
+def shown_traits(profile: dict[str, Any], now: datetime | None = None, k: int = 6) -> list[str]:
+    """Corroborated, still-live trait displays for the Aura screen / prompt. Gated by
+    TRAIT_MIN_EVIDENCE + TRAIT_MIN_CONFIDENCE so an uncorroborated guess never shows."""
+    now = now or datetime.now(UTC)
+    raw = profile.get("traits")
+    if not isinstance(raw, dict):
+        return []
+    rows: list[tuple[float, str]] = []
+    for node in raw.values():
+        if not isinstance(node, dict):
+            continue
+        if _trait_evidence(node) < TRAIT_MIN_EVIDENCE:
+            continue
+        if float(node.get("confidence", 0.0) or 0.0) < TRAIT_MIN_CONFIDENCE:
+            continue
+        weight = decayed_weight_by_kind(node.get("weight"), node.get("last_seen"), None, now)
+        if weight > 0 and node.get("display"):
+            rows.append((weight, str(node["display"])))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return [name for _, name in rows[:k]]

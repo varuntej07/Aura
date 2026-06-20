@@ -18,6 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+from google.cloud import firestore as fs
 from pydantic import BaseModel, ValidationError, field_validator
 
 from ..lib.logger import logger
@@ -454,24 +455,46 @@ async def _read_user_aura_profile(uid: str) -> dict[str, Any]:
     return await asyncio.to_thread(_fetch)
 
 
-async def _write_user_aura_profile(uid: str, profile: dict[str, Any]) -> None:
+async def _merge_and_write_user_aura(uid: str, insight: MessageInsight, message: str) -> dict[str, Any]:
+    """Transactionally read the CURRENT profile, fold in this turn's insight, and write.
+
+    The read-modify-write runs inside a Firestore transaction so it cannot lose a
+    concurrent write. Two rapid capture turns, or a per-session reflection write landing
+    in between, each cause the transaction to retry: it re-reads fresh state and re-applies
+    _merge_profile, which only touches capture-owned fields and copies everything else
+    (including the reflection tier's storylines / traits) straight through. The LLM call
+    has already happened, so the transaction body is pure and fast.
+    """
     from .firebase import admin_firestore
 
-    # Firestore hard-fails a document write above 1 MiB, and that failure is
-    # swallowed downstream — which would silently freeze the profile. Warn loudly
-    # while there is still headroom so a bloating doc never looks healthy.
-    approx_bytes = len(json.dumps(profile, default=str).encode("utf-8"))
+    db = admin_firestore()
+    ref = db.collection("UserAura").document(uid)
+
+    def _txn() -> dict[str, Any]:
+        transaction = db.transaction()
+
+        @fs.transactional
+        def _apply(tx: fs.Transaction) -> dict[str, Any]:
+            snap = ref.get(transaction=tx)
+            fresh = snap.to_dict() or {}
+            updated = _merge_profile(fresh, insight, message)
+            tx.set(ref, updated)
+            return updated
+
+        return _apply(transaction)
+
+    updated = await asyncio.to_thread(_txn)
+
+    # Firestore hard-fails a write above 1 MiB and that failure is swallowed downstream,
+    # which would silently freeze the profile. Warn loudly while there is still headroom.
+    approx_bytes = len(json.dumps(updated, default=str).encode("utf-8"))
     if approx_bytes >= _PROFILE_SIZE_WARN_BYTES:
         logger.warn("UserAuraExtractor: profile approaching Firestore 1MB limit", {
             "user_id": uid,
             "approx_bytes": approx_bytes,
-            "interest_categories": category_count(profile),
+            "interest_categories": category_count(updated),
         })
-
-    def _put() -> None:
-        admin_firestore().collection("UserAura").document(uid).set(profile)
-
-    await asyncio.to_thread(_put)
+    return updated
 
 
 def _derive_style_signal_description(
@@ -666,8 +689,7 @@ async def extract_and_update_user_aura(
             temperature=_EXTRACTION_TEMPERATURE,
         ))
 
-        updated = _merge_profile(profile, insight, message)
-        await _write_user_aura_profile(uid, updated)
+        updated = await _merge_and_write_user_aura(uid, insight, message)
 
         logger.info("UserAuraExtractor: profile updated", {
             "user_id": uid,

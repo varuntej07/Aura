@@ -18,6 +18,7 @@ from ..config.settings import settings
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
+from .aura_reflection import consolidate_session
 from .user_aura_extractor import extract_and_update_user_aura
 
 _SESSION_SUMMARY_PROMPT = """\
@@ -385,6 +386,11 @@ async def run_post_session_pipeline(
             message=user_turns_text,
             session_id=session_id,
         ) if user_turns_text else asyncio.sleep(0),
+        # Reflection tier: the same per-session narrative pass text chat uses, so a
+        # voice session also yields storylines/traits, not just flat interests.
+        consolidate_session(
+            user_id, session_id, turns, modality="voice",
+        ) if user_turns_text else asyncio.sleep(0),
         return_exceptions=True,
     )
 
@@ -402,6 +408,11 @@ async def run_post_session_pipeline(
         logger.warn("VoiceSession: aura extraction failed", {
             "user_id": user_id, "session_id": session_id,
             "error": str(results_b[2]),
+        })
+    if isinstance(results_b[3], Exception):
+        logger.warn("VoiceSession: aura reflection failed", {
+            "user_id": user_id, "session_id": session_id,
+            "error": str(results_b[3]),
         })
 
     # Step C: archive check

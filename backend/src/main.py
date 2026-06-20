@@ -52,6 +52,7 @@ from .handlers.briefing import (
     handle_post_world_briefing,
 )
 from .handlers.buddy_pills import handle_refresh_buddy_pills
+from .handlers.aura import handle_consolidate_session
 from .handlers.onboarding_profile import handle_onboarding_profile
 from .handlers.scheduler import handle_scheduler_tick
 from .handlers.signal_content_ingest import handle_signal_content_ingest
@@ -202,6 +203,11 @@ async def threads_reply_endpoint(request: Request) -> JSONResponse:
 @app.get("/threads/{thread_id}/messages")
 async def threads_messages_endpoint(thread_id: str, request: Request) -> JSONResponse:
     return await handle_thread_messages(request, thread_id)
+
+
+@app.post("/aura/consolidate-session")
+async def aura_consolidate_session_endpoint(request: Request) -> JSONResponse:
+    return await handle_consolidate_session(request)
 
 
 _google_auth_transport = GoogleRequest()

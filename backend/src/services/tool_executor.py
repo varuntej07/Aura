@@ -283,6 +283,42 @@ class ToolExecutor:
         # Store as UTC ISO string so the scheduler comparison is lexically correct.
         trigger_at = trigger_at_dt.isoformat()
 
+        # Idempotency guard. The same turn can be replayed - a user editing a chat
+        # message and re-sending it (editAndResend re-runs the whole turn, tools
+        # included), or a retry and the model can also double-call this tool in one turn. 
+        # Each replay would otherwise mint a fresh reminder doc, leaving
+        # the user with redundant duplicates. If an identical pending reminder
+        # already exists (same fire time + same message), return it instead of creating another. 
+        def _find_existing_pending() -> dict[str, Any] | None:
+            query = self._reminders_ref().where(
+                filter=FieldFilter("status", "==", "pending")
+            )
+            for doc in query.stream():
+                existing = doc.to_dict() or {}
+                same_time = existing.get("trigger_at") == trigger_at
+                same_message = (
+                    str(existing.get("message", "")).strip().casefold()
+                    == message.casefold()
+                )
+                if same_time and same_message:
+                    return {"reminder_id": doc.id, **existing}
+            return None
+
+        duplicate = await _run(_find_existing_pending)
+        if duplicate is not None:
+            logger.info("ToolExecutor: duplicate reminder suppressed", {
+                "user_id": self._user_id,
+                "reminder_id": duplicate["reminder_id"],
+                "trigger_at": trigger_at,
+            })
+            return {
+                "reminder_id": duplicate["reminder_id"],
+                "message": duplicate.get("message", message),
+                "trigger_at": duplicate.get("trigger_at", trigger_at),
+                "status": "pending",
+                "priority": duplicate.get("priority", priority),
+            }
+
         reminder_id = str(uuid4())
         now_iso = datetime.now(UTC).isoformat()
 

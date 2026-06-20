@@ -113,6 +113,8 @@ class _AuraProfileBody extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
       children: [
+        // Lead with the narrative (the connected story), then the flatter lists.
+        _StorylinesSection(summaries: _StorylinesSection.parse(profile['storylines'])),
         _ExplicitFactsSection(facts: _strings(profile['explicit_facts'])),
         _GoalsSection(goals: _strings(profile['inferred_goals'])),
         _InterestsSection(
@@ -125,6 +127,7 @@ class _AuraProfileBody extends StatelessWidget {
           tone: profile['dominant_tone'] as String?,
           depthPref: profile['response_depth_preference'] as String?,
         ),
+        _TraitsSection(traits: _TraitsSection.parse(profile['traits'])),
         _DietarySection(patterns: _strings(profile['dietary_patterns'])),
         _StyleSection(
           prefer: _strings(profile['response_style_prefer']),
@@ -177,6 +180,85 @@ class _GoalsSection extends StatelessWidget {
       label: 'Goals Buddy has noticed',
       child: Column(
         children: goals.map((g) => _BulletRow(text: g)).toList(),
+      ),
+    );
+  }
+}
+
+// Section: storylines — the narrative layer (what's going on in the user's life),
+// fused across messages by the per-session reflection tier. Newest/strongest first.
+
+class _StorylinesSection extends StatelessWidget {
+  final List<String> summaries;
+  const _StorylinesSection({required this.summaries});
+
+  /// Parse the `storylines` map ({id: {summary, weight, ...}}) into summary lines
+  /// ranked by stored weight. Tolerates a missing/old-shape field (returns []).
+  static List<String> parse(dynamic storylines) {
+    if (storylines is! Map || storylines.isEmpty) return const [];
+    final rows = <MapEntry<String, double>>[];
+    storylines.forEach((_, node) {
+      if (node is Map && node['summary'] != null) {
+        rows.add(MapEntry(
+          node['summary'].toString(),
+          (node['weight'] as num?)?.toDouble() ?? 0,
+        ));
+      }
+    });
+    rows.sort((a, b) => b.value.compareTo(a.value));
+    return rows.take(6).map((e) => e.key).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (summaries.isEmpty) return const SizedBox.shrink();
+    return _ProfileSection(
+      icon: Icons.auto_stories_outlined,
+      label: 'What\'s going on',
+      child: Column(
+        children: summaries.map((s) => _BulletRow(text: s)).toList(),
+      ),
+    );
+  }
+}
+
+// Section: traits — corroborated personality signals. Mirrors the backend
+// `shown_traits` gate so an uncorroborated or low-confidence guess is never displayed.
+
+class _TraitsSection extends StatelessWidget {
+  final List<String> traits;
+  const _TraitsSection({required this.traits});
+
+  static const _minEvidence = 2;       // == backend TRAIT_MIN_EVIDENCE
+  static const _minConfidence = 0.7;   // == backend TRAIT_MIN_CONFIDENCE
+
+  static List<String> parse(dynamic raw) {
+    if (raw is! Map || raw.isEmpty) return const [];
+    final rows = <MapEntry<String, double>>[];
+    raw.forEach((key, node) {
+      if (node is! Map) return;
+      final evidence = (node['evidence_count'] as num?)?.toInt() ?? 0;
+      final confidence = (node['confidence'] as num?)?.toDouble() ?? 0;
+      if (evidence < _minEvidence || confidence < _minConfidence) return;
+      rows.add(MapEntry(
+        (node['display'] ?? key).toString(),
+        (node['weight'] as num?)?.toDouble() ?? 0,
+      ));
+    });
+    rows.sort((a, b) => b.value.compareTo(a.value));
+    return rows.take(6).map((e) => e.key).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (traits.isEmpty) return const SizedBox.shrink();
+    return _ProfileSection(
+      icon: Icons.emoji_objects_outlined,
+      label: 'What Buddy senses about you',
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: traits.map((t) => _InterestChip(label: t)).toList(),
       ),
     );
   }

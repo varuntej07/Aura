@@ -12,6 +12,7 @@ import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../../data/repositories/chat_repository.dart';
 import '../../../data/services/buddy_pills_refresher.dart';
+import '../../../data/services/session_consolidator.dart';
 import '../../../data/services/chat_service_provider.dart';
 import '../../../data/services/chat_backup_service.dart';
 import '../../../data/services/chat_session_manager.dart';
@@ -180,6 +181,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
         suggestionPillsRepository: context.read<AgentSuggestionPillsRepository>(),
         buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
+        sessionConsolidator: context.read<SessionConsolidator>(),
       );
       _textChatViewModelCreated = true;
     }
