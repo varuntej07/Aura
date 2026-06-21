@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../data/models/reminder_model.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/reminders_viewmodel.dart';
+import '../../widgets/sign_in_required_view.dart';
 
 /// Full-page reminders list, accessible from Settings → Reminders.
 ///
@@ -89,6 +91,17 @@ class _RemindersViewState extends State<_RemindersView> {
       ),
       body: Consumer<RemindersViewModel>(
         builder: (context, vm, _) {
+          // Guest (logged-out) user reached this via Settings. Offer sign-in
+          // instead of a misleading "no reminders yet" dead-end.
+          final uid = context.read<AuthViewModel>().user?.uid;
+          if (uid == null) {
+            return SignInRequiredView(
+              icon: Icons.notifications_none_outlined,
+              message: 'Sign in to see and manage your reminders.',
+              onSignIn: () => context.go('/login'),
+            );
+          }
+
           if (vm.state == ViewState.loading) {
             return const Center(
               child: CircularProgressIndicator(
@@ -100,10 +113,8 @@ class _RemindersViewState extends State<_RemindersView> {
 
           final active = vm.activeReminders;
           final completed = vm.completedReminders;
-          final uid = context.read<AuthViewModel>().user?.uid ?? '';
 
-          Future<void> onRefresh() =>
-              uid.isEmpty ? Future<void>.value() : vm.refreshReminders(uid);
+          Future<void> onRefresh() => vm.refreshReminders(uid);
 
           if (active.isEmpty && completed.isEmpty) {
             // Wrapped in a scroll view so pull-to-refresh works on the empty

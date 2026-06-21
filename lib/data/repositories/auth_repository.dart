@@ -110,6 +110,39 @@ class AuthRepository {
     }
   }
 
+  /// Placeholder display name written when no real name is known yet — e.g. the
+  /// auth-state stream ([userModelStream]) creates the user doc on first email
+  /// sign-up before the typed name has propagated to the Firebase Auth profile (a
+  /// create race). It is treated as "no real name" by the reconciler below, so it
+  /// is repaired the instant a real name appears and existing placeholder docs
+  /// self-heal on the next sign-in.
+  static const String placeholderDisplayName = 'User';
+
+  /// Returns the first real (trimmed, non-blank, non-placeholder) name among
+  /// [candidates], or null if none qualify. The caller orders candidates by
+  /// authority: the explicit sign-up name first, then the Firebase Auth profile.
+  String? _firstRealName(Iterable<String?> candidates) {
+    for (final candidate in candidates) {
+      final trimmed = candidate?.trim();
+      if (trimmed != null &&
+          trimmed.isNotEmpty &&
+          trimmed != placeholderDisplayName) {
+        return trimmed;
+      }
+    }
+    return null;
+  }
+
+  /// True when the stored display name is missing, blank, or the
+  /// [placeholderDisplayName] — i.e. it does not hold a name the user would
+  /// recognise and is safe to repair.
+  bool _isPlaceholderDisplayName(String? stored) {
+    final trimmed = stored?.trim();
+    return trimmed == null ||
+        trimmed.isEmpty ||
+        trimmed == placeholderDisplayName;
+  }
+
   /// Loads the user doc (creating it if missing) and refreshes activity on every
   /// call. [loginMetadata] is non-null only on a real sign-in (not silent session
   /// restore); when present it is merged into the same doc write so the sign-in
@@ -129,9 +162,22 @@ class AuthRepository {
         // Detect timezone on every sign-in so it stays accurate if the user travels
         final timezone = await _detectTimezone();
         final now = DateTime.now();
+
+        // Reconcile the display name. The doc can carry the placeholder name when
+        // the auth-state stream created it on first sign-up before the typed name
+        // reached the Firebase Auth profile (a known create race). Repair it from
+        // the best real name available — the explicit sign-up [name], else the
+        // Firebase Auth profile — so the doc converges to the right name and any
+        // existing placeholder doc self-heals on the next sign-in. A real stored
+        // name is never overwritten, so healthy accounts incur no extra write.
+        final repairedName = _isPlaceholderDisplayName(user.displayName)
+            ? _firstRealName([name, firebaseUser.displayName])
+            : null;
+
         final updated = user.copyWith(
           lastActiveAt: now,
           timezone: timezone,
+          displayName: repairedName,
         );
         final writeResult = await _firestoreService.updateDocument(
           AppConstants.usersCollection,
@@ -139,6 +185,7 @@ class AuthRepository {
           {
             'last_active_at': now.toUtc().toIso8601String(),
             'timezone': timezone,
+            'display_name': ?repairedName,
             ...?loginMetadata,
           },
         );
@@ -168,7 +215,7 @@ class AuthRepository {
     final now = DateTime.now();
     final timezone = await _detectTimezone();
     final resolvedName =
-        (name != null && name.isNotEmpty) ? name : (firebaseUser.displayName ?? 'User');
+        _firstRealName([name, firebaseUser.displayName]) ?? placeholderDisplayName;
     final user = UserModel(
       uid: firebaseUser.uid,
       displayName: resolvedName,

@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../data/models/connector_models.dart';
+import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/connectors_viewmodel.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/loading_indicator.dart';
+import '../../widgets/sign_in_required_view.dart';
 
 class ConnectorsScreen extends StatefulWidget {
   const ConnectorsScreen({super.key});
@@ -20,6 +23,10 @@ class _ConnectorsScreenState extends State<ConnectorsScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Skip the backend load for a logged-out guest — it would just 401 and
+      // surface an error. The build gates the body to a sign-in prompt instead.
+      if (!mounted) return;
+      if (context.read<AuthViewModel>().user == null) return;
       context.read<ConnectorsViewModel>().load();
     });
   }
@@ -36,6 +43,17 @@ class _ConnectorsScreenState extends State<ConnectorsScreen> {
       ),
       body: Consumer<ConnectorsViewModel>(
         builder: (context, vm, _) {
+          // Guest (logged-out) user reached this via Settings. Offer sign-in
+          // instead of a 401 error from the connector load.
+          if (context.read<AuthViewModel>().user == null) {
+            return SignInRequiredView(
+              icon: Icons.hub_rounded,
+              message:
+                  'Sign in to connect your calendar, Gmail, and more to Buddy.',
+              onSignIn: () => context.go('/login'),
+            );
+          }
+
           if (vm.state == ViewState.loading && !vm.googleCalendar.enabled) {
             return const FullScreenLoader(message: 'Loading connectors...');
           }

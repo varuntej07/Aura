@@ -321,13 +321,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
 
                         const SizedBox(height: 28),
-                        _GlassSignOutButton(
-                          onTap: () => _signOut(context),
-                        ),
-                        const SizedBox(height: 12),
-                        _GlassDeleteAccountButton(
-                          onTap: () => _confirmDeleteAccount(context),
-                        ),
+                        // Sign Out / Delete only make sense for a real session.
+                        // A logged-out guest who lands here gets a Sign In button
+                        // instead, never a dead "Sign Out".
+                        if (user != null) ...[
+                          _GlassSignOutButton(
+                            onTap: () => _signOut(context),
+                          ),
+                          const SizedBox(height: 12),
+                          _GlassDeleteAccountButton(
+                            onTap: () => _confirmDeleteAccount(context),
+                          ),
+                        ] else
+                          _GlassSignInButton(
+                            onTap: () => context.go('/login'),
+                          ),
 
                         const SizedBox(height: 28),
                         Center(
@@ -567,6 +575,49 @@ class _GlassInfoTile extends StatelessWidget {
                 color: AppColors.textPrimary, fontSize: 14),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// Sign-in button — shown in place of Sign Out / Delete when logged out, so a
+// guest who lands in Settings has a clear, accent-styled way back in.
+
+class _GlassSignInButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _GlassSignInButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: FauxGlassCard(
+        borderRadius: 16,
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        borderColor: AppColors.accent.withValues(alpha: 0.4),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppColors.accent.withValues(alpha: 0.16),
+            AppColors.accent.withValues(alpha: 0.07),
+          ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.login_rounded, color: AppColors.accentDark, size: 18),
+            const SizedBox(width: 8),
+            Text(
+              'Sign In',
+              style: TextStyle(
+                color: AppColors.accentDark,
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

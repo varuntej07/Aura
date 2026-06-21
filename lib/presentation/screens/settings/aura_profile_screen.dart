@@ -1,10 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../viewmodels/auth_viewmodel.dart';
+import '../../widgets/sign_in_required_view.dart';
 import '../onboarding/aura_consent_screen.dart';
 
 class AuraProfileScreen extends StatelessWidget {
@@ -19,7 +21,39 @@ class AuraProfileScreen extends StatelessWidget {
     final authVm = context.watch<AuthViewModel>();
     final uid = authVm.user?.uid;
     if (uid == null) {
-      return const _ErrorBody(message: 'Sign in to view your Aura profile.');
+      // Guest (logged-out) user reached this via Settings. Offer a real way in
+      // instead of a dead-end message.
+      return Scaffold(
+        backgroundColor: Colors.transparent,
+        body: AmbientBackground(
+          child: SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  child: Row(
+                    children: [
+                      GlassIconButton(
+                        icon: Icons.arrow_back_ios_new,
+                        onTap: () => Navigator.pop(context),
+                        iconSize: 17,
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: SignInRequiredView(
+                    icon: Icons.auto_awesome_outlined,
+                    message: 'Sign in to see what Buddy has learned about you.',
+                    onSignIn: () => context.go('/login'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
     }
     // Memory is only built (and only readable) with explicit consent. When it is
     // off — never granted, or later turned off — show the invitation to turn it

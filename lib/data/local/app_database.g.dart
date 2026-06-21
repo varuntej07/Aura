@@ -2091,10 +2091,7 @@ final class $$ChatSessionsTableReferences
   static MultiTypedResultKey<$ChatMessagesTable, List<ChatMessage>>
   _chatMessagesRefsTable(_$AppDatabase db) => MultiTypedResultKey.fromTable(
     db.chatMessages,
-    aliasName: $_aliasNameGenerator(
-      db.chatSessions.id,
-      db.chatMessages.sessionId,
-    ),
+    aliasName: 'chat_sessions__id__chat_messages__session_id',
   );
 
   $$ChatMessagesTableProcessedTableManager get chatMessagesRefs {
@@ -2486,10 +2483,8 @@ final class $$ChatMessagesTableReferences
     extends BaseReferences<_$AppDatabase, $ChatMessagesTable, ChatMessage> {
   $$ChatMessagesTableReferences(super.$_db, super.$_table, super.$_typedResult);
 
-  static $ChatSessionsTable _sessionIdTable(_$AppDatabase db) =>
-      db.chatSessions.createAlias(
-        $_aliasNameGenerator(db.chatMessages.sessionId, db.chatSessions.id),
-      );
+  static $ChatSessionsTable _sessionIdTable(_$AppDatabase db) => db.chatSessions
+      .createAlias('chat_messages__session_id__chat_sessions__id');
 
   $$ChatSessionsTableProcessedTableManager get sessionId {
     final $_column = $_itemColumn<String>('session_id')!;
