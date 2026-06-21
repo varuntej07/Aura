@@ -44,7 +44,14 @@ class DoneEvent extends ChatStreamEvent {
 
 class ErrorStreamEvent extends ChatStreamEvent {
   final String message;
-  ErrorStreamEvent(this.message);
+
+  /// Originating [ErrorCode] for a client-side transport failure (timeout,
+  /// network down, 5xx). Null for a server-emitted `error` event, whose meaning
+  /// lives in [message]. Carrying the code lets the UI map it to copy directly
+  /// instead of re-deriving the cause by substring-matching the message text.
+  final ErrorCode? code;
+
+  ErrorStreamEvent(this.message, {this.code});
 }
 
 class ChatLimitReachedEvent extends ChatStreamEvent {
@@ -203,13 +210,13 @@ class BackendApiService implements ChatServiceProvider {
         stackTrace: st,
         tag: 'BackendApiService',
       );
-      yield ErrorStreamEvent(_streamErrorMessage(e));
+      // Preserve the originating ErrorCode so the UI classifies by code, not by
+      // re-parsing the message text.
+      final appEx = e is AppException
+          ? e
+          : AppException.unexpected(e.toString(), error: e, stackTrace: st);
+      yield ErrorStreamEvent(appEx.message, code: appEx.code);
     }
-  }
-
-  static String _streamErrorMessage(Object error) {
-    if (error is AppException) return error.message;
-    return AppException.unexpected(error.toString()).message;
   }
 
   static ChatStreamEvent? _parseStreamEvent(Map<String, dynamic> json) {
@@ -277,6 +284,22 @@ class BackendApiService implements ChatServiceProvider {
     return _apiClient.post(
       '/chat/buddy-pills/refresh',
       const {},
+      (json) => json,
+    );
+  }
+
+  /// Ships a finished chat session's transcript to the per-session reflection tier
+  /// (the narrative layer of UserAura). Server returns 202; the body is ignored.
+  /// Reflection is idempotent per [sessionId] and consent-gated server-side, so a
+  /// re-send or duplicate is safe.
+  Future<Result<Map<String, dynamic>>> consolidateSession({
+    required String sessionId,
+    required List<Map<String, dynamic>> turns,
+    String modality = 'text',
+  }) async {
+    return _apiClient.post(
+      '/aura/consolidate-session',
+      {'session_id': sessionId, 'turns': turns, 'modality': modality},
       (json) => json,
     );
   }

@@ -99,6 +99,7 @@ class FirestoreService {
     Map<String, dynamic> data,
     T Function(Map<String, dynamic>) fromJson, {
     bool merge = true,
+    bool readBack = true,
   }) async {
     final firestore = _firestore;
     if (firestore == null) {
@@ -111,6 +112,14 @@ class FirestoreService {
             .collection(collection)
             .doc(docId)
             .set(data, SetOptions(merge: merge));
+        // Write-only paths (e.g. the feedback sink, whose security rules allow
+        // create but deny read) must NOT read the doc back: the denied read
+        // would throw and surface as a FALSE write failure even though the write
+        // already succeeded. Such callers pass readBack: false and we echo the
+        // data we just wrote instead of re-fetching it.
+        if (!readBack) {
+          return Result.success(fromJson(data));
+        }
         final result = await getDocument(collection, docId, fromJson);
         return result;
       } catch (e, st) {

@@ -60,14 +60,14 @@ class AppException implements Exception {
   factory AppException.sessionTokenUnavailable() {
     return const AppException(
       code: ErrorCode.authTokenExpired,
-      message: "Couldn't verify your session. Check your connection and try again.",
+      message: "Couldn't verify your session. Try again in a moment.",
     );
   }
 
   factory AppException.serverError(int statusCode, String body) {
     return AppException(
       code: ErrorCode.serverError,
-      message: "Couldn't reach your Buddy. Check your connection and try again.",
+      message: "Something went wrong on Buddy's end. Try again in a moment.",
       originalError: 'Server error ($statusCode): $body',
     );
   }
@@ -75,7 +75,7 @@ class AppException implements Exception {
   factory AppException.requestTimeout() {
     return const AppException(
       code: ErrorCode.requestTimeout,
-      message: "Couldn't reach your Buddy. Check your connection and try again.",
+      message: "Buddy took too long to respond. Mind trying again?",
     );
   }
 

@@ -72,6 +72,10 @@ class AppFeedbackService {
       },
       (json) => json,
       merge: false,
+      // The feedback sink is write-only by security rule (create allowed, read
+      // denied). Skip the read-back so a denied re-fetch can't report a false
+      // failure on a write that actually succeeded.
+      readBack: false,
     );
 
     return result.when(
@@ -82,7 +86,9 @@ class AppFeedbackService {
       failure: (error) {
         AppLogger.error('Feedback submit failed',
             error: error, tag: 'AppFeedbackService');
-        return "Couldn't send that just now. Check your connection and try again.";
+        // Don't blame the connection — this fires on any write failure
+        // (permission, serialization, ...), not just network.
+        return "Couldn't send that just now. Mind trying again?";
       },
     );
   }

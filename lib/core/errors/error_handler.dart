@@ -83,9 +83,11 @@ class ErrorHandler {
   static String userMessage(AppException e) {
     switch (e.code) {
       case ErrorCode.networkUnavailable:
-      case ErrorCode.requestTimeout:
-      case ErrorCode.serverError:
         return "Couldn't reach Buddy. Check your connection and try again.";
+      case ErrorCode.requestTimeout:
+        return "Buddy took too long to respond. Mind trying again?";
+      case ErrorCode.serverError:
+        return "Something went wrong on Buddy's end. Try again in a moment.";
       case ErrorCode.unauthorized:
       case ErrorCode.authFailed:
       case ErrorCode.authCancelled:
