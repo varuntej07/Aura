@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# deploy.sh — Build and deploy Juno backend + voice worker to Google Cloud Run
+# deploy.sh — Build and deploy the Juno backend to Google Cloud Run.
+# (The voice worker now runs on LiveKit Cloud Agents, not Cloud Run 
 #
 # Prerequisites (run once):
 #   1. Install gcloud CLI: https://cloud.google.com/sdk/docs/install
@@ -46,11 +47,9 @@ PROJECT_ID="${1:?Usage: deploy.sh <GCP_PROJECT_ID> <REGION>}"
 REGION="${2:-us-central1}"
 SERVICE_NAME="juno-backend"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
-WORKER_SERVICE_NAME="juno-voice-worker"
-WORKER_IMAGE="gcr.io/${PROJECT_ID}/${WORKER_SERVICE_NAME}"
 LIVEKIT_URL="wss://aura-i06eolmd.livekit.cloud"
 
-echo "▶ Deploying ${SERVICE_NAME} + ${WORKER_SERVICE_NAME} to project=${PROJECT_ID} region=${REGION}"
+echo "▶ Deploying ${SERVICE_NAME} to project=${PROJECT_ID} region=${REGION}"
 
 # Enable required APIs (idempotent)
 echo "▶ Enabling GCP APIs..."
@@ -65,7 +64,7 @@ gcloud services enable \
 # Build & push image
 echo "▶ Building Docker image..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-docker build -t "${IMAGE}:latest" "${SCRIPT_DIR}"
+docker build -f "${SCRIPT_DIR}/Dockerfile.api" -t "${IMAGE}:latest" "${SCRIPT_DIR}"
 
 echo "▶ Pushing image to GCR..."
 docker push "${IMAGE}:latest"
@@ -95,7 +94,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --project="${PROJECT_ID}" \
   --platform=managed \
   --allow-unauthenticated \
-  --min-instances=1 \
+  --min-instances=0 \
   --max-instances=3 \
   --memory=1Gi \
   --cpu=1 \
@@ -173,46 +172,13 @@ ensure_scheduler_job "juno-content-ingest" "0 */3 * * *" "/internal/signal-engin
 
 echo "✅ Cloud Scheduler jobs reconciled"
 
-# Voice worker
-echo ""
-echo "▶ Building voice worker Docker image..."
-docker build -f "${SCRIPT_DIR}/Dockerfile.worker" -t "${WORKER_IMAGE}:latest" "${SCRIPT_DIR}"
-
-echo "▶ Pushing voice worker image to GCR..."
-docker push "${WORKER_IMAGE}:latest"
-
-echo "▶ Deploying voice worker to Cloud Run..."
-gcloud run deploy "${WORKER_SERVICE_NAME}" \
-  --image="${WORKER_IMAGE}:latest" \
-  --region="${REGION}" \
-  --project="${PROJECT_ID}" \
-  --platform=managed \
-  --allow-unauthenticated \
-  --min-instances=1 \
-  --max-instances=2 \
-  --memory=4Gi \
-  --cpu=2 \
-  --no-cpu-throttling \
-  --timeout=3600 \
-  --concurrency=1 \
-  --set-env-vars="ENV=production" \
-  --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}" \
-  --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
-  --set-secrets="OPENAI_API_KEY=juno-openai-api-key:latest" \
-  --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
-  --set-secrets="LIVEKIT_API_KEY=livekit-api-key:latest" \
-  --set-secrets="LIVEKIT_API_SECRET=livekit-api-secret:latest" \
-  --set-secrets="DEEPGRAM_API_KEY=deepgram-api-key:latest" \
-  --set-secrets="CARTESIA_API_KEY=cartesia-api-key:latest" \
-  --set-secrets="FIREBASE_WEB_API_KEY=juno-firebase-web-api-key:latest" \
-  --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
-  --set-secrets="/run/secrets/service-account.json=juno-firebase-service-account:latest" \
-  --set-env-vars="GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/service-account.json"
-
-WORKER_URL=$(gcloud run services describe "${WORKER_SERVICE_NAME}" \
-  --region="${REGION}" \
-  --project="${PROJECT_ID}" \
-  --format="value(status.url)")
-
-echo ""
-echo "✅ ${WORKER_SERVICE_NAME} deployed: ${WORKER_URL}"
+# ── Voice worker ─────────────────────────────────────────────────────────────
+# The voice worker NO LONGER runs on Cloud Run. It is hosted on LiveKit Cloud
+# Agents (managed, pay-per-minute, scale-to-zero) to avoid paying for an
+# always-on container. Deploy/update it from backend/ with:
+#
+#   lk agent deploy            # builds backend/Dockerfile (the worker image)
+#
+# Secrets/env live in LiveKit Cloud (lk agent update-secrets), not here. The
+# Firebase service account is mounted via `lk agent ... --secret-mount
+# ./service-account.json` at /etc/secrets/service-account.json.

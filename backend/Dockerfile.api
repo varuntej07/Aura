@@ -1,0 +1,49 @@
+# =============================================================================
+# FastAPI BACKEND image (Cloud Run service `juno-backend`).
+# Built explicitly with `-f Dockerfile.api` (see deploy.sh and the dark-deploy
+# command). The default `Dockerfile` is the LiveKit voice worker, because
+# LiveKit Cloud's builder requires that exact filename.
+# =============================================================================
+# ── Stage 1: Install dependencies ────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install third-party dependencies keyed only on pyproject.toml. A stub package lets
+# `pip install .` resolve without the real source, so editing code does NOT invalidate
+# this layer — deps reinstall only when pyproject.toml changes. The real src/ is copied
+# into the runtime stage from the build context below, not from this builder.
+COPY pyproject.toml ./
+RUN mkdir -p src && touch src/__init__.py
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
+
+# ── Stage 2: Lean runtime image ───────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+WORKDIR /app
+
+# Non-root user for security
+RUN groupadd -r juno && useradd -r -g juno juno
+
+# Pull installed packages + binaries from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy source (uvicorn resolves src.main:app from /app/src/)
+COPY src/ ./src/
+
+RUN chown -R juno:juno /app
+USER juno
+
+# Cloud Run injects $PORT at runtime (default 8080).
+# VOICE_GATEWAY_PORT is the app-level setting — keep in sync.
+ENV VOICE_GATEWAY_PORT=8080
+EXPOSE 8080
+
+# Use shell form so ${PORT} is expanded at container start
+CMD uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1
