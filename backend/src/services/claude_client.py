@@ -17,6 +17,7 @@ from langfuse import observe
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..shared.tools import claude_tool_definitions
+from .gemini_chat_fallback import stream_gemini_chat_fallback
 from .tool_executor import ToolExecutor
 
 _MAX_TURNS = 6
@@ -98,9 +99,12 @@ class ClaudeClient:
         all_captured_tool_data: list[dict[str, Any]] = []
         turn = 0
         response: Any = None
+        # Anthropic fallback chain (Sonnet -> Haiku), resolved once per request.
+        model_chain = [settings.ANTHROPIC_CHAT_MODEL, settings.ANTHROPIC_CHAT_MODEL_FALLBACK]
+        current_model_idx = 0
 
         logger.info("Claude: starting conversation", {
-            "model": settings.ANTHROPIC_CHAT_MODEL,
+            "model": model_chain[current_model_idx],
             "max_tokens": settings.ANTHROPIC_MAX_TOKENS,
             "user_content_type": "blocks" if isinstance(user_content, list) else "text",
             "history_turns": len(prior),
@@ -108,41 +112,56 @@ class ClaudeClient:
 
         for turn in range(_MAX_TURNS):
             turn_start = time.monotonic()
-            logger.debug(f"Claude: API call (turn {turn + 1}/{_MAX_TURNS})", {
-                "model": settings.ANTHROPIC_CHAT_MODEL,
-                "messages_in_history": len(messages),
-            })
-
-            for attempt in range(1, _MAX_RETRIES + 1):
+            response = None
+            attempt = 0
+            while response is None:
+                attempt += 1
+                model_id = model_chain[current_model_idx]
+                logger.debug(f"Claude: API call (turn {turn + 1}/{_MAX_TURNS})", {
+                    "model": model_id,
+                    "messages_in_history": len(messages),
+                })
                 try:
                     response = await self._client.messages.create(
-                        model=settings.ANTHROPIC_CHAT_MODEL,
+                        model=model_id,
                         max_tokens=settings.ANTHROPIC_MAX_TOKENS,
                         system=system_prompt,  # type: ignore[arg-type]
                         tools=tools,  # type: ignore[arg-type]
                         messages=messages,  # type: ignore[arg-type]
                     )
-                    break  # success
                 except _RETRYABLE_ERRORS as exc:
-                    if attempt == _MAX_RETRIES:
-                        logger.exception("Claude: API call failed after retries", {
+                    if attempt < _MAX_RETRIES:
+                        delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                        logger.warn("Claude: retryable error, backing off", {
+                            "model": model_id,
                             "turn": turn + 1,
                             "attempt": attempt,
+                            "delay_s": round(delay, 2),
                             "error_type": type(exc).__name__,
                             "error": str(exc),
                         })
-                        raise
-                    delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                    logger.warn("Claude: retryable error, backing off", {
+                        await asyncio.sleep(delay)
+                        continue
+                    if current_model_idx < len(model_chain) - 1:
+                        current_model_idx += 1
+                        attempt = 0
+                        logger.warn("Claude: model exhausted, falling back", {
+                            "from_model": model_id,
+                            "to_model": model_chain[current_model_idx],
+                            "turn": turn + 1,
+                        })
+                        continue
+                    logger.exception("Claude: API call failed after retries (chain exhausted)", {
+                        "model": model_id,
                         "turn": turn + 1,
                         "attempt": attempt,
-                        "delay_s": round(delay, 2),
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     })
-                    await asyncio.sleep(delay)
+                    raise
                 except Exception as exc:
                     logger.exception("Claude: API call failed", {
+                        "model": model_id,
                         "turn": turn + 1,
                         "attempt": attempt,
                         "error_type": type(exc).__name__,
@@ -153,7 +172,7 @@ class ClaudeClient:
             assert response is not None  # retry loop always raises or assigns
             turn_ms = int((time.monotonic() - turn_start) * 1000)
             logger.info(f"Claude: API response (turn {turn + 1})", {
-                "model": settings.ANTHROPIC_CHAT_MODEL,
+                "model": model_chain[current_model_idx],
                 "stop_reason": response.stop_reason,
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
@@ -269,9 +288,11 @@ class ClaudeClient:
         tool_names_used: list[str] = []
         all_captured_tool_data: list[dict[str, Any]] = []
         text_started = False
+        model_chain = [settings.ANTHROPIC_CHAT_MODEL, settings.ANTHROPIC_CHAT_MODEL_FALLBACK]
+        current_model_idx = 0
 
         logger.info("Claude: starting stream", {
-            "model": settings.ANTHROPIC_CHAT_MODEL,
+            "model": model_chain[current_model_idx],
             "user_content_type": "blocks" if isinstance(user_content, list) else "text",
             "history_turns": len(prior),
         })
@@ -280,10 +301,13 @@ class ClaudeClient:
             for turn in range(_MAX_TURNS):
                 response = None
 
-                for attempt in range(1, _MAX_RETRIES + 1):
+                attempt = 0
+                while response is None:
+                    attempt += 1
+                    model_id = model_chain[current_model_idx]
                     try:
                         async with self._client.messages.stream(
-                            model=settings.ANTHROPIC_CHAT_MODEL,
+                            model=model_id,
                             max_tokens=settings.ANTHROPIC_MAX_TOKENS,
                             system=system_prompt,  # type: ignore[arg-type]
                             tools=tools,  # type: ignore[arg-type]
@@ -330,23 +354,55 @@ class ClaudeClient:
                                         turn_text_buffer.clear()
 
                             response = await stream.get_final_message()
-                        break  # success
+                        # success : `response` is set, so the while loop exits
                     except _RETRYABLE_ERRORS as exc:
-                        # Don't retry once we've started streaming text — can't undo yielded chunks
-                        if text_started or attempt == _MAX_RETRIES:
+                        # Once a token has streamed we can neither replay it nor switch models,
+                        # so propagate and let the outer handler yield one error event.
+                        if text_started:
                             raise
-                        delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                        logger.warn("Claude stream: retrying", {
+                        if attempt < _MAX_RETRIES:
+                            delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                            logger.warn("Claude stream: retrying", {
+                                "model": model_id,
+                                "turn": turn + 1,
+                                "attempt": attempt,
+                                "delay_s": round(delay, 2),
+                                "error": str(exc),
+                            })
+                            await asyncio.sleep(delay)
+                            continue
+                        # This model's retry budget is spent and nothing has streamed yet.
+                        if current_model_idx < len(model_chain) - 1:
+                            current_model_idx += 1
+                            attempt = 0
+                            logger.warn("Claude stream: model exhausted, falling back", {
+                                "from_model": model_id,
+                                "to_model": model_chain[current_model_idx],
+                                "turn": turn + 1,
+                            })
+                            continue
+                        # Whole Anthropic chain is down before any token reached the user —
+                        # hand the rest of the conversation to the cross-provider Gemini hop,
+                        # which emits the same SSE events (and its own `done`).
+                        logger.warn("Claude stream: Anthropic chain exhausted, delegating to Gemini", {
                             "turn": turn + 1,
-                            "attempt": attempt,
-                            "delay_s": round(delay, 2),
                             "error": str(exc),
                         })
-                        await asyncio.sleep(delay)
+                        async for gemini_event in stream_gemini_chat_fallback(
+                            tool_executor=self._tool_executor,
+                            system_prompt=system_prompt,
+                            messages=messages,
+                            tools=tools,
+                            captured_tool_data=all_captured_tool_data,
+                            tool_names_used=tool_names_used,
+                        ):
+                            yield gemini_event
+                        return
 
                 assert response is not None
 
                 logger.info(f"Claude stream: turn {turn + 1} complete", {
+                    "model": model_chain[current_model_idx],
                     "stop_reason": response.stop_reason,
                     "input_tokens": response.usage.input_tokens,
                     "output_tokens": response.usage.output_tokens,

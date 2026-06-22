@@ -210,6 +210,7 @@ class ModelProvider:
         logger.debug("ModelProvider.balanced", {"model": model_id, "prompt_len": len(prompt)})
         return await self._call(
             model_id=model_id,
+            fallback_chain=[settings.TIER_BALANCED_FALLBACK],
             prompt=prompt,
             system=system,
             tools=tools,
@@ -233,6 +234,7 @@ class ModelProvider:
         logger.debug("ModelProvider.expert", {"model": model_id, "prompt_len": len(prompt)})
         return await self._call(
             model_id=model_id,
+            fallback_chain=[settings.TIER_EXPERT_FALLBACK, settings.TIER_CHEAP],
             prompt=prompt,
             system=system,
             tools=tools,
@@ -284,10 +286,11 @@ class ModelProvider:
         this does not flatten to text. Plain tool-use turn: no thinking, no temperature
         — the step discipline lives in the system prompt, not in extended reasoning.
         Streams so a longer turn never trips the SDK HTTP timeout."""
-        model_id = settings.REASON_STEP_MODEL
+        # Anthropic -> Anthropic only: this returns RAW Anthropic tool_use blocks, which
+        # Gemini cannot produce, so the fallback stays Sonnet -> Haiku.
+        model_chain = [settings.REASON_STEP_MODEL, settings.REASON_STEP_MODEL_FALLBACK]
         client = self._get_anthropic_client().with_options(timeout=_REASON_TIMEOUT_S)
         kwargs: dict[str, Any] = {
-            "model": model_id,
             "max_tokens": 4000,
             "messages": messages,
         }
@@ -296,30 +299,68 @@ class ModelProvider:
         if tools:
             kwargs["tools"] = tools
 
-        logger.debug("ModelProvider.reason_turn", {"model": model_id, "turns": len(messages)})
-
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                async with client.messages.stream(**kwargs) as stream:
-                    return await stream.get_final_message()
-            except _ANTHROPIC_RETRYABLE as exc:
-                if attempt == _MAX_RETRIES:
-                    logger.exception("ModelProvider: reason_turn() failed after retries", {
+        for model_idx, model_id in enumerate(model_chain):
+            is_last_model = model_idx == len(model_chain) - 1
+            logger.debug("ModelProvider.reason_turn", {"model": model_id, "turns": len(messages)})
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    async with client.messages.stream(model=model_id, **kwargs) as stream:
+                        message = await stream.get_final_message()
+                    if model_idx > 0:
+                        logger.warn("ModelProvider: reason_turn() recovered on fallback model", {
+                            "model": model_id,
+                            "attempts": attempt,
+                        })
+                    return message
+                except anthropic.NotFoundError as exc:
+                    if not is_last_model:
+                        logger.warn("ModelProvider: reason_turn() model unavailable (404), falling back", {
+                            "from_model": model_id,
+                            "to_model": model_chain[model_idx + 1],
+                            "error": str(exc)[:120],
+                        })
+                        break
+                    logger.exception("ModelProvider: reason_turn() model unavailable, no fallback left", {
                         "model": model_id,
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
                         "error": str(exc),
                     })
                     raise
-                delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                logger.warn("ModelProvider: reason_turn() retryable error, backing off", {
-                    "model": model_id,
-                    "attempt": attempt,
-                    "delay_s": round(delay, 2),
-                    "error_type": type(exc).__name__,
-                })
-                await asyncio.sleep(delay)
-        # retry loop always returns or raises; this line is unreachable
+                except anthropic.BadRequestError:
+                    # 400 fails identically on the next model — raise, never fall back.
+                    logger.exception("ModelProvider: reason_turn() bad request (400), not falling back", {
+                        "model": model_id,
+                    })
+                    raise
+                except _ANTHROPIC_RETRYABLE as exc:
+                    if attempt == _MAX_RETRIES:
+                        if is_quota_exhausted(exc):
+                            logger.error(
+                                "ModelProvider: reason_turn() Anthropic quota EXHAUSTED (429)",
+                                {"model": model_id, "error": str(exc)[:300]},
+                            )
+                        if not is_last_model:
+                            logger.warn("ModelProvider: reason_turn() retries exhausted, falling back", {
+                                "from_model": model_id,
+                                "to_model": model_chain[model_idx + 1],
+                                "error_type": type(exc).__name__,
+                            })
+                            break
+                        logger.exception("ModelProvider: reason_turn() failed after retries", {
+                            "model": model_id,
+                            "attempt": attempt,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        })
+                        raise
+                    delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                    logger.warn("ModelProvider: reason_turn() retryable error, backing off", {
+                        "model": model_id,
+                        "attempt": attempt,
+                        "delay_s": round(delay, 2),
+                        "error_type": type(exc).__name__,
+                    })
+                    await asyncio.sleep(delay)
+        # model loop always returns or raises; this line is unreachable
         raise RuntimeError("ModelProvider: reason_turn() retry loop exited unexpectedly")
 
     async def _call(
@@ -348,6 +389,7 @@ class ModelProvider:
         elif provider == "anthropic":
             raw = await self._call_anthropic(
                 model_id=model_id,
+                fallback_chain=chain,
                 prompt=prompt,
                 system=system,
                 tools=tools,
@@ -626,6 +668,7 @@ class ModelProvider:
         self,
         *,
         model_id: str,
+        fallback_chain: list[str],
         prompt: str,
         system: str | None,
         tools: list[dict] | None,
@@ -650,6 +693,29 @@ class ModelProvider:
         if tools:
             kwargs["tools"] = tools
 
+        async def _use_next_in_chain(reason: str, log_extra: dict) -> str:
+            # Recurse back through _call so the next model re-infers its provider:
+            # the terminal hop of an expert() chain (Sonnet -> Haiku -> Gemini Flash)
+            # lands in _call_gemini automatically. response_model=None keeps parsing
+            # in the OUTER _call so we never double-parse. A Gemini terminal hop drops
+            # tools (flatten-to-text), an acceptable degradation for these paths.
+            next_model = fallback_chain[0]
+            logger.warn(f"ModelProvider: {reason}, falling back", {
+                "from_model": model_id,
+                "to_model": next_model,
+                **log_extra,
+            })
+            return await self._call(
+                model_id=next_model,
+                fallback_chain=fallback_chain[1:],
+                prompt=prompt,
+                system=system,
+                tools=tools,
+                history=history,
+                response_model=None,
+                temperature=temperature,
+            )
+
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 response = await asyncio.wait_for(
@@ -657,10 +723,39 @@ class ModelProvider:
                     timeout=_TIMEOUT_S,
                 )
                 text_blocks = [b.text for b in response.content if b.type == "text"]
+                if attempt > 1:
+                    logger.warn("ModelProvider: Anthropic recovered after retries", {
+                        "model": model_id,
+                        "attempts": attempt,
+                    })
                 return " ".join(text_blocks).strip()
-            except TimeoutError:
+            except anthropic.NotFoundError as exc:
+                # Model not available for this account — retrying the same model is
+                # pointless, jump straight to the next link (mirrors Gemini's 404 path).
+                if fallback_chain:
+                    return await _use_next_in_chain(
+                        "model unavailable (404)", {"error": str(exc)[:120]}
+                    )
+                logger.exception("ModelProvider: Anthropic model unavailable, no fallback left", {
+                    "model": model_id,
+                    "error": str(exc),
+                })
+                raise
+            except anthropic.BadRequestError:
+                # 400 — a malformed request fails identically on every model, so falling
+                # back would only multiply cost. Raise immediately, never fall back.
+                logger.exception("ModelProvider: Anthropic bad request (400), not falling back", {
+                    "model": model_id,
+                    "prompt_len": len(prompt),
+                })
+                raise
+            except TimeoutError as exc:
                 if attempt == _MAX_RETRIES:
-                    logger.exception("ModelProvider: Anthropic timeout after retries", {
+                    if fallback_chain:
+                        return await _use_next_in_chain(
+                            "timeout after retries", {"attempt": attempt, "timeout_s": _TIMEOUT_S}
+                        )
+                    logger.exception("ModelProvider: Anthropic timeout after retries, no fallback left", {
                         "model": model_id,
                         "prompt_len": len(prompt),
                         "attempt": attempt,
@@ -676,6 +771,27 @@ class ModelProvider:
                 await asyncio.sleep(delay)
             except _ANTHROPIC_RETRYABLE as exc:
                 if attempt == _MAX_RETRIES:
+                    # Resolution point — make a depleted-credits outage scream in plain
+                    # terms before we fall back / give up.
+                    if is_quota_exhausted(exc):
+                        logger.error(
+                            "ModelProvider: Anthropic quota/credits EXHAUSTED (429), "
+                            "LLM work is failing. Check ANTHROPIC_API_KEY billing.",
+                            {
+                                "model": model_id,
+                                "attempt": attempt,
+                                "error": str(exc)[:300],
+                            },
+                        )
+                    if fallback_chain:
+                        return await _use_next_in_chain(
+                            "retries exhausted",
+                            {
+                                "attempt": attempt,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc)[:300],
+                            },
+                        )
                     logger.exception("ModelProvider: Anthropic call failed after retries", {
                         "model": model_id,
                         "prompt_len": len(prompt),

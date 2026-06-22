@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Anthropic
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_CHAT_MODEL: str = "claude-sonnet-4-6"
+    # Main text-chat fallback. If Sonnet 429s / is down BEFORE any token has streamed,
+    # claude_client retries the turn on Haiku (same SDK, tool schema, and streaming
+    # events). A total-Anthropic outage falls further to Gemini via gemini_chat_fallback.
+    ANTHROPIC_CHAT_MODEL_FALLBACK: str = "claude-haiku-4-5-20251001"
     ANTHROPIC_VOICE_MODEL: str = "claude-haiku-4-5"
     ANTHROPIC_MAX_TOKENS: int = 8096
 
@@ -116,7 +120,9 @@ class Settings(BaseSettings):
     TIER_CHEAP_FALLBACK: str = "gemini-2.5-flash-lite"           # tried when TIER_CHEAP fails
     TIER_CHEAP_LAST_RESORT: str = "claude-haiku-4-5-20251001"    # tried when TIER_CHEAP_FALLBACK also fails
     TIER_BALANCED: str = "claude-haiku-4-5-20251001"
+    TIER_BALANCED_FALLBACK: str = "gemini-2.5-flash"            # balanced() -> Gemini Flash when Haiku fails
     TIER_EXPERT: str = "claude-sonnet-4-6"
+    TIER_EXPERT_FALLBACK: str = "claude-haiku-4-5-20251001"    # expert() -> Haiku, then TIER_CHEAP (Gemini Flash)
     # TIER_REASONING -> Opus, kept available for rare hard-synthesis steps (not the default).
     # claude-opus-4-8 uses adaptive thinking (no budget_tokens, no temperature — both 400).
     TIER_REASONING: str = "claude-opus-4-8"
@@ -128,6 +134,9 @@ class Settings(BaseSettings):
     # Sonnet drives one step at a time: clarify -> web_surf fetch -> present -> final.
     REASON_STEP_ENABLED: bool = False
     REASON_STEP_MODEL: str = "claude-sonnet-4-6"   # mid model; several cheap steps per funnel
+    # reason_turn returns RAW Anthropic tool_use blocks, so the fallback must stay
+    # Anthropic->Anthropic (Gemini can't emit the same block shape). Sonnet -> Haiku.
+    REASON_STEP_MODEL_FALLBACK: str = "claude-haiku-4-5-20251001"
     REASON_STEP_MAX_FETCHES: int = 4               # web_surf calls per step (latency/cost bound)
     REASON_STEP_MAX_TURNS: int = 6                 # model turns per step
     REASON_STEP_CONFIDENCE_FLOOR: float = 0.85
@@ -204,10 +213,11 @@ class Settings(BaseSettings):
     # It is additive (each decider keeps its own sub-cap) and fails OPEN — a
     # Firestore read error allows the send, never an outage.
 
-    # Local hour-of-day (0-23) at which the morning briefing fan-out generates and
-    # sends. The fan-out rides the per-minute scheduler tick on a 15-minute gate, so
-    # the once-per-day claim fires on the first tick where it is this local hour.
-    BRIEFING_LOCAL_HOUR: int = 6
+    # Local hour-of-day (0-23) at which the daily briefing fan-out generates and sends.
+    # 20 = 8pm: an end-of-day recap of what happened that day, delivered every evening
+    # regardless of other notifications. The fan-out rides the per-minute scheduler tick
+    # on a 15-minute gate, so the once-per-day claim fires on the first tick in this hour.
+    BRIEFING_LOCAL_HOUR: int = 20
 
     # Briefing selection: scan the freshest N pool items (vector-independent), then
     # diversify down to ITEMS_MAX across categories with no single category exceeding
