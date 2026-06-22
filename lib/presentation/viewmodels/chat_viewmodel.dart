@@ -771,11 +771,18 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             _chatLimitReached = true;
             _setState(_messages.isEmpty ? ViewState.idle : ViewState.loaded);
 
-          case ErrorStreamEvent(:final message):
+          case ErrorStreamEvent(:final message, :final code):
             _isStreaming = false;
             _streamingOutput.value = StreamingSnapshot.empty;
 
-            final exc = AppException.unexpected(message);
+            // A server-emitted error event (code == null) carries copy the backend
+            // already wrote in Buddy's voice for this exact failure - show it verbatim. 
+            // A client-side transport failure carries an ErrorCode we map.
+            final reason = code == null
+                ? (message.trim().isNotEmpty
+                    ? message.trim()
+                    : 'Something went wrong. Try again in a moment.')
+                : _friendlyError(AppException(code: code, message: message));
             final errMsg = ChatMessageModel(
               id: _uuid.v4(),
               text: '',
@@ -784,7 +791,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
               channel: ChatMessageChannel.text,
               sessionId: _currentSessionId,
               status: MessageStatus.error,
-              errorReason: _friendlyError(exc),
+              errorReason: reason,
             );
             unawaited(_persistMessage(errMsg));
             _setState(ViewState.loaded);
@@ -795,7 +802,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         ErrorHandler.handle(e, st);
         _isStreaming = false;
         _streamingOutput.value = StreamingSnapshot.empty;
-        final exc = AppException.unexpected(e.toString(), error: e, stackTrace: st);
+        final exc = e is AppException
+            ? e
+            : AppException.unexpected(e.toString(), error: e, stackTrace: st);
         // Bubble only, no banner.
         final errMsg = ChatMessageModel(
           id: _uuid.v4(),
@@ -954,19 +963,33 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     return turns;
   }
 
+  /// Maps a client-side transport/HTTP failure to user copy by its [ErrorCode].
+  /// Server-emitted error events are shown verbatim at the call site (the backend
+  /// owns that copy), so this only ever sees a code-bearing transport failure or an
+  /// `unexpected` wrapper — there is no message-substring guessing here, which is
+  /// what used to let a timeout read as a "check your connection" error.
   static String _friendlyError(AppException error) {
-    final msg = error.message.toLowerCase();
-    if (msg.contains('overloaded') || msg.contains('529')) {
-      return "Your Buddy is busy right now. Try again in a moment.";
+    switch (error.code) {
+      case ErrorCode.networkUnavailable:
+        return "Couldn't reach Buddy. Check your connection and try again.";
+      case ErrorCode.requestTimeout:
+        return "Buddy took too long to respond. Mind trying again?";
+      case ErrorCode.serverError:
+        return "Something went wrong on Buddy's end. Try again in a moment.";
+      case ErrorCode.unauthorized:
+      case ErrorCode.authFailed:
+      case ErrorCode.authCancelled:
+      case ErrorCode.authTokenExpired:
+        return error.message; // context-specific copy set at the call site
+      case ErrorCode.forbidden:
+      case ErrorCode.notFound:
+      case ErrorCode.firestoreReadFailed:
+      case ErrorCode.firestoreWriteFailed:
+      case ErrorCode.documentNotFound:
+      case ErrorCode.unexpected:
+      case ErrorCode.unknown:
+        return 'Something went wrong. Try again in a moment.';
     }
-    if (msg.contains('timeout') || msg.contains('timed out') ||
-        msg.contains('network') || msg.contains('connection')) {
-      return "Couldn't reach your Buddy. Check your connection and try again.";
-    }
-    if (msg.contains('rate limit') || msg.contains('429')) {
-      return "You've hit your daily message limit. Upgrade to Pro for unlimited chat.";
-    }
-    return 'Something went wrong. Try again in a moment.';
   }
 
   static String? _normalizeUserId(String? id) {

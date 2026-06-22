@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/app_colors.dart';
+import '../../core/theme/glass_card.dart';
 
 /// Full-screen empty state shown when a logged-out (guest) user reaches an
 /// auth-gated screen. Instead of a dead-end message, it explains what needs an
@@ -73,34 +74,22 @@ class SignInRequiredView extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 24),
-            GestureDetector(
-              onTap: onSignIn,
-              child: Container(
-                height: 52,
-                padding: const EdgeInsets.symmetric(horizontal: 28),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [AppColors.accent, AppColors.accentDark],
-                  ),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.login_rounded, color: Colors.black, size: 18),
-                    SizedBox(width: 8),
-                    Text(
+            SizedBox(
+              width: double.infinity,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onSignIn,
+                child: const FauxGlassCard.navTile(
+                  child: Center(
+                    child: Text(
                       'Sign In',
                       style: TextStyle(
-                        color: Colors.black,
-                        fontSize: 16,
+                        color: AppColors.textPrimary,
+                        fontSize: 15,
                         fontWeight: FontWeight.w600,
-                        letterSpacing: -0.2,
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),

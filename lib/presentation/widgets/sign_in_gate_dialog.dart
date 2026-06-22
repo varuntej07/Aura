@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../core/theme/app_colors.dart';
+import '../../core/theme/glass_card.dart';
 import '../viewmodels/auth_viewmodel.dart';
 
 Future<void> showSignInGateDialog(BuildContext context) {
@@ -43,20 +44,27 @@ class _SignInGateDialog extends StatelessWidget {
           const SizedBox(height: 24),
           SizedBox(
             width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: () {
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () async {
+                final router = GoRouter.of(context);
+                final authViewModel = context.read<AuthViewModel>();
                 Navigator.pop(context);
-                context.read<AuthViewModel>().signInWithGoogle();
+                await authViewModel.signInWithGoogle();
+                if (authViewModel.isAuthenticated) {
+                  router.go('/home');
+                }
               },
-              icon: const Icon(Icons.g_mobiledata_rounded, size: 24),
-              label: const Text('Continue with Google'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.glassWhiteFill,
-                foregroundColor: AppColors.textPrimary,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: AppColors.glassBorderLight, width: 0.5),
+              child: const FauxGlassCard.navTile(
+                child: Center(
+                  child: Text(
+                    'Continue with Google',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -64,20 +72,22 @@ class _SignInGateDialog extends StatelessWidget {
           const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: () {
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
                 Navigator.pop(context);
                 context.push('/login');
               },
-              icon: const Icon(Icons.email_outlined, size: 20),
-              label: const Text('Sign in with Email'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.glassWhiteFill,
-                foregroundColor: AppColors.textPrimary,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(color: AppColors.glassBorderLight, width: 0.5),
+              child: const FauxGlassCard.navTile(
+                child: Center(
+                  child: Text(
+                    'Sign in with Email',
+                    style: TextStyle(
+                      color: AppColors.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
             ),

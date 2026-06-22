@@ -26,6 +26,7 @@ import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
 import '../settings/aura_profile_screen.dart';
 import '../settings/settings_screen.dart';
+import '../../widgets/show_sign_in_pill.dart';
 import '../../widgets/voice_sphere.dart';
 
 enum _HomeMode { voice, chat }
@@ -199,16 +200,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   Future<void> _handleMicTap() async {
     final authVm = context.read<AuthViewModel>();
     if (authVm.user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Sign in to use voice'),
-          action: SnackBarAction(
-            label: 'Sign In',
-            onPressed: () => context.go('/login'),
-          ),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
-        ),
+      showSignInPill(
+        context,
+        label: 'Sign in to talk',
+        onSignIn: () => context.go('/login'),
       );
       return;
     }
