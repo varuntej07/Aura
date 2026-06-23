@@ -72,12 +72,15 @@ def patched(monkeypatch):
             content_kind="read",
         )),
     )
-    send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
-    monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
+    # Post-cutover, the scoring tick ENQUEUES via orchestrator.submit (the real send +
+    # outcome + funnel happen later in the drain). notifications_sent counts the enqueue,
+    # so the gate assertions are unchanged; we just patch the new seam.
+    submit_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(scoring_loop.orchestrator, "submit", submit_mock)
     monkeypatch.setattr(feature_store, "write_outcome_pending", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", AsyncMock())
-    return send_mock
+    return submit_mock
 
 
 async def _run(monkeypatch, *, user_doc, candidates):

@@ -212,3 +212,56 @@ def test_parse_research_reads_and_normalizes_locale():
     assert research is not None
     assert research.country == "IN"   # upper-cased ISO country
     assert research.language == "te"  # lower-cased ISO language
+
+
+# ── fetch query construction (2026-06-19 World Cup "fired but composer abstained") ─
+def test_clean_topic_descriptor_strips_trailing_request_clause():
+    # The exact stored query that made every WC checkpoint fetch a generic jumble.
+    raw = "FIFA World Cup 2026 - keep me posted on all results, scores, and key updates until the tournament ends"
+    assert sb.clean_topic_descriptor(raw) == "FIFA World Cup 2026"
+
+
+def test_clean_topic_descriptor_strips_leading_request_verb():
+    assert sb.clean_topic_descriptor("let me know when GRRM releases Winds of Winter") == \
+        "GRRM releases Winds of Winter"
+    assert sb.clean_topic_descriptor("keep me updated on the 2026 US midterms") == "2026 US midterms"
+    assert sb.clean_topic_descriptor("notify me about the next Fed interest rate decision") == \
+        "next Fed interest rate decision"
+
+
+def test_clean_topic_descriptor_leaves_a_clean_subject_untouched():
+    # A query that is already just the subject is returned unchanged (idempotent).
+    assert sb.clean_topic_descriptor("Tesla stock and product launches") == "Tesla stock and product launches"
+    assert sb.clean_topic_descriptor("major earthquake near Tokyo") == "major earthquake near Tokyo"
+
+
+def test_clean_topic_descriptor_never_empties():
+    # If the heuristics would consume everything, the original survives (never a blank query).
+    assert sb.clean_topic_descriptor("keep me posted") == "keep me posted"
+    assert sb.clean_topic_descriptor("   ") == ""
+
+
+def test_build_fetch_query_event_checkpoint_anchors_specific_beat():
+    # The fix: an event checkpoint searches its OWN match, anchored by the clean topic,
+    # instead of the verbose topic sentence every checkpoint used to share.
+    q = sb.build_fetch_query(
+        event_label="United States vs. Australia",
+        research_query="FIFA World Cup 2026 - keep me posted on all results until the tournament ends",
+        title="FIFA World Cup 2026",
+    )
+    assert q == "United States vs. Australia FIFA World Cup 2026"
+
+
+def test_build_fetch_query_pulse_uses_clean_topic_query():
+    # A pulse / no-label checkpoint has no specific beat -> the cleaned topic query.
+    q = sb.build_fetch_query(
+        event_label="",
+        research_query="let me know when GRRM releases Winds of Winter",
+        title="Winds of Winter",
+    )
+    assert q == "GRRM releases Winds of Winter"
+
+
+def test_build_fetch_query_falls_back_to_title_when_no_query():
+    q = sb.build_fetch_query(event_label="", research_query="", title="Tesla news")
+    assert q == "Tesla news"

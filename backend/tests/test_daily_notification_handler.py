@@ -38,13 +38,15 @@ def _make_nudge_plan(status="scheduled"):
     }
 
 
-def _make_send_result(delivered: bool, tokens_targeted: int = 1, success_count: int = 1, failure_count: int = 0):
-    r = MagicMock()
-    r.delivered = delivered
-    r.tokens_targeted = tokens_targeted
-    r.success_count = success_count
-    r.failure_count = failure_count
-    return r
+def _make_decision(delivered: bool, tokens_targeted: int = 1, success_count: int = 1, failure_count: int = 0):
+    """Build the OrchestratorDecision the committed lane now returns to the handler."""
+    from src.services.notifications.proposal import Disposition, OrchestratorDecision
+
+    return OrchestratorDecision(
+        Disposition.SEND, "ok",
+        delivered=delivered, tokens_targeted=tokens_targeted,
+        success_count=success_count, failure_count=failure_count,
+    )
 
 
 class TestHandleSendNudge:
@@ -113,10 +115,10 @@ class TestHandleSendNudge:
         from src.handlers.daily_notification import handle_send_nudge
 
         plan = _make_nudge_plan()
-        send_result = _make_send_result(delivered=False, tokens_targeted=0, success_count=0)
+        decision = _make_decision(delivered=False, tokens_targeted=0, success_count=0)
 
         with patch("src.handlers.daily_notification._load_daily_plan", new=AsyncMock(return_value=plan)):
-            with patch("src.handlers.daily_notification.send_notification", new=AsyncMock(return_value=send_result)):
+            with patch("src.handlers.daily_notification.orchestrator.submit", new=AsyncMock(return_value=decision)):
                 result = await handle_send_nudge({"user_id": "u1", "plan_date": "2026-05-02", "nudge_slot": "morning_nudge"})
 
         assert result["status"] == "no_devices"
@@ -127,10 +129,10 @@ class TestHandleSendNudge:
         from src.handlers.daily_notification import handle_send_nudge
 
         plan = _make_nudge_plan()
-        send_result = _make_send_result(delivered=False, tokens_targeted=2, success_count=0, failure_count=2)
+        decision = _make_decision(delivered=False, tokens_targeted=2, success_count=0, failure_count=2)
 
         with patch("src.handlers.daily_notification._load_daily_plan", new=AsyncMock(return_value=plan)):
-            with patch("src.handlers.daily_notification.send_notification", new=AsyncMock(return_value=send_result)):
+            with patch("src.handlers.daily_notification.orchestrator.submit", new=AsyncMock(return_value=decision)):
                 result = await handle_send_nudge({"user_id": "u1", "plan_date": "2026-05-02", "nudge_slot": "morning_nudge"})
 
         assert result["error"] == "fcm_delivery_failed"
@@ -141,10 +143,10 @@ class TestHandleSendNudge:
         from src.handlers.daily_notification import handle_send_nudge
 
         plan = _make_nudge_plan()
-        send_result = _make_send_result(delivered=True, tokens_targeted=1, success_count=1)
+        decision = _make_decision(delivered=True, tokens_targeted=1, success_count=1)
 
         with patch("src.handlers.daily_notification._load_daily_plan", new=AsyncMock(return_value=plan)):
-            with patch("src.handlers.daily_notification.send_notification", new=AsyncMock(return_value=send_result)):
+            with patch("src.handlers.daily_notification.orchestrator.submit", new=AsyncMock(return_value=decision)):
                 with patch("src.handlers.daily_notification._update_nudge_status", new=AsyncMock()) as mock_status:
                     with patch("src.handlers.daily_notification._update_engagement_guard", new=AsyncMock()) as mock_guard:
                         result = await handle_send_nudge({"user_id": "u1", "plan_date": "2026-05-02", "nudge_slot": "morning_nudge"})

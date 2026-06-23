@@ -17,10 +17,14 @@ import 'auth_repository_test.mocks.dart';
   MockSpec<FirestoreService>(),
   MockSpec<User>(),
 ])
-UserModel _user({String uid = 'uid-1', bool onboardingComplete = true}) {
+UserModel _user({
+  String uid = 'uid-1',
+  bool onboardingComplete = true,
+  String displayName = 'Test User',
+}) {
   return UserModel(
     uid: uid,
-    displayName: 'Test User',
+    displayName: displayName,
     email: 'test@example.com',
     settings: UserSettings.defaults(),
     createdAt: DateTime(2026, 1, 1),
@@ -169,6 +173,105 @@ void main() {
           await repo.createAccountWithEmail('test@example.com', 'pw', 'Alice');
 
       expect(result.isFailure, isTrue);
+    });
+  });
+
+  group('display name reconciliation', () {
+    // Regression: email sign-up creates the user doc twice concurrently — the
+    // auth-state stream (name: null, before updateDisplayName has propagated)
+    // writes the 'User' placeholder, and that placeholder used to stick forever.
+    // The reconciler must repair it from the best real name available.
+    test('placeholder display_name is repaired from the Firebase Auth profile on sign-in',
+        () async {
+      when(firebaseUser.displayName).thenReturn('Varun');
+      when(authService.signInWithEmailAndPassword(any, any))
+          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+          (_) async => Result.success(_user(displayName: 'User')));
+
+      final result = await repo.signInWithEmail('test@example.com', 'pw');
+
+      expect(result.dataOrNull?.displayName, 'Varun');
+      final data =
+          verify(firestore.updateDocument(any, any, captureAny)).captured.single
+              as Map<String, dynamic>;
+      expect(data['display_name'], 'Varun');
+    });
+
+    test('blank display_name is repaired from the Firebase Auth profile on sign-in',
+        () async {
+      when(firebaseUser.displayName).thenReturn('Varun');
+      when(authService.signInWithEmailAndPassword(any, any))
+          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any))
+          .thenAnswer((_) async => Result.success(_user(displayName: '')));
+
+      final result = await repo.signInWithEmail('test@example.com', 'pw');
+
+      expect(result.dataOrNull?.displayName, 'Varun');
+      final data =
+          verify(firestore.updateDocument(any, any, captureAny)).captured.single
+              as Map<String, dynamic>;
+      expect(data['display_name'], 'Varun');
+    });
+
+    test('a real stored display_name is never overwritten (no display_name write)',
+        () async {
+      when(firebaseUser.displayName).thenReturn('Profile Name');
+      when(authService.signInWithEmailAndPassword(any, any))
+          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any))
+          .thenAnswer((_) async => Result.success(_user(displayName: 'Real Name')));
+
+      final result = await repo.signInWithEmail('test@example.com', 'pw');
+
+      expect(result.dataOrNull?.displayName, 'Real Name');
+      final data =
+          verify(firestore.updateDocument(any, any, captureAny)).captured.single
+              as Map<String, dynamic>;
+      expect(data.containsKey('display_name'), isFalse);
+    });
+
+    test('create with a blank typed name falls back to the Firebase Auth profile name',
+        () async {
+      when(firebaseUser.displayName).thenReturn('Varun');
+      when(authService.createUserWithEmailAndPassword(any, any, any))
+          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+        (_) async => Result.failure(
+          const AppException(code: ErrorCode.documentNotFound, message: 'not found'),
+        ),
+      );
+      when(firestore.setDocument<UserModel>(any, any, any, any))
+          .thenAnswer((_) async => Result.success(_user()));
+
+      await repo.createAccountWithEmail('test@example.com', 'pw', '   ');
+
+      final data = verify(firestore.setDocument<UserModel>(any, any, captureAny, any))
+          .captured
+          .single as Map<String, dynamic>;
+      expect(data['display_name'], 'Varun');
+    });
+
+    test('create with no name anywhere writes the placeholder, never an empty string',
+        () async {
+      when(firebaseUser.displayName).thenReturn(null);
+      when(authService.signInWithGoogle())
+          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+        (_) async => Result.failure(
+          const AppException(code: ErrorCode.documentNotFound, message: 'not found'),
+        ),
+      );
+      when(firestore.setDocument<UserModel>(any, any, any, any))
+          .thenAnswer((_) async => Result.success(_user()));
+
+      await repo.signInWithGoogle();
+
+      final data = verify(firestore.setDocument<UserModel>(any, any, captureAny, any))
+          .captured
+          .single as Map<String, dynamic>;
+      expect(data['display_name'], 'User');
     });
   });
 

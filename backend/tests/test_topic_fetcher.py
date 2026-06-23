@@ -8,6 +8,8 @@ skipped checkpoint, not a crash.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from src.services.tracking import topic_fetcher
 from src.services.tracking.fields import (
     TIER_BRAVE,
@@ -20,9 +22,11 @@ from src.services.tracking.fields import (
 _LONG = "USA beat Australia 2-1 in a thriller, advancing to the Round of 16 today."
 
 
-def _stub(text, sources=None):
+def _stub(text, sources=None, published=None):
+    # Tiers return (text, sources, latest_published) — the freshest article pubDate
+    # (UTC) or None when the source carries no date (brave/grounded).
     async def _f(query, locale):
-        return text, (sources or [])
+        return text, (sources or []), published
     return _f
 
 
@@ -53,6 +57,41 @@ async def test_raising_tier_falls_through(monkeypatch):
     monkeypatch.setitem(topic_fetcher._TIER_FETCHERS, TIER_NEWSDATA, _stub(_LONG))
     res = await topic_fetcher.fetch_topic("x", use_cache=False)
     assert res.tier == TIER_NEWSDATA
+
+
+async def test_latest_published_is_surfaced_for_freshness_gate(monkeypatch):
+    # The serving tier's freshest article date must ride out on the FetchResult so the
+    # orchestrator's freshness gate can drop a stale-by-a-day tracker push.
+    published = datetime(2026, 6, 22, 9, 0, tzinfo=UTC)
+    monkeypatch.setitem(topic_fetcher._TIER_FETCHERS, TIER_RSS, _stub(_LONG, published=published))
+    monkeypatch.setattr(topic_fetcher, "_cache", {})
+    res = await topic_fetcher.fetch_topic("USA world cup", use_cache=False)
+    assert res.tier == TIER_RSS
+    assert res.latest_published == published
+
+
+async def test_latest_published_none_when_source_has_no_date(monkeypatch):
+    # A dateless fallback tier (brave/grounded) must surface None — the gate then can't
+    # drop it, which is correct: never suppress a tier for lacking a date it never had.
+    monkeypatch.setitem(topic_fetcher._TIER_FETCHERS, TIER_RSS, _stub(_LONG, published=None))
+    monkeypatch.setattr(topic_fetcher, "_cache", {})
+    res = await topic_fetcher.fetch_topic("USA world cup", use_cache=False)
+    assert res.latest_published is None
+
+
+def test_struct_to_utc_and_newsdata_parse():
+    import time as _time
+
+    # feedparser published_parsed is a UTC struct_time.
+    struct = _time.strptime("2026-06-22 09:00:00", "%Y-%m-%d %H:%M:%S")
+    assert topic_fetcher._struct_to_utc(struct) == datetime(2026, 6, 22, 9, 0, tzinfo=UTC)
+    assert topic_fetcher._struct_to_utc(None) is None
+    # newsdata pubDate is 'YYYY-MM-DD HH:MM:SS' UTC.
+    assert topic_fetcher._parse_newsdata_date("2026-06-22 09:00:00") == datetime(
+        2026, 6, 22, 9, 0, tzinfo=UTC
+    )
+    assert topic_fetcher._parse_newsdata_date("") is None
+    assert topic_fetcher._parse_newsdata_date("not-a-date") is None
 
 
 async def test_all_tiers_fail_returns_tier_none(monkeypatch):

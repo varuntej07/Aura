@@ -18,12 +18,14 @@ import pytest
 _GCC_PATH = "src.services.google_calendar_connector.GoogleCalendarConnector"
 
 
-def _make_send_result(delivered: bool, tokens_targeted: int = 1, success_count: int = 1):
-    result = MagicMock()
-    result.delivered = delivered
-    result.tokens_targeted = tokens_targeted
-    result.success_count = success_count
-    return result
+def _make_decision(delivered: bool, tokens_targeted: int = 1, success_count: int = 1):
+    """The OrchestratorDecision the reminder path now receives from submit()."""
+    from src.services.notifications.proposal import Disposition, OrchestratorDecision
+
+    return OrchestratorDecision(
+        Disposition.SEND, "ok",
+        delivered=delivered, tokens_targeted=tokens_targeted, success_count=success_count,
+    )
 
 
 def _patch_gc(renew=0, sync=0):
@@ -53,13 +55,13 @@ class TestHandleSchedulerTick:
         from src.handlers.scheduler import handle_scheduler_tick
 
         due = [{"userId": "u1", "reminderId": "r1", "data": {"message": "Take meds"}}]
-        send_result = _make_send_result(delivered=True)
+        send_result = _make_decision(delivered=True)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
                 with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
                     with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="Take meds")):
-                        with patch("src.handlers.scheduler.send_notification", new=AsyncMock(return_value=send_result)):
+                        with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                             with _patch_gc():
                                 result = await handle_scheduler_tick()
 
@@ -73,12 +75,12 @@ class TestHandleSchedulerTick:
         from src.handlers.scheduler import handle_scheduler_tick
 
         due = [{"userId": "u1", "reminderId": "r1", "data": {"message": "Stand up"}}]
-        send_result = _make_send_result(delivered=False, tokens_targeted=0, success_count=0)
+        send_result = _make_decision(delivered=False, tokens_targeted=0, success_count=0)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
                 with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="Stand up")):
-                    with patch("src.handlers.scheduler.send_notification", new=AsyncMock(return_value=send_result)):
+                    with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                         with _patch_gc():
                             result = await handle_scheduler_tick()
 
@@ -94,10 +96,10 @@ class TestHandleSchedulerTick:
             {"userId": "u1", "reminderId": "r_fail", "data": {"message": "Bad one"}},
             {"userId": "u2", "reminderId": "r_ok", "data": {"message": "Good one"}},
         ]
-        good_result = _make_send_result(delivered=True)
+        good_result = _make_decision(delivered=True)
 
-        async def send_side_effect(user_id, **kwargs):
-            if user_id == "u1":
+        async def send_side_effect(proposal, **kwargs):
+            if proposal.user_id == "u1":
                 raise RuntimeError("FCM exploded")
             return good_result
 
@@ -105,7 +107,7 @@ class TestHandleSchedulerTick:
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
                 with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
                     with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="msg")):
-                        with patch("src.handlers.scheduler.send_notification", new=AsyncMock(side_effect=send_side_effect)):
+                        with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(side_effect=send_side_effect)):
                             with _patch_gc():
                                 result = await handle_scheduler_tick()
 
@@ -132,13 +134,13 @@ class TestHandleSchedulerTick:
         from src.handlers.scheduler import handle_scheduler_tick
 
         due = [{"userId": "u1", "reminderId": "r1", "data": {}}]
-        send_result = _make_send_result(delivered=True)
+        send_result = _make_decision(delivered=True)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
                 with patch("src.handlers.scheduler.mark_reminder_fired"):
                     with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="Reminder due now")) as mock_rw:
-                        with patch("src.handlers.scheduler.send_notification", new=AsyncMock(return_value=send_result)):
+                        with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                             with _patch_gc():
                                 await handle_scheduler_tick()
 

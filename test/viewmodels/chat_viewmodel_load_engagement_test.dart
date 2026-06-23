@@ -13,6 +13,7 @@ import 'package:aura/data/services/chat_service_provider.dart';
 import 'package:aura/data/services/chat_session_manager.dart';
 import 'package:aura/data/services/feedback_service.dart';
 import 'package:aura/data/services/posthog_analytics_service.dart';
+import 'package:aura/data/services/session_consolidator.dart';
 import 'package:aura/presentation/viewmodels/text_chat_viewmodel.dart';
 
 // Mocks
@@ -35,6 +36,16 @@ class MockAgentSuggestionPillsRepository extends Mock
     implements AgentSuggestionPillsRepository {}
 
 class MockBuddyPillsRefresher extends Mock implements BuddyPillsRefresher {}
+
+/// Noop fake: dispose() flushes the session, which we don't exercise here.
+class _NoopSessionConsolidator implements SessionConsolidator {
+  @override
+  Future<void> consolidate({
+    required String? uid,
+    required String? sessionId,
+    required List<ChatMessageModel> messages,
+  }) async {}
+}
 
 class _FakeChatMessageModel extends Fake implements ChatMessageModel {}
 
@@ -82,6 +93,7 @@ TextChatViewModel _buildVm({
     postHogAnalyticsService: postHogAnalyticsService,
     suggestionPillsRepository: MockAgentSuggestionPillsRepository(),
     buddyPillsRefresher: MockBuddyPillsRefresher(),
+    sessionConsolidator: _NoopSessionConsolidator(),
   );
 }
 

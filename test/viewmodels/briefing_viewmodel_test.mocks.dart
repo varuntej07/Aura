@@ -158,6 +158,42 @@ class MockBackendApiService extends _i1.Mock implements _i2.BackendApiService {
           as _i3.Future<_i4.Result<Map<String, dynamic>>>);
 
   @override
+  _i3.Future<_i4.Result<Map<String, dynamic>>> consolidateSession({
+    required String? sessionId,
+    required List<Map<String, dynamic>>? turns,
+    String? modality = 'text',
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#consolidateSession, [], {
+              #sessionId: sessionId,
+              #turns: turns,
+              #modality: modality,
+            }),
+            returnValue: _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+              _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#consolidateSession, [], {
+                  #sessionId: sessionId,
+                  #turns: turns,
+                  #modality: modality,
+                }),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+                  _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#consolidateSession, [], {
+                      #sessionId: sessionId,
+                      #turns: turns,
+                      #modality: modality,
+                    }),
+                  ),
+                ),
+          )
+          as _i3.Future<_i4.Result<Map<String, dynamic>>>);
+
+  @override
   _i3.Future<_i4.Result<Map<String, dynamic>>> seedOnboardingInterests(
     List<String>? interestSlugs,
   ) =>

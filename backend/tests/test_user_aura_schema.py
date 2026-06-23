@@ -15,12 +15,22 @@ from datetime import UTC, datetime, timedelta
 from src.services.user_aura_extractor import InterestSignal, MessageInsight, _merge_profile
 from src.services.user_aura_schema import (
     INTEREST_CATEGORIES,
+    INTEREST_KIND_DURABLE,
+    INTEREST_KIND_EVENT_DRIVEN,
     MAX_SUBJECTS_PER_CATEGORY,
     OTHER_CATEGORY,
     apply_interest_signal,
+    apply_storyline,
+    apply_trait,
     category_count,
+    decayed_weight_by_kind,
     interest_embedding_texts,
     interest_prompt_lines,
+    prune_interest,
+    ranked_storylines,
+    reclassify_interest_kind,
+    shown_traits,
+    storyline_prompt_lines,
     top_interest_subjects,
 )
 
@@ -96,7 +106,8 @@ def test_decay_ranks_recent_category_above_stale_one():
 
 def test_decay_then_increment_keeps_weight_recency_aware():
     interests: dict = {}
-    old = NOW - timedelta(days=30)  # one half-life
+    # A capture-written subject carries no kind, so it decays as durable (90d half-life).
+    old = NOW - timedelta(days=90)  # one durable half-life
     apply_interest_signal(interests, "health_medical", "vaccine", old)
     apply_interest_signal(interests, "health_medical", "vaccine", NOW)
     # First hit decays to ~0.5 over one half-life, then +1 -> ~1.5.
@@ -271,3 +282,140 @@ def test_insight_accepts_null_classification_fields():
     ):
         keys = updated.get(map_key, {})
         assert "null" not in keys and "None" not in keys, map_key
+
+
+# --------------------------------------------------------------------------
+# Kind-aware decay (FIFA: event_driven fades fast; legacy/no-kind = durable)
+# --------------------------------------------------------------------------
+
+def test_event_driven_decays_faster_than_durable():
+    forty_days = (NOW - timedelta(days=40)).isoformat()
+    durable = decayed_weight_by_kind(1.0, forty_days, INTEREST_KIND_DURABLE, NOW)
+    event = decayed_weight_by_kind(1.0, forty_days, INTEREST_KIND_EVENT_DRIVEN, NOW)
+    # After 40 days a durable interest is still substantial; an event-driven one is gone.
+    assert durable > 0.5
+    assert event < 0.05
+    assert durable > event
+
+
+def test_missing_kind_defaults_to_durable():
+    # CRITICAL regression: legacy nodes and every capture-written node carry NO kind.
+    # They must decay as durable, NOT event_driven, or existing profiles would suddenly
+    # evaporate when this change ships.
+    ninety_days = (NOW - timedelta(days=90)).isoformat()
+    none_kind = decayed_weight_by_kind(1.0, ninety_days, None, NOW)
+    durable = decayed_weight_by_kind(1.0, ninety_days, INTEREST_KIND_DURABLE, NOW)
+    unknown = decayed_weight_by_kind(1.0, ninety_days, "bogus_kind", NOW)
+    assert none_kind == durable == unknown
+    assert 0.45 < none_kind < 0.55  # exactly one durable half-life
+
+
+# --------------------------------------------------------------------------
+# Storylines (the narrative layer)
+# --------------------------------------------------------------------------
+
+def test_storyline_insert_and_prompt_line():
+    storylines: dict = {}
+    apply_storyline(
+        storylines, "annapurna_sde",
+        summary="writing a tensor-parallelism blog to land an SDE role at Annapurna Labs (AWS)",
+        entities=["tensor parallelism", "Annapurna Labs", "AWS"],
+        categories=["technology_computing", "career_jobs"],
+        intent="career_goal", kind="goal_instrumental", confidence=0.82, now=NOW,
+    )
+    node = storylines["annapurna_sde"]
+    assert node["kind"] == "goal_instrumental"
+    assert node["weight"] == 1.0
+    assert "Annapurna Labs" in node["entities"]
+    lines = storyline_prompt_lines({"storylines": storylines}, now=NOW)
+    assert lines and "Annapurna Labs" in lines[0]
+
+
+def test_storyline_merges_across_sessions_by_id():
+    storylines: dict = {}
+    apply_storyline(storylines, "annapurna_sde", "blog draft started",
+                    [], ["career_jobs"], "career_goal", "goal_instrumental", 0.6, NOW)
+    apply_storyline(storylines, "annapurna_sde", "blog published, applying now",
+                    [], ["career_jobs"], "career_goal", "goal_instrumental", 0.9, NOW)
+    # Same id -> one node, weight accumulates, summary updates to the latest.
+    assert len(storylines) == 1
+    assert storylines["annapurna_sde"]["weight"] == 2.0
+    assert "applying" in storylines["annapurna_sde"]["summary"]
+
+
+def test_ranked_storylines_orders_fresh_durable_above_stale_event():
+    storylines: dict = {}
+    three_weeks = NOW - timedelta(days=21)
+    apply_storyline(storylines, "wc", "wants World Cup score updates",
+                    ["FIFA World Cup"], ["sports"], "event_follow", "event_driven", 0.8, three_weeks)
+    apply_storyline(storylines, "ml", "studies ML systems",
+                    [], ["technology_computing"], None, "durable", 0.8, NOW)
+    ranked = ranked_storylines({"storylines": storylines}, now=NOW)
+    # 21 days at a 7-day half-life crushes the event storyline; fresh durable wins.
+    assert ranked[0]["summary"] == "studies ML systems"
+
+
+# --------------------------------------------------------------------------
+# Interest reclassification (the FIFA merge-op)
+# --------------------------------------------------------------------------
+
+def test_reclassify_interest_kind_marks_subject_event_driven():
+    interests: dict = {}
+    apply_interest_signal(interests, "sports", "FIFA World Cup", NOW)
+    applied = reclassify_interest_kind(interests, "sports", "FIFA World Cup", INTEREST_KIND_EVENT_DRIVEN)
+    assert applied is True
+    assert interests["sports"]["subjects"]["FIFA World Cup"]["kind"] == "event_driven"
+
+
+def test_reclassify_interest_kind_case_insensitive_and_missing():
+    interests: dict = {}
+    apply_interest_signal(interests, "sports", "FIFA World Cup", NOW)
+    # Different casing still matches by display.
+    assert reclassify_interest_kind(interests, "sports", "fifa world cup", INTEREST_KIND_EVENT_DRIVEN)
+    # Absent subject is a safe no-op, never an error.
+    assert reclassify_interest_kind(interests, "sports", "Wimbledon", INTEREST_KIND_EVENT_DRIVEN) is False
+
+
+# --------------------------------------------------------------------------
+# Traits (corroboration + confidence gate; the user sees their own Aura)
+# --------------------------------------------------------------------------
+
+def test_trait_hidden_until_corroborated():
+    traits: dict = {}
+    apply_trait(traits, "passion-oriented", confidence=0.9, now=NOW)
+    # One piece of evidence -> stored but NOT shown.
+    assert shown_traits({"traits": traits}, now=NOW) == []
+    apply_trait(traits, "passion-oriented", confidence=0.9, now=NOW)
+    # Corroborated (>=2) -> now shown.
+    assert "passion-oriented" in shown_traits({"traits": traits}, now=NOW)
+
+
+def test_trait_below_confidence_never_shown():
+    traits: dict = {}
+    apply_trait(traits, "perfectionist", confidence=0.3, now=NOW)
+    apply_trait(traits, "perfectionist", confidence=0.3, now=NOW)
+    # Corroborated by count, but confidence under threshold -> stays hidden.
+    assert shown_traits({"traits": traits}, now=NOW) == []
+
+
+def test_trait_corroboration_counts_distinct_sessions_not_reruns():
+    traits: dict = {}
+    # Re-reflecting the SAME session (a long session re-consolidated as it grows) must NOT
+    # inflate the trait toward the shown gate.
+    apply_trait(traits, "goal-oriented", confidence=0.9, now=NOW, session_id="s1")
+    apply_trait(traits, "goal-oriented", confidence=0.9, now=NOW, session_id="s1")
+    assert shown_traits({"traits": traits}, now=NOW) == []  # one distinct session
+    # A genuinely DIFFERENT session corroborates -> shown.
+    apply_trait(traits, "goal-oriented", confidence=0.9, now=NOW, session_id="s2")
+    assert "goal-oriented" in shown_traits({"traits": traits}, now=NOW)
+
+
+def test_prune_interest_removes_subject_and_empty_category():
+    interests: dict = {}
+    apply_interest_signal(interests, "fitness_nutrition", "road bike", NOW)
+    apply_interest_signal(interests, "sports", "cricket", NOW)
+    # Prune the mis-attributed road bike (a gift for someone else), case-insensitively.
+    assert prune_interest(interests, "fitness_nutrition", "Road Bike") is True
+    assert "fitness_nutrition" not in interests  # category emptied -> dropped
+    assert "sports" in interests             # unrelated category untouched
+    assert prune_interest(interests, "sports", "tennis") is False  # absent -> safe no-op

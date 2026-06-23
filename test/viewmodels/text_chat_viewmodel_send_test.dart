@@ -16,6 +16,7 @@ import 'package:aura/data/services/chat_service_provider.dart';
 import 'package:aura/data/services/chat_session_manager.dart';
 import 'package:aura/data/services/feedback_service.dart';
 import 'package:aura/data/services/posthog_analytics_service.dart';
+import 'package:aura/data/services/session_consolidator.dart';
 import 'package:aura/presentation/viewmodels/text_chat_viewmodel.dart';
 import 'package:aura/presentation/viewmodels/view_state.dart';
 
@@ -31,6 +32,7 @@ import 'text_chat_viewmodel_send_test.mocks.dart';
   MockSpec<PostHogAnalyticsService>(),
   MockSpec<AgentSuggestionPillsRepository>(),
   MockSpec<BuddyPillsRefresher>(),
+  MockSpec<SessionConsolidator>(),
 ])
 /// Stubs `sendMessageStream` (all-matcher form) to emit [events].
 void _stubStream(MockChatServiceProvider chatService, List<ChatStreamEvent> events) {
@@ -92,6 +94,7 @@ void main() {
       postHogAnalyticsService: postHog,
       suggestionPillsRepository: MockAgentSuggestionPillsRepository(),
       buddyPillsRefresher: MockBuddyPillsRefresher(),
+      sessionConsolidator: MockSessionConsolidator(),
     );
   });
 

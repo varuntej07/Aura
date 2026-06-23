@@ -96,22 +96,24 @@ def patched_send_path(monkeypatch):
             )
         ),
     )
-    monkeypatch.setattr(
-        scoring_loop,
-        "send_notification",
-        AsyncMock(return_value=SimpleNamespace(delivered=True)),
-    )
+    # Post-cutover the tick ENQUEUES via orchestrator.submit; the real send + the funnel
+    # event happen later in the drain / on_news_delivered. Return both so the test can
+    # assert the enqueued proposal carries the join keys, then drive the hook.
+    submit_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(scoring_loop.orchestrator, "submit", submit_mock)
     monkeypatch.setattr(
         feature_store, "write_outcome_pending", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
-    return cand
+    return cand, submit_mock
 
 
-async def test_successful_send_emits_funnel_event_with_join_keys(
+async def test_successful_send_enqueues_join_keys_then_hook_emits_funnel(
     patched_send_path, monkeypatch
 ):
-    cand = patched_send_path
+    from src.services.notification_service import NotificationResult
+
+    cand, submit_mock = patched_send_path
     capture = AsyncMock()
     monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", capture)
 
@@ -122,7 +124,27 @@ async def test_successful_send_emits_funnel_event_with_join_keys(
     ):
         await scoring_loop._score_one_user("uid-42", models, summary)
 
+    # 1. The tick ENQUEUES (no inline send / funnel). The join keys the client tap event
+    #    reuses must ride on the proposal so the hook can emit them on delivery.
     assert summary.notifications_sent == 1
+    submit_mock.assert_awaited_once()
+    proposal = submit_mock.await_args.args[0]
+    assert proposal.user_id == "uid-42"
+    assert proposal.data["content_id"] == cand.content_id
+    assert proposal.data["notification_id"]
+    assert proposal.data["category"] == cand.category
+    capture.assert_not_awaited()  # the funnel event has NOT fired yet (not delivered)
+
+    # 2. On a REAL delivery, on_news_delivered fires the top-of-funnel event with the
+    #    exact join keys — if these drift, the PostHog funnel silently flattens.
+    with patch.object(
+        feature_store, "read_state", AsyncMock(return_value=_ready_state())
+    ):
+        await scoring_loop.on_news_delivered(
+            proposal,
+            NotificationResult(tokens_targeted=1, success_count=1, failure_count=0),
+        )
+
     capture.assert_awaited_once()
     kwargs = capture.await_args.kwargs
     assert kwargs["distinct_id"] == "uid-42"

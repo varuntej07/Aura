@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from src.services import notification_budget as nb
 from src.services.notification_budget import (
+    ADAPTIVE_MIN_SAMPLE,
     FIELD_LAST_NOTIFICATION_AT,
     FIELD_PROACTIVE_SENDS_TODAY,
     FIELD_SENDS_TODAY_DATE,
@@ -20,6 +21,7 @@ from src.services.notification_budget import (
     MIN_PROACTIVE_SPACING,
     BudgetDecision,
     evaluate_proactive_claim,
+    resolve_adaptive_limits,
 )
 
 NOW = datetime(2026, 6, 10, 18, 0, tzinfo=UTC)
@@ -76,6 +78,51 @@ def test_naive_last_timestamp_is_treated_as_utc():
     coerced = nb._aware(naive)
     assert coerced.tzinfo == UTC
     assert coerced == naive.replace(tzinfo=UTC)
+
+
+# ── Adaptive per-user volume ─────────────────────────────────────────────────
+
+def test_adaptive_new_user_gets_gentle_default():
+    # Under the minimum sample we can't tell a non-engager from a brand-new user, so
+    # the gentle default applies (never the harsh one-a-day floor).
+    cap, spacing = resolve_adaptive_limits(delivered=ADAPTIVE_MIN_SAMPLE - 1, opened=0)
+    assert cap == 3 and spacing == timedelta(minutes=90)
+
+
+def test_adaptive_total_ignorer_is_throttled_hard():
+    # Enough sample, zero taps -> one gentle ping/day, far apart.
+    cap, spacing = resolve_adaptive_limits(delivered=20, opened=0)
+    assert cap == 1 and spacing == timedelta(hours=6)
+
+
+def test_adaptive_rare_tapper():
+    cap, spacing = resolve_adaptive_limits(delivered=20, opened=2)  # e=0.10
+    assert cap == 2 and spacing == timedelta(hours=4)
+
+
+def test_adaptive_sometimes_tapper_balanced_middle():
+    cap, spacing = resolve_adaptive_limits(delivered=20, opened=6)  # e=0.30
+    assert cap == 3 and spacing == timedelta(hours=2)
+
+
+def test_adaptive_heavy_tapper_leans_in():
+    cap, spacing = resolve_adaptive_limits(delivered=20, opened=12)  # e=0.60
+    assert cap == 5 and spacing == timedelta(minutes=45)
+
+
+def test_adaptive_cap_is_monotonic_in_engagement():
+    caps = [resolve_adaptive_limits(20, o)[0] for o in (0, 2, 6, 12)]
+    assert caps == sorted(caps)  # more taps never lowers the ceiling
+
+
+def test_evaluate_respects_caller_supplied_adaptive_limits():
+    # A throttled user (adaptive cap=1) is blocked at 1 even though the flat beta cap
+    # is far higher — proving the per-user limit, not the global constant, governs.
+    data = {FIELD_SENDS_TODAY_DATE: TODAY, FIELD_PROACTIVE_SENDS_TODAY: 1}
+    decision = evaluate_proactive_claim(
+        data, local_date=TODAY, now=NOW, cap=1, spacing=timedelta(hours=6)
+    )
+    assert not decision.allowed and decision.reason == "global_daily_cap"
 
 
 # ── Fail-open safety ─────────────────────────────────────────────────────────

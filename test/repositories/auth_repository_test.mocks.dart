@@ -285,12 +285,13 @@ class MockFirestoreService extends _i1.Mock implements _i7.FirestoreService {
     Map<String, dynamic>? data,
     T Function(Map<String, dynamic>)? fromJson, {
     bool? merge = true,
+    bool? readBack = true,
   }) =>
       (super.noSuchMethod(
             Invocation.method(
               #setDocument,
               [collection, docId, data, fromJson],
-              {#merge: merge},
+              {#merge: merge, #readBack: readBack},
             ),
             returnValue: _i4.Future<_i5.Result<T>>.value(
               _i6.dummyValue<_i5.Result<T>>(
@@ -298,7 +299,7 @@ class MockFirestoreService extends _i1.Mock implements _i7.FirestoreService {
                 Invocation.method(
                   #setDocument,
                   [collection, docId, data, fromJson],
-                  {#merge: merge},
+                  {#merge: merge, #readBack: readBack},
                 ),
               ),
             ),
@@ -308,7 +309,7 @@ class MockFirestoreService extends _i1.Mock implements _i7.FirestoreService {
                 Invocation.method(
                   #setDocument,
                   [collection, docId, data, fromJson],
-                  {#merge: merge},
+                  {#merge: merge, #readBack: readBack},
                 ),
               ),
             ),

@@ -20,6 +20,7 @@ import 'package:aura/data/services/chat_service_provider.dart' as _i2;
 import 'package:aura/data/services/chat_session_manager.dart' as _i14;
 import 'package:aura/data/services/feedback_service.dart' as _i13;
 import 'package:aura/data/services/posthog_analytics_service.dart' as _i15;
+import 'package:aura/data/services/session_consolidator.dart' as _i18;
 import 'package:mockito/mockito.dart' as _i1;
 import 'package:mockito/src/dummies.dart' as _i10;
 
@@ -767,6 +768,29 @@ class MockBuddyPillsRefresher extends _i1.Mock
   _i3.Future<void> refreshIfActivity(String? uid) =>
       (super.noSuchMethod(
             Invocation.method(#refreshIfActivity, [uid]),
+            returnValue: _i3.Future<void>.value(),
+            returnValueForMissingStub: _i3.Future<void>.value(),
+          )
+          as _i3.Future<void>);
+}
+
+/// A class which mocks [SessionConsolidator].
+///
+/// See the documentation for Mockito's code generation for more information.
+class MockSessionConsolidator extends _i1.Mock
+    implements _i18.SessionConsolidator {
+  @override
+  _i3.Future<void> consolidate({
+    required String? uid,
+    required String? sessionId,
+    required List<_i11.ChatMessageModel>? messages,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#consolidate, [], {
+              #uid: uid,
+              #sessionId: sessionId,
+              #messages: messages,
+            }),
             returnValue: _i3.Future<void>.value(),
             returnValueForMissingStub: _i3.Future<void>.value(),
           )

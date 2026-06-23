@@ -40,6 +40,9 @@ def _personal_candidate() -> ScoredCandidate:
 
 
 def _stub_common(monkeypatch):
+    """Stub the scoring tick's I/O. Post-cutover the tick ENQUEUES via orchestrator.submit
+    (the real send + counter bumps + outcome happen later in the drain / on_news_delivered),
+    so we patch submit and return that mock. The unified budget is no longer claimed here."""
     monkeypatch.setattr(scoring_loop, "_load_user_doc", AsyncMock(return_value={"timezone": "UTC"}))
     monkeypatch.setattr(scoring_loop, "_sweep_timeouts", AsyncMock(return_value=0))
     monkeypatch.setattr(scoring_loop, "is_within_active_hours", lambda *a, **k: True)
@@ -52,14 +55,13 @@ def _stub_common(monkeypatch):
     monkeypatch.setattr(feature_store, "write_outcome_pending", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", AsyncMock())
-    monkeypatch.setattr(
-        scoring_loop, "try_claim_proactive_slot",
-        AsyncMock(return_value=SimpleNamespace(allowed=True, reason=None)),
-    )
+    submit_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(scoring_loop.orchestrator, "submit", submit_mock)
+    return submit_mock
 
 
 async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
-    _stub_common(monkeypatch)
+    submit_mock = _stub_common(monkeypatch)
     monkeypatch.setattr(scoring_loop, "_load_recent_sent_content_ids", AsyncMock(return_value=set()))
     monkeypatch.setattr(
         scoring_loop, "list_recent_breaking_candidates",
@@ -74,8 +76,6 @@ async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
             content_kind="discuss",
         )),
     )
-    send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
-    monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
 
     # Fresh user: zero vector, not yet bootstrapped — the personal lane would skip,
     # but breaking runs first and is vector-independent.
@@ -84,25 +84,27 @@ async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
         await scoring_loop._score_one_user("uid-fresh", MagicMock(), summary)
 
-    assert summary.notifications_sent == 1
-    send_mock.assert_awaited_once()
-    data = send_mock.await_args.kwargs["data"]
+    assert summary.notifications_sent == 1  # enqueued
+    submit_mock.assert_awaited_once()
+    proposal = submit_mock.await_args.args[0]
+    assert proposal.source == scoring_loop.SOURCE_NEWS
+    assert proposal.kind == scoring_loop.ProposalKind.PROACTIVE
+    data = proposal.data
     assert data["lane"] == "breaking"
     assert data["notification_origin"] == "signal_engine"
     assert data["content_kind"] == "discuss"
     assert data["url"] == "https://example.com/break"  # citation rides along
-    assert state.breaking_sends_today == 1
-    assert state.sends_today == 1
+    # The freshest article timestamp drives the freshness gate.
+    assert proposal.content_timestamp is not None
+    # The daily counters now bump on DELIVERY (on_news_delivered), not on enqueue.
 
 
 async def test_breaking_capped_once_per_day(monkeypatch):
-    _stub_common(monkeypatch)
+    submit_mock = _stub_common(monkeypatch)
     monkeypatch.setattr(scoring_loop, "_load_recent_sent_content_ids", AsyncMock(return_value=set()))
     breaking_query = AsyncMock(return_value=[_breaking_candidate()])
     monkeypatch.setattr(scoring_loop, "list_recent_breaking_candidates", breaking_query)
     monkeypatch.setattr(scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[]))
-    send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
-    monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
 
     # Breaking quota already exhausted for today (the per-day breaking cap is
     # MAX_BREAKING_SENDS_PER_DAY; uncapped to a high number during beta, so reference the
@@ -118,12 +120,12 @@ async def test_breaking_capped_once_per_day(monkeypatch):
         await scoring_loop._score_one_user("uid-capped", MagicMock(), summary)
 
     assert summary.notifications_sent == 0
-    send_mock.assert_not_awaited()
+    submit_mock.assert_not_awaited()
     breaking_query.assert_not_called()  # gate short-circuits before querying
 
 
 async def test_personal_lane_suppresses_already_sent_story(monkeypatch):
-    _stub_common(monkeypatch)
+    submit_mock = _stub_common(monkeypatch)
     # No breaking candidate this tick; the one personal candidate was already sent.
     monkeypatch.setattr(scoring_loop, "list_recent_breaking_candidates", AsyncMock(return_value=[]))
     monkeypatch.setattr(
@@ -132,8 +134,6 @@ async def test_personal_lane_suppresses_already_sent_story(monkeypatch):
     monkeypatch.setattr(
         scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[_personal_candidate()])
     )
-    send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
-    monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
 
     state = feature_store.SignalStoreState()
     state.bootstrap_done = True
@@ -143,4 +143,64 @@ async def test_personal_lane_suppresses_already_sent_story(monkeypatch):
         await scoring_loop._score_one_user("uid-dup", MagicMock(), summary)
 
     assert summary.notifications_sent == 0  # only candidate was suppressed
-    send_mock.assert_not_awaited()
+    submit_mock.assert_not_awaited()
+
+
+# ── on_news_delivered: the delivery-dependent bookkeeping moved here from the tick ──
+def _news_proposal(*, lane: str | None = None):
+    from src.services.notifications.proposal import (
+        SOURCE_NEWS,
+        NotificationProposal,
+        ProposalKind,
+    )
+    data = {"content_id": "c1", "notification_id": "n1", "category": "news",
+            "sub_category": "world", "source": "google_news"}
+    if lane:
+        data["lane"] = lane
+    return NotificationProposal(
+        user_id="u1", source=SOURCE_NEWS, kind=ProposalKind.PROACTIVE,
+        dedup_key="c1", title="t", body="b", data=data,
+        decision=scoring_loop.NotificationDecision(score=0.9, relevance_reason="big"),
+    )
+
+
+async def test_on_news_delivered_breaking_bumps_counters_outcome_and_funnel(monkeypatch):
+    from src.services.notification_service import NotificationResult
+
+    monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
+    outcome = AsyncMock(return_value=None)
+    monkeypatch.setattr(feature_store, "write_outcome_pending", outcome)
+    capture = AsyncMock()
+    monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", capture)
+
+    state = feature_store.SignalStoreState()
+    with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
+        await scoring_loop.on_news_delivered(
+            _news_proposal(lane="breaking"),
+            NotificationResult(tokens_targeted=1, success_count=1, failure_count=0),
+        )
+
+    assert state.sends_today == 1
+    assert state.breaking_sends_today == 1  # breaking lane bumps both counters
+    outcome.assert_awaited_once()
+    capture.assert_awaited_once()
+    assert capture.await_args.kwargs["properties"]["lane"] == "breaking"
+
+
+async def test_on_news_delivered_no_delivery_only_bumps_no_open(monkeypatch):
+    from src.services.notification_service import NotificationResult
+
+    monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
+    outcome = AsyncMock(return_value=None)
+    monkeypatch.setattr(feature_store, "write_outcome_pending", outcome)
+
+    state = feature_store.SignalStoreState()
+    with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
+        await scoring_loop.on_news_delivered(
+            _news_proposal(),
+            NotificationResult(tokens_targeted=1, success_count=0, failure_count=1),
+        )
+
+    assert state.sends_today == 0  # nothing delivered → no send counted
+    assert state.consecutive_no_open_ticks == 1
+    outcome.assert_not_awaited()  # no learning outcome for a non-delivery

@@ -1,47 +1,23 @@
-"""Tests for the briefing engine's tracker-today push gate (pure helper).
+"""Tests for the briefing engine's on-demand generation (persistence + refresh).
 
-The briefing push is suppressed (the briefing itself is still written + viewable) only
-when a topic tracker already delivered to this user on their LOCAL date today, so the
-user isn't double-notified on a day they're already getting tracker news. The local-date
-comparison is the whole subtlety, so it is unit-tested directly.
+The evening briefing now always sends (the tracker-collision push suppression was
+removed when it moved to the unified orchestrator), so the engine-level logic worth
+pinning here is generate_on_demand: return an existing briefing without regenerating,
+generate + persist exactly once when missing, keep the existing one when the pool is
+empty, and debounce a forced refresh.
 """
 
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import pytest
 
 import src.services.briefing.briefing_engine as engine
 from src.services.briefing import briefing_agent, briefing_store
 from src.services.briefing.briefing_agent import BriefingResult
-from src.services.briefing.briefing_engine import _tracker_fired_today, generate_on_demand
+from src.services.briefing.briefing_engine import generate_on_demand
 from src.services.briefing.briefing_store import BriefingTargeting, StoredBriefing
-
-# 00:30 local in Kolkata == 19:00 UTC the PREVIOUS day, the case where naive UTC-date
-# comparison would be wrong.
-_LOCAL_NOW = datetime(2026, 6, 16, 0, 30, tzinfo=ZoneInfo("Asia/Kolkata"))
-
-
-def test_no_tracker_update_is_not_today():
-    assert _tracker_fired_today(None, _LOCAL_NOW) is False
-
-
-def test_update_earlier_today_local_is_today():
-    stamp = datetime(2026, 6, 15, 20, 0, tzinfo=UTC)  # 2026-06-16 01:30 IST → local today
-    assert _tracker_fired_today(stamp, _LOCAL_NOW) is True
-
-
-def test_update_yesterday_local_is_not_today():
-    stamp = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)  # 2026-06-14 17:30 IST (prior day)
-    assert _tracker_fired_today(stamp, _LOCAL_NOW) is False
-
-
-def test_recent_update_just_now_is_today():
-    stamp = _LOCAL_NOW.astimezone(UTC) - timedelta(minutes=5)
-    assert _tracker_fired_today(stamp, _LOCAL_NOW) is True
 
 
 # ── generate_on_demand: persistence + refresh ────────────────────────────────

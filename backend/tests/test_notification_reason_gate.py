@@ -78,12 +78,15 @@ def patched(monkeypatch):
     monkeypatch.setattr(
         scoring_loop, "_build_framing_context", lambda *a, **k: scoring_loop.UserFramingContext()
     )
-    send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
-    monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
+    # Post-cutover the tick ENQUEUES via orchestrator.submit; a BLOCKED candidate means
+    # submit is never awaited (the contract these gate tests pin). The outcome + funnel
+    # recording moved to on_news_delivered (covered by the records-reason test below).
+    submit_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(scoring_loop.orchestrator, "submit", submit_mock)
     monkeypatch.setattr(feature_store, "write_outcome_pending", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", AsyncMock())
-    return send_mock
+    return submit_mock
 
 
 async def _run(monkeypatch, *, candidates):
@@ -141,8 +144,10 @@ async def test_framer_unavailable_defers_and_warns(patched, monkeypatch):
 
 
 async def test_send_records_relevance_reason_on_outcome_and_event(patched, monkeypatch):
-    """A genuine send threads the named reason into the outcome doc and the funnel
-    event so every fired notification is auditable, not just a bare score."""
+    """A genuine send threads the named reason into the proposal, then on delivery into
+    the outcome doc and the funnel event, so every fired notification is auditable."""
+    from src.services.notification_service import NotificationResult
+
     monkeypatch.setattr(
         scoring_loop, "frame_notification",
         AsyncMock(return_value=_framer_result(
@@ -156,6 +161,15 @@ async def test_send_records_relevance_reason_on_outcome_and_event(patched, monke
 
     summary = await _run(monkeypatch, candidates=[_candidate()])
 
+    # The tick enqueues the proposal carrying the reason on its decision.
     assert summary.notifications_sent == 1
+    proposal = patched.await_args.args[0]
+    assert proposal.decision.relevance_reason == "names your compiler interest"
+
+    # On delivery, the hook records that reason on the outcome doc + the funnel event.
+    with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
+        await scoring_loop.on_news_delivered(
+            proposal, NotificationResult(tokens_targeted=1, success_count=1, failure_count=0),
+        )
     assert outcome_mock.await_args.kwargs["relevance_reason"] == "names your compiler interest"
     assert capture.await_args.kwargs["properties"]["relevance_reason"] == "names your compiler interest"

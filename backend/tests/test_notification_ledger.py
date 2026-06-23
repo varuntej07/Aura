@@ -163,6 +163,50 @@ async def test_record_tap_is_idempotent():
     doc_ref.update.assert_not_called()
 
 
+def _snap(status: str, outcome: str) -> MagicMock:
+    s = MagicMock()
+    s.to_dict.return_value = {nl.FIELD_STATUS: status, nl.FIELD_OUTCOME: outcome}
+    return s
+
+
+@pytest.mark.asyncio
+async def test_recent_engagement_counts_only_delivered_and_opened():
+    # delivered+opened, delivered+pending, delivered+dismissed, and a FAILED row.
+    rows = [
+        _snap(nl.STATUS_SENT, nl.OUTCOME_OPENED),
+        _snap(nl.STATUS_SENT, nl.OUTCOME_OPENED),
+        _snap(nl.STATUS_SENT, nl.OUTCOME_PENDING),
+        _snap(nl.STATUS_SENT, nl.OUTCOME_DISMISSED),
+        _snap(nl.STATUS_FAILED, nl.OUTCOME_PENDING),  # never seen → not counted at all
+    ]
+    mock_db = MagicMock()
+    stream_chain = (
+        mock_db.collection.return_value
+        .document.return_value
+        .collection.return_value
+        .where.return_value
+        .limit.return_value
+    )
+    stream_chain.stream.return_value = rows
+
+    with patch.object(nl, "admin_firestore", return_value=mock_db):
+        delivered, opened = await nl.recent_engagement(
+            "u1", since=datetime(2026, 6, 1, tzinfo=UTC)
+        )
+
+    assert delivered == 4   # the 4 SENT rows; the FAILED one is excluded
+    assert opened == 2      # only the two OUTCOME_OPENED
+
+
+@pytest.mark.asyncio
+async def test_recent_engagement_fails_open_to_zero():
+    with patch.object(nl, "admin_firestore", side_effect=RuntimeError("firestore down")):
+        delivered, opened = await nl.recent_engagement(
+            "u1", since=datetime(2026, 6, 1, tzinfo=UTC)
+        )
+    assert (delivered, opened) == (0, 0)
+
+
 @pytest.mark.asyncio
 async def test_record_dismiss_only_flips_pending():
     snap = MagicMock()

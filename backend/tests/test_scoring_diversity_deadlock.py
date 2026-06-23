@@ -77,12 +77,14 @@ def patched_scoring_path(monkeypatch):
             content_kind="discuss",
         )),
     )
-    send_mock = AsyncMock(return_value=SimpleNamespace(delivered=True))
-    monkeypatch.setattr(scoring_loop, "send_notification", send_mock)
+    # Post-cutover the scoring tick ENQUEUES via orchestrator.submit; notifications_sent
+    # counts the enqueue, so these diversity/threshold assertions are unchanged.
+    submit_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(scoring_loop.orchestrator, "submit", submit_mock)
     monkeypatch.setattr(feature_store, "write_outcome_pending", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop, "_safe_write_state", AsyncMock(return_value=None))
     monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", AsyncMock())
-    return send_mock
+    return submit_mock
 
 
 async def test_same_category_recent_send_does_not_block(patched_scoring_path, monkeypatch):
@@ -146,8 +148,9 @@ async def test_diversity_prefers_fresh_category_among_sendable(patched_scoring_p
         await scoring_loop._score_one_user("uid-3", MagicMock(), summary)
 
     assert summary.notifications_sent == 1
-    sent_kwargs = send_mock.await_args.kwargs
-    assert sent_kwargs["data"]["category"] == "sports"
+    # The chosen candidate now rides in the enqueued proposal (submit's first arg).
+    proposal = send_mock.await_args.args[0]
+    assert proposal.data["category"] == "sports"
 
 
 def test_exploration_picks_highest_base_in_target_category():
