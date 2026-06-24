@@ -140,11 +140,11 @@ class ApiClient {
 
       return Result.failure(networkEx);
     } on SocketException {
-      return Result.failure(AppException.networkUnavailable());
+      return Result.failure(await _socketFailure());
     } on TimeoutException {
       return Result.failure(AppException.requestTimeout());
     } on HttpException catch (e) {
-      
+
       if (attempt < AppConstants.maxApiRetries - 1) {
         await _backoffDelay(attempt);
         return _executeWithRetry(method, path, body, fromJson, attempt + 1, timeout: timeout);
@@ -152,7 +152,9 @@ class ApiClient {
 
       return Result.failure(AppException.unexpected(e.message, error: e));
     } on http.ClientException {
-      return Result.failure(AppException.networkUnavailable());
+      // A broken HTTP transaction (connection closed/reset, malformed response),
+      // not an offline device. Never blame the user's connection here.
+      return Result.failure(AppException.connectionInterrupted());
     } catch (e, st) {
       AppLogger.error(
         'Unexpected API client failure',
@@ -233,7 +235,7 @@ class ApiClient {
           await _backoffDelay(attempt);
           continue;
         }
-        throw AppException.networkUnavailable();
+        throw await _socketFailure();
       } on TimeoutException {
         if (!streamAccepted && attempt < AppConstants.maxApiRetries - 1) {
           await _backoffDelay(attempt);
@@ -247,14 +249,15 @@ class ApiClient {
         }
         throw AppException.unexpected(e.message, error: e);
       } on http.ClientException {
-        // Same transport-failure wrapping as in _executeWithRetry: a dropped
-        // connection is a network failure, not an unexpected crash. Retry only
-        // before the stream is accepted (after, a retry could replay text).
+        // A broken HTTP transaction (connection closed/reset, malformed
+        // response), not an offline device. Retry only before the stream is
+        // accepted (after, a retry could replay text). On the final failure use
+        // honest copy: never tell an online user to check their connection.
         if (!streamAccepted && attempt < AppConstants.maxApiRetries - 1) {
           await _backoffDelay(attempt);
           continue;
         }
-        throw AppException.networkUnavailable();
+        throw AppException.connectionInterrupted();
       } catch (e, st) {
         if (e is AppException) rethrow;
         AppLogger.error(
@@ -270,6 +273,17 @@ class ApiClient {
         if (stopwatch.isRunning) stopwatch.stop();
       }
     }
+  }
+
+  /// Maps a [SocketException] to honest copy. A socket failure can mean the
+  /// device is genuinely offline OR the server was unreachable while the user is
+  /// online; only the former warrants "check your connection". Blaming an online
+  /// user's network is the misleading-copy bug we explicitly guard against.
+  Future<AppException> _socketFailure() async {
+    final online = await _connectivity.isConnected;
+    return online
+        ? AppException.connectionInterrupted()
+        : AppException.networkUnavailable();
   }
 
   Future<void> _backoffDelay(int attempt) async {

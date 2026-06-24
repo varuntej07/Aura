@@ -79,6 +79,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   // it only for in-chat replies — shade replies are counted server-side.
   _PendingNotificationReply? _pendingReply;
 
+  /// Buddy-facing "why I reached out" note from a proactive-notification tap.
+  String? _pendingNotificationReason;
+
   ChatViewModel({
     required ChatServiceProvider backendService,
     required ConnectivityService connectivityService,
@@ -265,6 +268,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       _pendingReply = null;
     }
 
+    final notificationReason = _pendingNotificationReason;
+    _pendingNotificationReason = null;
+
     _setState(ViewState.loading);
 
     if (!_sessionTitleSet && _currentSessionId != null) {
@@ -280,7 +286,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       unawaited(_persistSessionTitle(_currentSessionId!, title));
     }
 
-    _streamResponse(trimmed, userMsg);
+    _streamResponse(trimmed, userMsg, notificationReason: notificationReason);
   }
 
   Future<void> retryLastMessage(String errorMessageId) async {
@@ -407,9 +413,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     required String question,
     required List<String> suggestedReplies,
     List<Map<String, dynamic>> priorMessages = const [],
+    String notificationReason = '',
   }) async {
     _messages.clear();
     _error = null;
+    _pendingNotificationReason = notificationReason.isEmpty ? null : notificationReason;
 
     if (priorMessages.isNotEmpty) {
       // Reconcile the shade exchange. Persist oldest-first so order is correct.
@@ -503,9 +511,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     required String contentId,
     required String category,
     required String initialMessage,
+    String notificationReason = '',
   }) async {
     _messages.clear();
     _error = null;
+    _pendingNotificationReason = notificationReason.isEmpty ? null : notificationReason;
 
     if (initialMessage.isNotEmpty) {
       final msg = ChatMessageModel(
@@ -565,9 +575,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   Future<void> loadIcebreakerContext({
     required String notificationId,
     required String openingMessage,
+    String notificationReason = '',
   }) async {
     _messages.clear();
     _error = null;
+    _pendingNotificationReason = notificationReason.isEmpty ? null : notificationReason;
 
     if (openingMessage.isNotEmpty) {
       final msg = ChatMessageModel(
@@ -680,7 +692,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
   // Private helpers
 
-  void _streamResponse(String text, ChatMessageModel userMsg) {
+  void _streamResponse(
+    String text,
+    ChatMessageModel userMsg, {
+    String? notificationReason,
+  }) {
     _isStreaming = true;
     _streamingOutput.value = StreamingSnapshot.empty;
     _streamSub?.cancel();
@@ -695,6 +711,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
           clientMessageId: userMsg.id,
           agentId: agentId,
           attachments: userMsg.attachments,
+          notificationReason: notificationReason,
         )
         .listen(
       (event) {

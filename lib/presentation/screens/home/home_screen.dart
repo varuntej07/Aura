@@ -113,6 +113,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             notificationId: payload.notificationId,
             contentId: payload.contentId,
             category: payload.category,
+            notificationReason: payload.notificationReason,
           ),
         );
       };
@@ -125,6 +126,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             openingMessage: payload.question,
             threadId: payload.threadId,
             suggestedReplies: payload.suggestedReplies,
+            notificationReason: payload.notificationReason,
           ),
         );
       };
@@ -139,6 +141,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             origin: NotificationChatOrigin.icebreaker,
             openingMessage: payload.openingChatMessage,
             notificationId: payload.notificationId,
+            notificationReason: payload.notificationReason,
           ),
         );
       };

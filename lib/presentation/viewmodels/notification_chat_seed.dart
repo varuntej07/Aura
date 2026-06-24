@@ -41,6 +41,8 @@ class NotificationChatSeed {
   final String threadId;
   final List<String> suggestedReplies;
 
+  final String notificationReason;
+
   const NotificationChatSeed({
     required this.origin,
     this.openingMessage = '',
@@ -51,5 +53,6 @@ class NotificationChatSeed {
     this.agentContext = '',
     this.threadId = '',
     this.suggestedReplies = const [],
+    this.notificationReason = '',
   });
 }
