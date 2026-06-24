@@ -39,6 +39,9 @@ class SignalNotificationTapPayload {
   // chat. url is the source article when contentKind is "read".
   final String contentKind;
   final String url;
+  // Buddy-facing "why I reached out" note. Sent to the chat backend on the first
+  // reply only, so Buddy stays oriented on the opener it sent. Never shown to the user.
+  final String notificationReason;
 
   const SignalNotificationTapPayload({
     required this.notificationId,
@@ -47,6 +50,7 @@ class SignalNotificationTapPayload {
     required this.openingChatMessage,
     this.contentKind = '',
     this.url = '',
+    this.notificationReason = '',
   });
 }
 
@@ -58,11 +62,13 @@ class ThreadFollowUpTapPayload {
   final String threadId;
   final String question;
   final List<String> suggestedReplies;
+  final String notificationReason;
 
   const ThreadFollowUpTapPayload({
     required this.threadId,
     required this.question,
     required this.suggestedReplies,
+    this.notificationReason = '',
   });
 }
 
@@ -72,10 +78,12 @@ class ThreadFollowUpTapPayload {
 class IcebreakerTapPayload {
   final String notificationId;
   final String openingChatMessage;
+  final String notificationReason;
 
   const IcebreakerTapPayload({
     required this.notificationId,
     required this.openingChatMessage,
+    this.notificationReason = '',
   });
 }
 
@@ -596,6 +604,7 @@ class NotificationService {
           openingChatMessage: data['opening_chat_message'] as String? ?? '',
           contentKind: data['content_kind'] as String? ?? '',
           url: data['url'] as String? ?? '',
+          notificationReason: data['notification_reason'] as String? ?? '',
         ));
       }
     } else if (notificationType == kThreadFollowUpType) {
@@ -608,6 +617,7 @@ class NotificationService {
           threadId: threadId,
           question: question,
           suggestedReplies: _decodeSuggestedRepliesData(data['suggested_replies']),
+          notificationReason: data['notification_reason'] as String? ?? '',
         ));
       }
     } else if (notificationType == FunnelEvents.originIcebreaker) {
@@ -620,6 +630,7 @@ class NotificationService {
         _icebreakerTapController.add(IcebreakerTapPayload(
           notificationId: notificationId,
           openingChatMessage: openingChatMessage,
+          notificationReason: data['notification_reason'] as String? ?? '',
         ));
       }
     } else if (notificationType == FunnelEvents.originBriefing) {
@@ -661,6 +672,7 @@ class NotificationService {
       question: data['question'] as String? ?? '',
       suggestedReplies:
           (data['suggested_replies'] as List?)?.cast<String>() ?? const [],
+      notificationReason: data['notification_reason'] as String? ?? '',
     ));
   }
 

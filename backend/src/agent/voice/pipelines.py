@@ -121,10 +121,10 @@ def build_agent_session(
         user_away_timeout=15.0,          # Flip user state to "away" after 12s of user silence
         turn_handling=TurnHandlingOptions(
             # MultilingualModel already guards turn finality semantically,
-            # so we lower the endpointing floor from the 0.5s default to 0.2s (~300ms faster reply)
+            # so we lower the endpointing floor from the 0.5s default to 0.2s (~300ms faster reply).
             endpointing={
                 "min_delay": 0.2,
-                "max_delay": 3.0,
+                "max_delay": 2.0,
             },
             interruption={
                 "mode": "adaptive",
