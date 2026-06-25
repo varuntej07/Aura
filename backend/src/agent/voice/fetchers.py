@@ -11,6 +11,13 @@ import asyncio
 
 from ...services.firebase import admin_firestore
 from ...services.user_aura_schema import interest_prompt_lines
+from .text_sanitizer import sanitize_for_speech
+
+# Memory keys that are already carried by a dedicated, live prompt slot and so must
+# NOT be echoed back through the memory digest. A stored "timezone" memory (written by
+# a past store_memory call) goes stale and contradicts the live {timezone} slot, which
+# is sourced fresh from the user profile every session. Compared case-insensitively.
+_PROFILE_OWNED_MEMORY_KEYS = {"timezone"}
 
 
 async def fetch_user_profile(user_id: str) -> dict[str, str]:
@@ -39,8 +46,10 @@ async def fetch_memory_summary(user_id: str) -> str:
         for d in docs:
             row = d.to_dict() or {}
             key = str(row.get("key", "")).strip()
-            value = str(row.get("value", "")).strip()
-            if key and value:
+            # Strip any markdown stored in the value so it reads cleanly when this digest
+            # is injected into the voice prompt (and is mirrored by the TTS sanitizer).
+            value = sanitize_for_speech(str(row.get("value", "")).strip())
+            if key and value and key.casefold() not in _PROFILE_OWNED_MEMORY_KEYS:
                 lines.append(f"- {key}: {value}")
         return "\n".join(lines)
     return await asyncio.to_thread(_read)
@@ -57,7 +66,9 @@ async def fetch_last_session_summary(user_id: str) -> dict[str, str]:
         )
         data = doc.to_dict() or {}
         return {
-            "summary": str(data.get("summary", "")),
+            # Strip markdown from the stored summary at read time so existing `latest`
+            # docs (written before the prose-only summary prompt) inject cleanly too.
+            "summary": sanitize_for_speech(str(data.get("summary", ""))),
             "last_session_at": str(data.get("last_session_at", "")),
         }
     return await asyncio.to_thread(_read)
