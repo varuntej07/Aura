@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..shared.tools import claude_tool_definitions
+from .chat_completion import tool_idempotency as _tool_idempotency
 from .firebase import admin_firestore
 from .gmail_connector import GmailConnector
 from .google_calendar_connector import GoogleCalendarConnector
@@ -25,6 +26,42 @@ from .model_provider import _strip_fences, get_model_provider
 ToolResult = dict[str, Any]
 
 TOOL_TIMEOUT_S = settings.CHAT_TOOL_TIMEOUT_S
+
+# Two reminders whose fire times fall within this window are "the same occasion".
+# A new reminder that duplicates an existing pending one for the same occasion is
+# suppressed. Wider than a double-tap because the model re-times a paraphrase
+# (observed up to ~1h apart in real data), but far short of an intentional re-set
+# hours or days later, which stays a separate reminder.
+REMINDER_SIMILAR_TRIGGER_WINDOW = timedelta(hours=3)
+
+# Cosine threshold (gemini-embedding-001, 768-dim) above which two reminder texts
+# for the same occasion are treated as the same task. Conservative on purpose: a
+# batch brain-dump puts several DISTINCT tasks at one fire time and those must
+# survive, so only clear paraphrases merge. NOTE: set from judgment, NOT yet
+# empirically calibrated (the embedding key was over its spend cap when this
+# shipped). Re-run scratchpad/calibrate_threshold.py on real pairs to tune it.
+REMINDER_SIMILARITY_THRESHOLD = 0.90
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _within_trigger_window(existing_trigger_at: Any, new_trigger_at: datetime) -> bool:
+    """True if an existing reminder fires close enough to a new one to be the same
+    occasion. An unparseable stored value never matches (it cannot be compared)."""
+    if not isinstance(existing_trigger_at, str) or not existing_trigger_at:
+        return False
+    try:
+        existing_dt = datetime.fromisoformat(existing_trigger_at)
+    except ValueError:
+        return False
+    if existing_dt.tzinfo is None:
+        existing_dt = existing_dt.replace(tzinfo=UTC)
+    return abs(existing_dt - new_trigger_at) <= REMINDER_SIMILAR_TRIGGER_WINDOW
 
 
 # reason_step funnel contract. The stepper (Sonnet) fetches via the web_surf TOOL; 
@@ -167,9 +204,15 @@ async def _get_user_timezone(uid: str) -> str:
 
 
 class ToolExecutor:
-    def __init__(self, user_id: str, created_via: str = "text") -> None:
+    def __init__(
+        self,
+        user_id: str,
+        created_via: str = "text",
+        client_message_id: str = "",
+    ) -> None:
         self._user_id = user_id
         self._created_via = created_via     # How reminders created in this session are tagged
+        self._client_message_id = client_message_id
 
     def _db(self) -> fs.Client:
         return admin_firestore()
@@ -218,7 +261,12 @@ class ToolExecutor:
             "input_keys": list(input_data.keys()),
         })
         try:
-            result = await handler(input_data)
+            if self._client_message_id and tool_name in _tool_idempotency.SIDE_EFFECTING_TOOLS:
+                result = await _tool_idempotency.run_idempotent(
+                    self._user_id, self._client_message_id, tool_name, input_data, handler,
+                )
+            else:
+                result = await handler(input_data)
             _ms = int((_time.monotonic() - _start) * 1000)
             logger.info(f"Tool: {tool_name} OK", {
                 "user_id": self._user_id,
@@ -283,28 +331,12 @@ class ToolExecutor:
         # Store as UTC ISO string so the scheduler comparison is lexically correct.
         trigger_at = trigger_at_dt.isoformat()
 
-        # Idempotency guard. The same turn can be replayed - a user editing a chat
-        # message and re-sending it (editAndResend re-runs the whole turn, tools
-        # included), or a retry and the model can also double-call this tool in one turn. 
-        # Each replay would otherwise mint a fresh reminder doc, leaving
-        # the user with redundant duplicates. If an identical pending reminder
-        # already exists (same fire time + same message), return it instead of creating another. 
-        def _find_existing_pending() -> dict[str, Any] | None:
-            query = self._reminders_ref().where(
-                filter=FieldFilter("status", "==", "pending")
-            )
-            for doc in query.stream():
-                existing = doc.to_dict() or {}
-                same_time = existing.get("trigger_at") == trigger_at
-                same_message = (
-                    str(existing.get("message", "")).strip().casefold()
-                    == message.casefold()
-                )
-                if same_time and same_message:
-                    return {"reminder_id": doc.id, **existing}
-            return None
-
-        duplicate = await _run(_find_existing_pending)
+        # Idempotency guard against the model creating the SAME task twice: a
+        # replayed turn (editAndResend re-runs every tool), a double tool-call, or
+        # the user restating it. Both an exact re-create AND a re-worded one ("DM
+        # Vish Jaggi" vs "DM Vishal") for a nearby fire time collapse to one
+        # reminder, while a batch of DISTINCT tasks at one time is preserved.
+        duplicate = await self._find_duplicate_reminder(message, trigger_at_dt)
         if duplicate is not None:
             logger.info("ToolExecutor: duplicate reminder suppressed", {
                 "user_id": self._user_id,
@@ -365,6 +397,71 @@ class ToolExecutor:
             "status": "pending",
             "priority": priority,
         }
+
+    async def _find_duplicate_reminder(
+        self, message: str, trigger_at_dt: datetime
+    ) -> dict[str, Any] | None:
+        """Find a pending reminder this new one duplicates, cheapest layer first.
+
+        1. Exact (casefolded) message at a nearby fire time — a pure double
+           create. No embedding call.
+        2. A semantically near-identical message at a nearby fire time — the model
+           re-worded the same task. One batched embedding call, conservative
+           threshold so a batch of DISTINCT tasks at one time is never merged.
+
+        Only pending reminders within ``REMINDER_SIMILAR_TRIGGER_WINDOW`` of the
+        new fire time are candidates, so an intentional re-set hours or days later
+        is left alone. Fail-open: any embedding error logs and returns ``None`` so
+        a flaky embed API can never block a user from setting a reminder.
+        """
+        def _pending() -> list[dict[str, Any]]:
+            return [
+                {"reminder_id": d.id, **(d.to_dict() or {})}
+                for d in self._reminders_ref()
+                .where(filter=FieldFilter("status", "==", "pending"))
+                .stream()
+            ]
+
+        candidates = [
+            c
+            for c in await _run(_pending)
+            if _within_trigger_window(c.get("trigger_at"), trigger_at_dt)
+        ]
+        if not candidates:
+            return None
+
+        # Layer 1: exact text for the same occasion.
+        message_normalized = message.strip().casefold()
+        for candidate in candidates:
+            if str(candidate.get("message", "")).strip().casefold() == message_normalized:
+                return candidate
+
+        # Layer 2: semantic near-duplicate.
+        try:
+            from .signal_engine.embedder import embed_texts
+
+            texts = [message] + [str(c.get("message", "")) for c in candidates]
+            vectors = await embed_texts(texts)
+            new_vector = vectors[0]
+            best: tuple[float, dict[str, Any]] | None = None
+            for candidate, vector in zip(candidates, vectors[1:]):
+                score = _cosine(new_vector, vector)
+                if score >= REMINDER_SIMILARITY_THRESHOLD and (best is None or score > best[0]):
+                    best = (score, candidate)
+            if best is not None:
+                logger.info("ToolExecutor: semantic duplicate reminder suppressed", {
+                    "user_id": self._user_id,
+                    "reminder_id": best[1]["reminder_id"],
+                    "similarity": round(best[0], 4),
+                })
+                return best[1]
+        except Exception as exc:
+            logger.warn("ToolExecutor: reminder semantic dedup failed; creating anyway", {
+                "user_id": self._user_id,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
+        return None
 
     async def _list_reminders(self, inp: dict[str, Any]) -> ToolResult:
         status_filter = str(inp.get("status_filter", "pending"))
@@ -599,7 +696,7 @@ class ToolExecutor:
     # Web surf — fast Brave search exposed to chat + voice (Gemini grounding stays on
     # the background sports ingest; the real-time path uses Brave for low latency).
     async def _web_surf(self, inp: dict[str, Any]) -> ToolResult:
-        from ..agents.data_fetchers.brave_search import brave_search
+        from ..agents.data_fetchers.brave_search import brave_search, peek_cache
         from .entitlement import (
             check_and_increment_daily_web_surf_usage,
             get_user_effective_tier,
@@ -612,6 +709,18 @@ class ToolExecutor:
         if recency not in {"any", "fresh"}:
             recency = "any"
 
+        # Serve an already-cached result WITHOUT charging the daily counter. The query was
+        # already counted on its first (network) execution; counting the repeat would burn a
+        # free-tier search on a request that never touches the network. Done before the tier
+        # gate so a cached repeat is free even for a user who is already at the cap.
+        cached = peek_cache(query, uid=self._user_id, recency=recency)
+        if cached is not None:
+            return cached
+
+        # Cache miss: this will be a real network call, so enforce the hard daily cap here.
+        # check_and_increment_daily_web_surf_usage stays exactly as-is (one atomic Firestore
+        # transaction that reads, limit-checks, and increments together), so two concurrent
+        # cache-miss queries cannot exceed the cap.
         tier = await get_user_effective_tier(self._user_id)
         if tier == "free":
             allowed, count = await check_and_increment_daily_web_surf_usage(self._user_id)

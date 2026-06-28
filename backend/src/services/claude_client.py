@@ -264,6 +264,7 @@ class ClaudeClient:
         history: list[dict[str, Any]] | None = None,
         is_agent: bool = False,
         user_tier: str = "pro",
+        extra_excluded_tools: frozenset[str] = frozenset(),
     ) -> AsyncIterator[dict[str, Any]]:
         """
         Streaming version of send_text_turn. Yields SSE-compatible event dicts:
@@ -278,7 +279,10 @@ class ClaudeClient:
         blocks (used when the user attaches images or documents to their message).
         """
         excluded = EXCLUDED_TOOLS_FOR_AGENT_CHAT if is_agent else EXCLUDED_TOOLS_FOR_GENERAL_CHAT
-        tools = [t for t in claude_tool_definitions() if t["name"] not in excluded]
+        tools = [
+            t for t in claude_tool_definitions()
+            if t["name"] not in excluded and t["name"] not in extra_excluded_tools
+        ]
         if user_tier == "free":
             tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
         if tools:

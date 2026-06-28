@@ -90,6 +90,40 @@ class TaskScheduler:
         })
         return task_name
 
+    def schedule_chat_completion(
+        self,
+        user_id: str,
+        client_message_id: str,
+        session_id: str,
+        delay_seconds: int,
+    ) -> str:
+        """Enqueue a delayed task that finishes a chat turn server-side if the client
+        disconnected before it completed. Called synchronously at the start of the chat
+        turn (before the SSE response), so the enqueue is durable on Cloud Run even though
+        the streaming request itself gets cancelled on disconnect.
+
+        The delay is set above the normal turn duration so a foreground turn acks itself
+        first and this task becomes a no-op. Returns the Cloud Task name.
+        """
+        payload = {
+            "action": "complete_chat_turn",
+            "user_id": user_id,
+            "client_message_id": client_message_id,
+            "session_id": session_id,
+        }
+        task_name = self._enqueue(
+            payload=payload,
+            delay_seconds=delay_seconds,
+            url_path="/internal/chat/complete",
+        )
+        logger.info("TaskScheduler: chat completion enqueued", {
+            "user_id": user_id,
+            "client_message_id": client_message_id,
+            "delay_seconds": delay_seconds,
+            "task_name": task_name,
+        })
+        return task_name
+
     def cancel_task(self, task_name: str) -> None:
         """Cancel a pending Cloud Task. Safe to call if already fired (no-op)."""
         try:
