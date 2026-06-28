@@ -405,6 +405,7 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
     String? clientMessageId,
     String? agentId,
     List<_i10.ChatAttachment>? attachments,
+    String? notificationReason,
   }) =>
       (super.noSuchMethod(
             Invocation.method(
@@ -416,6 +417,7 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
                 #clientMessageId: clientMessageId,
                 #agentId: agentId,
                 #attachments: attachments,
+                #notificationReason: notificationReason,
               },
             ),
             returnValue: _i3.Stream<_i9.ChatStreamEvent>.empty(),

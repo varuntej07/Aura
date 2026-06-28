@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -11,58 +13,84 @@ import 'package:aura/core/errors/app_exception.dart';
 import 'package:aura/core/network/api_client.dart';
 import 'package:aura/core/network/connectivity_service.dart';
 
-/// Forces [ConnectivityService] to report "connected" so the request actually
-/// reaches the HTTP layer (otherwise `_execute` short-circuits with
-/// networkUnavailable before we can exercise the ClientException path, and the
-/// test would pass even without the fix).
-class _AlwaysConnected extends ConnectivityPlatform {
+/// Reports a fixed connectivity state to [ConnectivityService] so we can test
+/// both an online device (a transit failure) and an offline one (a genuine
+/// connectivity loss) and assert they produce DIFFERENT copy.
+class _FixedConnectivity extends ConnectivityPlatform {
+  _FixedConnectivity(this._online);
+  final bool _online;
+
   @override
   Future<List<ConnectivityResult>> checkConnectivity() async =>
-      [ConnectivityResult.wifi];
+      _online ? [ConnectivityResult.wifi] : [ConnectivityResult.none];
 
   @override
   Stream<List<ConnectivityResult>> get onConnectivityChanged =>
       const Stream.empty();
 }
 
-void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
-
-  setUp(() {
-    ConnectivityPlatform.instance = _AlwaysConnected();
-  });
-
-  test(
-      'a transport ClientException (e.g. connection abort when the app '
-      'backgrounds) maps to a benign network failure, not an unexpected error',
-      () async {
-    final client = ApiClient(
+ApiClient _client() => ApiClient(
       connectivity: ConnectivityService(),
       tokenProvider: ({bool forceRefresh = false}) async => 'test-token',
     );
 
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+      'an online transport ClientException (connection abort) is a benign '
+      'server-side failure, NOT "check your connection" and NOT an unexpected '
+      'crash', () async {
+    ConnectivityPlatform.instance = _FixedConnectivity(true);
     // Stands in for the OS aborting the socket mid-request (app backgrounded):
-    // the http package surfaces it as a ClientException, which is none of the
-    // typed SocketException / HttpException / TimeoutException the client
-    // special-cases — so before the fix it fell into the generic catch.
+    // the http package surfaces it as a ClientException. The user is online, so
+    // telling them to check their connection is wrong.
     final mockClient = MockClient((request) async {
-      throw http.ClientException(
-        'Software caused connection abort',
-        request.url,
-      );
+      throw http.ClientException('Software caused connection abort', request.url);
     });
 
     final result = await http.runWithClient(
-      () => client.post(
-        '/chat/buddy-pills/refresh',
-        const <String, dynamic>{},
-        (json) => json,
-      ),
+      () => _client().post('/chat/buddy-pills/refresh', const {}, (json) => json),
       () => mockClient,
     );
 
-    // Without the fix this is ErrorCode.unexpected (logged ERROR + filed as a
-    // Crashlytics non-fatal). With the fix it's a quiet network failure.
+    expect(result.isFailure, isTrue);
+    // connectionInterrupted uses the serverError code (honest, retryable).
+    expect(result.errorOrNull?.code, ErrorCode.serverError);
+    expect(result.errorOrNull?.code, isNot(ErrorCode.networkUnavailable));
+    expect(result.errorOrNull?.code, isNot(ErrorCode.unexpected));
+  });
+
+  test('an online SocketException is a transit failure, not a connectivity loss',
+      () async {
+    ConnectivityPlatform.instance = _FixedConnectivity(true);
+    final mockClient = MockClient((request) async {
+      throw const SocketException('Connection refused');
+    });
+
+    final result = await http.runWithClient(
+      () => _client().post('/chat/buddy-pills/refresh', const {}, (json) => json),
+      () => mockClient,
+    );
+
+    expect(result.isFailure, isTrue);
+    expect(result.errorOrNull?.code, ErrorCode.serverError);
+    expect(result.errorOrNull?.code, isNot(ErrorCode.networkUnavailable));
+  });
+
+  test('an offline SocketException IS a genuine connectivity loss', () async {
+    ConnectivityPlatform.instance = _FixedConnectivity(false);
+    final mockClient = MockClient((request) async {
+      throw const SocketException('Network is unreachable');
+    });
+
+    // _execute short-circuits to networkUnavailable when offline, which is the
+    // honest "check your connection" case.
+    final result = await http.runWithClient(
+      () => _client().post('/chat/buddy-pills/refresh', const {}, (json) => json),
+      () => mockClient,
+    );
+
     expect(result.isFailure, isTrue);
     expect(result.errorOrNull?.code, ErrorCode.networkUnavailable);
   });

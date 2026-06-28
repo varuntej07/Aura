@@ -53,6 +53,7 @@ class MockChatServiceProvider extends _i1.Mock
     String? clientMessageId,
     String? agentId,
     List<_i5.ChatAttachment>? attachments,
+    String? notificationReason,
   }) =>
       (super.noSuchMethod(
             Invocation.method(
@@ -64,6 +65,7 @@ class MockChatServiceProvider extends _i1.Mock
                 #clientMessageId: clientMessageId,
                 #agentId: agentId,
                 #attachments: attachments,
+                #notificationReason: notificationReason,
               },
             ),
             returnValue: _i3.Stream<_i4.ChatStreamEvent>.empty(),

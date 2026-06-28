@@ -72,7 +72,10 @@ void main() {
           builder: (context, state) => Scaffold(
             body: Center(
               child: ElevatedButton(
-                onPressed: () => showSignInGateDialog(context),
+                onPressed: () => showSignInGateDialog(
+                  context,
+                  authViewModel: context.read<AuthViewModel>(),
+                ),
                 child: const Text('open gate'),
               ),
             ),

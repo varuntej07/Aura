@@ -256,6 +256,65 @@ void main() {
     expect(vm.isStreaming, isFalse);
   });
 
+  test(
+      'notification reason rides the FIRST reply only, then is dropped',
+      () async {
+    // Stub the stream form that includes the notificationReason arg.
+    when(
+      chatService.sendMessageStream(
+        any,
+        any,
+        history: anyNamed('history'),
+        sessionId: anyNamed('sessionId'),
+        clientMessageId: anyNamed('clientMessageId'),
+        agentId: anyNamed('agentId'),
+        attachments: anyNamed('attachments'),
+        notificationReason: anyNamed('notificationReason'),
+      ),
+    ).thenAnswer((_) => Stream.fromIterable([TextDeltaEvent('ok'), DoneEvent()]));
+
+    // A signal-engine notification opened this chat with a Buddy-facing reason.
+    await vm.loadSignalNotificationContext(
+      notificationId: 'n1',
+      contentId: 'c1',
+      category: 'tech',
+      initialMessage: 'saw this and thought of you',
+      notificationReason: 'They follow Verstappen; this is a Monaco GP result.',
+    );
+
+    // First reply carries the reason into the backend call so Buddy stays oriented.
+    await vm.sendMessage('what happened?', 'uid-1');
+    await pumpEventQueue();
+
+    final firstCall = verify(chatService.sendMessageStream(
+      any,
+      any,
+      history: anyNamed('history'),
+      sessionId: anyNamed('sessionId'),
+      clientMessageId: anyNamed('clientMessageId'),
+      agentId: anyNamed('agentId'),
+      attachments: anyNamed('attachments'),
+      notificationReason: captureAnyNamed('notificationReason'),
+    )).captured;
+    expect(firstCall.single, 'They follow Verstappen; this is a Monaco GP result.');
+
+    // Second reply must NOT resend it — later turns carry the real conversation.
+    await vm.sendMessage('tell me more', 'uid-1');
+    await pumpEventQueue();
+
+    final secondCall = verify(chatService.sendMessageStream(
+      any,
+      any,
+      history: anyNamed('history'),
+      sessionId: anyNamed('sessionId'),
+      clientMessageId: anyNamed('clientMessageId'),
+      agentId: anyNamed('agentId'),
+      attachments: anyNamed('attachments'),
+      notificationReason: captureAnyNamed('notificationReason'),
+    )).captured;
+    expect(secondCall.single, isNull);
+  });
+
   test('persist failure aborts send before streaming', () async {
     when(chatRepository.saveMessage(any, userId: anyNamed('userId')))
         .thenAnswer((_) async => Result.failure(
