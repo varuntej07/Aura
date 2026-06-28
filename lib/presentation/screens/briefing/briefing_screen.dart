@@ -92,9 +92,10 @@ class _BriefingScreenState extends State<BriefingScreen> {
 
   // First send seeds the briefing as the opening bubble; later sends are ordinary turns.
   void _handleSend(DailyBriefing briefing, TextChatViewModel chatVm, String text) {
-    final user = context.read<AuthViewModel>().user;
+    final authViewModel = context.read<AuthViewModel>();
+    final user = authViewModel.user;
     if (user == null) {
-      showSignInGateDialog(context);
+      showSignInGateDialog(context, authViewModel: authViewModel);
       return;
     }
     final chatStarted = chatVm.messages.isNotEmpty || chatVm.isStreaming;

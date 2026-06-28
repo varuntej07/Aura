@@ -9,7 +9,10 @@ enum ChatMessageChannel { text, voice }
 
 enum MessageFeedback { liked, disliked }
 
-enum MessageStatus { sent, error }
+/// pending = the live stream dropped (usually the app was backgrounded) but the turn is
+/// being finished server-side; the bubble shows a calm "finishing up" state and is
+/// replaced by the real reply when it hydrates. See ChatViewModel.hydrateServerReply.
+enum MessageStatus { sent, error, pending }
 
 class ChatMessageModel {
   final String id;

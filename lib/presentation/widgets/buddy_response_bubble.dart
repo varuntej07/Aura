@@ -221,6 +221,46 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
       styleSheet: _markdownStyleSheet(),
     );
 
+    // Pending: the live stream dropped (app was backgrounded) but Buddy is finishing the
+    // reply server-side and will push it. Show whatever streamed so far plus a calm note,
+    // never an error. The bubble is replaced by the real reply when it hydrates.
+    if (msg.status == MessageStatus.pending) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (msg.text.trim().isNotEmpty) ...[
+            body,
+            const SizedBox(height: 10),
+          ],
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  "Buddy's finishing this up. I'll ping you when it's ready.",
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 13,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
     if (msg.reminderPayload == null) return body;
 
     // Reminder chip is embedded inside the bubble — feels like part of the
@@ -293,6 +333,8 @@ class _BuddyResponseBubbleState extends State<BuddyResponseBubble> {
     final actions = <Widget>[];
 
     if (isUser) return const SizedBox.shrink();
+    // No copy/feedback/retry while the reply is still being finished server-side.
+    if (msg.status == MessageStatus.pending) return const SizedBox.shrink();
 
     actions.add(_ActionIcon(
       icon: Icons.content_copy_outlined,

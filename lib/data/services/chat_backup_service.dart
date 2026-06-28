@@ -12,6 +12,23 @@ import '../local/app_database.dart';
 
 enum ChatSyncJobType { sessionUpsert, messageUpsert }
 
+/// A chat turn finished server-side (users/{uid}/chat_turns/{cmid}) after the app
+/// disconnected mid-stream. Read back to hydrate the reply on return. Field names mirror
+/// the backend writer (services/chat_completion/turn_store.py).
+class ServerReply {
+  final String status; // generating | regenerating | complete | client_complete | failed
+  final String answerText;
+  final String sessionId;
+  final Map<String, dynamic>? reminder;
+
+  const ServerReply({
+    required this.status,
+    required this.answerText,
+    required this.sessionId,
+    this.reminder,
+  });
+}
+
 /// Backfill is bounded to the same session window restore covers, so a one-time
 /// repair can never enqueue unbounded work.
 const int _backfillSessionLimit = 25;
@@ -179,6 +196,40 @@ class ChatBackupService {
         metadata: {'userId': userId, 'sessionId': sessionId},
       );
       return false;
+    }
+  }
+
+  /// Read a server-completed chat turn (users/{uid}/chat_turns/{cmid}). Returns null if
+  /// the doc is missing or unreadable. Used to hydrate a reply that finished while the app
+  /// was backgrounded. Read-only; never writes.
+  Future<ServerReply?> fetchServerReply(String userId, String clientMessageId) async {
+    final firestore = _firestore;
+    if (userId.isEmpty || clientMessageId.isEmpty || firestore == null) return null;
+
+    try {
+      final snap = await firestore
+          .collection('users')
+          .doc(userId)
+          .collection('chat_turns')
+          .doc(clientMessageId)
+          .get();
+      if (!snap.exists) return null;
+      final d = snap.data() ?? const <String, dynamic>{};
+      return ServerReply(
+        status: (d['status'] as String?) ?? '',
+        answerText: (d['answer_text'] as String?) ?? '',
+        sessionId: (d['session_id'] as String?) ?? '',
+        reminder: d['reminder'] as Map<String, dynamic>?,
+      );
+    } catch (e, st) {
+      AppLogger.error(
+        'Failed to read server reply',
+        error: e,
+        stackTrace: st,
+        tag: 'ChatBackupService',
+        metadata: {'userId': userId, 'cmid': clientMessageId},
+      );
+      return null;
     }
   }
 

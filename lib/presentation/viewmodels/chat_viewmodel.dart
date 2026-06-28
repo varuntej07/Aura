@@ -702,6 +702,16 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     _streamSub?.cancel();
     safeNotifyListeners();
 
+    // Stable id for THIS turn's assistant reply, derived from the user message id (which
+    // is also the backend's client_message_id). The live reply, a "finishing up" pending
+    // placeholder, and the server-hydrated final reply all share this id, so each just
+    // upserts over the last — no duplicate bubbles regardless of arrival order.
+    final replyId = '${userMsg.id}::reply';
+    // True once any event has arrived, i.e. the server accepted the stream and recorded a
+    // turn it can finish in the background. A transport drop after this is recoverable
+    // (pending), not a dead-end error.
+    var streamStarted = false;
+
     _streamSub = _backendService
         .sendMessageStream(
           text,
@@ -715,6 +725,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         )
         .listen(
       (event) {
+        streamStarted = true;
         switch (event) {
           case TextDeltaEvent(:final delta):
             // Per-token update on the notifier only — repaints the streaming
@@ -762,7 +773,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             _isStreaming = false;
             final reminderJson = metadata?['reminder'] as Map<String, dynamic>?;
             final assistantMsg = ChatMessageModel(
-              id: _uuid.v4(),
+              id: replyId,
               text: _streamingOutput.value.text,
               isUser: false,
               timestamp: DateTime.now(),
@@ -801,7 +812,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
                     : 'Something went wrong. Try again in a moment.')
                 : _friendlyError(AppException(code: code, message: message));
             final errMsg = ChatMessageModel(
-              id: _uuid.v4(),
+              id: replyId,
               text: '',
               isUser: false,
               timestamp: DateTime.now(),
@@ -816,15 +827,43 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         }
       },
       onError: (Object e, StackTrace st) {
-        ErrorHandler.handle(e, st);
         _isStreaming = false;
+        final partial = _streamingOutput.value.text;
         _streamingOutput.value = StreamingSnapshot.empty;
+
+        // A transport drop AFTER the server accepted the stream (we saw events, or have
+        // partial text) means the turn is finishing server-side. Show a calm "finishing
+        // up" state, keep whatever streamed, and let the push + hydration deliver the
+        // rest — never the misleading "check your connection". Only a failure with
+        // nothing received (the request likely never reached the server, so no turn was
+        // recorded) is a real dead-end the user should retry.
+        final recoverable = streamStarted || partial.trim().isNotEmpty;
+        if (recoverable) {
+          final pendingMsg = ChatMessageModel(
+            id: replyId,
+            text: partial,
+            isUser: false,
+            timestamp: DateTime.now(),
+            channel: ChatMessageChannel.text,
+            sessionId: _currentSessionId,
+            status: MessageStatus.pending,
+          );
+          unawaited(_persistMessage(pendingMsg));
+          _setState(ViewState.loaded);
+          AppLogger.info(
+            'Stream dropped mid-turn; awaiting server completion',
+            tag: 'ChatViewModel',
+          );
+          return;
+        }
+
+        ErrorHandler.handle(e, st);
         final exc = e is AppException
             ? e
             : AppException.unexpected(e.toString(), error: e, stackTrace: st);
         // Bubble only, no banner.
         final errMsg = ChatMessageModel(
-          id: _uuid.v4(),
+          id: replyId,
           text: '',
           isUser: false,
           timestamp: DateTime.now(),
@@ -917,12 +956,31 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   }
 
   Future<bool> _persistMessage(ChatMessageModel msg) async {
-    _messages.add(msg);
+    // Upsert by id: a message with an existing id REPLACES it in place rather than
+    // appending a duplicate. Most callers pass a fresh uuid (so this just appends), but
+    // the assistant reply uses a stable id (`<cmid>::reply`) so a "finishing up"
+    // placeholder is cleanly replaced by the hydrated final reply, in order.
+    final existingIdx = _messages.indexWhere((m) => m.id == msg.id);
+    final ChatMessageModel? previous = existingIdx >= 0 ? _messages[existingIdx] : null;
+    if (existingIdx >= 0) {
+      _messages[existingIdx] = msg;
+    } else {
+      _messages.add(msg);
+    }
     safeNotifyListeners();
 
     final result = await _chatRepository.saveMessage(msg, userId: _currentUserId);
     if (result.isFailure) {
-      _messages.remove(msg);
+      // Roll back this id to its prior state (restore the replaced message, or remove
+      // the one we appended).
+      final idx = _messages.indexWhere((m) => m.id == msg.id);
+      if (idx >= 0) {
+        if (previous != null) {
+          _messages[idx] = previous;
+        } else {
+          _messages.removeAt(idx);
+        }
+      }
       _error = result.errorOrNull ??
           AppException.unexpected('Failed to save message locally.');
       _state = ViewState.error;
@@ -930,6 +988,63 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       return false;
     }
     return true;
+  }
+
+  /// Pull a reply that finished server-side while the app was backgrounded and merge it
+  /// into the chat, replacing the "finishing up" placeholder (or adding it if the live
+  /// session lost it). Safe to call repeatedly: the stable `<cmid>::reply` id upserts.
+  Future<void> hydrateServerReply(String clientMessageId) async {
+    final uid = _currentUserId;
+    if (uid == null || uid.isEmpty || clientMessageId.isEmpty) return;
+
+    final reply = await _chatBackupService.fetchServerReply(uid, clientMessageId);
+    if (reply == null) return;
+
+    final replyId = '$clientMessageId::reply';
+    if (reply.status == 'complete' && reply.answerText.trim().isNotEmpty) {
+      await _persistMessage(ChatMessageModel(
+        id: replyId,
+        text: reply.answerText,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId ??
+            (reply.sessionId.isNotEmpty ? reply.sessionId : null),
+        reminderPayload:
+            reply.reminder != null ? ReminderPayload.fromJson(reply.reminder!) : null,
+      ));
+      _setState(ViewState.loaded);
+    } else if (reply.status == 'failed') {
+      // Background completion gave up: turn the placeholder into an honest, retryable error.
+      await _persistMessage(ChatMessageModel(
+        id: replyId,
+        text: '',
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+        status: MessageStatus.error,
+        errorReason: "I couldn't finish that one. Tap retry to give it another go.",
+      ));
+      _setState(ViewState.loaded);
+    }
+    // Otherwise still generating/regenerating: leave the placeholder for a later sweep.
+  }
+
+  /// On resume / session open, finish hydrating any replies that completed in the
+  /// background. Scans the loaded session for "finishing up" placeholders and pulls each.
+  Future<void> reconcilePendingTurns() async {
+    const suffix = '::reply';
+    final pendingClientMessageIds = _messages
+        .where((m) =>
+            !m.isUser &&
+            m.status == MessageStatus.pending &&
+            m.id.endsWith(suffix))
+        .map((m) => m.id.substring(0, m.id.length - suffix.length))
+        .toList();
+    for (final cmid in pendingClientMessageIds) {
+      await hydrateServerReply(cmid);
+    }
   }
 
   Future<void> _persistSessionTitle(String sessionId, String title) async {

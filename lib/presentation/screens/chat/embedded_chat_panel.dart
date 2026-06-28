@@ -75,6 +75,11 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
     if (uid != null && uid.isNotEmpty) {
       final chatVm = context.read<TextChatViewModel>();
       chatVm.flushPendingBackup(uid);
+      // Returning to the app: pull in any reply that finished server-side while we were
+      // away, replacing its "finishing up" placeholder with the real answer.
+      if (state == AppLifecycleState.resumed) {
+        chatVm.reconcilePendingTurns();
+      }
       // Leaving the app after a session: if the user did anything, regenerate
       // the Buddy pills so fresh ones are waiting on their next visit, and ship the
       // session to the per-session reflection tier (storylines/traits). Both are

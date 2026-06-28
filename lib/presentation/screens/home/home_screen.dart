@@ -162,6 +162,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       };
 
+      vm.onChatReplyTap = (payload) async {
+        // "Buddy replied": this is not a new seeded chat, it's a reply that finished
+        // server-side in an existing conversation. Switch the embedded Home chat to that
+        // session (if needed) and hydrate the reply in place — no /chat/new opener.
+        final chatVm = _textChatViewModel;
+        if (payload.sessionId.isNotEmpty &&
+            chatVm.currentSessionId != payload.sessionId) {
+          await chatVm.switchSession(payload.sessionId);
+        }
+        await chatVm.hydrateServerReply(payload.clientMessageId);
+      };
+
       if (uid != null && uid.isNotEmpty) {
         // Warm the voice stack before the user taps the mic. Fire-and-forget so
         // it never blocks wake-word init or the first frame.

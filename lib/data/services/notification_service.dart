@@ -111,6 +111,19 @@ class TrackerUpdateTapPayload {
   });
 }
 
+/// Payload emitted when the user taps a "Buddy replied" notification — the reply that
+/// finished server-side after they left mid-stream. Opens the existing chat session and
+/// hydrates the reply (keyed by [clientMessageId]).
+class ChatReplyTapPayload {
+  final String sessionId;
+  final String clientMessageId;
+
+  const ChatReplyTapPayload({
+    required this.clientMessageId,
+    this.sessionId = '',
+  });
+}
+
 const _tag = 'NotificationService';
 
 /// Android notification channel used for all Aura notifications.
@@ -161,6 +174,8 @@ class NotificationService {
       StreamController<DailyBriefingTapPayload>.broadcast();
   final _trackerUpdateTapController =
       StreamController<TrackerUpdateTapPayload>.broadcast();
+  final _chatReplyTapController =
+      StreamController<ChatReplyTapPayload>.broadcast();
 
   // Emits when the user taps an engagement notification.
   Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
@@ -188,6 +203,11 @@ class NotificationService {
   // surface opens seeded with Buddy's update.
   Stream<TrackerUpdateTapPayload> get trackerUpdateTapStream =>
       _trackerUpdateTapController.stream;
+
+  // Emits when the user taps a "Buddy replied" notification — opens the existing chat
+  // session and hydrates the reply that finished while the app was backgrounded.
+  Stream<ChatReplyTapPayload> get chatReplyTapStream =>
+      _chatReplyTapController.stream;
 
   // Public API
 
@@ -311,6 +331,7 @@ class NotificationService {
     await _icebreakerTapController.close();
     await _dailyBriefingTapController.close();
     await _trackerUpdateTapController.close();
+    await _chatReplyTapController.close();
   }
 
   // Private helpers
@@ -645,6 +666,16 @@ class NotificationService {
           openingChatMessage: openingChatMessage,
           topicKey: data['topic_key'] as String? ?? '',
           trackerId: data['tracker_id'] as String? ?? '',
+        ));
+      }
+    } else if (notificationType == 'chat_reply') {
+      // "Buddy replied" tapped: open the existing session and hydrate the reply that
+      // finished server-side while the app was backgrounded (keyed by client_message_id).
+      final cmid = data['cmid'] as String? ?? '';
+      if (cmid.isNotEmpty) {
+        _chatReplyTapController.add(ChatReplyTapPayload(
+          clientMessageId: cmid,
+          sessionId: data['session_id'] as String? ?? '',
         ));
       }
     }

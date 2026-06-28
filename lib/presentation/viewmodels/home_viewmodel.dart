@@ -45,6 +45,7 @@ class HomeViewModel extends SafeChangeNotifier {
   StreamSubscription<IcebreakerTapPayload>? _icebreakerTapSub;
   StreamSubscription<DailyBriefingTapPayload>? _briefingTapSub;
   StreamSubscription<TrackerUpdateTapPayload>? _trackerUpdateTapSub;
+  StreamSubscription<ChatReplyTapPayload>? _chatReplyTapSub;
 
   MicState _micState = MicState.idle;
   VoiceSessionStatus _voiceStatus = VoiceSessionStatus.disconnected;
@@ -64,6 +65,7 @@ class HomeViewModel extends SafeChangeNotifier {
   void Function(IcebreakerTapPayload)? onIcebreakerTap;
   void Function(DailyBriefingTapPayload)? onDailyBriefingTap;
   void Function(TrackerUpdateTapPayload)? onTrackerUpdateTap;
+  void Function(ChatReplyTapPayload)? onChatReplyTap;
 
   HomeViewModel({
     required VoiceSessionService voiceSessionService,
@@ -85,6 +87,7 @@ class HomeViewModel extends SafeChangeNotifier {
     _icebreakerTapSub = _notificationService.icebreakerTapStream.listen(_onIcebreakerTap);
     _briefingTapSub = _notificationService.dailyBriefingTapStream.listen(_onDailyBriefingTap);
     _trackerUpdateTapSub = _notificationService.trackerUpdateTapStream.listen(_onTrackerUpdateTap);
+    _chatReplyTapSub = _notificationService.chatReplyTapStream.listen(_onChatReplyTap);
   }
 
   // Getters 
@@ -230,6 +233,10 @@ class HomeViewModel extends SafeChangeNotifier {
 
   void _onTrackerUpdateTap(TrackerUpdateTapPayload payload) {
     onTrackerUpdateTap?.call(payload);
+  }
+
+  void _onChatReplyTap(ChatReplyTapPayload payload) {
+    onChatReplyTap?.call(payload);
   }
 
   void _handleVoiceEvent(VoiceServerEvent event) {
@@ -516,6 +523,7 @@ class HomeViewModel extends SafeChangeNotifier {
     _icebreakerTapSub?.cancel();
     _briefingTapSub?.cancel();
     _trackerUpdateTapSub?.cancel();
+    _chatReplyTapSub?.cancel();
     unawaited(_wakeWordService.stop());
     unawaited(_voiceService.dispose());
     super.dispose();
