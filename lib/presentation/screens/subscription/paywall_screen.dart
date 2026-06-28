@@ -255,15 +255,15 @@ class _PlanPricing {
 const _companionPricing = _PlanPricing(
   symbol: '\$',
   monthly: '19.99',
-  annual: '191',
-  monthlyEquivalent: '15.92',
+  annual: '179.99',
+  monthlyEquivalent: '14.99',
 );
 
 const _proPricing = _PlanPricing(
   symbol: '\$',
   monthly: '34.99',
-  annual: '335',
-  monthlyEquivalent: '27.92',
+  annual: '314.99',
+  monthlyEquivalent: '26.25',
 );
 
 _PlanPricing _pricingForPlan(_PlanToggle plan) {
@@ -370,55 +370,32 @@ class _FeatureItem {
 const _freeFeatureItems = [
   _FeatureItem(
     icon: Icons.record_voice_over_outlined,
-    text: '15 voice minutes per month',
+    text: '60 voice minutes per month',
     included: true,
   ),
   _FeatureItem(
-    icon: Icons.chat_bubble_outline_rounded,
-    text: '50 chat messages per month',
+    icon: Icons.all_inclusive_rounded,
+    text: 'Unlimited chat',
     included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.notifications_outlined,
-    text: 'Basic reminders',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.extension_outlined,
-    text: 'Calendar and more agents',
-    included: false,
   ),
   _FeatureItem(
     icon: Icons.memory_rounded,
-    text: 'Aura memory profile',
+    text: 'Aura memory that remembers you',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.calendar_today_outlined,
+    text: 'Calendar + reminders',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.mail_outline_rounded,
+    text: 'Gmail agent + priority voice',
     included: false,
   ),
 ];
 
 const _companionFeatureItems = [
-  _FeatureItem(
-    icon: Icons.record_voice_over_outlined,
-    text: '120 voice minutes per month',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.chat_bubble_outline_rounded,
-    text: '500 chat messages per month',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.calendar_today_outlined,
-    text: 'Calendar + reminders unlimited',
-    included: true,
-  ),
-  _FeatureItem(
-    icon: Icons.memory_rounded,
-    text: 'Unlimited Aura memory',
-    included: true,
-  ),
-];
-
-const _proFeatureItems = [
   _FeatureItem(
     icon: Icons.record_voice_over_outlined,
     text: '400 voice minutes per month',
@@ -427,6 +404,34 @@ const _proFeatureItems = [
   _FeatureItem(
     icon: Icons.all_inclusive_rounded,
     text: 'Unlimited chat',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.calendar_today_outlined,
+    text: 'Calendar + reminders',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.memory_rounded,
+    text: 'Unlimited Aura memory',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.bolt_outlined,
+    text: 'Always-on voice, no waiting',
+    included: true,
+  ),
+];
+
+const _proFeatureItems = [
+  _FeatureItem(
+    icon: Icons.record_voice_over_outlined,
+    text: '700 voice minutes per month',
+    included: true,
+  ),
+  _FeatureItem(
+    icon: Icons.mail_outline_rounded,
+    text: 'Gmail agent + email actions',
     included: true,
   ),
   _FeatureItem(
@@ -601,7 +606,7 @@ class _BillingCard extends StatelessWidget {
                         borderRadius: BorderRadius.circular(5),
                       ),
                       child: const Text(
-                        'Save 20%',
+                        'Save 25%',
                         style: TextStyle(
                           color: AppColors.accent,
                           fontSize: 9,

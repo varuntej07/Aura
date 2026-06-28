@@ -28,8 +28,7 @@ def build_stt_pipeline() -> lk_stt.FallbackAdapter:
             deepgram.STT(model="nova-2", api_key=settings.DEEPGRAM_API_KEY.strip()),
         ],
         attempt_timeout=10.0,
-        max_retry_per_stt=1,
-        retry_interval=0.5,
+        max_retry_per_stt=0,
     )
 
 
@@ -58,7 +57,7 @@ def build_llm_pipeline(user_id: str) -> lk_llm.FallbackAdapter:
     llm_adapters.append(
         google.LLM(model=settings.TIER_CHEAP, api_key=settings.GEMINI_API_KEY.strip())
     )
-    return lk_llm.FallbackAdapter(llm_adapters, attempt_timeout=10.0)
+    return lk_llm.FallbackAdapter(llm_adapters, attempt_timeout=10.0, max_retry_per_llm=0)
 
 
 def build_tts_pipeline(sonic3_controls: dict) -> lk_tts.FallbackAdapter:
@@ -76,7 +75,7 @@ def build_tts_pipeline(sonic3_controls: dict) -> lk_tts.FallbackAdapter:
             deepgram.TTS(model="aura-2-andromeda-en", api_key=settings.DEEPGRAM_API_KEY.strip()),
             cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-2"),
         ],
-        max_retry_per_tts=1,
+        max_retry_per_tts=0,
     )
 
 

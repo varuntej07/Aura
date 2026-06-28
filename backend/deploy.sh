@@ -168,7 +168,7 @@ ensure_scheduler_job() {
 
 ensure_scheduler_job "juno-reminder-tick" "* * * * *" "/scheduler/tick"
 ensure_scheduler_job "juno-signal-engine-tick" "*/15 * * * *" "/internal/signal-engine/tick"
-ensure_scheduler_job "juno-content-ingest" "0 */3 * * *" "/internal/signal-engine/content-ingest"
+ensure_scheduler_job "juno-content-ingest" "0 */4 * * *" "/internal/signal-engine/content-ingest"
 
 echo "✅ Cloud Scheduler jobs reconciled"
 
