@@ -126,7 +126,7 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
   /// edit before sending — the pills are conversation openers, not auto-sends.
   void _fillInput(String text) {
     if (context.read<AuthViewModel>().user == null) {
-      showSignInGateDialog(context);
+      showSignInGateDialog(context, authViewModel: context.read<AuthViewModel>());
       return;
     }
     _inputController.text = text;
@@ -204,7 +204,7 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
               allowAttachments: context.read<AuthViewModel>().user != null,
               onSend: (text, attachments) {
                 if (context.read<AuthViewModel>().user == null) {
-                  showSignInGateDialog(context);
+                  showSignInGateDialog(context, authViewModel: context.read<AuthViewModel>());
                   return;
                 }
                 vm.sendMessage(text, _uid, attachments: attachments);

@@ -183,6 +183,7 @@ class BackendApiService implements ChatServiceProvider {
     String? clientMessageId,
     String? agentId,
     List<ChatAttachment>? attachments,
+    String? notificationReason,
   }) async* {
     try {
       await for (final line in _apiClient.streamPost('/chat', {
@@ -194,6 +195,7 @@ class BackendApiService implements ChatServiceProvider {
         'agent_id': ?agentId,
         if (attachments != null && attachments.isNotEmpty)
           'attachments': attachments.map((a) => a.toRequestPayload()).toList(),
+        'notification_reason': ?notificationReason,
       })) {
         try {
           final json = jsonDecode(line) as Map<String, dynamic>;

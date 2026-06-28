@@ -97,6 +97,7 @@ async def _run_tool(tool_name: str, args: dict) -> dict:
             "create_calendar_event": "Couldn't reach your calendar in time. Try again.",
             "get_user_context": "That's taking too long. Try again in a moment.",
             "web_surf": "Couldn't reach the web in time. Try again in a sec.",
+            "track_topic": "Uh ohh!, couldn't set that up in time. Try again in a sec.",
         }
         return {
             "error": True,
@@ -240,6 +241,30 @@ async def report_feedback(
         "verbatim_quote": verbatim_quote,
         "severity": severity,
     })
+
+
+# Topic tracking ----------------------------------------------------------
+
+@mcp_server.tool()
+async def track_topic(request: str) -> dict[str, Any]:
+    """Subscribe the user to ONGOING live updates about an event, topic, or developing
+    situation they want to stay posted on over time — a sports tournament or league, a
+    team's season, an election, a product launch, a court case, a person or company in
+    the news. Setup is instant; Buddy researches the topic and schedules the updates
+    (before / during / after key moments) in the background, sends only genuinely-new
+    updates, and stops on its own when it concludes.
+
+    Use whenever the user asks to be KEPT POSTED or NOTIFIED about how something unfolds
+    ('keep me posted on…', 'let me know how X goes', 'follow Y for me until it's done').
+    Do NOT use for a one-off reminder at a fixed time (use set_reminder) or a single
+    current lookup (use web_surf).
+
+    request: what to keep them posted on, in their own words, including any specifics they
+    gave (which team, league, region, etc.), e.g. "USA's matches at the 2026 World Cup".
+    Confirm warmly in your own words from what they said; do not wait on or read back any
+    title the tool returns.
+    """
+    return await _run_tool("track_topic", {"request": request})
 
 
 # Auth middleware ---------------------------------------------------------

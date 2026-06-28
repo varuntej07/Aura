@@ -17,6 +17,7 @@ abstract class ChatServiceProvider {
     String? clientMessageId,
     String? agentId,
     List<ChatAttachment>? attachments,
+    String? notificationReason,
   });
 
   /// Fire-and-forget: marks an engagement notification as responded.

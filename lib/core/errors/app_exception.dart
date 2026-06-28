@@ -48,6 +48,15 @@ class AppException implements Exception {
     );
   }
 
+  /// A request failed in transit (dropped or reset stream, server closed the
+  /// connection, unreachable host) while the device still has connectivity. This
+  /// is NOT the user's network, so we never tell an online user to "check your connection" 
+    return const AppException(
+      code: ErrorCode.serverError,
+      message: "Couldn't reach Buddy just now. Give it another try.",
+    );
+  }
+
   factory AppException.unauthorized() {
     return const AppException(
       code: ErrorCode.unauthorized,

@@ -139,18 +139,12 @@ async def entrypoint(ctx: JobContext) -> None:
         session_context = await gather_session_context(user_id, session_id)
         context_vars = session_context.prompt_context_vars
 
-        # Seed the chat history with a system-side note that mirrors what the prompt already says.
-        # Keeps the model anchored on the memory across turns without
-        # round-tripping to the LLM up front.
+        # memory_summary is already injected once via the {memory_summary} slot in
+        # VOICE_PROMPT (see context.prompt_context_vars). We deliberately do NOT add a
+        # second system-role copy here: a duplicate both wastes prompt tokens and can
+        # contradict the live slots (e.g. a stale "timezone: PST" memory vs the live
+        # {timezone}). The empty ChatContext is still passed so BuddyAgent owns its history.
         chat_ctx = lk_llm.ChatContext()
-        if session_context.memory_summary:
-            chat_ctx.add_message(
-                role="system",
-                content=(
-                    "Memory of prior chats with this user:\n"
-                    f"{session_context.memory_summary}"
-                ),
-            )
 
         # Mint a Firebase ID token so the MCP server can verify the worker.
         # Failure is fatal for tool use so the session can still hold a

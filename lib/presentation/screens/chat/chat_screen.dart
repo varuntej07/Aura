@@ -62,6 +62,7 @@ class _ChatScreenState extends State<ChatScreen> {
               contentId: extra.contentId,
               category: extra.category,
               initialMessage: extra.openingMessage,
+              notificationReason: extra.notificationReason,
             );
           case NotificationChatOrigin.thread:
             // Curiosity follow-up: reconcile any shade exchange from the server,
@@ -75,12 +76,14 @@ class _ChatScreenState extends State<ChatScreen> {
               question: extra.openingMessage,
               suggestedReplies: extra.suggestedReplies,
               priorMessages: prior,
+              notificationReason: extra.notificationReason,
             );
           case NotificationChatOrigin.icebreaker:
             // Icebreaker opener: seed Buddy's opener and arm the icebreaker funnel.
             await chatVm.loadIcebreakerContext(
               notificationId: extra.notificationId,
               openingMessage: extra.openingMessage,
+              notificationReason: extra.notificationReason,
             );
           case NotificationChatOrigin.tracker:
             // Topic-tracker live update: seed Buddy's update as the opener.
@@ -130,7 +133,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// edit before sending — the pills are conversation openers, not auto-sends.
   void _fillInput(String text) {
     if (context.read<AuthViewModel>().user == null) {
-      showSignInGateDialog(context);
+      showSignInGateDialog(context, authViewModel: context.read<AuthViewModel>());
       return;
     }
     _inputController.text = text;
@@ -224,7 +227,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     suggestions: vm.threadSuggestions,
                     onTap: (text) {
                       if (context.read<AuthViewModel>().user == null) {
-                        showSignInGateDialog(context);
+                        showSignInGateDialog(context, authViewModel: context.read<AuthViewModel>());
                         return;
                       }
                       vm.sendMessage(text, _uid);
@@ -239,7 +242,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   allowAttachments: context.read<AuthViewModel>().user != null,
                   onSend: (text, attachments) {
                     if (context.read<AuthViewModel>().user == null) {
-                      showSignInGateDialog(context);
+                      showSignInGateDialog(context, authViewModel: context.read<AuthViewModel>());
                       return;
                     }
                     vm.sendMessage(text, _uid, attachments: attachments);

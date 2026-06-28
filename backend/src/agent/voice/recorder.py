@@ -41,6 +41,11 @@ TOOL_THINKING_PHRASES: dict[str, list[str]] = {
         "on it, scrapping that reminder",
         "gotcha, getting rid of that one",
     ],
+    "track_topic": [
+        "ooh nice, I'll keep tabs on that for you",
+        "gotcha, I'll keep you posted on that",
+        "say less, I'm on it, I'll keep you in the loop",
+    ],
     "list_reminders": [
         "lemme pull up what you've got",
         "one sec, grabbing your reminders",
@@ -115,6 +120,7 @@ class VoiceSessionRecorder:
         self._session.on("user_state_changed", self._on_user_state)
         self._session.on("user_input_transcribed", self._on_user_transcript)
         self._session.on("conversation_item_added", self._on_conversation_item)
+        self._session.on("function_tools_executed", self._on_tools_executed)
         self._session.on("session_usage_updated", self._on_usage)
         self._session.on("error", self._on_session_error)
         self._session.on("close", self._on_close)
@@ -201,14 +207,17 @@ class VoiceSessionRecorder:
                 "timestamp": datetime.now(UTC).isoformat(),
             })
 
-        # Fire a per-tool phrase in parallel with the MCP round-trip.
-        # Gated on agent_state == "thinking" at fire-time so a phrase never
-        # lands on top of the model's actual reply if the tool returns fast.
+        # Tool-call CAPTURE now lives in _on_tools_executed (the function_tools_executed
+        # event), the only signal that actually carries tool names on this stack. ChatMessage
+        # items have no tool_calls field, so the path below never populated self.tool_calls.
+        #
+        # The per-tool "thinking" phrase below is dead for the same reason (item.tool_calls is
+        # always empty here) and is intentionally LEFT IN PLACE pending the post-demo
+        # filler-trigger decision. Do not build on it: function_tools_executed fires AFTER the
+        # tool returns, and no public session event carries the tool name pre-execution.
         tool_calls = getattr(item, "tool_calls", None) or []
         if tool_calls:
             tool_name = getattr(tool_calls[0], "name", "") or ""
-            if tool_name:
-                self.tool_calls.append(tool_name)
             phrases = TOOL_THINKING_PHRASES.get(tool_name)
             if phrases:
                 phrase = random.choice(phrases)
@@ -234,6 +243,22 @@ class VoiceSessionRecorder:
                 logger.info("VoiceSession: tool thinking phrase", {
                     "session_id": self._session_id, "user_id": self._user_id,
                     "tool": tool_name,
+                })
+
+    def _on_tools_executed(self, ev) -> None:  # type: ignore[misc]
+        # Authoritative tool-call capture. function_tools_executed is the only session event
+        # that carries executed tool names (each FunctionCall has .name); it fires after each
+        # tool round-trip completes, which is correct for post-session analytics. This replaces
+        # the old conversation_item_added/item.tool_calls path, which never populated anything
+        # because ChatMessage items carry no tool data on the gpt-4.1-mini path.
+        function_calls = getattr(ev, "function_calls", None) or []
+        for fnc_call in function_calls:
+            name = getattr(fnc_call, "name", "") or ""
+            if name:
+                self.tool_calls.append(name)
+                logger.info("VoiceSession: tool executed", {
+                    "session_id": self._session_id, "user_id": self._user_id,
+                    "tool": name,
                 })
 
     def _on_usage(self, ev) -> None:  # type: ignore[misc]

@@ -33,9 +33,14 @@ Transcript:
 
 Extract in these exact categories. Write "none" if a category has nothing.
 
+Write plain spoken prose under each category: short sentences only. Do NOT use any
+markdown: no asterisks, bullets, dashes as list markers, bold, headers, or numbered
+lists. This text is injected verbatim into a later voice prompt, so any markup gets
+read aloud literally.
+
 OPEN LOOPS
 Things the user mentioned wanting to do but did not complete this call.
-One bullet per item. Include specifics: dates, names, numbers.
+One short sentence per item. Include specifics: dates, names, numbers.
 
 DECISIONS MADE
 Things the user decided or committed to during this call.

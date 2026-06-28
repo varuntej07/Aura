@@ -1,20 +1,44 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:provider/provider.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/glass_card.dart';
 import '../viewmodels/auth_viewmodel.dart';
 
-Future<void> showSignInGateDialog(BuildContext context) {
+/// Shows the in-place "Sign in to continue" dialog for a guest user who taps an
+/// action that needs an account (chat send, briefing refresh, etc.)
+Future<void> showSignInGateDialog(
+  BuildContext context, {
+  required AuthViewModel authViewModel,
+}) {
   return showDialog<void>(
     context: context,
-    builder: (ctx) => const _SignInGateDialog(),
+    builder: (ctx) => _SignInGateDialog(
+      onContinueWithGoogle: () async {
+        final router = GoRouter.of(ctx);
+        Navigator.pop(ctx);
+        await authViewModel.signInWithGoogle();
+        if (authViewModel.isAuthenticated) {
+          router.go('/home');
+        }
+      },
+      onSignInWithEmail: () {
+        final router = GoRouter.of(ctx);
+        Navigator.pop(ctx);
+        router.push('/login');
+      },
+    ),
   );
 }
 
 class _SignInGateDialog extends StatelessWidget {
-  const _SignInGateDialog();
+  final Future<void> Function() onContinueWithGoogle;
+  final VoidCallback onSignInWithEmail;
+
+  const _SignInGateDialog({
+    required this.onContinueWithGoogle,
+    required this.onSignInWithEmail,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -46,15 +70,7 @@ class _SignInGateDialog extends StatelessWidget {
             width: double.infinity,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () async {
-                final router = GoRouter.of(context);
-                final authViewModel = context.read<AuthViewModel>();
-                Navigator.pop(context);
-                await authViewModel.signInWithGoogle();
-                if (authViewModel.isAuthenticated) {
-                  router.go('/home');
-                }
-              },
+              onTap: onContinueWithGoogle,
               child: const FauxGlassCard.navTile(
                 child: Center(
                   child: Text(
@@ -74,10 +90,7 @@ class _SignInGateDialog extends StatelessWidget {
             width: double.infinity,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: () {
-                Navigator.pop(context);
-                context.push('/login');
-              },
+              onTap: onSignInWithEmail,
               child: const FauxGlassCard.navTile(
                 child: Center(
                   child: Text(
