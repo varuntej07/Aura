@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.juno" "\0"
-            VALUE "FileDescription", "juno_app" "\0"
+            VALUE "FileDescription", "Aura" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "juno_app" "\0"
+            VALUE "InternalName", "aura" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.juno. All rights reserved." "\0"
-            VALUE "OriginalFilename", "juno_app.exe" "\0"
-            VALUE "ProductName", "juno_app" "\0"
+            VALUE "OriginalFilename", "aura.exe" "\0"
+            VALUE "ProductName", "Aura" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
