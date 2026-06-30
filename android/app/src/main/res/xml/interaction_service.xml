@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares Buddy's voice-interaction (digital assistant) capability. Points at the
+     session service that opens Buddy voice on the assist gesture, and the required
+     recognition service. -->
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="dev.varuntej.aura.assistant.BuddyVoiceInteractionSessionService"
+    android:recognitionService="dev.varuntej.aura.assistant.BuddyRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true" />

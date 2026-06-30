@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An accent suggestion chip: solid teal rounded pill (the tappable draft). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/buddy_kb_accent" />
+    <corners android:radius="18dp" />
+</shape>

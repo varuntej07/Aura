@@ -3,9 +3,19 @@
 -keep class io.flutter.plugins.** { *; }
 -keep class io.flutter.plugin.** { *; }
 
-# WebRTC (livekit_client) — JNI-bound classes must not be renamed
+# WebRTC (livekit_client / flutter_webrtc) — JNI-bound classes must not be renamed
 -keep class org.webrtc.** { *; }
 -dontwarn org.webrtc.**
+
+# Native LiveKit Android SDK (in-keyboard voice) + its PREFIXED WebRTC build, which the
+# webrtc-sdk:android-prefixed artifact relocates to the livekit.org.webrtc package so it
+# coexists with flutter_webrtc's org.webrtc. The AAR ships consumer rules, but pin the
+# JNI-bound classes so a release build can never strip the native voice bridge. The
+# livekit.** keep also covers the SDK's protobuf models.
+-keep class io.livekit.android.** { *; }
+-dontwarn io.livekit.android.**
+-keep class livekit.** { *; }
+-dontwarn livekit.**
 
 # SQLite / Drift — generated code uses reflection for column mapping
 -keep class ** extends androidx.sqlite.db.SupportSQLiteOpenHelper { *; }

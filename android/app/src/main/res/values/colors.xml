@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#FFFFFF</color>
+
+    <!-- Buddy Keyboard palette. Mirrors lib/core/theme/app_colors.dart so the
+         native keyboard matches the app's cream/teal design system. -->
+    <color name="buddy_kb_background">#FFF4EEE2</color>
+    <color name="buddy_kb_key">#FFFBF7EF</color>
+    <color name="buddy_kb_key_special">#FFEAE2D2</color>
+    <color name="buddy_kb_key_text">#FF272622</color>
+    <color name="buddy_kb_accent">#FF1EC8B0</color>
+    <color name="buddy_kb_accent_text">#FFFFFFFF</color>
+    <color name="buddy_kb_border">#FFDCD3C0</color>
+    <!-- Pale teal flash shown on key press (the polished tap feedback). -->
+    <color name="buddy_kb_key_pressed">#FFB9ECE3</color>
+    <!-- Muted charcoal for secondary text (context line, hints, footer). -->
+    <color name="buddy_kb_text_muted">#FF7C786F</color>
+    <!-- Soft teal tint for the Aura orb glow ring. -->
+    <color name="buddy_kb_accent_soft">#551EC8B0</color>
+    <!-- Green "Use this" confirm button in the writing-tools panel (matches the reference). -->
+    <color name="buddy_kb_use">#FF15703F</color>
+    <color name="buddy_kb_use_text">#FFFFFFFF</color>
+
+    <!-- Aura voice widget: the same cream/teal palette, aliased with widget-surface
+         names so the widget drawables don't reach into the keyboard's color names. -->
+    <color name="aura_widget_surface">@color/buddy_kb_key</color>
+    <color name="aura_widget_border">@color/buddy_kb_border</color>
+    <color name="aura_widget_accent">@color/buddy_kb_accent</color>
+    <color name="aura_widget_text">@color/buddy_kb_key_text</color>
+</resources>
