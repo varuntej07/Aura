@@ -53,15 +53,25 @@ class KeyboardVoiceController(private val appContext: Context) {
     private var scope: CoroutineScope? = null
     @Volatile
     private var onState: ((State, String?) -> Unit)? = null
+    // Live captions: (fromBuddy, text, isFinal, segmentId). Fired on the main thread as
+    // LiveKit transcription segments arrive, the same stream the app's subtitles read.
+    @Volatile
+    private var onTranscript: ((Boolean, String, Boolean, String) -> Unit)? = null
     @Volatile
     private var sawRemoteAudio = false
 
     val isActive: Boolean get() = room != null
 
-    /** Start a voice turn. [onState] is always invoked on the main thread. */
-    fun start(baseUrl: String, screenContext: JSONObject?, onState: (State, String?) -> Unit) {
+    /** Start a voice turn. [onState] and [onTranscript] are always invoked on the main thread. */
+    fun start(
+        baseUrl: String,
+        screenContext: JSONObject?,
+        onState: (State, String?) -> Unit,
+        onTranscript: (fromBuddy: Boolean, text: String, isFinal: Boolean, segmentId: String) -> Unit,
+    ) {
         if (room != null) return
         this.onState = onState
+        this.onTranscript = onTranscript
         if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -133,6 +143,9 @@ class KeyboardVoiceController(private val appContext: Context) {
         }
     }
 
+    // RoomEvent.TranscriptionReceived (live captions) is still @Beta in livekit-android; the
+    // app already relies on the same stream, so we opt in here too.
+    @OptIn(io.livekit.android.annotations.Beta::class)
     private fun onRoomEvent(event: RoomEvent, r: Room) {
         when (event) {
             is RoomEvent.TrackSubscribed -> {
@@ -142,6 +155,18 @@ class KeyboardVoiceController(private val appContext: Context) {
                 val agentSpeaking = event.speakers.any { it is RemoteParticipant }
                 if (agentSpeaking) sawRemoteAudio = true
                 onState?.invoke(if (agentSpeaking) State.SPEAKING else State.LISTENING, null)
+            }
+            is RoomEvent.TranscriptionReceived -> {
+                // A RemoteParticipant is Buddy; the local participant is the user. The agent
+                // publishes both sides of the transcript into the room (same as the app).
+                val fromBuddy = event.participant is RemoteParticipant
+                if (fromBuddy) sawRemoteAudio = true
+                val callback = onTranscript
+                if (callback != null) {
+                    for (segment in event.transcriptionSegments) {
+                        callback(fromBuddy, segment.text, segment.`final`, segment.id)
+                    }
+                }
             }
             is RoomEvent.Disconnected -> onState?.invoke(State.ENDED, null)
             else -> {}
@@ -170,9 +195,11 @@ class KeyboardVoiceController(private val appContext: Context) {
         }
     }
 
-    /** GET {baseUrl}/voice/token -> the LiveKit url + token, or null on any failure. */
+    /** GET {baseUrl}/voice/token -> the LiveKit url + token, or null on any failure.
+     *  surface=keyboard tells the voice worker this is a quick tap from the keyboard, so
+     *  Buddy keeps replies short and task-focused (see voice_agent._resolve_surface). */
     private fun fetchVoiceToken(baseUrl: String, idToken: String): LkToken? {
-        val endpoint = baseUrl.trimEnd('/') + "/voice/token"
+        val endpoint = baseUrl.trimEnd('/') + "/voice/token?surface=keyboard"
         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8_000

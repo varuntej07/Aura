@@ -73,5 +73,21 @@ class VoiceServerEvent {
 class VoiceSessionConfig {
   final String userId;
 
-  const VoiceSessionConfig({required this.userId});
+  /// On-screen / field text handed in from the Buddy Keyboard's Voice chip, sent to
+  /// the agent as screen context once connected so Buddy can talk about what is on
+  /// screen. Null for a normal mic tap or widget launch.
+  final ScreenContextHandoff? screenContext;
+
+  const VoiceSessionConfig({required this.userId, this.screenContext});
+}
+
+/// The on-screen text the keyboard handed to a voice session (the message/draft the
+/// user was looking at), plus where it came from. Delivered to the agent over the
+/// LiveKit data channel as a `screen_context` message.
+class ScreenContextHandoff {
+  final String text;
+  final String? fieldType;
+  final String? app;
+
+  const ScreenContextHandoff({required this.text, this.fieldType, this.app});
 }

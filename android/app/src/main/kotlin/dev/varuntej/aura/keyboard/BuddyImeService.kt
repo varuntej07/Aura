@@ -2,7 +2,6 @@ package dev.varuntej.aura.keyboard
 
 import android.animation.Animator
 import android.animation.ObjectAnimator
-import android.animation.PropertyValuesHolder
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -67,6 +66,10 @@ private val QWERTY_FAMILY = setOf(KeyLayout.QWERTY, KeyLayout.EMAIL, KeyLayout.U
 
 // How many word suggestions the strip shows at once.
 private const val SUGGESTION_LIMIT = 3
+
+// How many recent voice caption lines stay on screen at once (Spotify-lyrics style: the
+// newest is active, older ones fade upward before being dropped).
+private const val MAX_VOICE_CAPTION_LINES = 4
 
 // Two shift taps within this window latch caps lock.
 private const val SHIFT_DOUBLE_TAP_WINDOW_MS = 300L
@@ -159,6 +162,15 @@ class BuddyImeService : InputMethodService() {
     // In-process voice to Buddy (native LiveKit/WebRTC). Lazily created on first Voice tap,
     // stopped when the field or the whiteboard closes. Lifecycle state only.
     private var voiceController: KeyboardVoiceController? = null
+
+    // The live voice panel: a bottom-anchored caption column (Spotify-lyrics style) plus a
+    // waveform meter pinned mid-right. Built once per session by [buildVoiceStage] and updated
+    // in place as state + transcripts arrive, so running animations survive the whole turn.
+    private var voiceStage: View? = null
+    private var voiceWaveform: VoiceWaveformView? = null
+    private var voiceCaptionStack: LinearLayout? = null
+    private var voiceStatusLine: TextView? = null
+    private val voiceCaptions = LinkedHashMap<String, CaptionLine>()
 
     // Letter keys whose label tracks the shift state, so we can recase them without
     // rebuilding the whole grid on every keystroke.
@@ -307,6 +319,7 @@ class BuddyImeService : InputMethodService() {
         finishComposing()
         // The field lost focus (or the keyboard hid): never leave a voice session live.
         voiceController?.stop()
+        teardownVoiceStage()
         super.onFinishInputView(finishingInput)
     }
 
@@ -376,6 +389,7 @@ class BuddyImeService : InputMethodService() {
     override fun onDestroy() {
         voiceController?.stop()
         voiceController = null
+        teardownVoiceStage()
         // Drop any debounced prediction runnables still queued on the main thread, then stop the
         // off-thread prediction worker.
         mainHandler.removeCallbacksAndMessages(null)
@@ -574,7 +588,10 @@ class BuddyImeService : InputMethodService() {
     private fun refreshShiftKey() {
         val view = shiftKeyView ?: return
         val active = shiftState.isUpper
-        view.text = if (shiftState.isCapsLock) "⇪" else "⇧"
+        // Caps lock uses a fat, filled up-arrow (bold) so the latched state is unmistakable;
+        // one-shot shift keeps the lighter outline glyph.
+        view.text = if (shiftState.isCapsLock) "⬆" else "⇧"
+        view.setTypeface(null, if (shiftState.isCapsLock) Typeface.BOLD else Typeface.NORMAL)
         view.setBackgroundResource(
             if (active) R.drawable.buddy_kb_chip_bg else R.drawable.buddy_kb_key_special_bg,
         )
@@ -1377,30 +1394,54 @@ class BuddyImeService : InputMethodService() {
         startVoiceSession()
     }
 
+    /** Pin a full-takeover panel (emoji / whiteboard) to the live typing keyboard's height, so
+     *  opening it never resizes the IME window. Both panels are `match_parent` with a `weight=1`
+     *  child, which otherwise expands to fill the whole available area (up to ~3/4 of the screen).
+     *  Falls back to the XML `match_parent` if the typing layer hasn't been laid out yet. */
+    private fun pinPanelHeightToTyping(panel: View) {
+        val target = typingStack.height
+        if (target <= 0) return
+        val lp = panel.layoutParams
+        if (lp.height != target) {
+            lp.height = target
+            panel.layoutParams = lp
+        }
+    }
+
     private fun showWhiteboardPanel() {
+        // The typing layer drives the IME height, so flip its visibility SYNCHRONOUSLY (never from
+        // an animation end-callback): a late callback from a previous toggle could otherwise land
+        // us with typing INVISIBLE and the panel GONE, i.e. a blank "disappeared" keyboard.
+        pinPanelHeightToTyping(whiteboard)
+        typingStack.animate().cancel()
+        typingStack.visibility = View.INVISIBLE
+        typingStack.alpha = 1f
+        whiteboard.animate().cancel()
         whiteboard.alpha = 0f
         whiteboard.translationY = dp(12).toFloat()
         whiteboard.visibility = View.VISIBLE
         whiteboard.animate().alpha(1f).translationY(0f).setDuration(180).start()
-        typingStack.animate().alpha(0f).setDuration(120).withEndAction {
-            typingStack.visibility = View.INVISIBLE
-            typingStack.alpha = 1f
-        }.start()
     }
 
     private fun backToKeys() {
         cancelAnimators()
         voiceController?.stop()
+        teardownVoiceStage()
         finishComposing()
         mode = Mode.TYPING
+        typingStack.animate().cancel()
         typingStack.visibility = View.VISIBLE
         typingStack.alpha = 0f
         typingStack.animate().alpha(1f).setDuration(180).start()
+        whiteboard.animate().cancel()
         whiteboard.animate().alpha(0f).translationY(dp(12).toFloat()).setDuration(140)
             .withEndAction {
-                whiteboard.visibility = View.GONE
-                whiteboard.alpha = 1f
-                whiteboard.translationY = 0f
+                // Only hide if we're still in typing mode (a fast re-open may have run since).
+                if (mode != Mode.WHITEBOARD) {
+                    whiteboard.visibility = View.GONE
+                    whiteboard.alpha = 1f
+                    whiteboard.translationY = 0f
+                }
             }.start()
     }
 
@@ -1423,6 +1464,7 @@ class BuddyImeService : InputMethodService() {
         mode = Mode.TYPING
         selectedTool = null
         lastAction = null
+        teardownVoiceStage()
         if (::whiteboard.isInitialized) {
             whiteboard.visibility = View.GONE
             whiteboard.alpha = 1f
@@ -1499,17 +1541,25 @@ class BuddyImeService : InputMethodService() {
         val controller = voiceController
             ?: KeyboardVoiceController(applicationContext).also { voiceController = it }
         renderVoice(KeyboardVoiceController.State.CONNECTING, null)
-        controller.start(baseUrl, screenContext) { state, detail ->
-            if (mode != Mode.WHITEBOARD) return@start
-            when (state) {
-                // The IME can't request the mic permission (no Activity); hand to the app,
-                // which can prompt and then run the same voice.
-                KeyboardVoiceController.State.NO_MIC -> handoffToAppVoice(context, fieldType, app)
-                // Not signed in: route to sign-in via the app.
-                KeyboardVoiceController.State.NO_CREDENTIAL -> renderSignInPrompt()
-                else -> renderVoice(state, detail)
-            }
-        }
+        controller.start(
+            baseUrl,
+            screenContext,
+            onState = { state, detail ->
+                if (mode == Mode.WHITEBOARD) {
+                    when (state) {
+                        // The IME can't request the mic permission (no Activity); hand to the
+                        // app, which can prompt and then run the same voice.
+                        KeyboardVoiceController.State.NO_MIC -> handoffToAppVoice(context, fieldType, app)
+                        // Not signed in: route to sign-in via the app.
+                        KeyboardVoiceController.State.NO_CREDENTIAL -> renderSignInPrompt()
+                        else -> renderVoice(state, detail)
+                    }
+                }
+            },
+            onTranscript = { fromBuddy, text, _, segmentId ->
+                if (mode == Mode.WHITEBOARD) onVoiceTranscript(fromBuddy, text, segmentId)
+            },
+        )
         // TODO(analytics): fire EVENT_KEYBOARD_VOICE_STARTED (keyboard_voice_started)
         // once the IME process has an analytics path. The event carries no content.
     }
@@ -1546,76 +1596,256 @@ class BuddyImeService : InputMethodService() {
         }
     }
 
-    /** The in-keyboard voice panel: a mic indicator + state line + Stop, rendered on the
-     *  whiteboard canvas as the live session progresses. */
+    /** One caption in the voice lyric stack: the rendered line plus who said it (so it can be
+     *  recoloured as it advances). */
+    private class CaptionLine(val view: TextView, var fromBuddy: Boolean)
+
+    /** Drive the in-keyboard voice panel. While the session is live the panel shows a live
+     *  caption stream (Spotify-lyrics style) plus a waveform meter pinned mid-right; the meter's
+     *  energy reads the state, so no static "Listening…" line is needed. Ended / error states
+     *  tear the stage down and show one bounded, action-pointing message. */
     private fun renderVoice(state: KeyboardVoiceController.State, detail: String?) {
+        val live = state == KeyboardVoiceController.State.CONNECTING ||
+            state == KeyboardVoiceController.State.LISTENING ||
+            state == KeyboardVoiceController.State.SPEAKING
+        if (live) {
+            ensureVoiceStage()
+            voiceWaveform?.setEnergy(
+                when (state) {
+                    KeyboardVoiceController.State.SPEAKING -> VoiceWaveformView.Energy.SPEAKING
+                    KeyboardVoiceController.State.LISTENING -> VoiceWaveformView.Energy.LISTENING
+                    else -> VoiceWaveformView.Energy.IDLE // CONNECTING
+                },
+            )
+            // A faint hint only until real speech fills the lyrics; then it gets out of the way.
+            voiceStatusLine?.let { line ->
+                val hint = when {
+                    voiceCaptions.isNotEmpty() -> ""
+                    state == KeyboardVoiceController.State.CONNECTING -> "Connecting to Buddy…"
+                    else -> "Listening… just start talking"
+                }
+                line.text = hint
+                line.visibility = if (hint.isEmpty()) View.GONE else View.VISIBLE
+            }
+            return
+        }
+        // Ended / error: drop the stage and show one bounded message.
+        teardownVoiceStage()
         cancelAnimators()
         setUseThisVisible(false)
         wbCanvas.removeAllViews()
         val title: String
         val sub: String
-        when (state) {
-            KeyboardVoiceController.State.CONNECTING -> {
-                title = "Connecting to Buddy…"; sub = "One sec"
-            }
-            KeyboardVoiceController.State.LISTENING -> {
-                title = "Listening…"; sub = "Talk to Buddy. Tap stop when you're done."
-            }
-            KeyboardVoiceController.State.SPEAKING -> {
-                title = "Buddy is talking…"; sub = "Tap stop to end."
-            }
-            KeyboardVoiceController.State.ENDED -> {
-                title = "Voice ended"; sub = "Tap the mic to talk again."
-            }
-            else -> {
-                title = if (detail == "no_agent") "Buddy didn't pick up" else "Voice hit a snag"
-                sub = "Tap the mic to retry, or open Aura."
-            }
+        if (state == KeyboardVoiceController.State.ENDED) {
+            title = "Voice ended"; sub = "Tap the mic to talk again."
+        } else {
+            title = if (detail == "no_agent") "Buddy didn't pick up" else "Voice hit a snag"
+            sub = "Tap the mic to retry, or open Aura."
         }
-        val live = state == KeyboardVoiceController.State.CONNECTING ||
-            state == KeyboardVoiceController.State.LISTENING ||
-            state == KeyboardVoiceController.State.SPEAKING
-        // A clean vector mic that pulses while the session is live, so the user can see in
-        // real time that Buddy is listening / talking instead of reading an emoji.
-        wbCanvas.addView(
-            makeVoiceMicIndicator(live = live, speaking = state == KeyboardVoiceController.State.SPEAKING),
-        )
         wbCanvas.addView(makeCanvasLine(title))
         wbCanvas.addView(makeCanvasLine(sub))
-        if (live) {
-            wbCanvas.addView(makeChip("■ Stop", accent = true) { stopVoice() })
+    }
+
+    /** Build the live voice stage once: a bottom-anchored caption column with a waveform meter
+     *  pinned to the vertical centre of the right edge, and a Stop control beneath. Rebuilt only
+     *  when a session (re)starts; updated in place afterward so animations survive the turn. */
+    private fun ensureVoiceStage() {
+        val stage = voiceStage
+        if (stage != null && stage.parent === wbCanvas) return
+        buildVoiceStage()
+    }
+
+    private fun buildVoiceStage() {
+        cancelAnimators()
+        setUseThisVisible(false)
+        voiceCaptions.clear()
+        wbCanvas.removeAllViews()
+
+        // Centred caption column, anchored to the bottom. Right padding keeps the lyrics clear of
+        // the waveform + Stop rail on the right edge.
+        val captions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            setPadding(dp(12), dp(8), dp(58), dp(8))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM,
+            )
+        }
+        voiceCaptionStack = captions
+
+        val status = TextView(this).apply {
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setTextColor(color(R.color.buddy_kb_text_muted))
+            text = "Connecting to Buddy…"
+            val p = dp(4)
+            setPadding(p, dp(6), p, dp(6))
+        }
+        voiceStatusLine = status
+        captions.addView(status)
+
+        // The waveform meter (teal, the brand accent) with the Stop button directly beneath it,
+        // the whole rail pinned to the vertical centre of the right edge.
+        val meter = VoiceWaveformView(this).apply {
+            setBarColor(color(R.color.buddy_kb_accent))
+            setEnergy(VoiceWaveformView.Energy.IDLE)
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(40)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+            }
+        }
+        voiceWaveform = meter
+
+        val rail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(meter)
+            addView(makeStopButton())
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_VERTICAL or Gravity.END,
+            ).apply { rightMargin = dp(10) }
+        }
+
+        val stage = FrameLayout(this).apply {
+            minimumHeight = dp(168)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            addView(captions)
+            addView(rail)
+        }
+        voiceStage = stage
+        wbCanvas.addView(stage)
+    }
+
+    /** The compact Stop control that sits under the waveform on the right rail: a small teal
+     *  pill with a stop glyph. */
+    private fun makeStopButton(): View = TextView(this).apply {
+        text = "■"
+        gravity = Gravity.CENTER
+        textSize = 13f
+        setTextColor(color(R.color.buddy_kb_accent_text))
+        setBackgroundResource(R.drawable.buddy_kb_chip_bg)
+        val padH = dp(13)
+        val padV = dp(8)
+        setPadding(padH, padV, padH, padV)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dp(8) }
+        isClickable = true
+        setOnClickListener { stopVoice() }
+    }
+
+    /** Stop the waveform and forget the live panel views (called when voice ends or the panel
+     *  closes). The views themselves are removed by the caller's [wbCanvas] rebuild. */
+    private fun teardownVoiceStage() {
+        voiceWaveform?.release()
+        voiceWaveform = null
+        voiceCaptionStack = null
+        voiceStatusLine = null
+        voiceStage = null
+        voiceCaptions.clear()
+    }
+
+    /** Fold a transcript segment into the lyric stack. Interim updates of the same segment id
+     *  update the active line in place; a new segment id slides a fresh line in and demotes the
+     *  rest, capping history to [MAX_VOICE_CAPTION_LINES]. */
+    private fun onVoiceTranscript(fromBuddy: Boolean, text: String, segmentId: String) {
+        val stack = voiceCaptionStack ?: return
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        voiceStatusLine?.visibility = View.GONE
+
+        val existing = voiceCaptions[segmentId]
+        if (existing != null) {
+            existing.fromBuddy = fromBuddy
+            existing.view.text = trimmed
+            return
+        }
+
+        val line = CaptionLine(makeCaptionLine(trimmed), fromBuddy)
+        voiceCaptions[segmentId] = line
+        stack.addView(line.view)
+        // Spotify-style entrance: the new active line rises into place (alpha is owned by restyle).
+        line.view.alpha = 0f
+        line.view.translationY = dp(10).toFloat()
+        line.view.animate().translationY(0f).setDuration(220).start()
+
+        while (voiceCaptions.size > MAX_VOICE_CAPTION_LINES) {
+            val oldestId = voiceCaptions.keys.first()
+            val oldest = voiceCaptions.remove(oldestId)
+            if (oldest != null) {
+                val view = oldest.view
+                view.animate().alpha(0f).translationY(-dp(8).toFloat()).setDuration(180)
+                    .withEndAction { stack.removeView(view) }.start()
+            }
+        }
+        restyleCaptionLines()
+    }
+
+    /** Style each caption by its depth from the active (newest) line: the active line is large
+     *  and bright, older lines progressively smaller and dimmer, fading upward like lyrics.
+     *  Buddy speaks in teal, the user in charcoal. */
+    private fun restyleCaptionLines() {
+        val items = voiceCaptions.values.toList()
+        val lastIndex = items.size - 1
+        items.forEachIndexed { index, line ->
+            val depth = lastIndex - index
+            val view = line.view
+            val targetAlpha: Float
+            when (depth) {
+                0 -> {
+                    view.textSize = 19f
+                    view.setTypeface(null, Typeface.BOLD)
+                    view.maxLines = 3
+                    targetAlpha = 1f
+                }
+                1 -> {
+                    view.textSize = 16f
+                    view.setTypeface(null, Typeface.NORMAL)
+                    view.maxLines = 2
+                    targetAlpha = 0.55f
+                }
+                2 -> {
+                    view.textSize = 14f
+                    view.setTypeface(null, Typeface.NORMAL)
+                    view.maxLines = 1
+                    targetAlpha = 0.30f
+                }
+                else -> {
+                    view.textSize = 13f
+                    view.setTypeface(null, Typeface.NORMAL)
+                    view.maxLines = 1
+                    targetAlpha = 0.16f
+                }
+            }
+            view.ellipsize = TextUtils.TruncateAt.END
+            // Buddy in the teal brand accent, the user in charcoal: both readable on the cream
+            // card (buddy_kb_accent_text is white, which was invisible here).
+            view.setTextColor(
+                color(if (line.fromBuddy) R.color.buddy_kb_accent else R.color.buddy_kb_key_text),
+            )
+            view.animate().alpha(targetAlpha).setDuration(180).start()
         }
     }
 
-    /** The voice panel's mic: a clean vector mic, accent-tinted and breathing (scale + fade)
-     *  while the session is live (faster while Buddy speaks, slower while listening), so the
-     *  motion itself reads the session state. Static and muted once the session ends. The
-     *  animator is registered so [cancelAnimators] stops it when the panel closes. */
-    private fun makeVoiceMicIndicator(live: Boolean, speaking: Boolean): View = ImageView(this).apply {
-        setImageResource(R.drawable.ic_widget_mic)
-        imageTintList = ColorStateList.valueOf(
-            color(if (live) R.color.buddy_kb_accent_text else R.color.buddy_kb_text_muted),
+    /** A single caption line in the voice lyric stack. Styling (size / alpha / colour) is set
+     *  by [restyleCaptionLines] from its position; this just establishes the box. */
+    private fun makeCaptionLine(text: String): TextView = TextView(this).apply {
+        this.text = text
+        setAllCaps(false)
+        gravity = Gravity.CENTER
+        setTextColor(color(R.color.buddy_kb_key_text))
+        textSize = 19f
+        ellipsize = TextUtils.TruncateAt.END
+        val padV = dp(5)
+        setPadding(dp(4), padV, dp(4), padV)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         )
-        scaleType = ImageView.ScaleType.CENTER_INSIDE
-        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(10)
-            bottomMargin = dp(4)
-        }
-        if (live) {
-            val pulse = ObjectAnimator.ofPropertyValuesHolder(
-                this,
-                PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.18f),
-                PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.18f),
-                PropertyValuesHolder.ofFloat(View.ALPHA, 1f, 0.55f),
-            ).apply {
-                duration = if (speaking) 430 else 720
-                repeatMode = ObjectAnimator.REVERSE
-                repeatCount = ObjectAnimator.INFINITE
-            }
-            pulse.start()
-            activeAnimators.add(pulse)
-        }
     }
 
     private fun stopVoice() {
@@ -1877,26 +2107,34 @@ class BuddyImeService : InputMethodService() {
     }
 
     private fun showEmojiPanel() {
+        // Pin to the typing keyboard's height so the panel never balloons to ~3/4 of the screen,
+        // and flip the height-driving typing layer's visibility SYNCHRONOUSLY (see showWhiteboardPanel).
+        pinPanelHeightToTyping(emojiContainer)
+        typingStack.animate().cancel()
+        typingStack.visibility = View.INVISIBLE
+        typingStack.alpha = 1f
+        emojiContainer.animate().cancel()
         emojiContainer.alpha = 0f
         emojiContainer.translationY = dp(12).toFloat()
         emojiContainer.visibility = View.VISIBLE
         emojiContainer.animate().alpha(1f).translationY(0f).setDuration(160).start()
-        typingStack.animate().alpha(0f).setDuration(110).withEndAction {
-            typingStack.visibility = View.INVISIBLE
-            typingStack.alpha = 1f
-        }.start()
     }
 
     private fun closeEmojiPanel() {
         mode = Mode.TYPING
+        typingStack.animate().cancel()
         typingStack.visibility = View.VISIBLE
         typingStack.alpha = 0f
         typingStack.animate().alpha(1f).setDuration(160).start()
+        emojiContainer.animate().cancel()
         emojiContainer.animate().alpha(0f).translationY(dp(12).toFloat()).setDuration(130)
             .withEndAction {
-                emojiContainer.visibility = View.GONE
-                emojiContainer.alpha = 1f
-                emojiContainer.translationY = 0f
+                // Only hide if we didn't re-open the panel in the meantime.
+                if (mode != Mode.EMOJI) {
+                    emojiContainer.visibility = View.GONE
+                    emojiContainer.alpha = 1f
+                    emojiContainer.translationY = 0f
+                }
             }.start()
     }
 

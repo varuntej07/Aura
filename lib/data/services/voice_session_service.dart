@@ -48,6 +48,13 @@ class VoiceSessionService {
   // Token prefetched at app open (see prewarm), reused by startSession while fresh.
   Map<String, dynamic>? _prewarmedToken;
   DateTime? _prewarmedTokenAt;
+  // On-screen context handed from the Buddy Keyboard, sent to the agent once it joins.
+  // A few timed retries beat the agent's data-handler registration delay; the agent
+  // dedupes repeats (one-shot). Session-lifecycle state, cleared on teardown.
+  ScreenContextHandoff? _pendingScreenContext;
+  bool _screenContextSent = false;
+  Timer? _screenContextRetry1;
+  Timer? _screenContextRetry2;
   final Stopwatch _sessionStopwatch = Stopwatch();
   final StreamController<VoiceServerEvent> _eventsController =
       StreamController<VoiceServerEvent>.broadcast();
@@ -114,6 +121,8 @@ class VoiceSessionService {
       return const Result.success(null);
     }
     _isConnecting = true;
+    _pendingScreenContext = config.screenContext;
+    _screenContextSent = false;
 
     AppLogger.info('Requesting LiveKit token', tag: _tag,
         metadata: {'userId': config.userId});
@@ -202,6 +211,8 @@ class VoiceSessionService {
             // the greeting — if it never comes (e.g. the LLM/TTS is down), this
             // is what saves the user from an endless "Listening" screen.
             _armReplyWatchdog(reason: 'awaiting_greeting');
+            // The agent is now in the room: hand over any keyboard screen context.
+            _scheduleScreenContextDelivery();
           }
         })
         ..on<ParticipantDisconnectedEvent>((e) {
@@ -337,6 +348,39 @@ class VoiceSessionService {
       );
     } catch (e, st) {
       AppLogger.warning('Failed to send OCR context', tag: _tag,
+          metadata: {'error': e.toString(), 'stackTrace': st.toString()});
+    }
+  }
+
+  /// Send the keyboard's screen context to the agent now and again a couple of times.
+  /// The agent registers its data handler a beat after joining and dedupes repeats
+  /// (one-shot), so the first send that lands after registration wins.
+  void _scheduleScreenContextDelivery() {
+    final ctx = _pendingScreenContext;
+    if (ctx == null || _screenContextSent) return;
+    _screenContextSent = true;
+    unawaited(_sendScreenContext(ctx));
+    _screenContextRetry1 =
+        Timer(const Duration(milliseconds: 1200), () => unawaited(_sendScreenContext(ctx)));
+    _screenContextRetry2 =
+        Timer(const Duration(milliseconds: 2600), () => unawaited(_sendScreenContext(ctx)));
+  }
+
+  Future<void> _sendScreenContext(ScreenContextHandoff ctx) async {
+    final room = _room;
+    if (room == null) return;
+    try {
+      await room.localParticipant?.publishData(
+        utf8.encode(jsonEncode({
+          'type': 'screen_context',
+          'context_before': ctx.text,
+          if (ctx.fieldType != null) 'field_type': ctx.fieldType,
+          if (ctx.app != null) 'app': ctx.app,
+        })),
+        reliable: true,
+      );
+    } catch (e, st) {
+      AppLogger.warning('Failed to send screen context', tag: _tag,
           metadata: {'error': e.toString(), 'stackTrace': st.toString()});
     }
   }
@@ -484,6 +528,12 @@ class VoiceSessionService {
     _agentJoinWatchdog = null;
     _replyWatchdog?.cancel();
     _replyWatchdog = null;
+    _screenContextRetry1?.cancel();
+    _screenContextRetry1 = null;
+    _screenContextRetry2?.cancel();
+    _screenContextRetry2 = null;
+    _pendingScreenContext = null;
+    _screenContextSent = false;
     _listener?.dispose();
     _listener = null;
     _room = null;
