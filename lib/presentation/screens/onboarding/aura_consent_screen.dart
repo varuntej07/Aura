@@ -679,7 +679,7 @@ class _ConsentStep extends StatelessWidget {
                   children: [
                     _LegalLink(
                       label: 'Privacy Policy',
-                      url: 'https://varuntej.dev/aura/privacy-policy',
+                      url: 'https://auravoiceapp.com/privacy-policy',
                     ),
                     const Text(
                       ' · ',
@@ -687,7 +687,7 @@ class _ConsentStep extends StatelessWidget {
                     ),
                     _LegalLink(
                       label: 'Terms of Service',
-                      url: 'https://varuntej.dev/aura/terms-of-service',
+                      url: 'https://auravoiceapp.com/terms-of-service',
                     ),
                   ],
                 ),

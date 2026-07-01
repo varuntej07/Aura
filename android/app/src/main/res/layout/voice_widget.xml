@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Aura voice widget: a cream pill with the teal Buddy orb (mic glyph) and a
+     "Talk to Buddy" label. The whole row is the tap target (see VoiceWidgetProvider,
+     which wires the click PendingIntent onto voice_widget_root). Colors mirror the
+     app's cream/teal design system via the aura_widget_* aliases in colors.xml. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/voice_widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:gravity="center"
+    android:background="@drawable/voice_widget_background"
+    android:padding="10dp">
+
+    <FrameLayout
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/voice_widget_orb">
+
+        <ImageView
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_gravity="center"
+            android:src="@drawable/ic_widget_mic"
+            android:contentDescription="@string/voice_widget_label" />
+    </FrameLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="10dp"
+        android:text="@string/voice_widget_label"
+        android:textColor="@color/aura_widget_text"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:maxLines="1"
+        android:ellipsize="end" />
+</LinearLayout>

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Buddy Keyboard input view.
+
+     Two stacked layers at identical height so opening the whiteboard never resizes the
+     keyboard (the host app never reflows):
+       - typing_stack: the collapsed Buddy bar (Aura orb entry point) + the key grid.
+         Shown while typing; flipped to INVISIBLE (kept, so it still drives height) when
+         the whiteboard is open.
+       - whiteboard_container: a full-takeover Buddy panel, GONE until the orb is tapped.
+     Both the collapsed bar and the whiteboard are populated programmatically by
+     BuddyImeService. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/buddy_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/buddy_kb_background">
+
+    <LinearLayout
+        android:id="@+id/typing_stack"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="3dp"
+        android:paddingRight="3dp"
+        android:paddingBottom="22dp">
+
+        <LinearLayout
+            android:id="@+id/collapsed_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingTop="9dp"
+            android:paddingBottom="9dp"
+            android:paddingLeft="8dp"
+            android:paddingRight="10dp" />
+
+        <LinearLayout
+            android:id="@+id/keys_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/whiteboard_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:background="@color/buddy_kb_background"
+        android:paddingLeft="8dp"
+        android:paddingRight="8dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="22dp" />
+
+    <!-- Emoji panel: a full-takeover sibling at the same height as the typing stack, GONE until
+         the bottom-row emoji key is tapped. Built programmatically by BuddyImeService. -->
+    <LinearLayout
+        android:id="@+id/emoji_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:background="@color/buddy_kb_background"
+        android:paddingLeft="4dp"
+        android:paddingRight="4dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="22dp" />
+</FrameLayout>

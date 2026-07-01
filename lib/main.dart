@@ -11,8 +11,11 @@ import 'core/config/firebase_config.dart';
 import 'core/errors/error_handler.dart';
 import 'core/logging/app_logger.dart';
 import 'data/services/analytics_service.dart';
+import 'data/services/keyboard_credential_bridge.dart';
 import 'data/services/posthog_analytics_service.dart';
 import 'data/services/thread_notification_handler.dart';
+import 'data/services/voice_launcher_bridge.dart';
+import 'data/services/deep_link_service.dart';
 import 'di/providers.dart';
 
 /// FCM background message handler.
@@ -63,7 +66,19 @@ void main() {
       if (firebaseReady) {
         await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(true);
         unawaited(AnalyticsService.logAppOpen());
+        // Keep the Buddy Keyboard's shared credential in sync with the auth session
+        // (sign-in / token refresh / sign-out)
+        KeyboardCredentialBridge.instance.start();
       }
+
+      // Start relaying home-screen voice-widget taps (warm launches) before the
+      // first frame so a tap while the app is running is never missed. Android-only;
+      // a no-op elsewhere. Cold-launch taps are read by HomeScreen on mount.
+      VoiceLauncherBridge.instance.start();
+
+      // Start listening for aura://voice deep links before the first frame; 
+      // cold-launch links are read by HomeScreen on mount.
+      DeepLinkService.instance.start();
 
       AppLogger.info(
         'Aura starting',

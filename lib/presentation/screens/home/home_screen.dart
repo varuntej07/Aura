@@ -18,6 +18,8 @@ import '../../../data/services/chat_backup_service.dart';
 import '../../../data/services/chat_session_manager.dart';
 import '../../../data/services/feedback_service.dart';
 import '../../../data/services/posthog_analytics_service.dart';
+import '../../../data/services/voice_launcher_bridge.dart';
+import '../../../data/services/deep_link_service.dart';
 import '../../../core/network/connectivity_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/home_viewmodel.dart';
@@ -48,6 +50,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   late final TextChatViewModel _textChatViewModel;
   bool _textChatViewModelCreated = false;
   _HomeMode _mode = _HomeMode.voice;
+  StreamSubscription<String>? _launchActionSub;
+  StreamSubscription<String>? _deepLinkSub;
 
   @override
   void initState() {
@@ -174,11 +178,37 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         await chatVm.hydrateServerReply(payload.clientMessageId);
       };
 
+      // The voice home-screen widget opens the app straight into a live voice
+      // session. Relay warm-launch taps (app already running) ...
+      _launchActionSub =
+          VoiceLauncherBridge.instance.launchActions.listen(_handleLaunchAction);
+      // ... and warm aura://voice deep links (Siri / widgets / shared links), which
+      // speak the same launch-action vocabulary so both funnel into one handler.
+      _deepLinkSub =
+          DeepLinkService.instance.launchActions.listen(_handleLaunchAction);
+
       if (uid != null && uid.isNotEmpty) {
         // Warm the voice stack before the user taps the mic. Fire-and-forget so
         // it never blocks wake-word init or the first frame.
         unawaited(vm.prewarmVoice());
         await vm.initWakeWord(uid);
+      }
+
+      // ... then replay a cold-launch tap captured before Dart started (app was
+      // killed when the widget was tapped). Runs after prewarm so the connection
+      // is warm by the time the session starts.
+      final pendingLaunch =
+          await VoiceLauncherBridge.instance.consumePendingLaunchAction();
+      if (pendingLaunch != null && mounted) {
+        _handleLaunchAction(pendingLaunch);
+      }
+
+      // Also replay a cold-launch aura://voice deep link (app was killed when the
+      // link fired). Same handler as the widget, so behaviour is identical.
+      final pendingLink =
+          await DeepLinkService.instance.consumeInitialLaunchAction();
+      if (pendingLink != null && mounted) {
+        _handleLaunchAction(pendingLink);
       }
     });
   }
@@ -205,6 +235,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _launchActionSub?.cancel();
+    _deepLinkSub?.cancel();
     _breathController.dispose();
     _rippleController.dispose();
     _pageController.dispose();
@@ -228,6 +260,45 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       await vm.endSession();
     } else {
       await vm.startSession(authVm.user!.uid);
+    }
+  }
+
+  /// Routes a native launch action (from a home-screen widget tap) to its surface.
+  void _handleLaunchAction(String action) {
+    if (action == VoiceLauncherBridge.launchActionVoice) {
+      unawaited(_startVoiceFromWidget());
+    }
+  }
+
+  /// Opens the app into a live voice session, as if the user tapped the mic. The
+  /// tap can arrive while a chat or settings route is on top, so it returns to
+  /// Home and shows the Voice page first, then starts the session (mic on).
+  Future<void> _startVoiceFromWidget() async {
+    if (!mounted) return;
+    // A cold launch from a widget tap or aura://voice deep link can land before
+    // Firebase has restored the session. Wait briefly (bounded) for auth rather than
+    // silently dropping the intent; a genuinely signed-out user just stays put.
+    var user = context.read<AuthViewModel>().user;
+    var waitedMs = 0;
+    while (user == null && waitedMs < 3000 && mounted) {
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      waitedMs += 150;
+      if (!mounted) return;
+      user = context.read<AuthViewModel>().user;
+    }
+    if (user == null || !mounted) return;
+
+    GoRouter.of(context).go('/home');
+    _setMode(_HomeMode.voice);
+
+    final vm = context.read<HomeViewModel>();
+    if (!vm.hasActiveSession) {
+      // If this launch came from the keyboard's Voice chip, it stashed the on-screen
+      // text; hand it to the session so Buddy can talk about what's on screen. Null for
+      // a plain widget tap or deep link.
+      final screenContext =
+          await VoiceLauncherBridge.instance.consumePendingVoiceContext();
+      await vm.startSession(user.uid, screenContext: screenContext);
     }
   }
 

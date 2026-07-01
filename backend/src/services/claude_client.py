@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
-from langfuse import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -55,7 +54,6 @@ class ClaudeClient:
             timeout=_REQUEST_TIMEOUT_S,
         )
 
-    @observe(name="chat_turn")
     async def send_text_turn(
         self,
         *,
@@ -255,7 +253,6 @@ class ClaudeClient:
             "tool_result_data": all_captured_tool_data,
         }
 
-    @observe(name="chat_turn_stream")
     async def send_text_turn_stream(
         self,
         *,

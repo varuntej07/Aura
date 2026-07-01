@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The soft teal glow ring behind the Aura orb in the Buddy bar, signalling the orb
+     is alive and tappable. The orb image is clipped into this oval (clipToOutline). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="@android:color/transparent" />
+    <stroke android:width="1.5dp" android:color="@color/buddy_kb_accent_soft" />
+</shape>

@@ -24,7 +24,96 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- aura://voice deep link: the Voice Launcher primitive every surface
+                targets to open straight into voice. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="aura" android:host="voice"/>
+            </intent-filter>
+            <!-- https App Link to the same voice entry, verified by
+                 /.well-known/assetlinks.json on auravoiceapp.com, so a shared link opens
+                 Buddy voice directly instead of a browser. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="auravoiceapp.com" android:pathPrefix="/voice"/>
+            </intent-filter>
         </activity>
+
+        <!-- Buddy Keyboard: the in-app IME (a separate OS-managed input method).
+             BIND_INPUT_METHOD is granted to the system so it can bind this service;
+             method.xml declares the keyboard subtype. -->
+        <service
+            android:name=".keyboard.BuddyImeService"
+            android:label="@string/buddy_keyboard_label"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
+        <!-- Aura voice widget: a home-screen button that opens the app straight into
+             a voice session (one tap, mic on). The tap PendingIntent (built in
+             VoiceWidgetProvider) launches MainActivity with the voice launch action. -->
+        <receiver
+            android:name=".widget.VoiceWidgetProvider"
+            android:exported="false"
+            android:label="@string/voice_widget_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/voice_widget_info" />
+        </receiver>
+
+        <!-- Digital assistant (opt-in): once the user picks Buddy as the assistant app,
+             the assist gesture opens Buddy voice. No effect unless selected. -->
+        <service
+            android:name=".assistant.BuddyVoiceInteractionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".assistant.BuddyVoiceInteractionSessionService"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true" />
+        <service
+            android:name=".assistant.BuddyRecognitionService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
+
+        <!-- Quick Settings tile: a pull-down-shade shortcut into a voice session.
+             Reuses the same voice launch intent as the widget. -->
+        <service
+            android:name=".widget.VoiceTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notification"
+            android:label="@string/voice_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -65,6 +154,8 @@
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <!-- Microphone: required for voice capture and wake word detection -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Audio routing: in-keyboard voice sets communication mode + requests audio focus -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <!-- Internet: required for WebSocket voice gateway connection -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- Push notifications: required on Android 13+ (API 33+) -->

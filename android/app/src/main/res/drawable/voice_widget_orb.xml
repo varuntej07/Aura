@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The teal Buddy orb behind the mic glyph: a glowing oval with a top-to-bottom
+     teal gradient, echoing the in-app VoiceSphere. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:angle="270"
+        android:startColor="#FF35DAC6"
+        android:endColor="@color/aura_widget_accent" />
+</shape>

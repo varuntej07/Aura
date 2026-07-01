@@ -494,9 +494,9 @@ class _LoginTextField extends StatelessWidget {
 // Legal footer
 
 class _LegalFooter extends StatelessWidget {
-  static final _tosUri = Uri.parse('https://varuntej.dev/aura/terms-of-service');
+  static final _tosUri = Uri.parse('https://auravoiceapp.com/terms-of-service');
   static final _privacyUri =
-      Uri.parse('https://varuntej.dev/aura/privacy-policy');
+      Uri.parse('https://auravoiceapp.com/privacy-policy');
 
   @override
   Widget build(BuildContext context) {

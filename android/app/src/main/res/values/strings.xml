@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- App UI strings live in Flutter (lib/). This file exists only for native
+     Android resources that must be string references, e.g. the IME label. -->
+<resources>
+    <string name="buddy_keyboard_label">Buddy Keyboard</string>
+    <string name="buddy_keyboard_subtype_en">English</string>
+
+    <!-- Aura voice home-screen widget (one tap -> open the app with mic on). -->
+    <string name="voice_widget_label">Talk to Buddy</string>
+    <string name="voice_widget_description">One tap to start talking to Buddy.</string>
+
+    <!-- Quick Settings tile: pull-down-shade shortcut into a voice session. -->
+    <string name="voice_tile_label">Talk to Buddy</string>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Aura voice widget metadata. A small (~2x1) static button; updatePeriodMillis=0
+     because it never refreshes its own content (the tap is all it does). previewLayout
+     renders the real layout in the picker on API 31+; previewImage is the older
+     fallback. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="110dp"
+    android:minHeight="40dp"
+    android:targetCellWidth="2"
+    android:targetCellHeight="1"
+    android:minResizeWidth="110dp"
+    android:minResizeHeight="40dp"
+    android:resizeMode="horizontal"
+    android:widgetCategory="home_screen"
+    android:initialLayout="@layout/voice_widget"
+    android:previewLayout="@layout/voice_widget"
+    android:previewImage="@mipmap/ic_launcher"
+    android:description="@string/voice_widget_description"
+    android:updatePeriodMillis="0" />

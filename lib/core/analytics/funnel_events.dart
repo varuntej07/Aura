@@ -71,4 +71,27 @@ class FunnelEvents {
 
   // On-demand "Catch me up on the world" snapshot.
   static const String worldBriefingFetched = 'world_briefing_fetched';
+
+  // Most steps fire client-side from the native keyboard / in-app onboarding; 
+  // `keyboardDraftRequested` also fires server-side from /keyboard/draft. 
+  // Properties carry only the action + host app, never the user's typed content.
+  static const String keyboardEnabled = 'keyboard_enabled';
+  static const String keyboardFullAccessGranted = 'keyboard_full_access_granted';
+  static const String keyboardDraftRequested = 'keyboard_draft_requested';
+  static const String keyboardSuggestionInserted = 'keyboard_suggestion_inserted';
+  static const String keyboardLimitHit = 'keyboard_limit_hit';
+
+  static const String propKeyboardAction = 'action';
+  static const String propKeyboardHostApp = 'host_app';
+
+  // Field-type breakdown dimension stamped onto `keyboardDraftRequested`
+  // (text | email | url | number | phone | datetime | password). Breakdown only,
+  // never the user's typed content.
+  static const String propKeyboardFieldType = 'field_type';
+
+  // Password helper + in-keyboard voice, fired client-side from the native
+  // keyboard. Both are content-free: the generated password is never sent
+  // anywhere, and the voice-started event carries no transcript or field content.
+  static const String keyboardPasswordGenerated = 'keyboard_password_generated';
+  static const String keyboardVoiceStarted = 'keyboard_voice_started';
 }

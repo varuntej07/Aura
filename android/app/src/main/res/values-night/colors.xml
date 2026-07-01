@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Buddy Keyboard dark palette. The IME context follows the system night mode, so when the
+     phone is in dark mode these override the cream/teal light values in values/colors.xml, giving
+     the Gboard-style dark keyboard. The teal accent is kept in both themes (it is the brand).
+     The aura_widget_* aliases in values/colors.xml reference these tokens, so they follow too. -->
+<resources>
+    <color name="buddy_kb_background">#FF202124</color>
+    <color name="buddy_kb_key">#FF3C4043</color>
+    <color name="buddy_kb_key_special">#FF2A2D30</color>
+    <color name="buddy_kb_key_text">#FFE8EAED</color>
+    <color name="buddy_kb_accent">#FF1EC8B0</color>
+    <color name="buddy_kb_accent_text">#FF06241F</color>
+    <!-- Borders are near-invisible in dark for the flat Gboard look (close to the key fill). -->
+    <color name="buddy_kb_border">#FF44474A</color>
+    <!-- Brighter gray fill shown on key press (the simple highlight). -->
+    <color name="buddy_kb_key_pressed">#FF5F6368</color>
+    <!-- Muted gray for secondary text (context line, hints, footer). -->
+    <color name="buddy_kb_text_muted">#FF9AA0A6</color>
+    <!-- Soft teal tint for the Aura orb glow ring. -->
+    <color name="buddy_kb_accent_soft">#551EC8B0</color>
+</resources>
