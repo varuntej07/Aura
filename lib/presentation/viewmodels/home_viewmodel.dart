@@ -118,7 +118,7 @@ class HomeViewModel extends SafeChangeNotifier {
   /// failure so a cold backend or denied mic never reaches the UI.
   Future<void> prewarmVoice() => _voiceService.prewarm();
 
-  Future<void> startSession(String userId) async {
+  Future<void> startSession(String userId, {ScreenContextHandoff? screenContext}) async {
     _currentUserId = userId;
     if (hasActiveSession) return;
 
@@ -146,7 +146,7 @@ class HomeViewModel extends SafeChangeNotifier {
     }
 
     final result = await _voiceService.startSession(
-      VoiceSessionConfig(userId: userId),
+      VoiceSessionConfig(userId: userId, screenContext: screenContext),
     );
 
     await result.when(

@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -5,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
+import '../../../data/services/voice_launcher_bridge.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/settings_viewmodel.dart';
 import '../../widgets/error_display.dart';
@@ -87,6 +90,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       );
     }
+  }
+
+  /// Pins the one-tap voice widget to the home screen. The launcher shows its own
+  /// placement confirmation when it supports app-initiated pinning; otherwise we
+  /// point the user at the manual widget tray.
+  Future<void> _addVoiceWidget(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final requested =
+        await VoiceLauncherBridge.instance.requestPinVoiceWidget();
+    if (!mounted) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          requested
+              ? 'Check your home screen to drop the "Talk to Buddy" widget.'
+              : "Your launcher can't add it from here. Long-press your home "
+                  'screen, tap Widgets, and pick Aura.',
+          style: const TextStyle(color: AppColors.textPrimary),
+        ),
+        backgroundColor: AppColors.surfaceVariant,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   /// Toggles Aura memory consent. Turning ON opens the age-gated consent screen
@@ -222,6 +248,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           value: settings?.ttsEnabled ?? true,
                           onChanged: settingsVm.toggleTts,
                         ),
+                        // Home-screen widget: one tap opens the app with mic on.
+                        // Android-only (iOS WidgetKit ships separately).
+                        if (Platform.isAndroid) ...[
+                          const SizedBox(height: 8),
+                          _GlassNavTile(
+                            icon: Icons.widgets_outlined,
+                            title: 'Add to home screen',
+                            subtitle:
+                                'One-tap widget that opens Buddy with the mic on',
+                            onTap: () => _addVoiceWidget(context),
+                          ),
+                        ],
 
                         // ── Reminders ────────────────────────────────────────
                         _SectionLabel('Reminders'),
@@ -305,7 +343,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           title: 'Privacy Policy',
                           subtitle: 'How we handle your data',
                           onTap: () => launchUrl(
-                            Uri.parse('https://varuntej.dev/aura/privacy-policy'),
+                            Uri.parse('https://auravoiceapp.com/privacy-policy'),
                             mode: LaunchMode.externalApplication,
                           ),
                         ),
@@ -315,7 +353,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           title: 'Terms of Service',
                           subtitle: 'Terms and conditions',
                           onTap: () => launchUrl(
-                            Uri.parse('https://varuntej.dev/aura/terms-of-service'),
+                            Uri.parse('https://auravoiceapp.com/terms-of-service'),
                             mode: LaunchMode.externalApplication,
                           ),
                         ),
