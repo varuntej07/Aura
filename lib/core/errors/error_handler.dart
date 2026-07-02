@@ -76,7 +76,7 @@ class ErrorHandler {
   static void _withCrashlytics(
     void Function(FirebaseCrashlytics crashlytics) callback,
   ) {
-    if (!FirebaseRuntime.hasApp) return;
+    if (!FirebaseRuntime.crashlyticsSupported) return;
     callback(FirebaseCrashlytics.instance);
   }
 

@@ -23,6 +23,7 @@ builders, voice conditioning, and the session event recorder.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import time
@@ -38,9 +39,18 @@ from ..lib.logger import logger
 from ..services.entitlement import add_free_voice_seconds
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
+from .voice_prompt import render_screen_sight_note, render_surface_note
 from .voice.auth import mint_firebase_id_token
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_nudge
+from .voice.screen_context import (
+    OCR_CONTEXT_TYPE,
+    SCREEN_CONTEXT_TYPE,
+    TEXT_INPUT_TYPE,
+    deliver_screen_context,
+    deliver_typed_message,
+)
+from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -56,6 +66,32 @@ from .voice.voice_controls import derive_voice_controls
 # Firebase auto-issued UIDs are 28 alphanumeric chars.
 # We refuse anything else so a malformed room name can't drive a session.
 _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
+
+# Launch surfaces the client stamps into its participant metadata at /voice/token.
+# Anything else (or a missing value) collapses to "app", the neutral default.
+_KNOWN_SURFACES = frozenset({"app", "keyboard", "desktop"})
+
+
+def _resolve_surface(ctx: JobContext) -> str:
+    """Read the launch surface ('keyboard' vs 'app') from the user's participant metadata.
+
+    The /voice/token endpoint stamps {"surface": ...} into the token's participant
+    metadata; the keyboard sends 'keyboard', the in-app orb sends nothing. We read it
+    right after connect (the user is already in the room, since the job is dispatched on
+    their join) and default to 'app' on anything unexpected, so a missing or malformed
+    value never changes behavior.
+    """
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            surface = json.loads(raw).get("surface")
+            if surface in _KNOWN_SURFACES:
+                return surface
+    except Exception:
+        pass
+    return "app"
 
 
 def prewarm(process: JobProcess) -> None:
@@ -139,6 +175,17 @@ async def entrypoint(ctx: JobContext) -> None:
         session_context = await gather_session_context(user_id, session_id)
         context_vars = session_context.prompt_context_vars
 
+        # Where the call was launched from. Baked into the prompt once here (the prompt is
+        # built once per session in BuddyAgent), so a keyboard tap stays short and
+        # task-focused for the whole session, not just the first turn.
+        surface = _resolve_surface(ctx)
+        context_vars["surface"] = render_surface_note(surface)
+        context_vars["screen_sight"] = render_screen_sight_note(surface)
+        if surface != "app":
+            logger.info("VoiceSession: launch surface", {
+                "session_id": session_id, "user_id": user_id, "surface": surface,
+            })
+
         # memory_summary is already injected once via the {memory_summary} slot in
         # VOICE_PROMPT (see context.prompt_context_vars). We deliberately do NOT add a
         # second system-role copy here: a duplicate both wastes prompt tokens and can
@@ -200,10 +247,26 @@ async def entrypoint(ctx: JobContext) -> None:
             mcp_server=mcp_server,
         )
 
+        # Screen frames from the desktop overlay (armed screen sight). Registered
+        # BEFORE session.start so a frame racing the pipeline build is assembled,
+        # not dropped. Costs nothing on sessions that never send one; the byte
+        # stream can only carry frames from this room's participant.
+        screen_frames = ScreenFrameStore(session_id=session_id, user_id=user_id)
+        try:
+            ctx.room.register_byte_stream_handler(
+                SCREEN_FRAME_TOPIC, screen_frames.handle_stream
+            )
+        except Exception as exc:
+            logger.warn("VoiceSession: screen frame handler registration failed", {
+                "session_id": session_id, "user_id": user_id, "error": str(exc),
+            })
+
         buddy = BuddyAgent(
             user_id=user_id,
             context_vars=context_vars,
             chat_ctx=chat_ctx,
+            screen_frames=screen_frames,
+            session_id=session_id,
         )
 
         recorder = VoiceSessionRecorder(
@@ -221,6 +284,74 @@ async def entrypoint(ctx: JobContext) -> None:
         # Free-tier voice budget nudge task, armed after start, cancelled on session end.
         nudge_task: asyncio.Task | None = None
 
+        # On-screen / field context handed in over the data channel: the keyboard's
+        # "talk about what's on my screen", an OCR snapshot, or a typed message. The
+        # handler is registered BEFORE session.start so a packet that lands while the
+        # pipelines are still building is buffered, not dropped; it is flushed once the
+        # session is live. screen_context fires once per session.
+        screen_context_fired = False
+        session_live = False
+        pending_context_payloads: list[dict] = []
+        context_tasks: list[asyncio.Task] = []
+
+        def _dispatch_context_payload(msg: dict) -> None:
+            nonlocal screen_context_fired
+            msg_type = msg.get("type")
+            if msg_type == SCREEN_CONTEXT_TYPE:
+                if screen_context_fired:
+                    return
+                screen_context_fired = True
+                context_tasks.append(asyncio.create_task(
+                    deliver_screen_context(
+                        session,
+                        context_before=str(msg.get("context_before", "")),
+                        field_type=msg.get("field_type"),
+                        app=msg.get("app"),
+                        session_id=session_id,
+                        user_id=user_id,
+                    ),
+                    name=f"voice-screen-ctx-{session_id[:8]}",
+                ))
+            elif msg_type == OCR_CONTEXT_TYPE:
+                context_tasks.append(asyncio.create_task(
+                    deliver_screen_context(
+                        session,
+                        context_before=str(msg.get("text", "")),
+                        field_type=None,
+                        app=None,
+                        session_id=session_id,
+                        user_id=user_id,
+                    ),
+                    name=f"voice-ocr-ctx-{session_id[:8]}",
+                ))
+            elif msg_type == TEXT_INPUT_TYPE:
+                context_tasks.append(asyncio.create_task(
+                    deliver_typed_message(
+                        session,
+                        text=str(msg.get("text", "")),
+                        session_id=session_id,
+                        user_id=user_id,
+                    ),
+                    name=f"voice-text-input-{session_id[:8]}",
+                ))
+
+        def _on_data_received(packet) -> None:
+            try:
+                raw = getattr(packet, "data", None)
+                if not raw:
+                    return
+                msg = json.loads(bytes(raw).decode("utf-8"))
+            except Exception:
+                return  # not our JSON; ignore (other features may share the channel)
+            if not isinstance(msg, dict) or "type" not in msg:
+                return
+            if session_live:
+                _dispatch_context_payload(msg)
+            else:
+                pending_context_payloads.append(msg)
+
+        ctx.room.on("data_received", _on_data_received)
+
         try:
             await session.start(
                 room=ctx.room,
@@ -236,6 +367,13 @@ async def entrypoint(ctx: JobContext) -> None:
                     ),
                 ),
             )
+
+            # The session is live: process any context packet that arrived during startup,
+            # then let the handler dispatch live ones directly.
+            session_live = True
+            for _payload in pending_context_payloads:
+                _dispatch_context_payload(_payload)
+            pending_context_payloads.clear()
 
             # Free tier only: warn ~60s before the daily voice budget runs out (warn-only, no cutoff)
             if session_context.user_tier == "free":
@@ -286,6 +424,8 @@ async def entrypoint(ctx: JobContext) -> None:
         finally:
             if nudge_task is not None:
                 nudge_task.cancel()
+            for task in context_tasks:
+                task.cancel()
 
 
 if __name__ == "__main__":

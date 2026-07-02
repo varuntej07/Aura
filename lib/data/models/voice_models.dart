@@ -78,7 +78,16 @@ class VoiceSessionConfig {
   /// screen. Null for a normal mic tap or widget launch.
   final ScreenContextHandoff? screenContext;
 
-  const VoiceSessionConfig({required this.userId, this.screenContext});
+  /// Launch surface stamped into the LiveKit token (`?surface=` on /voice/token)
+  /// so the agent tailors its prompt (e.g. "desktop" renders the screen-sight
+  /// section). Null means the backend default, "app".
+  final String? surface;
+
+  const VoiceSessionConfig({
+    required this.userId,
+    this.screenContext,
+    this.surface,
+  });
 }
 
 /// The on-screen text the keyboard handed to a voice session (the message/draft the

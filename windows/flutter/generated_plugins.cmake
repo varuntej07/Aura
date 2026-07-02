@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  app_links
   cloud_firestore
   connectivity_plus
   file_selector_windows
@@ -10,9 +11,14 @@ list(APPEND FLUTTER_PLUGIN_LIST
   firebase_core
   flutter_timezone
   flutter_webrtc
+  hotkey_manager_windows
   livekit_client
   permission_handler_windows
+  screen_retriever_windows
+  tray_manager
   url_launcher_windows
+  window_manager
+  windows_single_instance
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
