@@ -3,10 +3,17 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../../core/logging/app_logger.dart';
+import '../../../core/theme/desktop_glass_theme.dart';
 import 'overlay_controller.dart';
+import 'window_effects_service.dart';
 
-const Size overlayPanelSize = Size(560, 360);
-const Size overlayPillSize = Size(320, 72);
+/// Tall sheet for sign-in/onboarding (forms need room).
+const Size overlaySetupPanelSize = Size(560, 360);
+
+/// Compact signed-in glass bar: sphere + one-line caption + action icons.
+const Size overlayVoiceBarSize = Size(520, 64);
+
+const Size overlayPillSize = Size(320, 56);
 const double overlayTopMargin = 48;
 
 /// Pure positioning math, unit-tested without a real window.
@@ -37,11 +44,16 @@ Rect displayBoundsContaining({
 /// events back into it. The overlay always appears top-center of the display
 /// the cursor is on.
 class DesktopWindowService with WindowListener {
-  DesktopWindowService({required OverlayController controller})
-      : _controller = controller;
+  DesktopWindowService({
+    required OverlayController controller,
+    required WindowEffectsService windowEffects,
+  })  : _controller = controller,
+        _windowEffects = windowEffects;
 
   final OverlayController _controller;
+  final WindowEffectsService _windowEffects;
   OverlayPresentation? _appliedPresentation;
+  OverlayPanelVariant? _appliedVariant;
 
   Future<void> attach() async {
     windowManager.addListener(this);
@@ -56,20 +68,33 @@ class DesktopWindowService with WindowListener {
 
   Future<void> _applyPresentation() async {
     final target = _controller.presentation;
-    if (target == _appliedPresentation) return;
+    final variant = _controller.panelVariant;
+    // Variant participates in the change check so a sign-in/sign-out while the
+    // panel is on screen still resizes the window.
+    if (target == _appliedPresentation && variant == _appliedVariant) return;
     _appliedPresentation = target;
+    _appliedVariant = variant;
     switch (target) {
       case OverlayPresentation.hidden:
         await windowManager.hide();
       case OverlayPresentation.panel:
-        await _showSized(overlayPanelSize, focus: true);
+        // Glass before show, so the surface never flashes un-frosted.
+        await _windowEffects.enableGlass(tint: DesktopGlassColors.acrylicTint);
+        await _showSized(
+          variant == OverlayPanelVariant.bar
+              ? overlayVoiceBarSize
+              : overlaySetupPanelSize,
+          focus: true,
+        );
       case OverlayPresentation.pill:
+        await _windowEffects.enableGlass(tint: DesktopGlassColors.acrylicTint);
         // Pill appears because focus moved to another app; do not steal it back.
         await _showSized(overlayPillSize, focus: false);
       case OverlayPresentation.pointing:
         // The pointing service owns the window (fullscreen click-through) for
-        // the flight's duration; touching bounds here would fight it.
-        break;
+        // the flight's duration; touching bounds here would fight it. The
+        // frost must drop though, or acrylic tints the entire monitor.
+        await _windowEffects.disableGlass();
     }
   }
 

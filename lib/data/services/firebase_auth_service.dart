@@ -386,11 +386,24 @@ class FirebaseAuthService {
   Future<Result<void>> signOut() async {
     final auth = _auth;
     try {
-      final signOuts = <Future<void>>[_googleSignIn.signOut()];
+      // Firebase sign-out is the one that actually ends the session, so it must
+      // run unconditionally and its result decides success. The Google session
+      // clear is best-effort and MUST NOT block it: google_sign_in has no
+      // Windows implementation (desktop signs in via a pairing custom token, not
+      // Google), so on desktop this throws and is deliberately swallowed. Keeping
+      // it in its own try means desktop still signs out and mobile Google users
+      // still get their Google session cleared.
       if (auth != null) {
-        signOuts.add(auth.signOut());
+        await auth.signOut().timeout(const Duration(seconds: 8));
       }
-      await Future.wait(signOuts).timeout(const Duration(seconds: 8));
+      try {
+        await _googleSignIn.signOut().timeout(const Duration(seconds: 5));
+      } catch (e) {
+        AppLogger.info(
+          'Google session clear skipped (unsupported or not signed in with Google)',
+          tag: 'FirebaseAuthService',
+        );
+      }
       AppLogger.info('Sign-out successful', tag: 'FirebaseAuthService');
       return const Result.success(null);
     } catch (e, st) {

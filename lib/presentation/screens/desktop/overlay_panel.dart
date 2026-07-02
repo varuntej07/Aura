@@ -3,15 +3,14 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../../core/theme/app_colors.dart';
-import '../../../core/theme/app_theme.dart';
+import '../../../core/theme/desktop_glass_theme.dart';
 import '../../../core/utils/pairing_code_input_formatter.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/services/desktop/overlay_controller.dart';
 import '../../../data/services/desktop/pairing_service.dart';
 import '../../../data/services/desktop/pointing_overlay_service.dart';
-import '../../../data/services/desktop/screen_demo_service.dart';
 import '../../../data/services/desktop/screen_sight_service.dart';
+import '../../../data/services/desktop/window_effects_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/desktop_voice_viewmodel.dart';
 import '../../widgets/desktop/pointer_buddy.dart';
@@ -28,6 +27,20 @@ double _sphereIntensityFor(VoiceSessionStatus status) {
   };
 }
 
+/// True while a session is live in any form (the mic is or is about to be
+/// hot). Drives the mic icon's active state and tap behavior.
+bool _sessionLive(VoiceSessionStatus status) {
+  return switch (status) {
+    VoiceSessionStatus.connecting ||
+    VoiceSessionStatus.ready ||
+    VoiceSessionStatus.listening ||
+    VoiceSessionStatus.processing ||
+    VoiceSessionStatus.speaking =>
+      true,
+    _ => false,
+  };
+}
+
 /// Root app for the desktop overlay window.
 class DesktopOverlayApp extends StatefulWidget {
   const DesktopOverlayApp({super.key});
@@ -37,13 +50,22 @@ class DesktopOverlayApp extends StatefulWidget {
 }
 
 class _DesktopOverlayAppState extends State<DesktopOverlayApp> {
+  AuthViewModel? _authViewModelForVariant;
+
   @override
   void initState() {
     super.initState();
     // Deferred: initialize() notifies immediately (loading state), which is
-    // unsafe while the first build is still mounting the provider tree.
+    // unsafe while the first build is still mounting the provider tree. The
+    // variant listener rides the same deferral for the same reason: pushing a
+    // variant into the provider-listened OverlayController mid-mount trips
+    // the framework's !_dirty assertion.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) context.read<AuthViewModel>().initialize();
+      if (!mounted) return;
+      final auth = context.read<AuthViewModel>();
+      auth.initialize();
+      _authViewModelForVariant = auth..addListener(_syncPanelVariant);
+      _syncPanelVariant();
     });
     // Esc is handled at the hardware-keyboard level, NOT via focus-scoped
     // shortcuts: after hide/show cycles the Flutter focus tree may hold no
@@ -54,8 +76,18 @@ class _DesktopOverlayAppState extends State<DesktopOverlayApp> {
 
   @override
   void dispose() {
+    _authViewModelForVariant?.removeListener(_syncPanelVariant);
     HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     super.dispose();
+  }
+
+  /// Auth state -> panel shape: signed out gets the tall setup sheet, signed
+  /// in the compact bar. The window service resizes off this.
+  void _syncPanelVariant() {
+    if (!mounted) return;
+    final signedIn = _authViewModelForVariant?.isAuthenticated ?? false;
+    context.read<OverlayController>().setPanelVariant(
+        signedIn ? OverlayPanelVariant.bar : OverlayPanelVariant.setup);
   }
 
   bool _handleKeyEvent(KeyEvent event) {
@@ -72,30 +104,31 @@ class _DesktopOverlayAppState extends State<DesktopOverlayApp> {
     return MaterialApp(
       title: 'Buddy',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.dark,
+      theme: buildDesktopGlassTheme(),
       home: const OverlayPanel(),
     );
   }
 }
 
-/// The Spotlight-style overlay surface. Renders panel or pill depending on
-/// [OverlayController.presentation]; the window itself is transparent, so this
-/// widget paints the whole visible shape (near-opaque cream card, glass
-/// border). No BackdropFilter: on a transparent window there is nothing behind
-/// the app surface to blur.
+/// The glass overlay surface. The window itself carries the real frost (DWM
+/// acrylic, toggled by DesktopWindowService per presentation) and is sized
+/// exactly to the content, so every surface here paints edge-to-edge; the
+/// rounded silhouette comes from DWM corner rounding, matched by
+/// [desktopGlassCornerRadius] on painted borders.
 class OverlayPanel extends StatelessWidget {
   const OverlayPanel({super.key});
 
   @override
   Widget build(BuildContext context) {
     final overlayController = context.watch<OverlayController>();
+    final signedIn = context.watch<AuthViewModel>().user != null;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: switch (overlayController.presentation) {
-        OverlayPresentation.pill => const _PillSurface(),
+        OverlayPresentation.pill => const _GlassPill(),
         OverlayPresentation.pointing => const _PointingSurface(),
-        _ => const _PanelSurface(),
+        _ => signedIn ? const _VoiceBar() : const _SetupPanel(),
       },
     );
   }
@@ -119,273 +152,225 @@ class _PointingSurface extends StatelessWidget {
   }
 }
 
-// Fully opaque surface: on a transparent window, Windows composites even
-// slight surface alpha into heavy bleed-through of whatever is behind the
-// overlay (observed in M1 testing). The rounded silhouette still comes from
-// window transparency around the margins.
-BoxDecoration _overlaySurfaceDecoration({required double radius}) {
-  return BoxDecoration(
-    color: AppColors.background,
-    borderRadius: BorderRadius.circular(radius),
-    border: Border.all(color: AppColors.glassBorderLight),
-    boxShadow: const [
-      BoxShadow(
-        color: Color(0x333A3228),
-        blurRadius: 28,
-        offset: Offset(0, 8),
-      ),
-    ],
-  );
-}
+/// Shared glass sheet: content wash + hairline border over the window's
+/// native acrylic. Falls back to a near-opaque surface when the OS acrylic
+/// call is unavailable (translucency over an un-blurred desktop is
+/// unreadable).
+class _GlassSurface extends StatelessWidget {
+  const _GlassSurface({required this.child});
 
-class _PanelSurface extends StatelessWidget {
-  const _PanelSurface();
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final authViewModel = context.watch<AuthViewModel>();
+    final glassSupported =
+        context.watch<WindowEffectsService>().glassSupported ?? true;
+    return Container(
+      decoration: BoxDecoration(
+        color: glassSupported
+            ? DesktopGlassColors.surfaceWash
+            : DesktopGlassColors.surfaceFallback,
+        borderRadius: BorderRadius.circular(desktopGlassCornerRadius),
+        border: Border.all(color: DesktopGlassColors.border),
+      ),
+      child: child,
+    );
+  }
+}
+
+/// Compact icon action on the glass bar; [active] glows teal.
+class _BarIconButton extends StatelessWidget {
+  const _BarIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      iconSize: 18,
+      visualDensity: VisualDensity.compact,
+      color:
+          active ? DesktopGlassColors.accent : DesktopGlassColors.iconIdle,
+      icon: Icon(icon),
+      onPressed: onPressed,
+    );
+  }
+}
+
+/// The signed-in surface: one glass bar. Sphere, a single line of Buddy's
+/// latest words, and icon toggles — screen sight and voice — plus sign-out.
+/// No titles, no status labels, no user-speech captions (design decision:
+/// the sphere and the audio ARE the status).
+class _VoiceBar extends StatelessWidget {
+  const _VoiceBar();
+
+  @override
+  Widget build(BuildContext context) {
     final voiceViewModel = context.watch<DesktopVoiceViewModel>();
     final screenSight = context.watch<ScreenSightService>();
-    final signedIn = authViewModel.user != null;
+    final hasError = voiceViewModel.status == VoiceSessionStatus.error;
+    final live = _sessionLive(voiceViewModel.status);
 
-    return Container(
-      margin: const EdgeInsets.all(8),
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-      decoration: _overlaySurfaceDecoration(radius: 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              VoiceSphere(
-                  intensity: _sphereIntensityFor(voiceViewModel.status),
-                  size: 40),
-              const SizedBox(width: 12),
-              Text('Buddy',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.w600,
-                      )),
-              if (screenSight.armed) ...[
-                const SizedBox(width: 10),
-                const _ScreenSightIndicator(),
-              ],
-              const Spacer(),
-              Text('Esc hides · Ctrl+Alt+B toggles',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppColors.textPrimary.withValues(alpha: 0.45),
-                      )),
-              if (signedIn)
-                IconButton(
-                  tooltip: screenSight.armed
-                      ? 'Stop letting Buddy see your screen'
-                      : 'Let Buddy see your screen (Ctrl+Alt+S)',
-                  iconSize: 16,
-                  visualDensity: VisualDensity.compact,
-                  color: screenSight.armed
-                      ? AppColors.accentBase
-                      : AppColors.textPrimary.withValues(alpha: 0.45),
-                  icon: Icon(screenSight.armed
-                      ? Icons.visibility_rounded
-                      : Icons.visibility_off_rounded),
-                  onPressed: () =>
-                      context.read<ScreenSightService>().toggleArmed(),
-                ),
-              if (signedIn)
-                IconButton(
-                  tooltip: 'Sign out',
-                  iconSize: 16,
-                  visualDensity: VisualDensity.compact,
-                  color: AppColors.textPrimary.withValues(alpha: 0.45),
-                  icon: const Icon(Icons.logout_rounded),
-                  onPressed: () => context.read<AuthViewModel>().signOut(),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          if (signedIn && context.watch<ScreenDemoService>().shouldOfferDemo)
-            const _ScreenDemoInvite(),
-          Expanded(
-            child: signedIn
-                ? const _VoicePanelBody()
-                : const DesktopOnboardingFlow(linkStep: _DesktopSignInForm()),
-          ),
-        ],
-      ),
-    );
-  }
-}
+    final caption = hasError
+        ? (voiceViewModel.errorMessage ??
+            'Something went sideways with the call.')
+        : voiceViewModel.assistantCaption;
 
-/// First-run invitation to the screen-sight demo: one button press captures
-/// once, Buddy points at something on the real screen with a playful comment,
-/// and the card never returns. The press itself is the consent for that
-/// single look.
-class _ScreenDemoInvite extends StatelessWidget {
-  const _ScreenDemoInvite();
-
-  @override
-  Widget build(BuildContext context) {
-    final demoService = context.watch<ScreenDemoService>();
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.accentBase.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(14),
-        border:
-            Border.all(color: AppColors.accentBase.withValues(alpha: 0.25)),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.visibility_rounded,
-              size: 16, color: AppColors.accentBase),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'Buddy can see your screen when you let him. Want to see?',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.textPrimary.withValues(alpha: 0.8),
-                  ),
-            ),
-          ),
-          TextButton(
-            onPressed: demoService.running
-                ? null
-                : () => context.read<ScreenDemoService>().dismiss(),
-            child: const Text('Not now', style: TextStyle(fontSize: 12)),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              textStyle: const TextStyle(fontSize: 12),
-            ),
-            onPressed: demoService.running
-                ? null
-                : () => context.read<ScreenDemoService>().runDemo(),
-            child: Text(demoService.running ? 'Looking...' : 'Show me'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Live voice surface: status, captions, error state with retry.
-class _VoicePanelBody extends StatelessWidget {
-  const _VoicePanelBody();
-
-  static const _statusLabels = {
-    VoiceSessionStatus.connecting: 'Getting Buddy on the line...',
-    VoiceSessionStatus.ready: 'Listening',
-    VoiceSessionStatus.listening: 'Listening',
-    VoiceSessionStatus.processing: 'Thinking...',
-    VoiceSessionStatus.speaking: '',
-  };
-
-  @override
-  Widget build(BuildContext context) {
-    final voiceViewModel = context.watch<DesktopVoiceViewModel>();
-
-    if (voiceViewModel.status == VoiceSessionStatus.error) {
-      return _VoiceErrorBody(viewModel: voiceViewModel);
-    }
-
-    if (voiceViewModel.status == VoiceSessionStatus.disconnected ||
-        voiceViewModel.status == VoiceSessionStatus.ended) {
-      return Center(
-        child: FilledButton.icon(
-          onPressed: () =>
-              context.read<DesktopVoiceViewModel>().startSession(),
-          icon: const Icon(Icons.mic_rounded),
-          label: const Text('Talk to Buddy'),
-        ),
-      );
-    }
-
-    final statusLabel = _statusLabels[voiceViewModel.status] ?? '';
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (voiceViewModel.userCaption.isNotEmpty)
-          Text(
-            voiceViewModel.userCaption,
-            textAlign: TextAlign.center,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: AppColors.textPrimary.withValues(alpha: 0.5),
-                  fontStyle: FontStyle.italic,
-                ),
-          ),
-        const SizedBox(height: 8),
-        if (voiceViewModel.assistantCaption.isNotEmpty)
-          Flexible(
-            child: SingleChildScrollView(
-              reverse: true,
+    return _GlassSurface(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: Row(
+          children: [
+            VoiceSphere(
+                intensity: _sphereIntensityFor(voiceViewModel.status),
+                size: 34),
+            const SizedBox(width: 12),
+            Expanded(
               child: Text(
-                voiceViewModel.assistantCaption,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: AppColors.textPrimary,
-                      height: 1.35,
+                caption,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: hasError
+                          ? DesktopGlassColors.danger
+                          : DesktopGlassColors.textBright,
                     ),
               ),
             ),
-          ),
-        if (statusLabel.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          Text(
-            statusLabel,
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.textPrimary.withValues(alpha: 0.45),
-                ),
-          ),
-        ],
-      ],
+            const SizedBox(width: 8),
+            if (hasError && voiceViewModel.showMicSettingsHint)
+              _BarIconButton(
+                icon: Icons.settings_rounded,
+                tooltip: 'Open mic settings',
+                onPressed: () =>
+                    launchUrl(Uri.parse('ms-settings:privacy-microphone')),
+              ),
+            _BarIconButton(
+              icon: screenSight.armed
+                  ? Icons.visibility_rounded
+                  : Icons.visibility_off_rounded,
+              tooltip: screenSight.armed
+                  ? 'Stop letting Buddy see your screen'
+                  : 'Let Buddy see your screen (Ctrl+Alt+S)',
+              active: screenSight.armed,
+              onPressed: () =>
+                  context.read<ScreenSightService>().toggleArmed(),
+            ),
+            _BarIconButton(
+              icon: hasError
+                  ? Icons.refresh_rounded
+                  : (live ? Icons.mic_rounded : Icons.mic_none_rounded),
+              tooltip: hasError
+                  ? 'Try again'
+                  : (live ? 'End the conversation' : 'Talk to Buddy'),
+              active: live && !hasError,
+              onPressed: () {
+                final viewModel = context.read<DesktopVoiceViewModel>();
+                if (live) {
+                  viewModel.endSession();
+                } else {
+                  viewModel.startSession();
+                }
+              },
+            ),
+            _BarIconButton(
+              icon: Icons.logout_rounded,
+              tooltip: 'Sign out',
+              onPressed: () => context.read<AuthViewModel>().signOut(),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
-class _VoiceErrorBody extends StatelessWidget {
-  const _VoiceErrorBody({required this.viewModel});
-
-  final DesktopVoiceViewModel viewModel;
+/// Signed-out surface: the tall glass sheet holding first-run onboarding and
+/// the pairing/sign-in form (forms need words; the no-text rule applies to
+/// the talking surface, not setup).
+class _SetupPanel extends StatelessWidget {
+  const _SetupPanel();
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            viewModel.errorMessage ?? 'Something went sideways with the call.',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: AppColors.textPrimary.withValues(alpha: 0.75),
-                ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+    return _GlassSurface(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const VoiceSphere(intensity: 0.35, size: 32),
+                const SizedBox(width: 10),
+                Text('Buddy',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontSize: 20,
+                        )),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Expanded(
+              child: DesktopOnboardingFlow(linkStep: _DesktopSignInForm()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact always-on-top pill shown when focus leaves mid-conversation: the
+/// visible proof the mic is live (the invariant), with the latest caption.
+/// The teal eye marks screen sight while armed (same invariant, for sight).
+/// Clicking restores the bar; the conversation never pauses.
+class _GlassPill extends StatelessWidget {
+  const _GlassPill();
+
+  @override
+  Widget build(BuildContext context) {
+    final voiceViewModel = context.watch<DesktopVoiceViewModel>();
+    final screenSight = context.watch<ScreenSightService>();
+    final caption = voiceViewModel.assistantCaption.isNotEmpty
+        ? voiceViewModel.assistantCaption
+        : 'Buddy is listening...';
+
+    return GestureDetector(
+      onTap: () => context.read<OverlayController>().pillActivated(),
+      child: _GlassSurface(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
             children: [
-              FilledButton(
-                onPressed: () =>
-                    context.read<DesktopVoiceViewModel>().startSession(),
-                child: const Text('Try again'),
+              VoiceSphere(
+                  intensity: _sphereIntensityFor(voiceViewModel.status),
+                  size: 28),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(caption,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: DesktopGlassColors.textDim,
+                        )),
               ),
-              if (viewModel.showMicSettingsHint) ...[
+              if (screenSight.armed) ...[
                 const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: () => launchUrl(
-                      Uri.parse('ms-settings:privacy-microphone')),
-                  child: const Text('Open mic settings'),
-                ),
+                const Icon(Icons.visibility_rounded,
+                    size: 14, color: DesktopGlassColors.accent),
               ],
             ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -464,7 +449,7 @@ class _DesktopSignInFormState extends State<_DesktopSignInForm> {
               ? 'Sign in to bring Buddy to your desktop'
               : 'On your phone: Aura → Settings → Link this PC',
           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: AppColors.textPrimary.withValues(alpha: 0.7),
+                color: DesktopGlassColors.textDim,
               ),
         ),
         const SizedBox(height: 12),
@@ -503,6 +488,7 @@ class _DesktopSignInFormState extends State<_DesktopSignInForm> {
               fontFamily: 'GeistMono',
               fontSize: 22,
               letterSpacing: 4,
+              color: DesktopGlassColors.textBright,
             ),
             decoration: const InputDecoration(
               hintText: 'XXXX-XXXX',
@@ -514,7 +500,8 @@ class _DesktopSignInFormState extends State<_DesktopSignInForm> {
         if (errorMessage != null) ...[
           Text(errorMessage,
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Color(0xFFB3452E), fontSize: 12)),
+              style: const TextStyle(
+                  color: DesktopGlassColors.danger, fontSize: 12)),
           const SizedBox(height: 8),
         ],
         FilledButton(
@@ -539,82 +526,6 @@ class _DesktopSignInFormState extends State<_DesktopSignInForm> {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// The always-visible proof that Buddy can see the screen (the screen-sight
-/// counterpart of the mic-live invariant): shown on the panel header and the
-/// pill whenever sight is armed.
-class _ScreenSightIndicator extends StatelessWidget {
-  const _ScreenSightIndicator();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: AppColors.accentBase.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.visibility_rounded,
-              size: 12, color: AppColors.accentBase),
-          const SizedBox(width: 4),
-          Text('Seeing your screen',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.accentBase,
-                    fontSize: 11,
-                  )),
-        ],
-      ),
-    );
-  }
-}
-
-/// Compact always-on-top pill shown when focus leaves mid-conversation: the
-/// visible proof the mic is live (the invariant), with the latest caption.
-/// Clicking restores the panel; the conversation never pauses.
-class _PillSurface extends StatelessWidget {
-  const _PillSurface();
-
-  @override
-  Widget build(BuildContext context) {
-    final voiceViewModel = context.watch<DesktopVoiceViewModel>();
-    final screenSight = context.watch<ScreenSightService>();
-    final caption = voiceViewModel.assistantCaption.isNotEmpty
-        ? voiceViewModel.assistantCaption
-        : 'Buddy is listening...';
-
-    return GestureDetector(
-      onTap: () => context.read<OverlayController>().pillActivated(),
-      child: Container(
-        margin: const EdgeInsets.all(6),
-        padding: const EdgeInsets.symmetric(horizontal: 14),
-        decoration: _overlaySurfaceDecoration(radius: 30),
-        child: Row(
-          children: [
-            VoiceSphere(
-                intensity: _sphereIntensityFor(voiceViewModel.status),
-                size: 32),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(caption,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppColors.textPrimary,
-                      )),
-            ),
-            if (screenSight.armed) ...[
-              const SizedBox(width: 8),
-              const Icon(Icons.visibility_rounded,
-                  size: 14, color: AppColors.accentBase),
-            ],
-          ],
-        ),
-      ),
     );
   }
 }

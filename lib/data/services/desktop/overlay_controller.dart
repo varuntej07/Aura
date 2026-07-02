@@ -6,6 +6,12 @@ import 'package:flutter/foundation.dart';
 /// the window while it is active.
 enum OverlayPresentation { hidden, panel, pill, pointing }
 
+/// Which shape the panel takes: [setup] is the tall sign-in/onboarding sheet
+/// (forms need room), [bar] is the compact signed-in glass bar. Synced from
+/// auth state by the overlay app; [DesktopWindowService] sizes the window
+/// from it.
+enum OverlayPanelVariant { setup, bar }
+
 /// Pure state machine for the desktop overlay. Owns WHAT should be on screen;
 /// [DesktopWindowService] applies it to the real window, so every transition
 /// here is unit-testable without a window.
@@ -32,6 +38,18 @@ class OverlayController extends ChangeNotifier {
 
   OverlayPresentation get presentation => _presentation;
   bool get voiceActive => _voiceActive;
+
+  OverlayPanelVariant _panelVariant = OverlayPanelVariant.setup;
+  OverlayPanelVariant get panelVariant => _panelVariant;
+
+  /// Auth state drives the panel shape: signed out shows the setup sheet,
+  /// signed in the compact bar. Notifies so the window resizes even while the
+  /// panel is already visible (sign-in and sign-out both happen on-screen).
+  void setPanelVariant(OverlayPanelVariant variant) {
+    if (_panelVariant == variant) return;
+    _panelVariant = variant;
+    notifyListeners();
+  }
 
   /// Global hotkey Ctrl+Alt+B: toggles. Hidden summons the panel; the panel
   /// dismisses (ending any live voice); the pill restores the panel. During

@@ -20,6 +20,7 @@ import '../data/services/desktop/pairing_service.dart';
 import '../data/services/desktop/pointing_overlay_service.dart';
 import '../data/services/desktop/screen_demo_service.dart';
 import '../data/services/desktop/screen_sight_service.dart';
+import '../data/services/desktop/window_effects_service.dart';
 import '../data/services/firebase_auth_service.dart';
 import '../data/services/firestore_service.dart';
 import '../data/services/notification_service.dart';
@@ -37,6 +38,7 @@ List<SingleChildWidget> buildDesktopProviders(
   SharedPreferences prefs, {
   required OverlayController overlayController,
   required ScreenSightService screenSightService,
+  required WindowEffectsService windowEffectsService,
 }) {
   // Analytics: same PostHog project as mobile, HTTP transport.
   final analyticsClient = PostHogHttpAnalytics(prefs: prefs);
@@ -111,6 +113,8 @@ List<SingleChildWidget> buildDesktopProviders(
     Provider<AuthRepository>.value(value: authRepository),
     Provider<PairingService>(create: (_) => PairingService()),
     ChangeNotifierProvider<OverlayController>.value(value: overlayController),
+    ChangeNotifierProvider<WindowEffectsService>.value(
+        value: windowEffectsService),
     ChangeNotifierProvider<ScreenSightService>.value(value: screenSightService),
     ChangeNotifierProvider<PointingOverlayService>.value(
         value: pointingOverlayService),

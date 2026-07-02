@@ -19,6 +19,7 @@ import 'data/services/desktop/desktop_tray_service.dart';
 import 'data/services/desktop/desktop_window_service.dart';
 import 'data/services/desktop/overlay_controller.dart';
 import 'data/services/desktop/screen_sight_service.dart';
+import 'data/services/desktop/window_effects_service.dart';
 import 'di/desktop_providers.dart';
 import 'presentation/screens/desktop/overlay_panel.dart';
 
@@ -65,14 +66,18 @@ void main(List<String> args) {
       );
 
       const windowOptions = WindowOptions(
-        size: overlayPanelSize,
+        size: overlaySetupPanelSize,
         backgroundColor: Colors.transparent,
         skipTaskbar: true,
         alwaysOnTop: true,
         titleBarStyle: TitleBarStyle.hidden,
       );
 
-      final windowService = DesktopWindowService(controller: overlayController);
+      final windowEffectsService = WindowEffectsService();
+      final windowService = DesktopWindowService(
+        controller: overlayController,
+        windowEffects: windowEffectsService,
+      );
       final hotkeyService = DesktopHotkeyService();
       final trayService = DesktopTrayService(
         onOpenBuddy: overlayController.summon,
@@ -112,6 +117,7 @@ void main(List<String> args) {
           prefs,
           overlayController: overlayController,
           screenSightService: screenSightService,
+          windowEffectsService: windowEffectsService,
         ),
         child: const DesktopOverlayApp(),
       ));
