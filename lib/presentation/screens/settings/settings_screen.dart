@@ -16,6 +16,7 @@ import '../connectors/connectors_screen.dart';
 import '../onboarding/aura_consent_screen.dart';
 import '../reminders/reminders_screen.dart';
 import 'aura_profile_screen.dart';
+import 'link_device_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -260,6 +261,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             onTap: () => _addVoiceWidget(context),
                           ),
                         ],
+
+                        // ── Buddy on your PC ─────────────────────────────────
+                        _SectionLabel('Buddy on your PC'),
+                        _GlassNavTile(
+                          icon: Icons.laptop_windows_outlined,
+                          title: 'Link this PC',
+                          subtitle: 'Get a code to sign in Buddy on your desktop',
+                          onTap: () => Navigator.push(
+                            context,
+                            LinkDeviceScreen.route(),
+                          ),
+                        ),
 
                         // ── Reminders ────────────────────────────────────────
                         _SectionLabel('Reminders'),

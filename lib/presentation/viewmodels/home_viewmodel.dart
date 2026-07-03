@@ -4,6 +4,7 @@ import '../../core/base/safe_change_notifier.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/errors/error_handler.dart';
 import '../../core/logging/app_logger.dart';
+import '../../core/voice/voice_error_copy.dart';
 import '../../data/models/chat_message_model.dart';
 import '../../data/models/voice_models.dart';
 import '../../data/repositories/chat_repository.dart';
@@ -356,36 +357,13 @@ class HomeViewModel extends SafeChangeNotifier {
     }
   }
 
-  /// Maps a voice error code to copy a real person would actually want to read
-  /// when a call falls over. Casual, blame-the-tech-not-the-user, always ends
-  /// with a clear "tap to try again" since the mic orb is the retry button.
+  /// Copy lives in voice_error_copy.dart, shared with DesktopVoiceViewModel so
+  /// voice failures read identically on every surface.
   String _toVoiceErrorMessage({
     required String? code,
     required String? fallbackMessage,
   }) {
-    switch (code) {
-      case 'agent_join_timeout':
-        return "Buddy's taking too long to pick up. Give it another tap?";
-      case 'agent_silent':
-        return "Buddy's connected but gone quiet on me. Tap to try again?";
-      case 'agent_disconnected_early':
-        return "Call dropped before Buddy could say anything. Let's try again?";
-      case 'provider_unavailable':
-        return "Buddy's voice is having a moment on our end. Hang tight and try again shortly.";
-      case 'agent_state_failed':
-      case 'session_runtime_failed':
-      case 'tts_pipeline_failed':
-        return "Buddy hit a snag mid-call. Mind tapping to start over?";
-      case 'mic_permission_denied':
-        return "I need mic access to hear you. Flip it on in Settings and tap again.";
-      default:
-        // Prefer whatever specific message the service handed us; only fall
-        // back to a generic line if there's genuinely nothing better.
-        final msg = fallbackMessage?.trim();
-        return (msg != null && msg.isNotEmpty)
-            ? msg
-            : "Something went sideways with the call. Tap to try again?";
-    }
+    return voiceErrorMessageForCode(code: code, fallbackMessage: fallbackMessage);
   }
 
   void _updateOrInsertTranscriptEntry({

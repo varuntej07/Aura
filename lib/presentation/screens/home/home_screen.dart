@@ -178,6 +178,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         await chatVm.hydrateServerReply(payload.clientMessageId);
       };
 
+      vm.onTrialTap = (payload) {
+        // Trial 3-days-left / trial-ended notice tapped: open the paywall with copy
+        // contextualized to why they're here, instead of the generic entry point.
+        context.push('/paywall', extra: payload);
+      };
+
       // The voice home-screen widget opens the app straight into a live voice
       // session. Relay warm-launch taps (app already running) ...
       _launchActionSub =

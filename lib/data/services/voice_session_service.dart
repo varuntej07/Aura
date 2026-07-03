@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, Uint8List, defaultTargetPlatform;
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -8,10 +10,11 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../core/constants/api_endpoints.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/logging/app_logger.dart';
+import '../../core/voice/voice_error_copy.dart';
 import '../../core/network/api_response.dart';
 import '../models/voice_models.dart';
 import 'analytics_service.dart';
-import 'posthog_analytics_service.dart';
+import '../../core/analytics/analytics_client.dart';
 import 'screen_wake_lock.dart';
 
 const _tag = 'VoiceSession';
@@ -32,7 +35,7 @@ const _prewarmedTokenTtl = Duration(minutes: 30);
 
 class VoiceSessionService {
   final Future<String?> Function() _tokenProvider;
-  final PostHogAnalyticsService _postHogAnalyticsService;
+  final AnalyticsClient _postHogAnalyticsService;
   final ScreenWakeLock _screenWakeLock;
 
   Room? _room;
@@ -61,7 +64,7 @@ class VoiceSessionService {
 
   VoiceSessionService({
     required Future<String?> Function() tokenProvider,
-    required PostHogAnalyticsService postHogAnalyticsService,
+    required AnalyticsClient postHogAnalyticsService,
     ScreenWakeLock? screenWakeLock,
   })  : _tokenProvider = tokenProvider,
         _postHogAnalyticsService = postHogAnalyticsService,
@@ -128,12 +131,14 @@ class VoiceSessionService {
         metadata: {'userId': config.userId});
 
     try {
-      // Reuse the token prefetched at app open if it's still fresh; 
-      // otherwise fetch one now.
-      var tokenResult = _freshPrewarmedToken();
+      // Reuse the token prefetched at app open if it's still fresh;
+      // otherwise fetch one now. A prewarmed token was minted WITHOUT a
+      // surface (backend defaults it to "app"), so a session that declares
+      // one must always fetch fresh or the agent would miss its surface note.
+      var tokenResult = config.surface == null ? _freshPrewarmedToken() : null;
       if (tokenResult == null) {
         final idToken = await _tokenProvider();
-        tokenResult = await _fetchLiveKitToken(idToken);
+        tokenResult = await _fetchLiveKitToken(idToken, surface: config.surface);
       }
       if (tokenResult == null) {
         return Result.failure(
@@ -278,22 +283,36 @@ class VoiceSessionService {
       // they tap: withPreConnectAudio records before the agent is ready and ships
       // the buffer the moment Buddy goes active, discarding it if no agent joins.
       // The 25s readiness timeout sits just past the 20s agent-join watchdog so
-      // the watchdog (with its friendly coded error) always owns the no-show case; 
+      // the watchdog (with its friendly coded error) always owns the no-show case;
       // the room resets the buffer automatically on disconnect. A real
       // connect failure inside the operation still propagates to the catch below.
-      await _room!.withPreConnectAudio(
-        () async {
-          await _room!.connect(
-            lkUrl,
-            lkToken,
-            connectOptions: const ConnectOptions(autoSubscribe: true),
-          );
-          await _room!.localParticipant?.setMicrophoneEnabled(true);
-        },
-        timeout: const Duration(seconds: 25),
-        onError: (e) => AppLogger.warning('Preconnect audio buffer error',
-            tag: _tag, metadata: {'error': e.toString()}),
-      );
+      //
+      // Windows: the pre-connect buffer needs an audio-renderer API livekit's
+      // desktop platform code doesn't implement ("Bad state: Failed to start
+      // audio renderer"), so connect plainly there. Only cost is losing the
+      // speak-while-connecting buffer.
+      if (defaultTargetPlatform == TargetPlatform.windows) {
+        await _room!.connect(
+          lkUrl,
+          lkToken,
+          connectOptions: const ConnectOptions(autoSubscribe: true),
+        );
+        await _room!.localParticipant?.setMicrophoneEnabled(true);
+      } else {
+        await _room!.withPreConnectAudio(
+          () async {
+            await _room!.connect(
+              lkUrl,
+              lkToken,
+              connectOptions: const ConnectOptions(autoSubscribe: true),
+            );
+            await _room!.localParticipant?.setMicrophoneEnabled(true);
+          },
+          timeout: const Duration(seconds: 25),
+          onError: (e) => AppLogger.warning('Preconnect audio buffer error',
+              tag: _tag, metadata: {'error': e.toString()}),
+        );
+      }
 
       AppLogger.info('LiveKit mic enabled', tag: _tag);
       unawaited(AnalyticsService.logVoiceStarted());
@@ -302,13 +321,23 @@ class VoiceSessionService {
       AppLogger.error('Failed to connect to LiveKit', error: e, stackTrace: st,
           tag: _tag, metadata: {'userId': config.userId});
       _cleanupRoom();
-      final isIceFailure = e.toString().contains('MediaConnectException') ||
-          e.toString().contains('PeerConnection');
+      final errorText = e.toString();
+      final isIceFailure = errorText.contains('MediaConnectException') ||
+          errorText.contains('PeerConnection');
+      // Audio-capture failures (Windows privacy toggle, device busy, driver)
+      // surface here as getUserMedia/media-device errors; give them actionable
+      // copy instead of the generic line (failure mode #6).
+      final isMicCaptureFailure = errorText.contains('getUserMedia') ||
+          errorText.contains('MediaDevice') ||
+          errorText.contains('audio renderer');
       return Result.failure(
         AppException.unexpected(
-          isIceFailure
-              ? "Couldn't reach Buddy. Looks like a network hiccup. Try again?"
-              : "Couldn't start the call. Give it another shot in a sec?",
+          isMicCaptureFailure
+              ? voiceErrorMessageForCode(
+                  code: micCaptureFailedCode, fallbackMessage: null)
+              : isIceFailure
+                  ? "Couldn't reach Buddy. Looks like a network hiccup. Try again?"
+                  : "Couldn't start the call. Give it another shot in a sec?",
           error: e,
           stackTrace: st,
         ),
@@ -334,6 +363,31 @@ class VoiceSessionService {
       return Result.failure(
         AppException.unexpected('Failed to send text input.', error: e, stackTrace: st),
       );
+    }
+  }
+
+  /// Send one screen-sight JPEG to the agent as a byte stream (topic
+  /// "screen_frame"). The writer chunks to 15KB packets with backpressure
+  /// internally, so a whole frame goes in one write. Fail-soft: a dropped
+  /// frame degrades to "Buddy can't see this turn", never a session error.
+  Future<void> sendScreenFrame(
+    Uint8List jpegBytes, {
+    required Map<String, String> attributes,
+  }) async {
+    final participant = _room?.localParticipant;
+    if (participant == null) return;
+    try {
+      final writer = await participant.streamBytes(StreamBytesOptions(
+        topic: 'screen_frame',
+        mimeType: 'image/jpeg',
+        totalSize: jpegBytes.length,
+        attributes: attributes,
+      ));
+      await writer.write(jpegBytes);
+      await writer.close();
+    } catch (e, st) {
+      AppLogger.warning('Failed to send screen frame', tag: _tag,
+          metadata: {'error': e.toString(), 'stackTrace': st.toString()});
     }
   }
 
@@ -544,10 +598,15 @@ class VoiceSessionService {
     _closingByClient = false;
   }
 
-  Future<Map<String, dynamic>?> _fetchLiveKitToken(String? idToken) async {
+  Future<Map<String, dynamic>?> _fetchLiveKitToken(
+    String? idToken, {
+    String? surface,
+  }) async {
     try {
       final resp = await http.get(
-        Uri.parse(ApiEndpoints.voiceToken),
+        Uri.parse(ApiEndpoints.voiceToken).replace(
+          queryParameters: surface != null ? {'surface': surface} : null,
+        ),
         headers: {
           'Content-Type': 'application/json',
           if (idToken != null) 'Authorization': 'Bearer $idToken',

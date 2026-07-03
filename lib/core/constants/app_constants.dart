@@ -8,6 +8,8 @@ class AppConstants {
   static const chatRequestTimeout = Duration(seconds: 45);
   static const chatStreamConnectTimeout = Duration(seconds: 10);
   static const chatStreamIdleTimeout = Duration(seconds: 90);
+  // Also covers desktop pairing (devices/pair/start, devices/unlink): both can
+  // hit a cold Cloud Run instance (min-instances=0) well past the default read timeout.
   static const apiWriteTimeout = Duration(seconds: 30);
   static const webSocketPingInterval = Duration(seconds: 15);
   static const webSocketReconnectDelay = Duration(seconds: 3);

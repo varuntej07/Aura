@@ -290,6 +290,31 @@ class BackendApiService implements ChatServiceProvider {
     );
   }
 
+  /// Starts desktop device pairing: mints a short-lived single-use code that
+  /// the desktop app redeems at POST /devices/pair/claim for a session.
+  /// Returns `{code, expires_in_seconds}`.
+  Future<Result<Map<String, dynamic>>> startDevicePairing() async {
+    return _apiClient.post(
+      '/devices/pair/start',
+      const {},
+      (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
+    );
+  }
+
+  /// Unlinks a paired desktop device and revokes refresh tokens for the
+  /// account (all sessions; Firebase has no per-device revoke). Idempotent:
+  /// repeating this on an already-removed device answers 404/not_found rather
+  /// than erroring, so callers may safely retry on an ambiguous timeout.
+  Future<Result<Map<String, dynamic>>> unlinkDevice(String deviceId) async {
+    return _apiClient.post(
+      '/devices/unlink',
+      {'device_id': deviceId},
+      (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
+    );
+  }
+
   /// Ships a finished chat session's transcript to the per-session reflection tier
   /// (the narrative layer of UserAura). Server returns 202; the body is ignored.
   /// Reflection is idempotent per [sessionId] and consent-gated server-side, so a

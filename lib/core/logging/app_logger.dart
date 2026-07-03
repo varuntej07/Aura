@@ -45,7 +45,7 @@ class AppLogger {
     _log(LogLevel.error, message, tag: tag, metadata: metadata);
     if (error != null) debugPrint('  └─ Error: $error');
     if (stackTrace != null) debugPrint('  └─ Stack: $stackTrace');
-    if (error != null && FirebaseRuntime.hasApp) {
+    if (error != null && FirebaseRuntime.crashlyticsSupported) {
       FirebaseCrashlytics.instance.recordError(
         error,
         stackTrace,
