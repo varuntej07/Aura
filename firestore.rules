@@ -58,6 +58,15 @@ service cloud.firestore {
       allow read, update, delete: if false;
     }
 
+    // Desktop pairing codes — the one-time code IS the credential (exchanged for
+    // a custom token by the unauthenticated desktop via the backend). Clients must
+    // never read or write these; only the Admin SDK (which bypasses rules) touches
+    // them. Redundant with the default deny below, but explicit on purpose: this
+    // collection must stay closed even if the catch-all is ever loosened.
+    match /pairing_codes/{code} {
+      allow read, write: if false;
+    }
+
     // Default deny — every collection not matched above is backend-only. The
     // Admin SDK bypasses these rules, so the backend keeps full access.
     match /{document=**} {

@@ -393,6 +393,22 @@ class _VoiceBar extends StatelessWidget {
 /// [_GlassSurface] still paints its background/border edge-to-edge at the
 /// window's full current size regardless — only the CONTENT'S positioning
 /// changes (top-aligned, natural size, no stretch).
+///
+/// [SingleChildScrollView] wraps the measured content: a step change (e.g.
+/// "New here?" jumping link -> welcome) triggers Flutter's rebuild
+/// SYNCHRONOUSLY, but the native window resize that follows is async and
+/// lands a frame or more later. For however many frames the new step's true
+/// content is taller than the window's still-old bounds, [Align]'s loose
+/// constraint only relaxes the MINIMUM — the incoming MAXIMUM stays capped at
+/// the current window height, so an unscrollable Column would hit a real
+/// RenderFlex overflow right at that moment (2026-07-10 bug report).
+/// SingleChildScrollView's own size is `constraints.constrain(child.size)` —
+/// no `shrinkWrap` param needed (that's a ListView/ScrollView-only concept):
+/// it already hugs content shorter than the available height (min=0 from
+/// Align) and caps at the available height for taller content, scrolling the
+/// rest instead of overflowing. The inner [Padding] still reports its true,
+/// uncapped natural size for measurement either way (a scroll view always
+/// gives its child unbounded extent along the scroll axis).
 class _SetupPanel extends StatefulWidget {
   const _SetupPanel();
 
@@ -419,39 +435,42 @@ class _SetupPanelState extends State<_SetupPanel> {
     return _GlassSurface(
       child: Align(
         alignment: Alignment.topCenter,
-        child: Padding(
-          key: _contentKey,
-          padding: const EdgeInsets.fromLTRB(24, 18, 24, 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Image.asset('assets/icons/Aura-Icon.png',
-                      width: 32, height: 32),
-                  const SizedBox(width: 12),
-                  Text('Buddy',
-                      style:
-                          Theme.of(context).textTheme.titleLarge?.copyWith(
-                                fontSize: 20,
-                              )),
-                  const Spacer(),
-                  const HotkeyHint(
-                    keys: ['Ctrl', 'Alt', 'B'],
-                    action: 'summon Buddy anywhere',
-                  ),
-                  const SizedBox(width: 12),
-                  const HotkeyHint(keys: ['Esc'], action: 'hide'),
-                ],
-              ),
-              const SizedBox(height: 12),
-              DesktopOnboardingFlow(
-                linkStep: const _DesktopSignInForm(),
-                onStepChanged: (step) =>
-                    context.read<OverlayController>().setOnboardingStep(step),
-              ),
-            ],
+        child: SingleChildScrollView(
+          child: Padding(
+            key: _contentKey,
+            padding: const EdgeInsets.fromLTRB(24, 18, 24, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Image.asset('assets/icons/Aura-Icon.png',
+                        width: 32, height: 32),
+                    const SizedBox(width: 12),
+                    Text('Buddy',
+                        style:
+                            Theme.of(context).textTheme.titleLarge?.copyWith(
+                                  fontSize: 20,
+                                )),
+                    const Spacer(),
+                    const HotkeyHint(
+                      keys: ['Ctrl', 'Alt', 'B'],
+                      action: 'summon Buddy anywhere',
+                    ),
+                    const SizedBox(width: 12),
+                    const HotkeyHint(keys: ['Esc'], action: 'hide'),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                DesktopOnboardingFlow(
+                  linkStep: const _DesktopSignInForm(),
+                  onStepChanged: (step) => context
+                      .read<OverlayController>()
+                      .setOnboardingStep(step),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -591,37 +610,43 @@ class _DesktopSignInFormState extends State<_DesktopSignInForm> {
         ),
         const SizedBox(height: 14),
         if (_emailMode) ...[
-          TextField(
-            controller: _emailController,
-            style: const TextStyle(
-              fontSize: 14,
-              color: DesktopGlassColors.textBright,
+          SizedBox(
+            width: 300,
+            child: TextField(
+              controller: _emailController,
+              style: const TextStyle(
+                fontSize: 14,
+                color: DesktopGlassColors.textBright,
+              ),
+              decoration: const InputDecoration(
+                hintText: 'you@email.com',
+                isDense: true,
+                prefixIcon: Icon(Icons.mail_outline_rounded, size: 16),
+                prefixIconConstraints:
+                    BoxConstraints(minWidth: 36, minHeight: 36),
+              ),
+              keyboardType: TextInputType.emailAddress,
             ),
-            decoration: const InputDecoration(
-              hintText: 'you@email.com',
-              isDense: true,
-              prefixIcon: Icon(Icons.mail_outline_rounded, size: 16),
-              prefixIconConstraints:
-                  BoxConstraints(minWidth: 36, minHeight: 36),
-            ),
-            keyboardType: TextInputType.emailAddress,
           ),
           const SizedBox(height: 10),
-          TextField(
-            controller: _passwordController,
-            style: const TextStyle(
-              fontSize: 14,
-              color: DesktopGlassColors.textBright,
+          SizedBox(
+            width: 300,
+            child: TextField(
+              controller: _passwordController,
+              style: const TextStyle(
+                fontSize: 14,
+                color: DesktopGlassColors.textBright,
+              ),
+              decoration: const InputDecoration(
+                hintText: 'Password',
+                isDense: true,
+                prefixIcon: Icon(Icons.lock_outline_rounded, size: 16),
+                prefixIconConstraints:
+                    BoxConstraints(minWidth: 36, minHeight: 36),
+              ),
+              obscureText: true,
+              onSubmitted: (_) => _submitEmail(),
             ),
-            decoration: const InputDecoration(
-              hintText: 'Password',
-              isDense: true,
-              prefixIcon: Icon(Icons.lock_outline_rounded, size: 16),
-              prefixIconConstraints:
-                  BoxConstraints(minWidth: 36, minHeight: 36),
-            ),
-            obscureText: true,
-            onSubmitted: (_) => _submitEmail(),
           ),
         ] else
           SizedBox(
