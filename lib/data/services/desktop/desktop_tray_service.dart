@@ -2,6 +2,7 @@ import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:tray_manager/tray_manager.dart';
 
 import '../../../core/logging/app_logger.dart';
+import 'desktop_crash_log.dart';
 
 /// System tray icon + menu: Open Buddy, Start with Windows toggle, Quit.
 /// Left click summons the overlay; right click opens the menu.
@@ -21,8 +22,9 @@ class DesktopTrayService with TrayListener {
       await trayManager.setIcon('assets/icons/tray_icon.ico');
       await trayManager.setToolTip('Buddy (Ctrl+Alt+B)');
       await _rebuildMenu();
-    } catch (e) {
+    } catch (e, st) {
       AppLogger.error('Tray setup failed', error: e, tag: 'DesktopTray');
+      DesktopCrashLog.record('DesktopTray', e, st);
     }
   }
 

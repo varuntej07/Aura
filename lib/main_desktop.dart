@@ -77,6 +77,7 @@ void main(List<String> args) {
       final windowService = DesktopWindowService(
         controller: overlayController,
         windowEffects: windowEffectsService,
+        prefs: prefs,
       );
       final hotkeyService = DesktopHotkeyService();
       final trayService = DesktopTrayService(

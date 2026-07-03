@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/services/backend_api_service.dart';
 import '../../../data/services/firebase_auth_service.dart';
+import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/link_device_viewmodel.dart';
 
 /// Phone side of desktop pairing: shows the short-lived code the PC redeems,
@@ -71,9 +73,38 @@ class _LinkDeviceScreenState extends State<LinkDeviceScreen> {
         ],
       ),
     );
-    if (confirmed == true) {
-      await viewModel.unlinkDevice(device.id);
-    }
+    if (confirmed != true) return;
+
+    final unlinked = await viewModel.unlinkDevice(device.id);
+    if (!unlinked || !mounted) return;
+
+    // The backend just revoked every refresh token for this account, including
+    // this phone's own session (exactly what the dialog above promised). Follow
+    // through immediately and explicitly instead of leaving it to a confusing,
+    // unpredictable auth failure the next time the SDK silently refreshes the
+    // ID token.
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Signed out for safety'),
+        content: const Text(
+          "You're signed out everywhere, including this phone. Sign back in to keep going.",
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    await context.read<AuthViewModel>().signOut();
+    if (!mounted) return;
+    // Pushed via Navigator (not GoRouter), so the auth redirect won't clear
+    // this screen on its own — navigate to sign-in explicitly.
+    context.go('/login');
   }
 
   @override
@@ -100,12 +131,18 @@ class _LinkDeviceScreenState extends State<LinkDeviceScreen> {
               padding: const EdgeInsets.symmetric(vertical: 24),
               child: Column(
                 children: [
-                  if (viewModel.generating)
+                  if (viewModel.generating) ...[
                     const Padding(
                       padding: EdgeInsets.symmetric(vertical: 8),
                       child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  else if (code != null) ...[
+                    ),
+                    if (viewModel.showColdStartHint)
+                      const Text(
+                        "Waking Buddy's server up, just a moment...",
+                        style: TextStyle(
+                            color: AppColors.textTertiary, fontSize: 12),
+                      ),
+                  ] else if (code != null) ...[
                     Text(
                       code,
                       textAlign: TextAlign.center,
@@ -179,12 +216,20 @@ class _LinkDeviceScreenState extends State<LinkDeviceScreen> {
                                 color: AppColors.textPrimary, fontSize: 15),
                           ),
                         ),
-                        TextButton(
-                          onPressed: viewModel.unlinking
-                              ? null
-                              : () => _confirmUnlink(device),
-                          child: const Text('Unlink'),
-                        ),
+                        if (viewModel.isUnlinking(device.id))
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 12),
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        else
+                          TextButton(
+                            onPressed: () => _confirmUnlink(device),
+                            child: const Text('Unlink'),
+                          ),
                       ],
                     ),
                   ),

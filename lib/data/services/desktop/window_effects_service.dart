@@ -1,48 +1,45 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/logging/app_logger.dart';
+import 'desktop_crash_log.dart';
 
 const _tag = 'WindowEffects';
 
 /// Dart side of the "aura/window_effects" method channel implemented in
-/// windows/runner/window_effects_channel.cpp. Toggles DWM acrylic blur-behind
-/// (the overlay's glass) per presentation: on for the panel and pill, off for
-/// the fullscreen pointing flight, which must stay fully see-through.
-///
-/// Fail-soft: when the OS call is unavailable or fails, [glassSupported]
-/// flips false and the overlay paints a near-opaque fallback surface instead
-/// of translucent paint over an un-blurred desktop (unreadable, per M1
-/// testing on transparent windows).
-class WindowEffectsService extends ChangeNotifier {
+/// windows/runner/window_effects_channel.cpp. The overlay window is
+/// permanently borderless and fully transparent (no OS backdrop, no OS
+/// corner rounding) — [ensureTransparent] just reasserts that native state on
+/// every presentation change, matching the call pattern that already
+/// reliably worked. All visible "glass" (fill, border, rounded corners at any
+/// radius) is painted by Flutter itself (`_GlassSurface` in overlay_panel.dart),
+/// not by the OS, since native blur+rounding never reliably rendered as one
+/// consistent shape (see window_effects_channel.cpp for the full story).
+class WindowEffectsService {
   static const _channel = MethodChannel('aura/window_effects');
 
-  bool? _glassSupported;
-
-  /// Null until the first native call resolves; then whether acrylic applied.
-  bool? get glassSupported => _glassSupported;
-
-  Future<void> enableGlass({required Color tint}) => _setGlass(true, tint);
-
-  Future<void> disableGlass() => _setGlass(false, const Color(0x00000000));
-
-  Future<void> _setGlass(bool enabled, Color tint) async {
+  Future<void> ensureTransparent() async {
     try {
-      final applied = await _channel.invokeMethod<bool>('setGlass', {
-        'enabled': enabled,
-        'tintArgb': tint.toARGB32(),
-      });
-      _updateSupported(applied ?? false);
-    } catch (e) {
+      await _channel.invokeMethod<bool>('ensureTransparent');
+    } catch (e, st) {
       AppLogger.warning('Window effects call failed',
-          tag: _tag, metadata: {'enabled': enabled, 'error': e.toString()});
-      _updateSupported(false);
+          tag: _tag, metadata: {'error': e.toString()});
+      DesktopCrashLog.record(_tag, e, st);
     }
   }
 
-  void _updateSupported(bool value) {
-    if (_glassSupported == value) return;
-    _glassSupported = value;
-    notifyListeners();
+  /// Forces OS keyboard focus onto the overlay window after show. Implemented
+  /// natively (AttachThreadInput handshake) because the plain
+  /// SetForegroundWindow that window_manager's focus() issues is denied while
+  /// another process owns the foreground — exactly the hotkey-summon case.
+  /// Returns whether the window actually became the foreground window.
+  Future<bool> forceFocus() async {
+    try {
+      return await _channel.invokeMethod<bool>('focusWindow') ?? false;
+    } catch (e, st) {
+      AppLogger.warning('Native focus call failed',
+          tag: _tag, metadata: {'error': e.toString()});
+      DesktopCrashLog.record(_tag, e, st);
+      return false;
+    }
   }
 }

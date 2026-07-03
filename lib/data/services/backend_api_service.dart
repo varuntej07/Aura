@@ -298,16 +298,20 @@ class BackendApiService implements ChatServiceProvider {
       '/devices/pair/start',
       const {},
       (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
     );
   }
 
   /// Unlinks a paired desktop device and revokes refresh tokens for the
-  /// account (all sessions; Firebase has no per-device revoke).
+  /// account (all sessions; Firebase has no per-device revoke). Idempotent:
+  /// repeating this on an already-removed device answers 404/not_found rather
+  /// than erroring, so callers may safely retry on an ambiguous timeout.
   Future<Result<Map<String, dynamic>>> unlinkDevice(String deviceId) async {
     return _apiClient.post(
       '/devices/unlink',
       {'device_id': deviceId},
       (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
     );
   }
 

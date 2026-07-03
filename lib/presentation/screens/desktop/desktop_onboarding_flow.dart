@@ -3,6 +3,9 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/desktop_glass_theme.dart';
+import '../../../data/services/desktop/overlay_controller.dart'
+    show DesktopOnboardingStep;
 
 /// Stable URL baked into shipped builds. It is a web-side redirect
 /// (auravoiceapp.com/app), so where it lands can change after release
@@ -16,27 +19,32 @@ const String desktopOnboardingSeenPreferenceKey = 'desktop_onboarding_seen';
 /// explanation that a phone app exists; this walks them there instead:
 /// meet Buddy -> get the phone app (QR) -> link this PC.
 ///
-/// The panel window is a fixed 560x360, so every step lays out horizontally
-/// compact. Once a user reaches the link step the flow is marked seen and
-/// later signed-out launches land directly on the link step.
+/// The window resizes to each step's actual content height (via
+/// [onStepChanged], read by [DesktopWindowService]) rather than one fixed
+/// sheet tall enough for the tallest step. Once a user reaches the link step
+/// the flow is marked seen and later signed-out launches land directly on it.
 class DesktopOnboardingFlow extends StatefulWidget {
-  const DesktopOnboardingFlow({super.key, required this.linkStep});
+  const DesktopOnboardingFlow({
+    super.key,
+    required this.linkStep,
+    this.onStepChanged,
+  });
 
   /// The existing pairing/email sign-in form, injected so this flow owns
   /// only the guidance around it.
   final Widget linkStep;
+
+  /// Fired whenever the visible step changes, including the initial resolve
+  /// of the "seen onboarding" flag. Plain callback (not a Provider read) so
+  /// this widget stays testable without a provider tree.
+  final ValueChanged<DesktopOnboardingStep>? onStepChanged;
 
   @override
   State<DesktopOnboardingFlow> createState() => _DesktopOnboardingFlowState();
 }
 
 class _DesktopOnboardingFlowState extends State<DesktopOnboardingFlow> {
-  static const int _welcomeStep = 0;
-  static const int _getAppStep = 1;
-  static const int _linkStep = 2;
-  static const int _stepCount = 3;
-
-  int _step = _welcomeStep;
+  DesktopOnboardingStep _step = DesktopOnboardingStep.welcome;
   bool _resolvedSeenFlag = false;
 
   @override
@@ -46,16 +54,18 @@ class _DesktopOnboardingFlowState extends State<DesktopOnboardingFlow> {
       if (!mounted) return;
       setState(() {
         if (prefs.getBool(desktopOnboardingSeenPreferenceKey) ?? false) {
-          _step = _linkStep;
+          _step = DesktopOnboardingStep.link;
         }
         _resolvedSeenFlag = true;
       });
+      widget.onStepChanged?.call(_step);
     });
   }
 
-  void _goToStep(int step) {
+  void _goToStep(DesktopOnboardingStep step) {
     setState(() => _step = step);
-    if (step == _linkStep) {
+    widget.onStepChanged?.call(step);
+    if (step == DesktopOnboardingStep.link) {
       SharedPreferences.getInstance().then(
           (prefs) => prefs.setBool(desktopOnboardingSeenPreferenceKey, true));
     }
@@ -68,30 +78,32 @@ class _DesktopOnboardingFlowState extends State<DesktopOnboardingFlow> {
     if (!_resolvedSeenFlag) return const SizedBox.shrink();
 
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Expanded(
-          child: switch (_step) {
-            _welcomeStep => _WelcomeStep(
-                onNext: () => _goToStep(_getAppStep),
-                onSkipToLink: () => _goToStep(_linkStep),
-              ),
-            _getAppStep => _GetAppStep(
-                onNext: () => _goToStep(_linkStep),
-                onBack: () => _goToStep(_welcomeStep),
-              ),
-            _ => widget.linkStep,
-          },
-        ),
+        switch (_step) {
+          DesktopOnboardingStep.welcome => _WelcomeStep(
+              onNext: () => _goToStep(DesktopOnboardingStep.getApp),
+              onSkipToLink: () => _goToStep(DesktopOnboardingStep.link),
+            ),
+          DesktopOnboardingStep.getApp => _GetAppStep(
+              onNext: () => _goToStep(DesktopOnboardingStep.link),
+              onBack: () => _goToStep(DesktopOnboardingStep.welcome),
+            ),
+          DesktopOnboardingStep.link => widget.linkStep,
+        },
         const SizedBox(height: 8),
         Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            _ProgressDots(current: _step, count: _stepCount),
-            if (_step == _linkStep) ...[
+            _ProgressDots(
+              current: _step,
+              onSelect: _goToStep,
+            ),
+            if (_step == DesktopOnboardingStep.link) ...[
               const SizedBox(width: 12),
               _SmallTextButton(
                 label: 'New here?',
-                onPressed: () => _goToStep(_welcomeStep),
+                onPressed: () => _goToStep(DesktopOnboardingStep.welcome),
               ),
             ],
           ],
@@ -115,7 +127,7 @@ class _WelcomeStep extends StatelessWidget {
         Text('Meet Buddy, your AI friend on this PC.',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: AppColors.textPrimary,
+                  color: DesktopGlassColors.textBright,
                   fontWeight: FontWeight.w600,
                 )),
         const SizedBox(height: 6),
@@ -123,19 +135,22 @@ class _WelcomeStep extends StatelessWidget {
             'your phone left off.',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.textPrimary.withValues(alpha: 0.7),
+                  color: DesktopGlassColors.textDim,
                 )),
-        const SizedBox(height: 14),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: const [
-            _HotkeyChip(keys: 'Ctrl + Alt + B', action: 'summon'),
-            SizedBox(width: 10),
-            _HotkeyChip(keys: 'Esc', action: 'hide'),
-          ],
-        ),
+        const SizedBox(height: 10),
+        // Windows 11 hides new tray icons in the overflow area by default, so
+        // this is said explicitly once here rather than left to be discovered.
+        Text(
+            'Buddy lives in your system tray — press Ctrl+Alt+B anytime to '
+            'bring it back.',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: DesktopGlassColors.textDim,
+                  fontSize: 11,
+                )),
         const SizedBox(height: 16),
         FilledButton(onPressed: onNext, child: const Text('Get set up')),
+        const SizedBox(height: 10),
         _SmallTextButton(
             label: 'Already have Aura? Link now', onPressed: onSkipToLink),
       ],
@@ -157,9 +172,12 @@ class _GetAppStep extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
+            // The QR card stays white with dark-ink modules: scanners want
+            // contrast, and a bright card reads as "this is the thing to
+            // point your phone at" on the dark glass.
             color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.glassBorderLight),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: DesktopGlassColors.border),
           ),
           child: QrImageView(
             data: getAuraAppUrl,
@@ -184,7 +202,7 @@ class _GetAppStep extends StatelessWidget {
             children: [
               Text('First, grab Aura on your phone',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: AppColors.textPrimary,
+                        color: DesktopGlassColors.textBright,
                         fontWeight: FontWeight.w600,
                       )),
               const SizedBox(height: 6),
@@ -192,7 +210,7 @@ class _GetAppStep extends StatelessWidget {
                   'app is where it starts. Scan the code, or visit '
                   'auravoiceapp.com/app.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppColors.textPrimary.withValues(alpha: 0.7),
+                        color: DesktopGlassColors.textDim,
                       )),
               const SizedBox(height: 12),
               Row(
@@ -211,64 +229,57 @@ class _GetAppStep extends StatelessWidget {
   }
 }
 
-class _HotkeyChip extends StatelessWidget {
-  const _HotkeyChip({required this.keys, required this.action});
-
-  final String keys;
-  final String action;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: AppColors.glassWhiteFill,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: AppColors.glassBorderLight),
-          ),
-          child: Text(keys,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.textPrimary,
-                    fontWeight: FontWeight.w600,
-                  )),
-        ),
-        const SizedBox(width: 5),
-        Text(action,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.textPrimary.withValues(alpha: 0.55),
-                )),
-      ],
-    );
-  }
-}
-
+/// Step dots double as navigation: each dot jumps to its step (they read as
+/// tappable, so they are). Housed in a faint glass pill so the nav control
+/// itself reads as one small piece of glass, not three bare dots floating on
+/// the surface.
 class _ProgressDots extends StatelessWidget {
-  const _ProgressDots({required this.current, required this.count});
+  const _ProgressDots({
+    required this.current,
+    required this.onSelect,
+  });
 
-  final int current;
-  final int count;
+  final DesktopOnboardingStep current;
+  final void Function(DesktopOnboardingStep step) onSelect;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (var i = 0; i < count; i++)
-          Container(
-            width: 6,
-            height: 6,
-            margin: const EdgeInsets.symmetric(horizontal: 3),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: i == current
-                  ? AppColors.accentBase
-                  : AppColors.textPrimary.withValues(alpha: 0.2),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: DesktopGlassColors.fieldFill,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: DesktopGlassColors.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final step in DesktopOnboardingStep.values)
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => onSelect(step),
+                // Padding, not margin: the 6px dot alone is a hostile click
+                // target; the padded box is the real hit area.
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: step == current
+                          ? DesktopGlassColors.accent
+                          : DesktopGlassColors.iconIdle,
+                    ),
+                  ),
+                ),
+              ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }

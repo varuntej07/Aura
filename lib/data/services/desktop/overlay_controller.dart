@@ -12,6 +12,13 @@ enum OverlayPresentation { hidden, panel, pill, pointing }
 /// from it.
 enum OverlayPanelVariant { setup, bar }
 
+/// Which step of [DesktopOnboardingFlow] is showing inside the [setup]
+/// variant. Each step's content is a different height, so
+/// [DesktopWindowService] sizes the window per step instead of one fixed
+/// sheet tall enough for all of them (the empty space above/below short
+/// steps that prompted this).
+enum DesktopOnboardingStep { welcome, getApp, link }
+
 /// Pure state machine for the desktop overlay. Owns WHAT should be on screen;
 /// [DesktopWindowService] applies it to the real window, so every transition
 /// here is unit-testable without a window.
@@ -48,6 +55,39 @@ class OverlayController extends ChangeNotifier {
   void setPanelVariant(OverlayPanelVariant variant) {
     if (_panelVariant == variant) return;
     _panelVariant = variant;
+    notifyListeners();
+  }
+
+  DesktopOnboardingStep _onboardingStep = DesktopOnboardingStep.welcome;
+  DesktopOnboardingStep get onboardingStep => _onboardingStep;
+
+  /// Reported by [DesktopOnboardingFlow] as the user steps through it.
+  /// Notifies so [DesktopWindowService] can resize the setup sheet to that
+  /// step's actual content height while the panel is already on screen.
+  void setOnboardingStep(DesktopOnboardingStep step) {
+    if (_onboardingStep == step) return;
+    _onboardingStep = step;
+    notifyListeners();
+  }
+
+  double? _measuredSetupHeight;
+  double? get measuredSetupHeight => _measuredSetupHeight;
+
+  /// Reported by `_SetupPanel` after every layout: the sheet's ACTUAL
+  /// rendered height, measured directly rather than guessed. Per-step
+  /// constants in DesktopWindowService are only the pre-measurement starting
+  /// guess (avoids a visible "always opens oversized" flash); this is the
+  /// authoritative value once available, and self-corrects on every content
+  /// change (step, error text appearing, anything) with no new constant to
+  /// tune. 1px-epsilon and clamped so float jitter and layout transients
+  /// don't spam resizes.
+  void reportMeasuredSetupHeight(double height) {
+    final clamped = height.clamp(120.0, 560.0);
+    if (_measuredSetupHeight != null &&
+        (clamped - _measuredSetupHeight!).abs() < 1) {
+      return;
+    }
+    _measuredSetupHeight = clamped;
     notifyListeners();
   }
 

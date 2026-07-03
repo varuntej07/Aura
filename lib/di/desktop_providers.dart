@@ -113,8 +113,7 @@ List<SingleChildWidget> buildDesktopProviders(
     Provider<AuthRepository>.value(value: authRepository),
     Provider<PairingService>(create: (_) => PairingService()),
     ChangeNotifierProvider<OverlayController>.value(value: overlayController),
-    ChangeNotifierProvider<WindowEffectsService>.value(
-        value: windowEffectsService),
+    Provider<WindowEffectsService>.value(value: windowEffectsService),
     ChangeNotifierProvider<ScreenSightService>.value(value: screenSightService),
     ChangeNotifierProvider<PointingOverlayService>.value(
         value: pointingOverlayService),

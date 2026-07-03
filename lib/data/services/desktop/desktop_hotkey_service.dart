@@ -2,6 +2,7 @@ import 'package:flutter/services.dart' show PhysicalKeyboardKey;
 import 'package:hotkey_manager/hotkey_manager.dart';
 
 import '../../../core/logging/app_logger.dart';
+import 'desktop_crash_log.dart';
 
 /// Registers the global hotkeys (hardcoded for v1; rebind UI is a captured
 /// TODO): Ctrl+Alt+B summons/toggles the overlay, Ctrl+Alt+S arms/disarms
@@ -25,13 +26,14 @@ class DesktopHotkeyService {
         keyDownHandler: (_) => onPressed(),
       );
       return true;
-    } catch (e) {
+    } catch (e, st) {
       AppLogger.error(
         'Global hotkey registration failed. Another app may own Ctrl+Alt+B; '
         'tray menu remains the open path.',
         error: e,
         tag: 'DesktopHotkey',
       );
+      DesktopCrashLog.record('DesktopHotkey', e, st);
       return false;
     }
   }
@@ -48,13 +50,14 @@ class DesktopHotkeyService {
         keyDownHandler: (_) => onPressed(),
       );
       return true;
-    } catch (e) {
+    } catch (e, st) {
       AppLogger.error(
         'Screen sight hotkey registration failed. Another app may own '
         'Ctrl+Alt+S; the eye button on the panel remains the arm path.',
         error: e,
         tag: 'DesktopHotkey',
       );
+      DesktopCrashLog.record('DesktopHotkey', e, st);
       return false;
     }
   }

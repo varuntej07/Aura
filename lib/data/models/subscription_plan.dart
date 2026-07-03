@@ -102,6 +102,14 @@ class UserEntitlement {
         if (originalPurchaseDate != null)
           'original_purchase_date': Timestamp.fromDate(originalPurchaseDate!),
         'updated_at': FieldValue.serverTimestamp(),
+        // Backend-owned trial-lifecycle-notification claim flags (entitlement_notifications.py).
+        // Written false only so the fields EXIST on doc creation — a Firestore equality
+        // filter on `== false` never matches a field that's simply absent. The backend is
+        // the only writer of `true`; a later Flutter write (e.g. on purchase) resetting
+        // these to false is harmless because the backend query also filters `tier == free`,
+        // which excludes anyone who's upgraded regardless of these flags.
+        'trial_notified_3d': false,
+        'trial_notified_expired': false,
       };
 
   UserEntitlement copyWith({
