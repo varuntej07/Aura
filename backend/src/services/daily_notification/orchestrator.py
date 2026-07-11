@@ -23,8 +23,6 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from langfuse import observe
-
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
 from ...services.model_provider import ModelProvider
@@ -36,6 +34,11 @@ from .suggestion_pills_agent import SuggestionPillsAgent
 MAX_DAILY_MEETING_REMINDERS = 3
 _THREE_HOURS = timedelta(hours=3)
 _TWO_HOURS = timedelta(hours=2)
+
+# Recent queries older than this are stale and must not seed suggestion pills (a meeting
+# prepped for last week is a finished thread). Kept in sync with the same constant in
+# handlers/buddy_pills.py (twin fetch).
+_QUERY_RECENCY_WINDOW_DAYS = 3
 
 # Module-level agent singletons
 _models: ModelProvider | None = None
@@ -67,7 +70,6 @@ async def run_daily_plan(user_id: str) -> None:
 
 
 # Core pipeline
-@observe(name="daily_notification_plan")
 async def _run(user_id: str) -> None:
     today = date.today().isoformat()
 
@@ -86,7 +88,7 @@ async def _run(user_id: str) -> None:
     # subjects in parallel. Interests ground the main Buddy chat suggestion pills.
     upcoming_events, queries, interest_subjects = await asyncio.gather(
         _fetch_upcoming_calendar_events(user_id, days_ahead=7),
-        _fetch_last_10_queries(user_id),
+        _fetch_recent_queries(user_id),
         _fetch_interest_subjects_if_consented(user_id),
     )
 
@@ -174,12 +176,20 @@ async def _load_user_timezone(user_id: str) -> str:
         return "UTC"
 
 
-async def _fetch_last_10_queries(user_id: str) -> list[dict]:
+async def _fetch_recent_queries(user_id: str) -> list[dict]:
+    """Up to 10 most recent user inputs from the last _QUERY_RECENCY_WINDOW_DAYS days.
+    The recency window keeps stale, already-finished topics (a meeting prepped for last
+    week, a one-off errand) out of the suggestion pills. The range filter and order_by are
+    on the same `timestamp` field, so the automatic single-field index covers it."""
     def _fetch() -> list[dict]:
         db = admin_firestore()
+        cutoff_iso = (
+            datetime.now(UTC) - timedelta(days=_QUERY_RECENCY_WINDOW_DAYS)
+        ).isoformat()
         docs = (
             db.collection("users").document(user_id)
             .collection("queries")
+            .where("timestamp", ">=", cutoff_iso)
             .order_by("timestamp", direction="DESCENDING")
             .limit(10)
             .stream()

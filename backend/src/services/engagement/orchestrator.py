@@ -21,7 +21,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from google.cloud import firestore as fs  # type: ignore
-from langfuse import observe
 
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
@@ -54,7 +53,6 @@ async def run_orchestration(
 
 # ── Core pipeline ─────────────────────────────────────────────────────────────
 
-@observe(name="engagement_orchestration")
 async def _orchestrate(
     user_id: str,
     trigger_event: str,

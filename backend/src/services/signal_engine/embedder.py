@@ -22,6 +22,14 @@ from ...lib.logger import logger
 EMBEDDING_MODEL_ID = "models/gemini-embedding-001"
 EMBEDDING_DIMENSION = 768
 
+# No cross-model fallback here, by design. Unlike a chat/notification LLM call (where a
+# different model returns an interchangeable answer), a different embedding model produces
+# vectors in a DIFFERENT latent space — different geometry, possibly different dimensionality —
+# that are not comparable to the gemini-embedding-001 @ 768-dim vectors already stored in the
+# content_candidates pool and indexed by Firestore find_nearest. Silently swapping models would
+# make every vector compare as noise. The correct degradation is to FAIL LOUD (retry + timeout
+# below, then raise so the caller's quota guard surfaces the outage) — re-homing embeddings is a
+# re-embed-the-whole-pool migration, not a runtime fallback.
 _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0
 _TIMEOUT_S = 15.0

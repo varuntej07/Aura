@@ -21,6 +21,7 @@ from typing import Any, Literal, cast
 from google.cloud import firestore as fs
 from pydantic import BaseModel, ValidationError, field_validator
 
+from ..config.settings import settings
 from ..lib.logger import logger
 from .life_facts_schema import (
     LIFE_FACT_DESCRIPTIONS,
@@ -40,6 +41,8 @@ from .user_aura_schema import (
     category_count,
 )
 from .user_aura_schema import sanitize_firestore_key as _sanitize_firestore_key
+from .memory.atom_store import AtomInput, upsert_atoms
+from .memory.fields import ATOM_TYPE_FACT, ATOM_TYPE_INTEREST_SUBJECT
 
 _MAX_INFERRED_GOALS = 10
 _MAX_EXPLICIT_FACTS = 20          # cap on stored durable facts per user
@@ -626,8 +629,19 @@ async def _update_user_aura_style_signals(
     })
 
 
-async def _user_has_granted_aura_consent(uid: str) -> bool:
-    """Read aura_consent_granted from users/{uid}. Returns False on any error (safe default)."""
+async def _user_has_granted_aura_consent(
+    uid: str, user_doc: dict[str, Any] | None = None,
+) -> bool:
+    """Read aura_consent_granted from users/{uid}. Returns False on any error (safe
+    default). ``user_doc`` lets a caller that already fetched the doc this turn
+    (the chat handler) pass it through instead of a redundant re-fetch -- this
+    function is called from two independent fire-and-forget tasks per chat turn
+    (the aura extractor and intent-sense), so without this it re-read the same doc
+    twice on top of the chat handler's own reads (see firestore_read_audit_20260706
+    memory)."""
+    if user_doc is not None:
+        return user_doc.get("aura_consent_granted", False) is True
+
     from .firebase import admin_firestore
 
     def _fetch() -> bool:
@@ -646,11 +660,35 @@ async def _user_has_granted_aura_consent(uid: str) -> bool:
         return False
 
 
+async def _upsert_memory_atoms_from_insight(uid: str, insight: MessageInsight) -> None:
+    """Persist this turn's durable facts and named interest subjects into the UNBOUNDED
+    long-term memory store (services/memory), so they are recallable by semantic
+    similarity forever, independent of the capped UserAura digest. Captured at extraction
+    time (pre-cap) so nothing the user told us is ever lost to recall. Fire-and-forget:
+    upsert_atoms swallows its own errors and never blocks the chat path."""
+    atoms: list[AtomInput] = []
+    for fact in insight.explicit_facts or []:
+        if isinstance(fact, str) and fact.strip():
+            atoms.append(AtomInput(text=fact.strip(), atom_type=ATOM_TYPE_FACT, importance=0.6))
+    for signal in insight.interests or []:
+        subject = (signal.subject or "").strip()
+        if subject:
+            atoms.append(AtomInput(
+                text=subject,
+                atom_type=ATOM_TYPE_INTEREST_SUBJECT,
+                importance=0.4,
+                categories=[signal.category] if signal.category else [],
+            ))
+    if atoms:
+        await upsert_atoms(uid, atoms, source="extractor")
+
+
 async def extract_and_update_user_aura(
     uid: str,
     message: str,
     session_id: str | None = None,
     prev_buddy_response: str | None = None,
+    user_doc: dict[str, Any] | None = None,
 ) -> None:
     """
     Public entry point. Called via asyncio.create_task from the chat handler.
@@ -663,6 +701,9 @@ async def extract_and_update_user_aura(
       4. Merge insight into the profile and write back.
       5. If prev_buddy_response is available, log the turn signal and run feedback loop updates.
 
+    ``user_doc`` lets the chat handler pass the users/{uid} doc it already fetched
+    this turn instead of this (detached, fire-and-forget) task re-fetching it.
+
     All exceptions are caught and logged. This function never raises.
     """
     # Step 0: GDPR consent gate. Skip if the user has not opted in, but log it so a
@@ -670,7 +711,7 @@ async def extract_and_update_user_aura(
     # logs instead of looking identical to "healthy and quiet". This skip being
     # silent is exactly what hid a 5-week profile freeze. The check reads
     # users/{uid}.aura_consent_granted, written at onboarding and by the memory toggle.
-    if not await _user_has_granted_aura_consent(uid):
+    if not await _user_has_granted_aura_consent(uid, user_doc):
         logger.info("UserAuraExtractor: extraction skipped, Aura consent not granted", {
             "user_id": uid,
         })
@@ -687,9 +728,14 @@ async def extract_and_update_user_aura(
             system=_EXTRACTION_SYSTEM_PROMPT,
             response_model=MessageInsight,
             temperature=_EXTRACTION_TEMPERATURE,
+            model=settings.TIER_EXTRACTION,
         ))
 
         updated = await _merge_and_write_user_aura(uid, insight, message)
+
+        # Mirror the durable facts + named subjects into the unbounded long-term memory
+        # store for query-relevant recall. Best-effort; never affects the merge above.
+        await _upsert_memory_atoms_from_insight(uid, insight)
 
         logger.info("UserAuraExtractor: profile updated", {
             "user_id": uid,

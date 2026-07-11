@@ -1,5 +1,13 @@
 """
-Scoring loop — runs every 15 minutes via Cloud Scheduler.
+Scoring pass — runs ONCE per completed 4-hour content-ingest generation, as a
+durable Cloud Task enqueued by the ingest handler (2026-07-09; replaced the
+recurring 15-30 min Cloud Scheduler cadence, which re-ran a near-identical
+50-doc KNN per user against a pool that only changes every 4 hours — 16
+scoring passes per ingest interval down to 1, a 93.75% cut in scheduled
+scoring executions; see firestore_read_audit_20260706 memory for the earlier
+15→30 min step). Idempotency across duplicate Cloud Task deliveries, ingest
+retries, and manual recovery calls lives in generation_store.py; this module
+only knows how to score one pass.
 
 For each active user:
   1. Read state and the user's timezone.
@@ -27,6 +35,7 @@ isolated; a single user blow-up never stops the loop.
 from __future__ import annotations
 
 import asyncio
+import re
 import statistics
 import uuid
 from dataclasses import dataclass, field
@@ -40,7 +49,6 @@ from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..model_provider import ModelProvider, get_model_provider
-from ..notification_budget import try_claim_proactive_slot
 from ..user_aura_schema import (
     GENDER_FIELD,
     LANGUAGE_FIELD,
@@ -60,7 +68,9 @@ from ..analytics.funnel_events import (
     PROP_NOTIFICATION_ORIGIN,
 )
 from ..notification_ledger import NotificationDecision
-from ..notification_service import send_notification
+from ..notification_service import NotificationResult
+from ..notifications import orchestrator
+from ..notifications.proposal import SOURCE_NEWS, NotificationProposal, ProposalKind
 from . import event_ingester, feature_store
 from .content_category_map import POOL_PRODUCIBLE_TAXONOMY_SLUGS, to_taxonomy_slug
 from .content_pool import (
@@ -108,8 +118,19 @@ DIVERSITY_LOOKBACK_HOURS = 24
 # Stale pending-outcome threshold.
 OUTCOME_TIMEOUT_HOURS = 6
 
-# Consecutive ticks with no engagement before exploration drift activates.
-EXPLORATION_DRIFT_THRESHOLD = 20
+# Cap on the denormalized recent-sends ring buffer (feature_store.SignalStoreState
+# .recent_sends). 60 matches the old _load_recent_sent_content_ids window: news
+# candidates expire from the pool within ~24h, so 60 rows comfortably covers any
+# item still selectable for already-sent suppression.
+RECENT_SENDS_MAX = 60
+
+# Consecutive ticks with no engagement before exploration drift activates. This
+# counts TICKS, so it must scale with cadence to keep roughly the same wall-clock
+# idle time (the same reasoning that halved it 20->10 when ticks widened
+# 15min->30min on 2026-07-06). With ingest-triggered scoring there are only 6
+# ticks per day (one per 4h generation): 2 ticks ≈ 8h idle, the closest match to
+# the original ~5h intent that still requires more than a single missed pass.
+EXPLORATION_DRIFT_THRESHOLD = 2
 
 # Gate B fall-through: how many top-ranked eligible candidates to frame (one LLM
 # call each) in search of one that passes the relevance gate, before giving up for
@@ -136,6 +157,69 @@ REGION_MISMATCH_PENALTY = 0.9
 # Max users processed simultaneously in one tick.
 TICK_USER_CONCURRENCY = 10
 
+# ── Active-tracker topic suppression (news lane vs tracking lane overlap) ─────
+# "Track the FIFA World Cup" both provisions a tracker AND enriches UserAura
+# interests, which steers this loop's user_vector + allow-list toward FIFA — so the
+# user would get the same story twice, once from each lane. While a tracker on
+# topic X delivered within this window, the news lane skips X-matching candidates;
+# the tracker's fact-gated moments own that story (founder decision 2026-07-10).
+TRACKER_NEWS_SUPPRESSION_WINDOW = timedelta(hours=24)
+
+# Tokens too generic to identify a tracked topic on their own.
+_TRACKER_TOPIC_TOKEN_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "and", "at", "in", "on", "for", "vs", "v",
+    "news", "update", "updates", "latest",
+})
+
+
+def _topic_match_tokens(text: str) -> set[str]:
+    """Lowercased alphabetic tokens for tracked-topic matching. Pure digits are
+    dropped ("2026" appears in half of all sports headlines)."""
+    words = re.split(r"[^a-z0-9]+", (text or "").lower())
+    return {
+        w for w in words
+        if w and not w.isdigit() and w not in _TRACKER_TOPIC_TOKEN_STOPWORDS
+    }
+
+
+async def _recently_updated_tracker_token_sets(
+    user_id: str, now: datetime,
+) -> list[tuple[str, set[str]]]:
+    """Token sets of the user's ACTIVE tracked topics that delivered an update within
+    the suppression window. One auto-indexed per-user query, only on scoring passes
+    (6/day per user with ingest-triggered scoring). Fails open to [] — a read error
+    must never mute the news lane."""
+    from ..tracking import fields as tracking_fields
+    from ..tracking import tracking_store
+
+    token_sets: list[tuple[str, set[str]]] = []
+    for tracker in await tracking_store.list_trackers_for_user(user_id):
+        if tracker.status != tracking_fields.TRACKER_STATUS_ACTIVE:
+            continue
+        if (
+            tracker.last_update_at is None
+            or now - tracker.last_update_at > TRACKER_NEWS_SUPPRESSION_WINDOW
+        ):
+            continue
+        tokens = _topic_match_tokens(tracker.topic_key.replace("-", " "))
+        if tokens:
+            token_sets.append((tracker.topic_key, tokens))
+    return token_sets
+
+
+def _matched_tracked_topic(
+    candidate: ScoredCandidate, token_sets: list[tuple[str, set[str]]],
+) -> str:
+    """The tracked topic_key this candidate covers, or "". A single-token topic
+    ("tesla") matches on that token; a multi-token one ("fifa world cup") needs at
+    least two shared tokens so one incidental word can't suppress unrelated news."""
+    candidate_tokens = _topic_match_tokens(f"{candidate.title} {candidate.sub_category}")
+    for topic_key, topic_tokens in token_sets:
+        required = min(2, len(topic_tokens))
+        if len(topic_tokens & candidate_tokens) >= required:
+            return topic_key
+    return ""
+
 
 @dataclass
 class TickSummary:
@@ -146,10 +230,20 @@ class TickSummary:
     # an inferred guess: it used to be a silent early-return invisible in the metrics,
     # which sent the 2026-06-14 diagnosis chasing the (healthy) vector index.
     users_skipped_no_candidates: int = 0
+    # Users whose personal lane actually ran a KNN query this pass (breaking-lane
+    # sends and pre-KNN skips are excluded). Persisted onto the generation record
+    # so cost per pass is observable, not inferred.
+    knn_queries: int = 0
+    # Users whose KNN candidates were actually scored (KNN returned a non-empty set).
+    users_scored: int = 0
     notifications_sent: int = 0
     blocked_below_threshold: int = 0
     blocked_daily_cap: int = 0
     blocked_quiet_hours: int = 0
+    # Candidates skipped because an ACTIVE topic tracker already pushed on the same
+    # subject within the last 24h (the tracker owns that story; the news lane must
+    # not double-cover it).
+    blocked_tracker_overlap: int = 0
     timeouts_swept: int = 0
     # Best base score of each below-threshold user, so the tick health line can
     # report how close the pool came (weak matches vs a mis-tuned threshold).
@@ -174,13 +268,21 @@ async def run_tick() -> TickSummary:
             logger.info("signal_engine.scoring_loop: no active users")
         return summary
 
+    # Breaking-lane candidates are vector-independent — the same freshest-40 list
+    # applies to every user this tick (content_pool.py docstring: "deliberately
+    # VECTOR-INDEPENDENT"). Fetch once per tick and share it across all users
+    # instead of re-querying it once per user (was N reads/tick, now 1).
+    breaking_candidates = await list_recent_breaking_candidates(
+        min_salience=BREAKING_SALIENCE_BAR, limit=40,
+    )
+
     models = get_model_provider()
     semaphore = asyncio.Semaphore(TICK_USER_CONCURRENCY)
 
     async def _score_with_semaphore(user_id: str) -> None:
         async with semaphore:
             try:
-                await _score_one_user(user_id, models, summary)
+                await _score_one_user(user_id, models, summary, breaking_candidates)
             except Exception as exc:
                 logger.exception("signal_engine.scoring_loop: per-user failure while scoring concurrently using semaphore", {
                     "user_id": user_id,
@@ -193,10 +295,13 @@ async def run_tick() -> TickSummary:
         "users_considered": summary.users_considered,
         "users_skipped_no_state": summary.users_skipped_no_state,
         "users_skipped_no_candidates": summary.users_skipped_no_candidates,
+        "users_scored": summary.users_scored,
+        "knn_queries": summary.knn_queries,
         "notifications_sent": summary.notifications_sent,
         "blocked_below_threshold": summary.blocked_below_threshold,
         "blocked_daily_cap": summary.blocked_daily_cap,
         "blocked_quiet_hours": summary.blocked_quiet_hours,
+        "blocked_tracker_overlap": summary.blocked_tracker_overlap,
         "timeouts_swept": summary.timeouts_swept,
     })
 
@@ -291,6 +396,7 @@ async def _score_one_user(
     user_id: str,
     models: ModelProvider,
     summary: TickSummary,
+    breaking_candidates: list[ScoredCandidate],
 ) -> None:
     state = await feature_store.read_state(user_id)
 
@@ -326,10 +432,15 @@ async def _score_one_user(
         summary.blocked_quiet_hours += 1
         return
 
-    # Content already sent to this user. Both lanes drop these so the same story is
-    # never re-sent — when the top pick equals a previous send, the next-best fresh
-    # one is chosen instead.
-    sent_content_ids = await _load_recent_sent_content_ids(user_id)
+    # Content already sent to this user + recent send categories for the diversity
+    # tie-breaker, both derived in memory from the denormalized recent_sends ring
+    # buffer on `state` (was: two separate range queries every tick). A pre-
+    # existing user's buffer self-heals via a one-time backfill from the outcomes
+    # subcollection. Both lanes drop already-sent content so the same story is
+    # never re-sent — when the top pick equals a previous send, the next-best
+    # fresh one is chosen instead.
+    await _ensure_recent_sends_backfilled(user_id, state)
+    sent_content_ids, recent_categories = _derive_recent_sends(state)
 
     # LANE B — breaking news. Vector-INDEPENDENT, so it runs BEFORE the personal
     # bootstrap / has-signal gate: a genuinely worldwide story reaches even a
@@ -342,7 +453,7 @@ async def _score_one_user(
     ):
         sent_breaking = await _try_send_breaking(
             user_id, models, state, user_doc, sent_content_ids,
-            user_local_now, user_local_date, summary,
+            user_local_now, user_local_date, summary, breaking_candidates,
         )
         if sent_breaking:
             await _safe_write_state(user_id, state)
@@ -368,6 +479,7 @@ async def _score_one_user(
         state = await event_ingester.refresh_user_vector_from_aura(user_id, state)
 
     candidates = await find_nearest_for_user(state.user_vector, limit=50)
+    summary.knn_queries += 1
     if not candidates:
         # The user has a vector but vector search returned nothing — pool starved
         # (all candidates expired) or find_nearest is failing. Count it so the tick
@@ -375,8 +487,9 @@ async def _score_one_user(
         await _safe_write_state(user_id, state)
         summary.users_skipped_no_candidates += 1
         return
+    summary.users_scored += 1
 
-    recent_categories = await _load_recent_outcome_categories(user_id)
+    # recent_categories was already derived above, alongside sent_content_ids.
 
     # Build the category allow-list (Layer 2). Read UserAura once here so it feeds
     # both the allow-list and, on a send, the framing context (no second read).
@@ -545,22 +658,10 @@ async def _score_one_user(
         )
         return
 
-    # Coordinated ceiling across all proactive deciders (no-op while the flag is
-    # off). Claimed before the LLM framing call so a budget-blocked tick spends
-    # nothing. The engine's own DAILY_HARD_CAP above remains the per-source cap.
-    budget = await try_claim_proactive_slot(
-        user_id, source="signal_engine", user_local_date=user_local_date,
-    )
-    if not budget.allowed:
-        state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state)
-        summary.blocked_daily_cap += 1
-        logger.info(
-            f"signal_engine.scoring_loop: not sending (global budget: {budget.reason})",
-            {"user_id": user_id, "reason": budget.reason},
-        )
-        return
-
+    # The unified proactive budget + spacing is now claimed in the DRAIN (claiming here
+    # too would double-count). The engine's own is_sendable DAILY_HARD_CAP above remains
+    # the per-source sub-cap.
+    #
     # Build the framing context once from the UserAura already read for the allow-set,
     # plus gender/language from the user doc (tone + output language). No new read.
     # Shared across all framing attempts below.
@@ -571,6 +672,33 @@ async def _score_one_user(
     # whole tick when only the #1 is rejected. The chosen pick (incl. exploration
     # drift) is tried first. Capped at MAX_FRAME_ATTEMPTS LLM calls; still one send.
     attempts = _ordered_frame_attempts(eligible, chosen, MAX_FRAME_ATTEMPTS)
+
+    # Active-tracker suppression: a topic the user's tracker already pushed on within
+    # the window belongs to the tracking lane — the news lane skips its candidates so
+    # the same story never arrives twice from two lanes.
+    tracked_token_sets = await _recently_updated_tracker_token_sets(user_id, datetime.now(UTC))
+    if tracked_token_sets:
+        remaining = []
+        for attempt in attempts:
+            overlapping_topic = _matched_tracked_topic(attempt[2], tracked_token_sets)
+            if overlapping_topic:
+                summary.blocked_tracker_overlap += 1
+                logger.info(
+                    "signal_engine.scoring_loop: candidate suppressed, active tracker "
+                    f"already covers it (topic={overlapping_topic})",
+                    {
+                        "user_id": user_id,
+                        "content_id": attempt[2].content_id,
+                        "topic_key": overlapping_topic,
+                    },
+                )
+                continue
+            remaining.append(attempt)
+        attempts = remaining
+        if not attempts:
+            state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
+            await _safe_write_state(user_id, state)
+            return
     framed = None
     relevance_reason = ""
     for attempt_score, _, attempt_cand, attempt_components in attempts:
@@ -634,82 +762,65 @@ async def _score_one_user(
         )
         return
 
+    # Hand ONE proposal to the funnel. Cross-agent dedup, priority arbitration (vs
+    # thread/icebreaker/re-engage), the tap-worthiness gate, the unified adaptive budget,
+    # and smart-timing all run in the DRAIN. The delivery-dependent bookkeeping (the
+    # learning outcome, the funnel event, sends_today++) runs in on_news_delivered when
+    # the drain actually delivers — so it can never count a held/dropped proposal.
     notification_id = str(uuid.uuid4())
-    sent_at = datetime.now(UTC)
-    result = await send_notification(
-        user_id,
-        title=framed.title,
-        body=framed.body,
-        data={
-            "deep_link": "chat",
-            "content_id": best_cand.content_id,
-            "notification_id": notification_id,
-            "category": best_cand.category,
-            "sub_category": best_cand.sub_category,
-            "source": best_cand.source,
-            "url": best_cand.url,
-            "content_kind": framed.content_kind,
-            "opening_chat_message": framed.opening_chat_message,
-            "notification_origin": "signal_engine",
-        },
-        notification_type="signal_engine",
-        collapse_key=f"signal_{notification_id}",
-        decision=NotificationDecision(
-            score=best_score,
-            components=components,
-            gate_a_active=gate_a_active,
-            matched_interest_slug=best_cand.category,
-            relevance_reason=relevance_reason,
-            framer_prompt_version=FRAMER_PROMPT_VERSION,
-            sends_today_before=state.sends_today,
-            local_hour=user_local_now.hour,
-            day_of_week=user_local_now.weekday(),
-        ),
+    await orchestrator.submit(
+        NotificationProposal(
+            user_id=user_id,
+            source=SOURCE_NEWS,
+            kind=ProposalKind.PROACTIVE,
+            dedup_key=best_cand.content_id,
+            title=framed.title,
+            body=framed.body,
+            data={
+                "deep_link": "chat",
+                "content_id": best_cand.content_id,
+                "notification_id": notification_id,
+                "category": best_cand.category,
+                "sub_category": best_cand.sub_category,
+                "source": best_cand.source,
+                "url": best_cand.url,
+                "content_kind": framed.content_kind,
+                "opening_chat_message": framed.opening_chat_message,
+                # Buddy-facing "why I reached out" — injected into the chat prompt on the
+                # FIRST turn after a tap so Buddy stays oriented instead of disowning its
+                # own opener. Never shown in the push itself.
+                "notification_reason": relevance_reason,
+                "notification_origin": "signal_engine",
+            },
+            notification_type="signal_engine",
+            collapse_key=f"signal_{notification_id}",
+            # Real freshness: the candidate's own timestamp drives the 18h news window.
+            content_timestamp=best_cand.freshness_ts,
+            decision=NotificationDecision(
+                score=best_score,
+                components=components,
+                gate_a_active=gate_a_active,
+                matched_interest_slug=best_cand.category,
+                relevance_reason=relevance_reason,
+                framer_prompt_version=FRAMER_PROMPT_VERSION,
+                sends_today_before=state.sends_today,
+                local_hour=user_local_now.hour,
+                day_of_week=user_local_now.weekday(),
+            ),
+        )
     )
-
-    if not result.delivered:
-        state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state)
-        logger.info("signal_engine.scoring_loop: send returned no delivery", {
-            "user_id": user_id,
-            "notification_id": notification_id,
-        })
-        return
-
-    state.sends_today += 1
-    state.last_notification_at = sent_at
+    # Persist this tick's IN-TICK state mutations (daily reset, vector bootstrap/refresh,
+    # timeout-driven no-open bumps). NOT sends_today — that is a delivery fact the hook
+    # owns. Safe from clobber: no other tick runs for this user between enqueue and the
+    # within-the-minute drain that re-reads this state.
     await _safe_write_state(user_id, state)
-    await feature_store.write_outcome_pending(
-        user_id,
-        notification_id,
-        content_id=best_cand.content_id,
-        score=best_score,
-        scored_at=now_utc,
-        sent_at=sent_at,
-        relevance_reason=relevance_reason,
-    )
+    # Counts "handed to the funnel" — the metric the tick-health line + 0-send warning
+    # care about (did scoring produce something to send?). The real delivery is logged
+    # by the drain and recorded in on_news_delivered.
     summary.notifications_sent += 1
 
-    # Top of the re-engagement funnel. Fire-and-forget; never blocks the tick.
-    # The shared property keys must match the client's tap event for PostHog to
-    # join sent -> tapped -> session -> action (see analytics/funnel_events.py).
-    await posthog_client.capture_event(
-        distinct_id=user_id,
-        event=EVENT_NOTIFICATION_SENT,
-        properties={
-            PROP_NOTIFICATION_ID: notification_id,
-            PROP_CONTENT_ID: best_cand.content_id,
-            PROP_CATEGORY: best_cand.category,
-            PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_SIGNAL_ENGINE,
-            "sub_category": best_cand.sub_category,
-            "source": best_cand.source,
-            "score": round(best_score, 4),
-            "relevance_reason": relevance_reason,
-        },
-    )
-
     logger.info(
-        f"signal_engine.scoring_loop: notification sent "
+        f"signal_engine.scoring_loop: notification enqueued "
         f"(category={best_cand.category}, score={round(best_score, 3)}, "
         f"reason={relevance_reason!r})",
         {
@@ -731,6 +842,86 @@ async def _safe_write_state(user_id: str, state: feature_store.SignalStoreState)
         await feature_store.write_state(user_id, state)
     except Exception:
         pass
+
+
+async def on_news_delivered(
+    proposal: NotificationProposal, result: NotificationResult
+) -> None:
+    """Post-send bookkeeping for a signal-engine (news) push the drain DELIVERED.
+
+    Runs in the drain (via post_send.dispatch_post_send), NOT the scoring tick, so the
+    learning outcome, the funnel event, and the daily send counters all key off a REAL
+    delivery — a held or dropped proposal records nothing. Re-reads state fresh: the
+    producer already persisted this tick's vector / daily-reset mutations at enqueue, and
+    no other tick runs for this user between enqueue and the within-the-minute drain, so
+    this read-modify-write of the counters can't clobber them. Never raises.
+    """
+    user_id = proposal.user_id
+    data = proposal.data or {}
+    decision = proposal.decision
+    is_breaking = data.get("lane") == "breaking"
+    state = await feature_store.read_state(user_id)
+
+    if not result.delivered:
+        state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
+        await _safe_write_state(user_id, state)
+        logger.info("signal_engine.scoring_loop: news send returned no delivery", {
+            "user_id": user_id, "notification_id": data.get("notification_id", ""),
+        })
+        return
+
+    now = datetime.now(UTC)
+    state.sends_today += 1
+    if is_breaking:
+        state.breaking_sends_today += 1
+    state.last_notification_at = now
+    content_id = str(data.get("content_id", ""))
+    category = str(data.get("category", ""))
+    # Append to the denormalized ring buffer the scoring tick reads from (was: a
+    # separate range query). Safe even if this user's buffer hasn't been
+    # backfilled yet — the next tick's backfill re-reads the outcomes
+    # subcollection this send is about to land in, so nothing here is lost.
+    feature_store.record_recent_send(
+        state, content_id=content_id, category=category, sent_at=now, cap=RECENT_SENDS_MAX,
+    )
+    await _safe_write_state(user_id, state)
+
+    notification_id = data.get("notification_id", "")
+    score = decision.score if (decision and decision.score is not None) else 0.0
+    relevance_reason = decision.relevance_reason if decision else ""
+    await feature_store.write_outcome_pending(
+        user_id,
+        notification_id,
+        content_id=content_id,
+        score=score,
+        scored_at=now,
+        sent_at=now,
+        relevance_reason=relevance_reason,
+        category=category,
+    )
+
+    # Top of the re-engagement funnel — the property keys must match the client's tap
+    # event so PostHog can join sent -> tapped -> session -> action.
+    properties: dict[str, Any] = {
+        PROP_NOTIFICATION_ID: notification_id,
+        PROP_CONTENT_ID: data.get("content_id", ""),
+        PROP_CATEGORY: data.get("category", ""),
+        PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_SIGNAL_ENGINE,
+        "sub_category": data.get("sub_category", ""),
+        "source": data.get("source", ""),
+        "relevance_reason": relevance_reason,
+        "score": round(score, 4),
+    }
+    if is_breaking:
+        properties["lane"] = "breaking"
+    await posthog_client.capture_event(
+        distinct_id=user_id, event=EVENT_NOTIFICATION_SENT, properties=properties,
+    )
+
+    logger.info("signal_engine.scoring_loop: news notification delivered", {
+        "user_id": user_id, "notification_id": notification_id,
+        "content_id": data.get("content_id", ""), "lane": data.get("lane", "personal"),
+    })
 
 
 def _has_any_signal(state: feature_store.SignalStoreState) -> bool:
@@ -901,62 +1092,45 @@ def _local_now(timezone_name: str) -> datetime:
         return datetime.now(UTC)
 
 
-async def _load_recent_outcome_categories(user_id: str) -> list[str]:
-    """Categories from sends in the last DIVERSITY_LOOKBACK_HOURS, most-recent
-    first. Outcomes older than the window are ignored so a stale send can't keep
-    suppressing its category forever. Parallel fetches."""
-    cutoff = datetime.now(UTC) - timedelta(hours=DIVERSITY_LOOKBACK_HOURS)
+def _derive_recent_sends(
+    state: feature_store.SignalStoreState, *, now: datetime | None = None,
+) -> tuple[set[str], list[str]]:
+    """Pure, in-memory replacement for the two per-tick range queries this used to
+    be: already-sent content_ids (any outcome, whole ring buffer) and the most
+    recent categories within DIVERSITY_LOOKBACK_HOURS (capped at
+    RECENT_OUTCOMES_FOR_DIVERSITY), most-recent first. state.recent_sends is
+    stored oldest-first (feature_store.record_recent_send appends), so walking it
+    in reverse gives newest-first; the walk stops at the first entry outside the
+    lookback window since everything after it is even older."""
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(hours=DIVERSITY_LOOKBACK_HOURS)
 
-    def _fetch_outcome_content_ids() -> list[str]:
-        db = admin_firestore()
-        snaps = (
-            db.collection("users").document(user_id)
-            .collection("signal_store").document("state")
-            .collection("outcomes")
-            .order_by("sent_at", direction="DESCENDING")
-            .limit(RECENT_OUTCOMES_FOR_DIVERSITY)
-            .stream()
-        )
-        recent: list[str] = []
-        for s in snaps:
-            data = s.to_dict() or {}
-            sent_at = data.get("sent_at")
-            # Drop sends older than the lookback window. A tz-naive timestamp is
-            # treated as UTC to match how write_outcome_pending stores it.
-            if isinstance(sent_at, datetime):
-                if sent_at.tzinfo is None:
-                    sent_at = sent_at.replace(tzinfo=UTC)
-                if sent_at < cutoff:
-                    continue
-            recent.append(str(data.get("content_id", "")))
-        return recent
+    sent_content_ids = {e["content_id"] for e in state.recent_sends if e.get("content_id")}
 
-    try:
-        content_ids = await asyncio.to_thread(_fetch_outcome_content_ids)
-    except Exception as exc:
-        logger.warn("signal_engine.scoring_loop: outcome history fetch failed", {
-            "user_id": user_id,
-            "error": str(exc),
-        })
-        return []
-
-    valid_ids = [cid for cid in content_ids if cid]
-    if not valid_ids:
-        return []
-
-    from .content_pool import get_candidate
-    results = await asyncio.gather(*[get_candidate(cid) for cid in valid_ids])
-    return [cand.category for cand in results if cand and cand.category]
+    recent_categories: list[str] = []
+    for entry in reversed(state.recent_sends):
+        sent_at = entry.get("sent_at")
+        if isinstance(sent_at, datetime):
+            aware = sent_at if sent_at.tzinfo else sent_at.replace(tzinfo=UTC)
+            if aware < cutoff:
+                break
+        category = entry.get("category")
+        if category:
+            recent_categories.append(category)
+        if len(recent_categories) >= RECENT_OUTCOMES_FOR_DIVERSITY:
+            break
+    return sent_content_ids, recent_categories
 
 
-async def _load_recent_sent_content_ids(user_id: str, limit: int = 60) -> set[str]:
-    """content_ids of the user's recent sends (any outcome), for already-sent
-    suppression on both lanes. Orders by sent_at desc — a single-field order
-    Firestore auto-indexes at collection scope, so no composite index is needed.
-    News candidates expire from the pool within ~24h, so a 60-row window more than
-    covers any item still selectable. Returns an empty set on error (fail-open:
-    suppression is a nicety, never a reason to mute)."""
-    def _fetch() -> set[str]:
+async def _load_recent_sent_rows(user_id: str, limit: int = RECENT_SENDS_MAX) -> list[dict[str, Any]]:
+    """ONE-TIME backfill query (see _ensure_recent_sends_backfilled) — not called
+    per tick. Returns rows oldest-first (matching how record_recent_send appends
+    new entries), each {"content_id", "category", "sent_at"}. Older outcome docs
+    predate the ``category`` field on write_outcome_pending, so category may come
+    back empty here; the caller joins content_pool for just the handful that
+    still need it. Returns [] on error (fail-open — a failed backfill just means
+    dedup/diversity stay cold for this tick, never a mute)."""
+    def _fetch() -> list[dict[str, Any]]:
         db = admin_firestore()
         snaps = (
             db.collection("users").document(user_id)
@@ -966,16 +1140,68 @@ async def _load_recent_sent_content_ids(user_id: str, limit: int = 60) -> set[st
             .limit(limit)
             .stream()
         )
-        return {str((s.to_dict() or {}).get("content_id", "")) for s in snaps} - {""}
+        rows: list[dict[str, Any]] = []
+        for s in snaps:
+            data = s.to_dict() or {}
+            content_id = str(data.get("content_id", "") or "")
+            if not content_id:
+                continue
+            sent_at = data.get("sent_at")
+            rows.append({
+                "content_id": content_id,
+                "category": str(data.get("category", "") or ""),
+                "sent_at": sent_at if isinstance(sent_at, datetime) else datetime.now(UTC),
+            })
+        rows.reverse()  # oldest-first
+        return rows
 
     try:
         return await asyncio.to_thread(_fetch)
     except Exception as exc:
-        logger.warn("signal_engine.scoring_loop: recent-sent fetch failed", {
-            "user_id": user_id,
-            "error": str(exc),
+        logger.warn("signal_engine.scoring_loop: recent-sends backfill fetch failed", {
+            "user_id": user_id, "error": str(exc),
         })
-        return set()
+        return []
+
+
+async def _ensure_recent_sends_backfilled(
+    user_id: str, state: feature_store.SignalStoreState,
+) -> None:
+    """One-time migration for pre-existing users: recent_sends didn't exist before
+    this denormalization, so the first tick after deploy backfills it from the
+    outcomes subcollection instead of leaving already-sent suppression / the
+    diversity tie-breaker silently cold until the ring buffer organically refills
+    over the next RECENT_SENDS_MAX real sends. Mutates state in place; the
+    caller's existing state write persists it. No-op once recent_sends_backfilled
+    is set — including for a genuinely-empty history — so this never re-queries
+    on a later tick."""
+    if state.recent_sends_backfilled:
+        return
+
+    rows = await _load_recent_sent_rows(user_id, limit=RECENT_SENDS_MAX)
+
+    # Only the most recent RECENT_OUTCOMES_FOR_DIVERSITY rows ever fed the
+    # diversity tie-breaker under the old two-query design; the rest only ever
+    # fed the content_id dedup set, which needs no category. Join content_pool
+    # ONLY for legacy rows missing the (now-inline) category field, and only for
+    # that handful — this is a one-time cost, not a per-tick one.
+    if rows:
+        from .content_pool import get_candidate
+
+        needs_category = [r for r in rows[-RECENT_OUTCOMES_FOR_DIVERSITY:] if not r["category"]]
+        if needs_category:
+            candidates = await asyncio.gather(
+                *[get_candidate(r["content_id"]) for r in needs_category]
+            )
+            for row, cand in zip(needs_category, candidates):
+                if cand and cand.category:
+                    row["category"] = cand.category
+
+    state.recent_sends = rows
+    state.recent_sends_backfilled = True
+    logger.info("signal_engine.scoring_loop: backfilled recent_sends ring buffer", {
+        "user_id": user_id, "count": len(rows),
+    })
 
 
 async def _try_send_breaking(
@@ -987,34 +1213,24 @@ async def _try_send_breaking(
     user_local_now: datetime,
     user_local_date: str,
     summary: TickSummary,
+    breaking_candidates: list[ScoredCandidate],
 ) -> bool:
     """Lane B: try to send ONE globally-significant breaking story, bypassing the
     personal interest gate. Returns True iff a notification was delivered (the
     caller then persists state). Vector-independent — reads the freshest high-
     salience pool items directly, not the user's vector neighbours.
 
+    ``breaking_candidates`` is fetched ONCE per tick by the caller (run_tick) and
+    shared across every user, since the query itself has no user-specific filter.
+
     Mutates state (sends_today, breaking_sends_today, last_notification_at) on a
     successful send; the caller writes state. Every other branch leaves state for
     the personal lane to continue."""
-    candidates = await list_recent_breaking_candidates(
-        min_salience=BREAKING_SALIENCE_BAR, limit=40,
-    )
-    pick = next((c for c in candidates if c.content_id not in sent_content_ids), None)
+    pick = next((c for c in breaking_candidates if c.content_id not in sent_content_ids), None)
     if pick is None:
         return False
 
-    # Coordinated proactive ceiling + spacing. Claimed before the LLM framing call
-    # so a budget-blocked breaking tick spends nothing.
-    budget = await try_claim_proactive_slot(
-        user_id, source="signal_engine_breaking", user_local_date=user_local_date,
-    )
-    if not budget.allowed:
-        logger.info(
-            f"signal_engine.scoring_loop: breaking not sent (global budget: {budget.reason})",
-            {"user_id": user_id, "content_id": pick.content_id, "reason": budget.reason},
-        )
-        return False
-
+    # The unified proactive budget is claimed in the DRAIN now (not here).
     aura = await _read_user_aura(user_id)
     user_context = _build_framing_context(aura, user_doc, user_local_now)
     try:
@@ -1033,78 +1249,56 @@ async def _try_send_breaking(
         )
         return False
 
+    # Enqueue ONE breaking proposal. The drain owns dedup/arbitration/tap-gate/budget;
+    # on_news_delivered (lane="breaking") bumps the delivery counters on a real send. The
+    # caller (_score_one_user) still persists this tick's in-tick state mutations.
     notification_id = str(uuid.uuid4())
-    sent_at = datetime.now(UTC)
-    result = await send_notification(
-        user_id,
-        title=framed.title,
-        body=framed.body,
-        data={
-            "deep_link": "chat",
-            "content_id": pick.content_id,
-            "notification_id": notification_id,
-            "category": pick.category,
-            "sub_category": pick.sub_category,
-            "source": pick.source,
-            "url": pick.url,
-            "content_kind": framed.content_kind,
-            "opening_chat_message": framed.opening_chat_message,
-            "notification_origin": "signal_engine",
-            # Breaking reuses the signal_engine origin so the existing client tap
-            # routing + funnel join work unchanged; `lane` only separates analytics.
-            "lane": "breaking",
-        },
-        notification_type="signal_engine",
-        collapse_key=f"signal_{notification_id}",
-        decision=NotificationDecision(
-            score=pick.salience,
-            matched_interest_slug=pick.category,
-            relevance_reason=framed.relevance_reason or "globally significant breaking news",
-            framer_prompt_version=FRAMER_PROMPT_VERSION,
-            lane="breaking",
-            sends_today_before=state.sends_today,
-            local_hour=user_local_now.hour,
-            day_of_week=user_local_now.weekday(),
-        ),
-    )
-    if not result.delivered:
-        logger.info("signal_engine.scoring_loop: breaking send returned no delivery", {
-            "user_id": user_id,
-            "notification_id": notification_id,
-        })
-        return False
-
-    state.sends_today += 1
-    state.breaking_sends_today += 1
-    state.last_notification_at = sent_at
-    await feature_store.write_outcome_pending(
-        user_id,
-        notification_id,
-        content_id=pick.content_id,
-        score=pick.salience,
-        scored_at=sent_at,
-        sent_at=sent_at,
-        relevance_reason=framed.relevance_reason or "globally significant breaking news",
+    await orchestrator.submit(
+        NotificationProposal(
+            user_id=user_id,
+            source=SOURCE_NEWS,
+            kind=ProposalKind.PROACTIVE,
+            dedup_key=pick.content_id,
+            title=framed.title,
+            body=framed.body,
+            data={
+                "deep_link": "chat",
+                "content_id": pick.content_id,
+                "notification_id": notification_id,
+                "category": pick.category,
+                "sub_category": pick.sub_category,
+                "source": pick.source,
+                "url": pick.url,
+                "content_kind": framed.content_kind,
+                "opening_chat_message": framed.opening_chat_message,
+                # Buddy-facing "why I reached out", injected into the chat prompt on the
+                # first turn after a tap (never shown in the push).
+                "notification_reason": framed.relevance_reason or "globally significant breaking news",
+                "notification_origin": "signal_engine",
+                # Breaking reuses the signal_engine origin so the existing client tap
+                # routing + funnel join work unchanged; `lane` only separates analytics
+                # and tells the drain (smart-timing) + on_news_delivered this is breaking.
+                "lane": "breaking",
+            },
+            notification_type="signal_engine",
+            collapse_key=f"signal_{notification_id}",
+            content_timestamp=pick.freshness_ts,
+            decision=NotificationDecision(
+                score=pick.salience,
+                matched_interest_slug=pick.category,
+                relevance_reason=framed.relevance_reason or "globally significant breaking news",
+                framer_prompt_version=FRAMER_PROMPT_VERSION,
+                lane="breaking",
+                sends_today_before=state.sends_today,
+                local_hour=user_local_now.hour,
+                day_of_week=user_local_now.weekday(),
+            ),
+        )
     )
     summary.notifications_sent += 1
 
-    await posthog_client.capture_event(
-        distinct_id=user_id,
-        event=EVENT_NOTIFICATION_SENT,
-        properties={
-            PROP_NOTIFICATION_ID: notification_id,
-            PROP_CONTENT_ID: pick.content_id,
-            PROP_CATEGORY: pick.category,
-            PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_SIGNAL_ENGINE,
-            "sub_category": pick.sub_category,
-            "source": pick.source,
-            "lane": "breaking",
-            "salience": round(pick.salience, 4),
-        },
-    )
-
     logger.info(
-        f"signal_engine.scoring_loop: BREAKING notification sent "
+        f"signal_engine.scoring_loop: BREAKING notification enqueued "
         f"(category={pick.category}, salience={round(pick.salience, 3)})",
         {
             "user_id": user_id,

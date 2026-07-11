@@ -78,6 +78,7 @@ async def send_notification(
     sound: str = "default",
     apns_category: str | None = None,
     data_only: bool = False,
+    dedup_key: str = "",
     decision: "notification_ledger.NotificationDecision | None" = None,
 ) -> NotificationResult:
     """Send an FCM push notification to all registered devices for a user.
@@ -227,6 +228,7 @@ async def send_notification(
             source=str(data_in.get("source", "")),
             category=str(data_in.get("category", "")),
             content_kind=str(data_in.get("content_kind", "")),
+            dedup_key=dedup_key,
             delivered=delivered,
             tokens_targeted=tokens_targeted,
             success_count=success_count,

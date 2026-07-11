@@ -174,6 +174,90 @@ async def plan_and_claim_today(
         return ClaimResult(False, "error")
 
 
+@dataclass
+class PendingOpenerData:
+    """Opener content persisted to the state doc after generation, so a crash-then-
+    re-drain can recover it without a second LLM call."""
+    title: str
+    body: str
+    opening_chat_message: str
+    topic: str
+    reason: str
+    notification_id: str
+
+
+async def store_pending_opener(
+    user_id: str,
+    *,
+    local_date: str,
+    title: str,
+    body: str,
+    opening_chat_message: str,
+    topic: str,
+    reason: str,
+    notification_id: str,
+) -> None:
+    """Write opener content to the state doc after generation, before the push.
+    Best-effort: a failure here only disables crash-recovery for this opener;
+    it never affects the primary send path. The funnel's dedup_key prevents
+    double-send even if the recovered opener fires after the original delivered."""
+    def _write() -> None:
+        _state_ref(user_id).set({
+            f.FIELD_PENDING_OPENER_DATE: local_date,
+            f.FIELD_PENDING_OPENER_TITLE: title,
+            f.FIELD_PENDING_OPENER_BODY: body,
+            f.FIELD_PENDING_OPENER_MSG: opening_chat_message,
+            f.FIELD_PENDING_OPENER_TOPIC: topic,
+            f.FIELD_PENDING_OPENER_REASON: reason,
+            f.FIELD_PENDING_OPENER_NOTIFICATION_ID: notification_id,
+        }, merge=True)
+
+    try:
+        await asyncio.to_thread(_write)
+    except Exception as exc:
+        logger.warn("icebreaker.store: store_pending_opener failed (crash-recovery unavailable)", {
+            "user_id": user_id, "local_date": local_date, "error": str(exc),
+        })
+
+
+async def try_recover_pending_opener(
+    user_id: str, local_date: str
+) -> PendingOpenerData | None:
+    """Return a previously-generated opener stored for today, or None if no
+    recovery is available (different date, fields missing, or read error).
+    Called when the day slot is already claimed — the normal case (already sent)
+    and the crash-recovery case (claimed but killed before mark_consumed) look
+    identical from the claim alone; this distinguishes them."""
+    def _read() -> PendingOpenerData | None:
+        snap = _state_ref(user_id).get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        if data.get(f.FIELD_PENDING_OPENER_DATE) != local_date:
+            return None
+        title = str(data.get(f.FIELD_PENDING_OPENER_TITLE) or "")
+        body = str(data.get(f.FIELD_PENDING_OPENER_BODY) or "")
+        nid = str(data.get(f.FIELD_PENDING_OPENER_NOTIFICATION_ID) or "")
+        if not title or not body or not nid:
+            return None
+        return PendingOpenerData(
+            title=title,
+            body=body,
+            opening_chat_message=str(data.get(f.FIELD_PENDING_OPENER_MSG) or ""),
+            topic=str(data.get(f.FIELD_PENDING_OPENER_TOPIC) or ""),
+            reason=str(data.get(f.FIELD_PENDING_OPENER_REASON) or ""),
+            notification_id=nid,
+        )
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn("icebreaker.store: try_recover_pending_opener failed", {
+            "user_id": user_id, "local_date": local_date, "error": str(exc),
+        })
+        return None
+
+
 async def record_sent_opener(
     user_id: str,
     *,

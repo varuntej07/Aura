@@ -87,6 +87,10 @@ async def handle_signal_events(request: Request) -> JSONResponse:
     # Flutter app waiting on a response.
     for event in validated:
         asyncio.create_task(apply_event(user_id, **event))
+        # Reactive layer: the same behavioral signal updates presence (foreground +
+        # dismiss-streak) for the surface-aware Delivery Arbiter. Separate task so it
+        # never disturbs the signal-engine ingestion above.
+        asyncio.create_task(_bridge_to_reactive(user_id, event["event_type"]))
 
     logger.info("signal_events: accepted", {
         "user_id": user_id,
@@ -94,6 +98,19 @@ async def handle_signal_events(request: Request) -> JSONResponse:
         "received": len(events_raw),
     })
     return JSONResponse({"accepted": len(validated)}, status_code=202)
+
+
+async def _bridge_to_reactive(user_id: str, event_type: str) -> None:
+    """Lazy-imported wrapper so signal_events stays decoupled from the reactive
+    package at module load. Never raises."""
+    try:
+        from ..services.reactive.behavioral_bridge import bridge_client_event
+
+        await bridge_client_event(user_id, event_type)
+    except Exception as exc:
+        logger.warn("signal_events: reactive bridge failed (swallowed)", {
+            "user_id": user_id, "event_type": event_type, "error": str(exc),
+        })
 
 
 def _coerce_optional_str(value) -> str | None:

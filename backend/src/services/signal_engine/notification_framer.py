@@ -76,6 +76,23 @@ def strip_long_dashes(text: str) -> str:
     return cleaned.strip().strip(",").strip()
 
 
+def truncate_at_word_boundary(text: str, max_chars: int) -> str:
+    """Shorten ``text`` to at most ``max_chars`` without ever splitting a word.
+
+    A naive ``text[:max_chars]`` cut a real push body mid-token ("...for you" ->
+    "...for y"), which reads as a glitch in the shade. This cuts at the last
+    space before the limit instead, drops any trailing punctuation, and appends a
+    single ellipsis so the trim reads as intentional. Text already within the cap
+    is returned untouched; a single token longer than the cap (rare for push copy)
+    falls back to a hard slice so the platform limit is always honoured."""
+    if not text or len(text) <= max_chars:
+        return text
+    window = text[: max_chars - 1]  # leave room for the ellipsis
+    cut = window.rfind(" ")
+    truncated = (window[:cut] if cut > 0 else window).rstrip(" ,;:.")
+    return f"{truncated}…"
+
+
 class FramedNotification(BaseModel):
     title: str = Field(..., description="Push title, <= 50 chars.")
     body: str = Field(..., description="Push body, <= 100 chars.")
@@ -351,11 +368,15 @@ def _normalise(
     else:
         content_kind = CONTENT_KIND_READ if (candidate.url or "").strip() else CONTENT_KIND_DISCUSS
     return FramedNotification(
-        title=strip_long_dashes(framed.title)[:NOTIFICATION_TITLE_MAX_CHARS],
-        body=strip_long_dashes(framed.body)[:NOTIFICATION_BODY_MAX_CHARS],
-        opening_chat_message=strip_long_dashes(
-            framed.opening_chat_message
-        )[:OPENING_CHAT_MESSAGE_MAX_CHARS],
+        title=truncate_at_word_boundary(
+            strip_long_dashes(framed.title), NOTIFICATION_TITLE_MAX_CHARS
+        ),
+        body=truncate_at_word_boundary(
+            strip_long_dashes(framed.body), NOTIFICATION_BODY_MAX_CHARS
+        ),
+        opening_chat_message=truncate_at_word_boundary(
+            strip_long_dashes(framed.opening_chat_message), OPENING_CHAT_MESSAGE_MAX_CHARS
+        ),
         is_relevant=framed.is_relevant,
         relevance_reason=framed.relevance_reason[:RELEVANCE_REASON_MAX_CHARS],
         content_kind=content_kind,

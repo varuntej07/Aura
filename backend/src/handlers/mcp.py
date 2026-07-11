@@ -315,7 +315,7 @@ def register_mcp(app: FastAPI) -> None:
 
     NOTE: using @app.on_event (deprecated) here is deliberate, not an oversight.
     Switching to a FastAPI `lifespan` is all-or-nothing: it disables EVERY
-    on_event app-wide, including main.on_startup (env checks + Langfuse init). It
+    on_event app-wide, including main.on_startup (env checks). It
     is also behavior-identical for our case (the session manager already runs for
     the whole container lifetime, which is what keeps voice tool calls off the
     2026-05-29 Cloud Run 404/hang path, together with stateless_http=True). And the

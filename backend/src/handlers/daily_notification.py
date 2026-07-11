@@ -19,8 +19,13 @@ from typing import Any
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
-from ..services.notification_budget import record_committed_send
-from ..services.notification_service import send_notification
+from ..services.notifications import orchestrator
+from ..services.notifications.proposal import (
+    SOURCE_CALENDAR,
+    Disposition,
+    NotificationProposal,
+    ProposalKind,
+)
 
 
 # Send a scheduled notification
@@ -79,24 +84,46 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
 
     fcm_notification_type = "meeting_reminder" if is_meeting_reminder_slot else "daily_nudge"
 
-    # Send via FCM
-    result = await send_notification(
-        user_id,
-        title=title,
-        body=notification_body,
-        data={
-            "notification_type": fcm_notification_type,
-            "plan_date": plan_date,
-            "nudge_slot": nudge_slot,
-            "initial_message": opening_chat_message,
-            "quick_reply_chips": json.dumps(quick_reply_chips),
-        },
-        notification_type=fcm_notification_type,
-        priority="high",
-        collapse_key=f"{fcm_notification_type}_{nudge_slot}",
+    # Committed lane: a calendar reminder fires regardless (the user has the meeting),
+    # so the orchestrator sends it inline. The slot+date dedup_key is a backstop
+    # against a Cloud Tasks retry that slips past the daily_plan status check above.
+    # The orchestrator records the committed send to the shared budget itself.
+    decision = await orchestrator.submit(
+        NotificationProposal(
+            user_id=user_id,
+            source=SOURCE_CALENDAR,
+            kind=ProposalKind.COMMITTED,
+            dedup_key=f"meeting_{plan_date}_{nudge_slot}",
+            title=title,
+            body=notification_body,
+            data={
+                "notification_type": fcm_notification_type,
+                "plan_date": plan_date,
+                "nudge_slot": nudge_slot,
+                "initial_message": opening_chat_message,
+                "quick_reply_chips": json.dumps(quick_reply_chips),
+            },
+            notification_type=fcm_notification_type,
+            collapse_key=f"{fcm_notification_type}_{nudge_slot}",
+        )
     )
 
-    if result.tokens_targeted == 0:
+    if decision.disposition != Disposition.SEND:
+        # Already delivered before (dedup) or dropped. Close the loop so Cloud Tasks
+        # stops retrying, and don't double-count engagement/budget.
+        logger.info("daily_notification: orchestrator did not send", {
+            "user_id": user_id,
+            "nudge_slot": nudge_slot,
+            "plan_date": plan_date,
+            "disposition": decision.disposition.value,
+            "reason": decision.reason,
+        })
+        await _update_nudge_status(
+            user_id, plan_date, nudge_slot, "sent", datetime.now(UTC).isoformat()
+        )
+        return {"status": "already_sent", "reason": decision.reason}
+
+    if decision.tokens_targeted == 0:
         logger.warn("daily_notification: no FCM tokens found, notification not delivered", {
             "user_id": user_id,
             "nudge_slot": nudge_slot,
@@ -104,13 +131,13 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
         })
         return {"status": "no_devices", "tokens_targeted": 0, "success_count": 0}
 
-    if not result.delivered:
+    if not decision.delivered:
         logger.error("daily_notification: FCM delivery failed, all tokens rejected", {
             "user_id": user_id,
             "nudge_slot": nudge_slot,
             "plan_date": plan_date,
-            "tokens_targeted": result.tokens_targeted,
-            "failure_count": result.failure_count,
+            "tokens_targeted": decision.tokens_targeted,
+            "failure_count": decision.failure_count,
         })
         return {"error": "fcm_delivery_failed", "status_code": 500}
 
@@ -126,25 +153,18 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
     else:
         await _update_engagement_guard(user_id, sent_at)
 
-    # Committed send: calendar reminders fire regardless but are recorded in the
-    # unified budget so a proactive push is spaced away (no-op while flag off).
-    await record_committed_send(
-        user_id,
-        source="meeting_reminder" if is_meeting_reminder_slot else "daily_nudge",
-    )
-
     logger.info("daily_notification: nudge sent", {
         "user_id": user_id,
         "nudge_slot": nudge_slot,
         "plan_date": plan_date,
-        "tokens_targeted": result.tokens_targeted,
-        "success_count": result.success_count,
+        "tokens_targeted": decision.tokens_targeted,
+        "success_count": decision.success_count,
     })
 
     return {
         "status": "sent",
-        "tokens_targeted": result.tokens_targeted,
-        "success_count": result.success_count,
+        "tokens_targeted": decision.tokens_targeted,
+        "success_count": decision.success_count,
     }
 
 

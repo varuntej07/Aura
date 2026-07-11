@@ -61,6 +61,10 @@ FIELD_CONTENT_ID = "content_id"
 FIELD_SOURCE = "source"
 FIELD_CATEGORY = "category"
 FIELD_CONTENT_KIND = "content_kind"
+# Stable content identity, written by the orchestrator so a later send carrying
+# the same key (the same story from a second decider, or a re-proposed proactive
+# item) can be deduped against recent history. Empty on legacy/direct sends.
+FIELD_DEDUP_KEY = "dedup_key"
 FIELD_SENT_AT = "sent_at"
 FIELD_STATUS = "status"
 FIELD_DELIVERY = "delivery"
@@ -149,6 +153,7 @@ async def record_send(
     source: str = "",
     category: str = "",
     content_kind: str = "",
+    dedup_key: str = "",
     delivered: bool,
     tokens_targeted: int,
     success_count: int,
@@ -173,6 +178,7 @@ async def record_send(
         FIELD_SOURCE: source,
         FIELD_CATEGORY: category,
         FIELD_CONTENT_KIND: content_kind,
+        FIELD_DEDUP_KEY: dedup_key,
         FIELD_SENT_AT: now,
         FIELD_STATUS: STATUS_SENT if delivered else STATUS_FAILED,
         FIELD_DELIVERY: {
@@ -206,6 +212,128 @@ async def record_send(
             "type": notification_type,
             "error": str(exc),
         })
+
+
+async def recent_dedup_keys(user_id: str, *, since: datetime) -> set[str]:
+    """The set of non-empty ``dedup_key``s sent to a user since ``since``.
+
+    The orchestrator's cross-agent dedup gate reads this so the same content can't
+    fire twice (e.g. a story surfaced by both tracking and news, or a proactive
+    item re-proposed on a later tick). A single-field range on ``sent_at`` in a
+    per-user subcollection is auto-indexed at collection scope — no explicit index.
+    Fails OPEN (returns empty set) so a read error never blocks a send.
+    """
+    since_aware = since if since.tzinfo else since.replace(tzinfo=UTC)
+
+    def _read() -> set[str]:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        snaps = (
+            admin_firestore()
+            .collection("users")
+            .document(user_id)
+            .collection("notifications")
+            .where(filter=FieldFilter(FIELD_SENT_AT, ">=", since_aware))
+            .limit(200)
+            .stream()
+        )
+        keys: set[str] = set()
+        for snap in snaps:
+            row = snap.to_dict() or {}
+            # Only a DELIVERED send dedups: a failed send must stay retryable, so
+            # its row never blocks the same content from being attempted again.
+            if row.get(FIELD_STATUS) != STATUS_SENT:
+                continue
+            key = row.get(FIELD_DEDUP_KEY)
+            if key:
+                keys.add(str(key))
+        return keys
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn("notification_ledger.recent_dedup_keys failed", {
+            "user_id": user_id, "error": str(exc),
+        })
+        return set()
+
+
+async def has_recent_delivery(user_id: str, notification_type: str, *, since: datetime) -> bool:
+    """True if a notification of ``notification_type`` was DELIVERED to this user since
+    ``since``. Same cheap single-field ``sent_at`` range as ``recent_dedup_keys``
+    (auto-indexed at collection scope, no explicit index needed). Fails OPEN (False) so
+    a read error never holds/blocks a send that would otherwise go out."""
+    since_aware = since if since.tzinfo else since.replace(tzinfo=UTC)
+
+    def _read() -> bool:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        snaps = (
+            admin_firestore()
+            .collection("users")
+            .document(user_id)
+            .collection("notifications")
+            .where(filter=FieldFilter(FIELD_SENT_AT, ">=", since_aware))
+            .limit(200)
+            .stream()
+        )
+        for snap in snaps:
+            row = snap.to_dict() or {}
+            if row.get(FIELD_STATUS) == STATUS_SENT and row.get(FIELD_TYPE) == notification_type:
+                return True
+        return False
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn("notification_ledger.has_recent_delivery failed", {
+            "user_id": user_id, "notification_type": notification_type, "error": str(exc),
+        })
+        return False
+
+
+async def recent_engagement(user_id: str, *, since: datetime) -> tuple[int, int]:
+    """``(delivered_count, opened_count)`` over ``[since, now]`` — the substrate for
+    the adaptive per-user notification volume (``notification_budget``).
+
+    A user who taps gets a higher daily ceiling + tighter spacing; one who ignores
+    gets throttled. Counts only DELIVERED rows (a failed send was never seen, so it
+    can't be 'ignored'). Same cheap single-field ``sent_at`` range as
+    ``recent_dedup_keys`` (auto-indexed at collection scope). Fails OPEN to ``(0, 0)``
+    so a read error falls back to the gentle default tier, never an outage.
+    """
+    since_aware = since if since.tzinfo else since.replace(tzinfo=UTC)
+
+    def _read() -> tuple[int, int]:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        snaps = (
+            admin_firestore()
+            .collection("users")
+            .document(user_id)
+            .collection("notifications")
+            .where(filter=FieldFilter(FIELD_SENT_AT, ">=", since_aware))
+            .limit(500)
+            .stream()
+        )
+        delivered = 0
+        opened = 0
+        for snap in snaps:
+            row = snap.to_dict() or {}
+            if row.get(FIELD_STATUS) != STATUS_SENT:
+                continue
+            delivered += 1
+            if row.get(FIELD_OUTCOME) == OUTCOME_OPENED:
+                opened += 1
+        return delivered, opened
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn("notification_ledger.recent_engagement failed", {
+            "user_id": user_id, "error": str(exc),
+        })
+        return 0, 0
 
 
 async def record_tap(

@@ -296,6 +296,16 @@ async def find_nearest_for_user(
         return []
 
 
+# NOTE: an in-process 3h TTL cache (find_nearest_for_user_cached) used to sit
+# here to spare the 15-30 min scoring cron from re-querying an unchanged pool.
+# Scoring is now ingest-triggered (one pass per 4h generation, see
+# signal_engine/generation_store.py), so every scoring pass genuinely faces a
+# refreshed pool and the durable generation guard is the single cost and
+# correctness boundary — the cache was removed rather than kept as a second,
+# competing mechanism that could serve a pre-ingest snapshot to the pass that
+# exists precisely to score the post-ingest pool.
+
+
 @dataclass
 class RecentHeadline:
     """A lightweight pool item for the icebreaker context bundle — just enough to

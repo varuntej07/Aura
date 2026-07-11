@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field
 from ...lib.logger import logger
 from ..buddy_voice import BUDDY_CONTENT_PUSH_RULES, BUDDY_VOICE_CORE
 from ..model_provider import ModelProvider
+from ..signal_engine.notification_framer import (
+    strip_long_dashes,
+    truncate_at_word_boundary,
+)
 from .context_bundle import IcebreakerContext
 
 # FCM/platform-safe caps, enforced after the model returns.
@@ -149,9 +153,16 @@ def _normalise(opener: IcebreakerOpener) -> IcebreakerOpener:
     reason = opener.reason.strip()
     is_send_worthy = opener.is_send_worthy and bool(reason)
     return IcebreakerOpener(
-        title=opener.title[:ICEBREAKER_TITLE_MAX_CHARS],
-        body=opener.body[:ICEBREAKER_BODY_MAX_CHARS],
-        opening_chat_message=opener.opening_chat_message[:ICEBREAKER_OPENING_MESSAGE_MAX_CHARS],
+        title=truncate_at_word_boundary(
+            strip_long_dashes(opener.title), ICEBREAKER_TITLE_MAX_CHARS
+        ),
+        body=truncate_at_word_boundary(
+            strip_long_dashes(opener.body), ICEBREAKER_BODY_MAX_CHARS
+        ),
+        opening_chat_message=truncate_at_word_boundary(
+            strip_long_dashes(opener.opening_chat_message),
+            ICEBREAKER_OPENING_MESSAGE_MAX_CHARS,
+        ),
         topic=opener.topic[:ICEBREAKER_TOPIC_MAX_CHARS],
         is_send_worthy=is_send_worthy,
         reason=reason[:ICEBREAKER_REASON_MAX_CHARS],

@@ -59,6 +59,25 @@ class TaskScheduler:
         })
         return task_name
 
+    def schedule_orchestrate(self, user_id: str) -> str:
+        """Enqueue an immediate, COALESCED reactive-orchestrate task for a user
+        (POST /internal/orchestrate). Carries only the user_id — the orchestrate
+        pass drains that user's whole event inbox in one go, so a burst of events
+        collapses to one task, not one per event. This is the revived
+        ``schedule_orchestration`` hook, repointed at the reactive endpoint.
+
+        Returns the Cloud Task name (for logging/debugging)."""
+        task_name = self._enqueue(
+            payload={"user_id": user_id},
+            delay_seconds=0,
+            url_path="/internal/orchestrate",
+        )
+        logger.info("TaskScheduler: orchestrate enqueued", {
+            "user_id": user_id,
+            "task_name": task_name,
+        })
+        return task_name
+
     def schedule_notification(
         self,
         engagement_id: str,
@@ -124,6 +143,51 @@ class TaskScheduler:
         })
         return task_name
 
+    def schedule_signal_scoring(self, generation_id: str) -> str:
+        """Enqueue the ONE durable scoring task for a completed content-ingest
+        generation (POST /internal/signal-engine/tick). Called synchronously from
+        the ingest handler before its HTTP response so the enqueue is durable on
+        Cloud Run (never asyncio.create_task after responding — the instance may
+        freeze).
+
+        The task name is DETERMINISTIC (derived from the 4-hour generation ID),
+        so a Cloud Scheduler retry of the same ingest generation collides with
+        the already-created task instead of enqueuing a second scoring pass —
+        Cloud Tasks answers AlreadyExists, which we treat as success. The
+        generation claim in signal_engine/generation_store.py is the second,
+        durable layer of the same guarantee.
+
+        Returns the Cloud Task name.
+        """
+        from google.api_core.exceptions import AlreadyExists  # type: ignore
+
+        task_id = f"signal-scoring-{generation_id}"
+        try:
+            task_name = self._enqueue(
+                payload={"generation_id": generation_id},
+                delay_seconds=0,
+                url_path="/internal/signal-engine/tick",
+                task_id=task_id,
+            )
+        except AlreadyExists:
+            client = self._get_client()
+            task_name = client.task_path(
+                settings.CLOUD_TASKS_PROJECT,
+                settings.CLOUD_TASKS_LOCATION,
+                settings.CLOUD_TASKS_QUEUE,
+                task_id,
+            )
+            logger.info("TaskScheduler: duplicate signal scoring enqueue suppressed", {
+                "generation_id": generation_id,
+                "task_name": task_name,
+            })
+            return task_name
+        logger.info("TaskScheduler: signal scoring enqueued", {
+            "generation_id": generation_id,
+            "task_name": task_name,
+        })
+        return task_name
+
     def cancel_task(self, task_name: str) -> None:
         """Cancel a pending Cloud Task. Safe to call if already fired (no-op)."""
         try:
@@ -142,7 +206,12 @@ class TaskScheduler:
         payload: dict[str, Any],
         delay_seconds: int,
         url_path: str,
+        task_id: str | None = None,
     ) -> str:
+        """task_id, when given, pins a deterministic Cloud Task name so a retry
+        of the same logical work raises AlreadyExists instead of duplicating the
+        task; the caller decides whether that collision is success (idempotent
+        work) or an error. Omitted -> Cloud Tasks assigns a unique name."""
         from google.cloud import tasks_v2  # type: ignore
         from google.protobuf import timestamp_pb2  # type: ignore
 
@@ -166,6 +235,14 @@ class TaskScheduler:
                 },
             }
         }
+
+        if task_id is not None:
+            task["name"] = client.task_path(
+                settings.CLOUD_TASKS_PROJECT,
+                settings.CLOUD_TASKS_LOCATION,
+                settings.CLOUD_TASKS_QUEUE,
+                task_id,
+            )
 
         if delay_seconds > 0:
             eta = timestamp_pb2.Timestamp()

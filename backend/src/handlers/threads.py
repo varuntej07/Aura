@@ -27,6 +27,7 @@ from ..services.analytics.funnel_events import (
     PROP_THREAD_ID,
 )
 from ..services.model_provider import get_model_provider
+from ..services.notification_service import send_notification
 from ..services.request_auth import resolve_user_id_from_request
 from ..services.threads import thread_store
 from ..services.threads.models import Thread, ThreadSource, ThreadStatus
@@ -34,6 +35,49 @@ from ..services.threads.thread_responder import generate_thread_reply
 from ..services.user_aura_extractor import extract_and_update_user_aura
 
 MAX_REPLY_CHARS = 2_000
+
+# This is the curiosity-thread FCM routing key the client switches on. Buddy's
+# reply rides the same type so the existing handler updates the same shade
+# notification; ``kind=reply`` tells the client to render it as Buddy's answer
+# (plain body, no suggestion chips) rather than a fresh question.
+_THREAD_FOLLOWUP_TYPE = "thread_followup"
+
+
+async def _push_buddy_reply(user_id: str, thread_id: str, buddy_reply: str) -> None:
+    """Deliver Buddy's reply to a shade answer as its own follow-up push.
+
+    Why a push and not just the HTTP response: the chip tap runs in an Android
+    background isolate that the OS can reap the instant it flushes this request.
+    The client clears the "sending" spinner immediately with an optimistic echo
+    of the user's own words, then relies on THIS push to land Buddy's reply in
+    the shade, so it shows up even after that isolate is gone. Sent inline,
+    before the endpoint returns, because Cloud Run can freeze the container's CPU
+    once the response is sent, which would strand any post-response task.
+
+    Best-effort: a push failure must never fail the reply ingest.
+    """
+    try:
+        await send_notification(
+            user_id,
+            title="Buddy",
+            body=buddy_reply,
+            data={
+                "thread_id": thread_id,
+                "kind": "reply",
+                "buddy_reply": buddy_reply,
+            },
+            notification_type=_THREAD_FOLLOWUP_TYPE,
+            data_only=True,
+            collapse_key=f"thread_{thread_id}",
+            priority="high",
+        )
+    except Exception as exc:  # noqa: BLE001 - delivery is best-effort
+        logger.warn("threads: buddy-reply push failed", {
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
 
 
 async def handle_thread_reply(request: Request) -> JSONResponse:
@@ -97,6 +141,10 @@ async def handle_thread_reply(request: Request) -> JSONResponse:
         user_id, thread_id, role="assistant",
         content=buddy_reply, created_at=datetime.now(UTC),
     )
+
+    # Land Buddy's reply in the notification shade via its own push, so it shows
+    # even if the client's background isolate was already reaped (see helper).
+    await _push_buddy_reply(user_id, thread_id, buddy_reply)
 
     # Funnel action step: a shade reply is a conversion even though the app
     # never opened (so no tap/session event fires for this path). Fire server-

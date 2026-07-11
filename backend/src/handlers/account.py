@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from ..lib.logger import logger
 from ..services.firebase import admin_auth, admin_firestore
 from ..services.request_auth import decode_firebase_claims
+from .pairing import FIELD_UID as PAIRING_FIELD_UID
 
 
 async def handle_delete_account(request: Request) -> JSONResponse:
@@ -59,6 +60,17 @@ def _delete_all_user_data(uid: str) -> None:
 
     # Chat sessions are stored per-user in local SQLite on device, nothing to delete server-side
     _delete_collection_docs(db.collection("devices").where("uid", "==", uid).stream())
+
+    # Top-level pairing_codes/{CODE} docs (pairing.py) aren't under users/{uid}, so the
+    # subcollection-recursive deletes above never reach them.
+    _delete_collection_docs(
+        db.collection("pairing_codes").where(PAIRING_FIELD_UID, "==", uid).stream()
+    )
+
+    # Same shape: dashboard_link_codes/{TOKEN} (dashboard_link.py) is also top-level.
+    _delete_collection_docs(
+        db.collection("dashboard_link_codes").where(PAIRING_FIELD_UID, "==", uid).stream()
+    )
 
 
 def _delete_document_and_subcollections(db, doc_ref) -> None:

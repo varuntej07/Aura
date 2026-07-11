@@ -6,9 +6,12 @@ POST /devices/pair/start  -> authed; the signed-in phone app requests a short-li
 POST /devices/pair/claim  -> UNAUTHENTICATED by design (reviewed decision): the
                              one-time code IS the credential. The desktop exchanges
                              a valid code for a Firebase custom token, exactly once.
-POST /devices/unlink      -> authed; remove a linked device, then revoke ALL of the
-                             user's refresh tokens (the honest reviewed semantic:
-                             unlinking a device signs out every session).
+POST /devices/unlink      -> authed; deletes the device doc inline (so the response
+                             reflects it immediately), then schedules revocation of
+                             ALL of the user's refresh tokens as a FastAPI background
+                             task (the honest reviewed semantic: unlinking a device
+                             signs out every session) — a slow Identity Toolkit round
+                             trip on a cold instance never holds the response hostage.
 
 Security model:
   * Codes come from ``secrets`` over a 32-char unambiguous alphabet (no 0/O/1/I),
@@ -43,18 +46,13 @@ import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 
-from fastapi import Request
+from fastapi import BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from google.cloud import firestore as gcloud_firestore
 
 from ..lib.logger import logger
 from ..services.firebase import admin_auth, admin_firestore
-from ..services.notifications import orchestrator
-from ..services.notifications.proposal import (
-    SOURCE_DEVICE_LINK,
-    NotificationProposal,
-    ProposalKind,
-)
+from ..services.notifications.device_link_push import send_new_device_linked_push
 from ..services.request_auth import resolve_user_id_from_request
 
 # ── Pairing constants ────────────────────────────────────────────────────────
@@ -384,7 +382,7 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
     # "New device linked" security push. Never fails the claim (log and continue).
     if linked_device_doc_id:
         try:
-            await _send_new_device_linked_push(user_id, device_name, linked_device_doc_id)
+            await send_new_device_linked_push(user_id, device_name, linked_device_doc_id)
         except Exception as exc:
             logger.exception("Pairing: new-device push failed (claim still succeeds)", {
                 "user_id": user_id,
@@ -399,32 +397,33 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
     return JSONResponse({"custom_token": custom_token}, status_code=200)
 
 
-async def _send_new_device_linked_push(
-    user_id: str, device_name: str, linked_device_doc_id: str
-) -> None:
-    """Security alert through the notification funnel: COMMITTED lane, so it sends
-    inline on submit (freshness + dedup only, never held or arbitrated)."""
-    proposal = NotificationProposal(
-        user_id=user_id,
-        source=SOURCE_DEVICE_LINK,
-        kind=ProposalKind.COMMITTED,
-        dedup_key=f"device_link:{linked_device_doc_id}",
-        title="New device linked",
-        body=(
-            f"A Windows PC ('{device_name}') just linked to your Aura account. "
-            "Wasn't you? Unlink in Settings."
-        ),
-    )
-    await orchestrator.submit(proposal)
-
-
 # ── POST /devices/unlink ─────────────────────────────────────────────────────
-async def handle_unlink_device(request: Request) -> JSONResponse:
-    """Delete a linked device, then revoke ALL of the user's refresh tokens.
+def _revoke_refresh_tokens_background(user_id: str) -> None:
+    """Runs as a FastAPI background task, after the unlink response is already on
+    the wire. Revocation is a security-hardening side effect with no user-visible
+    artifact of its own (the device doc is already gone by the time this runs), so
+    it must never hold the mutation's response hostage to a slow Identity Toolkit
+    round trip on a cold instance. Failure here must not surface anywhere the
+    client can see; log loudly and stop (same "log and continue" contract as the
+    linked_devices write and the new-device push above)."""
+    try:
+        admin_auth().revoke_refresh_tokens(user_id)
+    except Exception as exc:
+        logger.exception("Pairing: background refresh-token revoke failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+
+
+async def handle_unlink_device(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
+    """Delete a linked device, then schedule revocation of ALL of the user's
+    refresh tokens as a background task.
 
     Yes, all sessions — that is the honest reviewed semantic: Firebase revocation
     is per-user, not per-device, and pretending otherwise would leave the unlinked
-    desktop silently signed in."""
+    desktop silently signed in. Revocation runs after the response is sent so the
+    client sees the (idempotent) deletion result quickly regardless of how long
+    the revoke call takes."""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
         return JSONResponse(
@@ -456,9 +455,6 @@ async def handle_unlink_device(request: Request) -> JSONResponse:
 
     try:
         deleted = await asyncio.to_thread(_delete_linked_device)
-        if not deleted:
-            return JSONResponse({"error": "not_found"}, status_code=404)
-        await asyncio.to_thread(lambda: admin_auth().revoke_refresh_tokens(user_id))
     except Exception as exc:
         logger.exception("Pairing: unlink failed", {
             "user_id": user_id,
@@ -467,7 +463,15 @@ async def handle_unlink_device(request: Request) -> JSONResponse:
         })
         return JSONResponse({"error": "internal"}, status_code=500)
 
-    logger.info("Pairing: device unlinked, all refresh tokens revoked", {
+    if not deleted:
+        # Idempotent by design: a retry of an already-completed unlink (e.g. the
+        # client timed out waiting on a cold instance and retried) lands here and
+        # should read as success from the caller's point of view, not an error.
+        return JSONResponse({"error": "not_found"}, status_code=404)
+
+    background_tasks.add_task(_revoke_refresh_tokens_background, user_id)
+
+    logger.info("Pairing: device unlinked, refresh-token revoke scheduled", {
         "user_id": user_id,
         "device_id": device_id,
     })

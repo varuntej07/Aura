@@ -20,6 +20,7 @@ cached/fallback pills.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -52,7 +53,7 @@ async def handle_refresh_buddy_pills(request: Request) -> JSONResponse:
 
     try:
         recent_queries, interest_subjects = await asyncio.gather(
-            asyncio.to_thread(_fetch_last_10_queries, user_id),
+            asyncio.to_thread(_fetch_recent_queries, user_id),
             asyncio.to_thread(_fetch_interest_subjects_if_consented, user_id),
         )
         pills = await _get_pills_agent().generate_buddy_pills(
@@ -70,14 +71,28 @@ async def handle_refresh_buddy_pills(request: Request) -> JSONResponse:
         return JSONResponse({"refreshed": False}, status_code=200)
 
 
-def _fetch_last_10_queries(user_id: str) -> list[dict]:
-    """Most recent 10 logged user inputs (users/{uid}/queries), newest first.
-    Mirrors the daily orchestrator's fetch so buddy pills are grounded the same way."""
+# Only queries from the last few days count as "what the user is actively into".
+# An older query (a meeting prepped for last week, a one-off errand) is stale and must
+# not resurface as a live chat starter, so it is filtered out before grounding. Kept in
+# sync with the same constant in daily_notification/orchestrator.py (twin fetch).
+_QUERY_RECENCY_WINDOW_DAYS = 3
+
+
+def _fetch_recent_queries(user_id: str) -> list[dict]:
+    """Up to 10 most recent user inputs from the last _QUERY_RECENCY_WINDOW_DAYS days
+    (users/{uid}/queries), newest first. The recency window keeps stale, already-finished
+    topics out of the pills. Mirrors the daily orchestrator's fetch so buddy pills are
+    grounded the same way. The range filter and order_by are on the same `timestamp` field,
+    so the automatic single-field index covers it (no composite index needed)."""
     try:
         db = admin_firestore()
+        cutoff_iso = (
+            datetime.now(UTC) - timedelta(days=_QUERY_RECENCY_WINDOW_DAYS)
+        ).isoformat()
         docs = (
             db.collection("users").document(user_id)
             .collection("queries")
+            .where("timestamp", ">=", cutoff_iso)
             .order_by("timestamp", direction="DESCENDING")
             .limit(10)
             .stream()

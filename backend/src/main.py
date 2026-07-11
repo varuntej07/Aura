@@ -18,7 +18,8 @@ import json
 import time
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.id_token import verify_oauth2_token
@@ -27,6 +28,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
 from .handlers.account import handle_delete_account
+from .handlers.billing import (
+    handle_billing_checkout,
+    handle_billing_portal,
+    handle_billing_webhook,
+)
+from .handlers.calendar import get_upcoming_calendar
+from .handlers.entitlement import handle_get_entitlement
 from .handlers.chat import handle_chat_stream
 from .handlers.connectors import (
     connect_gmail,
@@ -52,8 +60,43 @@ from .handlers.briefing import (
     handle_post_world_briefing,
 )
 from .handlers.buddy_pills import handle_refresh_buddy_pills
-from .handlers.aura import handle_consolidate_session
+from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
+from .handlers.aura import (
+    handle_consolidate_session,
+    handle_delete_memory,
+    handle_get_memory,
+)
+from .handlers.history import (
+    handle_delete_session,
+    handle_get_session_detail,
+    handle_list_sessions,
+)
+from .handlers.screen_saves import (
+    handle_delete_screen_save,
+    handle_list_screen_saves,
+)
+from .handlers.drafts import (
+    handle_delete_draft,
+    handle_list_drafts,
+)
+from .handlers.memories import (
+    handle_callback_card,
+    handle_delete_memory,
+    handle_list_memories,
+    handle_patch_memory,
+)
 from .handlers.onboarding_profile import handle_onboarding_profile
+from .handlers.draft_outbound import handle_draft_outbound_refine
+from .handlers.dashboard_link import (
+    handle_dashboard_link_claim,
+    handle_dashboard_link_start,
+)
+from .handlers.pairing import (
+    handle_pair_claim,
+    handle_pair_start,
+    handle_unlink_device,
+)
+from .handlers.web_auth import handle_web_auth_start, handle_web_auth_status
 from .handlers.scheduler import handle_scheduler_tick
 from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
@@ -97,6 +140,23 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     "status": response.status_code,
                     "duration_ms": duration_ms,
                 })
+                # Per-platform latency feed for the ops dashboard. Clients send
+                # X-Aura-Platform (android/ios/windows); requests without it
+                # (cron, internal, old app builds) are deliberately excluded so
+                # the metric measures real client-observed backend latency.
+                # A GCP log-based DISTRIBUTION metric extracts duration_ms
+                # labeled by platform from these lines (ops/README.md has the
+                # one-time gcloud command); Cloud Run's built-in
+                # request_latencies metric cannot see custom headers.
+                platform = request.headers.get("X-Aura-Platform", "")
+                if platform:
+                    logger.info("request_metric", {
+                        "platform": platform[:24],
+                        "app_version": request.headers.get("X-Aura-App-Version", "")[:24],
+                        "path": request.url.path,
+                        "status": response.status_code,
+                        "duration_ms": duration_ms,
+                    })
             return response
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -112,15 +172,44 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RequestLoggingMiddleware)
 
+# CORS, added AFTER RequestLoggingMiddleware so Starlette makes it the
+# OUTERMOST layer (Starlette wraps in reverse add order — the last middleware
+# added runs first on the way in, last on the way out). It has to be
+# outermost to intercept a browser's preflight OPTIONS before anything else
+# sees it, and so every response (including errors from deeper middleware)
+# still carries the right Access-Control-* headers. Explicit origin allowlist
+# from settings, no wildcard. allow_credentials stays False on purpose: every
+# authenticated route here reads a manually-set `Authorization: Bearer
+# <Firebase ID token>` header, not a cookie, so there is nothing for CORS
+# "credentials" mode to protect — enabling it would only add the
+# wildcard-plus-credentials footgun for no benefit.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
 
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True}
 
 
+# Launch surfaces the voice worker understands (voice_agent._KNOWN_SURFACES). Anything
+# else collapses to "app", the neutral default, so a bad query param never changes behavior.
+_VOICE_SURFACES = frozenset({"app", "keyboard", "desktop"})
+
+
 @app.get("/voice/token")
 async def voice_token(request: Request) -> JSONResponse:
-    """Return a LiveKit room token for the authenticated user."""
+    """Return a LiveKit room token for the authenticated user.
+
+    `?surface=keyboard` marks a quick tap from the Buddy Keyboard; it is stamped into the
+    token's participant metadata so the worker can keep that session short and task-focused.
+    The in-app voice orb passes nothing and gets the default "app" experience.
+    """
     claims = decode_firebase_claims(request.headers)
     if not claims:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -128,11 +217,16 @@ async def voice_token(request: Request) -> JSONResponse:
     if not user_id:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    surface = request.query_params.get("surface", "app")
+    if surface not in _VOICE_SURFACES:
+        surface = "app"
+
     room_name = f"voice-{user_id}"
     token = (
         AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
         .with_identity(user_id)
         .with_name(user_id)
+        .with_metadata(json.dumps({"surface": surface}))
         .with_grants(VideoGrants(room_join=True, room=room_name))
         .to_jwt()
     )
@@ -180,6 +274,55 @@ async def devices_register_endpoint(request: Request) -> JSONResponse:
     return await register_device(request)
 
 
+# Desktop pairing: the signed-in phone app requests a short-lived one-time code.
+@app.post("/devices/pair/start")
+async def devices_pair_start_endpoint(request: Request) -> JSONResponse:
+    return await handle_pair_start(request)
+
+
+# Desktop pairing: the desktop exchanges the code for a Firebase custom token.
+# UNAUTHENTICATED by design (reviewed decision) — the one-time code IS the credential.
+@app.post("/devices/pair/claim")
+async def devices_pair_claim_endpoint(request: Request) -> JSONResponse:
+    return await handle_pair_claim(request)
+
+
+# Remove a linked desktop, then revoke ALL refresh tokens (honest full sign-out).
+@app.post("/devices/unlink")
+async def devices_unlink_endpoint(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
+    return await handle_unlink_device(request, background_tasks)
+
+
+# Dashboard-link handshake: the signed-in desktop app requests a short-lived
+# token to open a signed-in web dashboard without a second login.
+@app.post("/devices/dashboard-link/start")
+async def devices_dashboard_link_start_endpoint(request: Request) -> JSONResponse:
+    return await handle_dashboard_link_start(request)
+
+
+# Dashboard-link handshake: the web dashboard exchanges the token for a Firebase
+# custom token. UNAUTHENTICATED by design (reviewed decision) -- the one-time
+# token IS the credential.
+@app.post("/devices/dashboard-link/claim")
+async def devices_dashboard_link_claim_endpoint(request: Request) -> JSONResponse:
+    return await handle_dashboard_link_claim(request)
+
+
+# Web sign-up handshake: desktop opens a browser to /auth?session=<code>;
+# Aura-Web completes Google sign-in server-side and writes the result here.
+# UNAUTHENTICATED by design on BOTH endpoints (reviewed decision, mirrors
+# pairing's "the code IS the credential" model) — there is no uid yet at
+# issuance time, so auth can't be required the way pair/start requires it.
+@app.post("/devices/web-auth/start")
+async def devices_web_auth_start_endpoint(request: Request) -> JSONResponse:
+    return await handle_web_auth_start(request)
+
+
+@app.post("/devices/web-auth/status")
+async def devices_web_auth_status_endpoint(request: Request) -> JSONResponse:
+    return await handle_web_auth_status(request)
+
+
 @app.post("/chat")
 async def chat_endpoint(request: Request) -> StreamingResponse:
     body = await request.body()
@@ -208,6 +351,74 @@ async def threads_messages_endpoint(thread_id: str, request: Request) -> JSONRes
 @app.post("/aura/consolidate-session")
 async def aura_consolidate_session_endpoint(request: Request) -> JSONResponse:
     return await handle_consolidate_session(request)
+
+
+@app.get("/aura/memory")
+async def aura_get_memory_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_memory(request)
+
+
+@app.delete("/aura/memory/{atom_id}")
+async def aura_delete_memory_endpoint(request: Request, atom_id: str) -> JSONResponse:
+    return await handle_delete_memory(request, atom_id)
+
+
+@app.get("/history/sessions")
+async def history_list_sessions_endpoint(request: Request) -> JSONResponse:
+    return await handle_list_sessions(request)
+
+
+@app.get("/history/sessions/{session_id}")
+async def history_get_session_endpoint(request: Request, session_id: str) -> JSONResponse:
+    return await handle_get_session_detail(request, session_id)
+
+
+@app.delete("/history/sessions/{session_id}")
+async def history_delete_session_endpoint(request: Request, session_id: str) -> JSONResponse:
+    return await handle_delete_session(request, session_id)
+
+
+@app.get("/screen-saves")
+async def screen_saves_list_endpoint(request: Request) -> JSONResponse:
+    return await handle_list_screen_saves(request)
+
+
+@app.delete("/screen-saves/{item_id}")
+async def screen_saves_delete_endpoint(request: Request, item_id: str) -> JSONResponse:
+    return await handle_delete_screen_save(request, item_id)
+
+
+@app.get("/drafts")
+async def drafts_list_endpoint(request: Request) -> JSONResponse:
+    return await handle_list_drafts(request)
+
+
+@app.delete("/drafts/{draft_id}")
+async def drafts_delete_endpoint(request: Request, draft_id: str) -> JSONResponse:
+    return await handle_delete_draft(request, draft_id)
+
+
+# Visible memory (v0.1.7): the desktop daily catch-up card + the dashboard's
+# "What Buddy remembers" page. /memories/callback is registered before
+# /memories/{memory_id} so "callback" can never be captured as a memory id.
+@app.get("/memories/callback")
+async def memories_callback_endpoint(request: Request) -> JSONResponse:
+    return await handle_callback_card(request)
+
+
+@app.get("/memories")
+async def memories_list_endpoint(request: Request) -> JSONResponse:
+    return await handle_list_memories(request)
+
+
+@app.delete("/memories/{memory_id}")
+async def memories_delete_endpoint(request: Request, memory_id: str) -> JSONResponse:
+    return await handle_delete_memory(request, memory_id)
+
+
+@app.patch("/memories/{memory_id}")
+async def memories_patch_endpoint(request: Request, memory_id: str) -> JSONResponse:
+    return await handle_patch_memory(request, memory_id)
 
 
 _google_auth_transport = GoogleRequest()
@@ -277,6 +488,40 @@ async def engage_notify_endpoint(
     return JSONResponse(content=result)
 
 
+# Reactive orchestrate (internal — Cloud Tasks only). Coalesced per-user wake from the
+# outbox relay / inline presence dispatch. Drains the user's event inbox -> reconcile ->
+# deterministic policy -> dispatch agents through the self-heal envelope -> guard -> funnel.
+@app.post("/internal/orchestrate")
+async def orchestrate_endpoint(
+    request: Request,
+    _: None = Depends(_verify_scheduler_token),
+) -> JSONResponse:
+    from .handlers.orchestrate import handle_orchestrate
+
+    body = await request.json()
+    result = await handle_orchestrate(body)
+    return JSONResponse(content=result)
+
+
+# Durable chat completion (internal — Cloud Tasks only). Finishes a chat turn the client
+# disconnected from and pushes "Buddy replied". See services/chat_completion/completion.py.
+@app.post("/internal/chat/complete")
+async def chat_complete_endpoint(
+    request: Request,
+    _: None = Depends(_verify_scheduler_token),
+) -> JSONResponse:
+    from .services.chat_completion.completion import complete_turn
+
+    body = await request.json()
+    raw_session = str(body.get("session_id", "") or "")
+    status = await complete_turn(
+        str(body.get("user_id", "")),
+        str(body.get("client_message_id", "")),
+        raw_session or None,
+    )
+    return JSONResponse(content={"status": status})
+
+
 # Daily notification — meeting reminder delivery only (discovery handled by signal engine)
 @app.post("/internal/daily-notify/send")
 async def daily_notify_send_endpoint(
@@ -300,6 +545,27 @@ async def onboarding_profile_endpoint(request: Request) -> JSONResponse:
 @app.post("/chat/buddy-pills/refresh")
 async def refresh_buddy_pills_endpoint(request: Request) -> JSONResponse:
     return await handle_refresh_buddy_pills(request)
+
+
+# Buddy Keyboard: memory-aware draft suggestions for the in-keyboard Buddy bar
+# (reply/continue/rewrite in the user's voice; grammar/translate/tone utility).
+@app.post("/keyboard/draft")
+async def keyboard_draft_endpoint(request: Request) -> JSONResponse:
+    return await handle_keyboard_draft(request)
+
+
+# Buddy Keyboard: the user's consent-gated known-word hints (interest subjects + storyline
+# entities) the on-device keyboard caches so it never flags / autocorrects them.
+@app.get("/keyboard/vocab")
+async def keyboard_vocab_endpoint(request: Request) -> JSONResponse:
+    return await handle_keyboard_vocab(request)
+
+
+# Buddy Drafts refine: reworks an existing outbound draft (text-only; new drafts
+# are minted and metered inside the voice worker, never here).
+@app.post("/desktop/draft-outbound/refine")
+async def desktop_draft_outbound_refine_endpoint(request: Request) -> JSONResponse:
+    return await handle_draft_outbound_refine(request)
 
 
 # Signal engine — user events, scoring tick, content ingest.
@@ -327,11 +593,19 @@ async def briefing_world_endpoint(request: Request) -> JSONResponse:
     return await handle_post_world_briefing(request)
 
 
+# Signal scoring (internal — the Cloud Task enqueued by content-ingest, or an
+# authenticated manual recovery call). The body optionally carries the 4-hour
+# generation_id; an empty/absent body derives the current bucket.
 @app.post("/internal/signal-engine/tick")
 async def signal_engine_tick_endpoint(
+    request: Request,
     _: None = Depends(_verify_scheduler_token),
 ) -> JSONResponse:
-    result = await handle_signal_tick()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = await handle_signal_tick(body if isinstance(body, dict) else {})
     return JSONResponse(content=result)
 
 
@@ -356,6 +630,11 @@ async def engage_responded_endpoint(request: Request) -> JSONResponse:
     result = await handle_engagement_responded(user_id, engagement_id)
     status = 404 if result.get("error") == "not_found" else 200
     return JSONResponse(content=result, status_code=status)
+
+
+@app.get("/calendar/upcoming")
+async def calendar_upcoming_endpoint(request: Request) -> JSONResponse:
+    return await get_upcoming_calendar(request)
 
 
 @app.get("/connectors")
@@ -393,6 +672,27 @@ async def google_calendar_webhook_endpoint(request: Request) -> JSONResponse:
     return await google_calendar_webhook(request)
 
 
+@app.get("/entitlement")
+async def entitlement_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_entitlement(request)
+
+
+@app.post("/billing/checkout")
+async def billing_checkout_endpoint(request: Request) -> JSONResponse:
+    return await handle_billing_checkout(request)
+
+
+# No Firebase auth here: the Standard Webhooks signature is the auth (handler).
+@app.post("/billing/webhook")
+async def billing_webhook_endpoint(request: Request) -> JSONResponse:
+    return await handle_billing_webhook(request)
+
+
+@app.get("/billing/portal")
+async def billing_portal_endpoint(request: Request) -> JSONResponse:
+    return await handle_billing_portal(request)
+
+
 def _check_env() -> None:
     """Log the status of every critical env var so you can spot missing config instantly."""
     checks = {
@@ -408,6 +708,9 @@ def _check_env() -> None:
         "GMAIL": settings.gmail_configured,
         "GEMINI_API_KEY": settings.gemini_configured,
         "GEMINI_MODEL": settings.GEMINI_MODEL,
+        "DODO_CONFIGURED": settings.dodo_configured,
+        "DODO_WEBHOOK_SECRET": bool(settings.DODO_WEBHOOK_SECRET),
+        "DODO_API_BASE": settings.DODO_API_BASE,
         "ENV": settings.ENV,
     }
 
@@ -420,18 +723,20 @@ def _check_env() -> None:
 
 
 # on_event is deprecated but intentional here: it is part of the same "all or nothing"
-# group as the MCP session-manager handlers in handlers/mcp.py Do not migrate this one without the others. 
+# group as the MCP session-manager handlers in handlers/mcp.py Do not migrate this one without the others.
 # See the NOTE in mcp.register_mcp and lessons-learnt 2026-05-29.
 @app.on_event("startup")  # pyright: ignore[reportDeprecated]
 async def on_startup() -> None:
     _check_env()
-    # Initialize Langfuse — reads LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST from env
-    try:
-        from langfuse import Langfuse
-        Langfuse()
-        logger.info("Langfuse initialized")
-    except Exception as exc:
-        logger.warn("Langfuse initialization failed, tracing disabled", {"error": str(exc)})
+
+
+@app.on_event("shutdown")  # pyright: ignore[reportDeprecated]
+async def on_shutdown() -> None:
+    # Drain any still-queued Langfuse telemetry before the container stops; the
+    # SDK's atexit hook covers hard exits, this covers the clean path. Never
+    # raises (llm_telemetry swallows everything).
+    from .services.analytics.llm_telemetry import flush as flush_llm_telemetry
+    flush_llm_telemetry()
 
 
 if __name__ == "__main__":

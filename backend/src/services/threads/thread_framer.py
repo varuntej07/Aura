@@ -21,6 +21,10 @@ from pydantic import BaseModel, Field
 from ...lib.logger import logger
 from ..buddy_voice import BUDDY_VOICE_CORE
 from ..model_provider import ModelProvider
+from ..signal_engine.notification_framer import (
+    strip_long_dashes,
+    truncate_at_word_boundary,
+)
 from .models import Thread, ThreadSource
 
 # Hard caps enforced after the model returns. The prompt asks for the same
@@ -64,9 +68,14 @@ thing about them, never to check up on a task.
 
 Rules, all hard:
 - Curiosity, never accountability. NEVER ask "did you finish / complete / do it /
-  get it done". Ask what it is, who it is for, how they feel about it, the story.
-- Reference THEIR words. Short: the body is at most 90 characters and sounds like a
-  text from a friend. Lowercase is fine.
+  get it done", and NEVER frame it as them forgetting, slacking, keeping up, or
+  staying on top of something. You are intrigued, not checking up. Ask what it is,
+  who it is for, how they feel about it, the story.
+- Name the SPECIFIC thing they mentioned, in their words. A question that names
+  nothing concrete is a failure: it reads as nagging and gives them nothing to grab.
+  Point straight at the actual subject so it is obvious what you are asking about.
+- Short: the body is at most 90 characters and sounds like a text from a friend.
+  Lowercase is fine.
 - suggested_replies: 2 or 3 options that make it effortless to START sharing. They
   are conversation-openers, not yes/no, and never progress states. Each is at most
   24 characters.
@@ -103,6 +112,16 @@ unknown: ["which team they support"]
 -> {"title":"quick one",
     "body":"who's your team? gotta know who you're suffering for",
     "suggested_replies":["RCB","CSK","just love the game"]}
+
+NEVER WRITE LIKE THIS:
+
+mentioned: "call the bank about the lease deposit"
+-> {"title":"what's the deal",
+    "body":"you always forgetting or just trying to stay on top of it",
+    "suggested_replies":["...","..."]}
+   names nothing specific and accuses them of forgetting. That is the nagging,
+   accountability voice this prompt exists to kill. Name the bank call and be curious
+   about it instead: "what's the bank thing about? sorting the lease?"
 """
 
 
@@ -156,7 +175,7 @@ def _safe_fallback(thread: Thread) -> FramedFollowUp:
 def _normalise(framed: FramedFollowUp, thread: Thread) -> FramedFollowUp:
     """Enforce char caps and the 2-3 reply count after the model returns."""
     replies = [
-        r.strip()[:SUGGESTED_REPLY_MAX_CHARS]
+        strip_long_dashes(r.strip())[:SUGGESTED_REPLY_MAX_CHARS]
         for r in framed.suggested_replies
         if r and r.strip()
     ][:MAX_SUGGESTED_REPLIES]
@@ -165,8 +184,12 @@ def _normalise(framed: FramedFollowUp, thread: Thread) -> FramedFollowUp:
     if len(replies) < MIN_SUGGESTED_REPLIES:
         replies = _safe_fallback(thread).suggested_replies
     return FramedFollowUp(
-        title=framed.title.strip()[:FOLLOW_UP_TITLE_MAX_CHARS] or "hey",
-        body=framed.body.strip()[:FOLLOW_UP_BODY_MAX_CHARS],
+        title=truncate_at_word_boundary(
+            strip_long_dashes(framed.title.strip()), FOLLOW_UP_TITLE_MAX_CHARS
+        ) or "hey",
+        body=truncate_at_word_boundary(
+            strip_long_dashes(framed.body.strip()), FOLLOW_UP_BODY_MAX_CHARS
+        ),
         suggested_replies=replies,
     )
 

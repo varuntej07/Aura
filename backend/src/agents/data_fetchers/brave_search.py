@@ -17,6 +17,7 @@ import httpx
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from .brave_news import _parse_page_age
 
 _REQUEST_TIMEOUT_S = 7.0  # real-time path: chat + voice (user is waiting)
 
@@ -42,6 +43,16 @@ def _normalize_query(query: str) -> str:
     return " ".join(query.lower().strip().split())
 
 
+def _cache_key(query: str, uid: str, recency: str) -> tuple[str, str, str]:
+    """The cache key shared by brave_search and peek_cache so they can never drift.
+
+    Clamps recency to the supported set and normalizes the query identically, so a
+    peek_cache hit is guaranteed to hit the same entry brave_search would.
+    """
+    recency = recency if recency in {"any", "fresh"} else "any"
+    return (uid, _normalize_query(query), recency)
+
+
 def _strip_prompt_injection(text: str) -> str:
     return _PROMPT_INJECTION_PATTERN.sub("", text).strip()
 
@@ -64,16 +75,37 @@ def _cache_put(key: tuple[str, str, str], value: dict[str, Any]) -> None:
     _cache[key] = (time.monotonic() + _CACHE_TTL_S, value)
 
 
-def _parse_brave_response(payload: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+def peek_cache(query: str, *, uid: str, recency: str = "any") -> dict[str, Any] | None:
+    """Read-only cache probe used by callers that meter usage (web_surf entitlement).
+
+    Returns the cached result (with cached=True) when this query is already in the
+    in-process cache, else None. Performs NO network call and never records usage, so a
+    free-tier caller can serve a repeat query without burning a daily search. Mirrors the
+    exact cache key brave_search builds (same query normalization + recency clamp) so a
+    peek hit guarantees brave_search would also hit.
+    """
+    cached = _cache_get(_cache_key(query, uid, recency))
+    if cached is not None:
+        return {**cached, "cached": True}
+    return None
+
+
+def _parse_brave_response(payload: dict[str, Any]) -> tuple[str, list[dict[str, str]], str]:
     """Flatten Brave web results into one text blob + deduped citation list.
 
     text:    one block per result — "<title>: <description> <extra snippets>".
     sources: [{title, url}] in result order, deduped by url.
+    latest_published: ISO string of the freshest per-result ``page_age`` seen
+        (reusing brave_news._parse_page_age, which already knows Brave's format), or
+        "" when no result carried one. Only the Web Search endpoint's results (as
+        opposed to News) sometimes omit it, so this is a best-effort signal, not a
+        guarantee every call returns one.
     """
     results = ((payload.get("web") or {}).get("results")) or []
     blocks: list[str] = []
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
+    latest: Any = None
 
     for result in results:
         title = _HTML_TAG.sub("", str(result.get("title") or "")).strip()
@@ -92,7 +124,11 @@ def _parse_brave_response(payload: dict[str, Any]) -> tuple[str, list[dict[str, 
             seen.add(url)
             sources.append({"title": title or url, "url": url})
 
-    return "\n\n".join(blocks), sources
+        published = _parse_page_age(result.get("page_age"))
+        if published is not None and (latest is None or published > latest):
+            latest = published
+
+    return "\n\n".join(blocks), sources, (latest.isoformat() if latest else "")
 
 
 async def brave_search(
@@ -119,7 +155,7 @@ async def brave_search(
 
     recency = recency if recency in {"any", "fresh"} else "any"
 
-    cache_key = (uid, _normalize_query(query), recency)
+    cache_key = _cache_key(query, uid, recency)
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info("brave_search cache hit", {
@@ -145,9 +181,14 @@ async def brave_search(
         logger.warn("brave_search non-200", {"uid": uid, "status": response.status_code})
         return {"text": "", "sources": [], "query": query, "cached": False}
 
-    text, sources = _parse_brave_response(response.json())
+    text, sources, latest_published = _parse_brave_response(response.json())
     text = _strip_prompt_injection(text)
-    result = {"text": text, "sources": sources, "query": query, "cached": False}
+    result = {
+        "text": text, "sources": sources, "query": query, "cached": False,
+        # ISO string, not a datetime — this dict is also returned as-is to the chat/
+        # voice web_surf tool result, which must stay JSON-serializable.
+        "latest_published": latest_published,
+    }
     _cache_put(cache_key, result)
 
     latency_ms = int((time.monotonic() - started) * 1000)

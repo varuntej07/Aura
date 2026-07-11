@@ -538,6 +538,33 @@ async def reflect_session(
     ))
 
 
+async def _upsert_memory_atoms_from_patch(uid: str, patch: ReflectionPatch) -> None:
+    """Mirror reflected storylines + canonical facts into the UNBOUNDED long-term memory
+    store (services/memory) for query-relevant semantic recall. Traits are intentionally
+    NOT stored as atoms: they are identity labels already surfaced via the digest's
+    shown_traits, not episodic things to recall against a query. Fire-and-forget;
+    upsert_atoms swallows its own errors."""
+    from .memory.atom_store import AtomInput, upsert_atoms
+    from .memory.fields import ATOM_TYPE_FACT, ATOM_TYPE_STORYLINE
+
+    atoms: list[AtomInput] = []
+    for storyline in patch.storylines or []:
+        summary = (storyline.summary or "").strip()
+        if summary:
+            atoms.append(AtomInput(
+                text=summary,
+                atom_type=ATOM_TYPE_STORYLINE,
+                decay_kind=storyline.kind,
+                importance=storyline.confidence,
+                categories=list(storyline.categories or []),
+            ))
+    for fact in patch.facts_canonical or []:
+        if isinstance(fact, str) and fact.strip():
+            atoms.append(AtomInput(text=fact.strip(), atom_type=ATOM_TYPE_FACT, importance=0.6))
+    if atoms:
+        await upsert_atoms(uid, atoms, source="reflection")
+
+
 async def consolidate_session(
     uid: str,
     session_id: str | None,
@@ -579,6 +606,9 @@ async def consolidate_session(
 
         now = datetime.now(UTC)
         applied = await asyncio.to_thread(_apply_patch_txn, uid, session_id, turn_count, patch, now)
+
+        # Mirror reflected storylines + canonical facts into the unbounded memory store.
+        await _upsert_memory_atoms_from_patch(uid, patch)
 
         logger.info("AuraReflection: session consolidated", {
             "user_id": uid,

@@ -86,3 +86,48 @@ NOTIFICATION_ORIGIN_BRIEFING = "daily_briefing"
 # On-demand "Catch me up on the world" snapshot. Fired CLIENT-side when the world
 # snapshot loads in the briefing screen (the empty-state button or the refresh icon)
 EVENT_WORLD_BRIEFING_FETCHED = "world_briefing_fetched"
+
+# --- Buddy Keyboard funnel ---
+# Acquisition/activation funnel for the Buddy Keyboard (BUDDY_EVERYWHERE.md). Most
+# steps fire CLIENT-side (the native keyboard / in-app onboarding); the draft step
+# ALSO fires SERVER-side from /keyboard/draft, so a served draft is counted even if
+# the client capture is dropped. The properties are breakdown dimensions only
+# (which action, which host app) and NEVER carry the user's typed content.
+EVENT_KEYBOARD_ENABLED = "keyboard_enabled"
+EVENT_KEYBOARD_FULL_ACCESS_GRANTED = "keyboard_full_access_granted"
+EVENT_KEYBOARD_DRAFT_REQUESTED = "keyboard_draft_requested"
+EVENT_KEYBOARD_SUGGESTION_INSERTED = "keyboard_suggestion_inserted"
+EVENT_KEYBOARD_LIMIT_HIT = "keyboard_limit_hit"
+
+PROP_KEYBOARD_ACTION = "action"
+PROP_KEYBOARD_HOST_APP = "host_app"
+
+# Field-type breakdown dimension stamped onto EVENT_KEYBOARD_DRAFT_REQUESTED so we
+# can see which field classes drive drafts (text | email | url | number | phone |
+# datetime | password). A breakdown only, never the user's typed content.
+PROP_KEYBOARD_FIELD_TYPE = "field_type"
+
+# Password helper + in-keyboard voice, fired CLIENT-side from the native keyboard.
+# Both are content-free: the generated password is never sent anywhere, and the
+# voice-started event carries no transcript or field content.
+EVENT_KEYBOARD_PASSWORD_GENERATED = "keyboard_password_generated"
+EVENT_KEYBOARD_VOICE_STARTED = "keyboard_voice_started"
+
+# --- Desktop outbound-draft funnel ---
+# Voice-triggered screen drafting on the desktop (Buddy Drafts). REQUESTED fires
+# SERVER-side from the voice worker per new draft, REFINED fires server-side from
+# the worker's refine branch and from POST /desktop/draft-outbound/refine, and
+# LIMIT_HIT fires when a free-tier user runs out of daily drafts. The desktop
+# client fires its own draft_card_copied / draft_card_dismissed steps. Properties
+# are breakdown dimensions only (channel, length, mode) and NEVER carry the draft
+# text, the context summary, or anything read off the user's screen.
+EVENT_DESKTOP_DRAFT_REQUESTED = "desktop_draft_requested"
+EVENT_DESKTOP_DRAFT_REFINED = "desktop_draft_refined"
+EVENT_DESKTOP_DRAFT_LIMIT_HIT = "desktop_draft_limit_hit"
+
+PROP_DRAFT_CHANNEL = "channel"
+PROP_DRAFT_LENGTH = "length"
+# "new" | "refine" on REQUESTED/REFINED; the chip slug or "custom"/"voice" on the
+# refine event's instruction_kind breakdown.
+PROP_DRAFT_MODE = "mode"
+PROP_DRAFT_INSTRUCTION_KIND = "instruction_kind"

@@ -20,6 +20,13 @@ from fastapi.responses import JSONResponse
 from ..lib.logger import logger
 from ..services.aura_reflection import consolidate_session
 from ..services.request_auth import resolve_user_id_from_request
+from ..services.memory.atom_store import delete_atom, list_atoms
+from ..services.memory.fields import (
+    ATOM_TYPE_FACT,
+    ATOM_TYPE_INTEREST_SUBJECT,
+    ATOM_TYPE_STORYLINE,
+    ATOM_TYPE_TRAIT,
+)
 
 # The client owns the chat; this is digest input, not storage. Keep the most recent
 # turns and let reflection compress further if needed.
@@ -58,3 +65,54 @@ async def handle_consolidate_session(request: Request) -> JSONResponse:
         "modality": modality,
     })
     return JSONResponse({"status": "accepted"}, status_code=202)
+
+
+# Map each atom type to a user-facing group for the "what Buddy remembers" screen.
+_ATOM_TYPE_GROUP = {
+    ATOM_TYPE_FACT: "facts",
+    ATOM_TYPE_STORYLINE: "storylines",
+    ATOM_TYPE_INTEREST_SUBJECT: "interests",
+    ATOM_TYPE_TRAIT: "traits",
+}
+
+
+async def handle_get_memory(request: Request) -> JSONResponse:
+    """GET /aura/memory — what Buddy remembers about the user, grouped by type.
+
+    NOT consent-gated on purpose: a user can always SEE (and delete) their stored data,
+    even after revoking processing consent. Showing memory is a GDPR access right; only
+    the chat-time USE of it is gated (in handlers/chat.py). Read-only, never writes.
+    """
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    atoms = await list_atoms(user_id)
+    groups: dict[str, list] = {"facts": [], "storylines": [], "interests": [], "traits": []}
+    for atom in atoms:
+        bucket = _ATOM_TYPE_GROUP.get(atom["atom_type"], "facts")
+        groups[bucket].append({
+            "id": atom["id"],
+            "text": atom["text"],
+            "last_seen": atom["last_seen"],
+        })
+
+    logger.info("AuraMemory: listed", {"user_id": user_id, "total": len(atoms)})
+    return JSONResponse({"memory": groups, "total": len(atoms)})
+
+
+async def handle_delete_memory(request: Request, atom_id: str) -> JSONResponse:
+    """DELETE /aura/memory/{atom_id} — forget one memory. Always allowed for the owner
+    (a data-subject erasure right). v1 is a hard delete with no tombstone: if the user
+    later re-states the fact, the extractor may recreate it, which is a reasonable signal
+    to remember it again."""
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    atom_id = (atom_id or "").strip()
+    if not atom_id:
+        return JSONResponse({"error": "Missing atom id."}, status_code=400)
+
+    ok = await delete_atom(user_id, atom_id)
+    logger.info("AuraMemory: deleted", {"user_id": user_id, "atom_id": atom_id, "ok": ok})
+    return JSONResponse({"ok": ok})
