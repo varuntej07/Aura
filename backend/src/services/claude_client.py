@@ -16,6 +16,8 @@ import anthropic
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..shared.tools import claude_tool_definitions
+from .analytics.llm_telemetry import anthropic_usage_tokens, start_llm_generation
+from .chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from .gemini_chat_fallback import stream_gemini_chat_fallback
 from .tool_executor import ToolExecutor
 
@@ -120,15 +122,31 @@ class ClaudeClient:
                     "messages_in_history": len(messages),
                 })
                 try:
-                    response = await self._client.messages.create(
-                        model=model_id,
-                        max_tokens=settings.ANTHROPIC_MAX_TOKENS,
-                        system=system_prompt,  # type: ignore[arg-type]
-                        tools=tools,  # type: ignore[arg-type]
-                        messages=messages,  # type: ignore[arg-type]
+                    # One telemetry generation per actual API attempt; the inner
+                    # try re-raises into the existing retry/fallback handling.
+                    recording = start_llm_generation(
+                        model=model_id, provider="anthropic", caller="chat",
+                        uid=self._tool_executor.user_id,
                     )
-                except _RETRYABLE_ERRORS as exc:
-                    if attempt < _MAX_RETRIES:
+                    try:
+                        response = await self._client.messages.create(
+                            model=model_id,
+                            max_tokens=settings.ANTHROPIC_MAX_TOKENS,
+                            system=system_prompt,  # type: ignore[arg-type]
+                            tools=tools,  # type: ignore[arg-type]
+                            messages=messages,  # type: ignore[arg-type]
+                        )
+                    except BaseException as exc:
+                        recording.finish(success=False, error_type=type(exc).__name__)
+                        raise
+                    recording.finish(tokens=anthropic_usage_tokens(response.usage))
+                except anthropic.APIError as exc:
+                    # Retry with backoff only for the transient subset (rate limit,
+                    # connection blip, 5xx). Anything else -- e.g. a 400 for an
+                    # exhausted Anthropic credit balance, or an auth error -- would
+                    # fail identically on a retry, so skip straight to the next
+                    # model in the chain instead of burning the retry budget on it.
+                    if isinstance(exc, _RETRYABLE_ERRORS) and attempt < _MAX_RETRIES:
                         delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                         logger.warn("Claude: retryable error, backing off", {
                             "model": model_id,
@@ -147,6 +165,7 @@ class ClaudeClient:
                             "from_model": model_id,
                             "to_model": model_chain[current_model_idx],
                             "turn": turn + 1,
+                            "error_type": type(exc).__name__,
                         })
                         continue
                     logger.exception("Claude: API call failed after retries (chain exhausted)", {
@@ -307,6 +326,12 @@ class ClaudeClient:
                     attempt += 1
                     model_id = model_chain[current_model_idx]
                     try:
+                        # One telemetry generation per actual API attempt; the
+                        # nested try re-raises into the existing fallback handling.
+                        recording = start_llm_generation(
+                            model=model_id, provider="anthropic", caller="chat",
+                            uid=self._tool_executor.user_id,
+                        )
                         async with self._client.messages.stream(
                             model=model_id,
                             max_tokens=settings.ANTHROPIC_MAX_TOKENS,
@@ -355,13 +380,24 @@ class ClaudeClient:
                                         turn_text_buffer.clear()
 
                             response = await stream.get_final_message()
+                        recording.finish(tokens=anthropic_usage_tokens(response.usage))
                         # success : `response` is set, so the while loop exits
-                    except _RETRYABLE_ERRORS as exc:
+                    except anthropic.APIError as exc:
+                        # A client disconnect mid-stream (GeneratorExit) bypasses this
+                        # handler and drops the unfinished recording — an accepted,
+                        # rare undercount; the background-completion regen records its
+                        # own turn. finish() is idempotent, so this never double-logs.
+                        recording.finish(success=False, error_type=type(exc).__name__)
                         # Once a token has streamed we can neither replay it nor switch models,
                         # so propagate and let the outer handler yield one error event.
                         if text_started:
                             raise
-                        if attempt < _MAX_RETRIES:
+                        # Retry with backoff only for the transient subset (rate limit,
+                        # connection blip, 5xx). Anything else -- e.g. a 400 for an
+                        # exhausted Anthropic credit balance, or an auth error -- would
+                        # fail identically on a retry, so skip straight to the next
+                        # model in the chain instead of burning the retry budget on it.
+                        if isinstance(exc, _RETRYABLE_ERRORS) and attempt < _MAX_RETRIES:
                             delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                             logger.warn("Claude stream: retrying", {
                                 "model": model_id,
@@ -372,7 +408,8 @@ class ClaudeClient:
                             })
                             await asyncio.sleep(delay)
                             continue
-                        # This model's retry budget is spent and nothing has streamed yet.
+                        # This model is done for this turn: either its retry budget is
+                        # spent, or the error wasn't retryable in the first place.
                         if current_model_idx < len(model_chain) - 1:
                             current_model_idx += 1
                             attempt = 0
@@ -380,13 +417,16 @@ class ClaudeClient:
                                 "from_model": model_id,
                                 "to_model": model_chain[current_model_idx],
                                 "turn": turn + 1,
+                                "error_type": type(exc).__name__,
                             })
                             continue
                         # Whole Anthropic chain is down before any token reached the user —
                         # hand the rest of the conversation to the cross-provider Gemini hop,
-                        # which emits the same SSE events (and its own `done`).
+                        # which emits the same SSE events (and its own `done`), and can itself
+                        # delegate further to the GPT hop if Gemini is down too.
                         logger.warn("Claude stream: Anthropic chain exhausted, delegating to Gemini", {
                             "turn": turn + 1,
+                            "error_type": type(exc).__name__,
                             "error": str(exc),
                         })
                         async for gemini_event in stream_gemini_chat_fallback(
@@ -493,4 +533,4 @@ class ClaudeClient:
                 "error": str(exc),
                 "error_type": type(exc).__name__,
             })
-            yield {"type": "error", "message": str(exc)}
+            yield {"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}

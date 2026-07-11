@@ -25,19 +25,38 @@ from fastapi.responses import StreamingResponse
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..lib.query_logger import log_query
+from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from ..services.claude_client import ClaudeClient
 from ..services.request_auth import resolve_user_id
 from ..services.tool_executor import ToolExecutor
 from ..services.user_aura_extractor import extract_and_update_user_aura
 from ..services.chat_completion import prompt_builder as _prompt_builder
 from ..services.chat_completion import turn_store
-from ..services.chat_completion.prompt_builder import build_turn_system_blocks
+from ..services.chat_completion.prompt_builder import build_turn_system_blocks, fetch_user_doc
 from ..services.engagement.task_scheduler import get_task_scheduler
 
 _build_user_content = _prompt_builder.build_user_content
 _NOTIFICATION_REASON_MAX_CHARS = _prompt_builder.NOTIFICATION_REASON_MAX_CHARS
 _build_system_blocks = _prompt_builder.build_system_blocks
 _build_injected_system_prompt_suffix = _prompt_builder.build_injected_system_prompt_suffix
+
+
+async def _reconcile_and_schedule_intents(
+    user_id: str,
+    message: str,
+    prev_buddy_response: str | None,
+    user_doc: dict[str, Any] | None = None,
+) -> None:
+    """Lazy-imported wrapper for the reactive intent sensor, so chat.py stays
+    decoupled from the reactive package at module load. Never raises."""
+    try:
+        from ..services.reactive.intent_sense import reconcile_and_schedule
+
+        await reconcile_and_schedule(user_id, message, prev_buddy_response, user_doc=user_doc)
+    except Exception as exc:
+        logger.warn("chat: intent sense task failed (swallowed)", {
+            "user_id": user_id, "error": str(exc),
+        })
 
 
 def _resolve_user_id(event: dict[str, Any], body: dict[str, Any]) -> str | None:
@@ -291,10 +310,17 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     effective_tier = "pro"
     if settings.is_production:
         from ..services.entitlement import (
+            EntitlementUnavailableError,
             check_and_increment_daily_chat_usage,
             get_user_effective_tier,
         )
-        effective_tier = await get_user_effective_tier(user_id)
+        try:
+            effective_tier = await get_user_effective_tier(user_id)
+        except EntitlementUnavailableError:
+            # Never hand out pro on an outage. "free" here only tightens tool
+            # gating for the turn; the usage counter below fails open on the
+            # same outage, so the user is degraded, never hard-blocked.
+            effective_tier = "free"
         if effective_tier == "free":
             allowed, _ = await check_and_increment_daily_chat_usage(user_id)
             if not allowed:
@@ -366,11 +392,16 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         None,
     )
 
+    # Single read of users/{uid} for this turn, shared below instead of 4
+    # independent re-fetches (datetime, aura-revoke check, and the two fire-and-
+    # forget tasks' own consent checks) -- see firestore_read_audit_20260706 memory.
+    user_doc = await fetch_user_doc(user_id)
+
     # Build the full system prompt (datetime + aura profile suffix + query-relevant
     # long-term memory) via the shared assembler, so the live turn here and the durable
     # background completion (services/chat_completion) construct the EXACT same prompt.
     system_prompt_blocks = await build_turn_system_blocks(
-        user_id, message, notification_reason,
+        user_id, message, notification_reason, user_doc=user_doc,
     )
 
     asyncio.create_task(
@@ -383,7 +414,15 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         )
     )
     asyncio.create_task(
-        extract_and_update_user_aura(user_id, message, session_id, prev_buddy_response)
+        extract_and_update_user_aura(
+            user_id, message, session_id, prev_buddy_response, user_doc=user_doc,
+        )
+    )
+    # Reactive layer: detect resolutions ("mom is fine" -> cancel the queued surgery
+    # follow-up) and future concerns ("mom has surgery tomorrow" -> schedule one).
+    # Fire-and-forget, consent-gated + cost-capped, never touches the stream.
+    asyncio.create_task(
+        _reconcile_and_schedule_intents(user_id, message, prev_buddy_response, user_doc)
     )
 
     user_content = _build_user_content(message, validated_attachments)
@@ -469,7 +508,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             )
             _err = json.dumps({
                 "type": "error",
-                "message": "Something glitched on my end there. Mind sending that again?",
+                "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE,
             })
             yield f"data: {_err}\n\n"
         finally:

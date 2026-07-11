@@ -9,87 +9,29 @@ names, the done signal) and the AgentSession event handlers that fill it. Call
 from __future__ import annotations
 
 import asyncio
-import random
 from datetime import UTC, datetime
 
 from livekit.agents import AgentSession, JobContext
 
 from ...lib.logger import logger
+from ...services.analytics.llm_telemetry import start_llm_generation
 from .errors import classify_pipeline_error, publish_client_error
 from .telemetry import log_turn_metrics, log_voice_failure
+from .text_sanitizer import strip_nonverbal_cues
 
-# Spoken in parallel with each MCP tool round-trip so the user hears live
-# feedback that the agent is working on it.
-TOOL_THINKING_PHRASES: dict[str, list[str]] = {
-    "get_upcoming_events": [
-        "lemme peek at your calendar",
-        "one sec, pulling up your schedule",
-        "checking what you've got coming up",
-    ],
-    "create_calendar_event": [
-        "cool, popping that on your calendar",
-        "alright, getting that on the calendar",
-        "on it, adding that now",
-    ],
-    "set_reminder": [
-        "gotcha, setting that up",
-        "say no more, locking that in",
-        "yep, setting that reminder now",
-    ],
-    "cancel_reminder": [
-        "yep, clearing that one out",
-        "on it, scrapping that reminder",
-        "gotcha, getting rid of that one",
-    ],
-    "track_topic": [
-        "ooh nice, I'll keep tabs on that for you",
-        "gotcha, I'll keep you posted on that",
-        "say less, I'm on it, I'll keep you in the loop",
-    ],
-    "list_reminders": [
-        "lemme pull up what you've got",
-        "one sec, grabbing your reminders",
-        "checking your reminders real quick",
-    ],
-    "store_memory": [
-        "ooh good to know, filing that away",
-        "noted, I'll hang onto that",
-        "got it, tucking that away",
-    ],
-    "query_memory": [
-        "lemme think back for a sec",
-        "digging through what I remember",
-        "one sec, jogging my memory",
-    ],
-    "get_user_context": [
-        "lemme pull up your stuff real quick",
-        "one sec, grabbing your details",
-    ],
-    "web_surf": [
-        "ooh good question, lemme look that up",
-        "hang on, let me actually check that",
-        "one sec, looking that up real quick",
-        "lemme make sure I get this right",
-    ],
-    "list_emails": [
-        "lemme peek at your inbox",
-        "one sec, checking your inbox",
-    ],
-    "read_email": [
-        "pulling that email up now",
-        "one sec, opening that up",
-    ],
-    "send_email": [
-        "alright, sending that off",
-        "on it, firing that email out",
-    ],
-}
+# Slow-tool filler phrases moved to voice/tool_filler.py, triggered from
+# BuddyAgent.llm_node (the only pre-execution tool signal on this stack).
 
-# Spoken (LLM-framed) when the user has gone silent long enough
+# Spoken (LLM-framed) when the user has gone silent long enough. Kept deliberately
+# open so the line lands fresh each time: the earlier, more prescriptive version
+# converged on the same stock "you still there? no rush" phrasing every session.
 AWAY_NUDGE_INSTRUCTIONS = (
-    "The user has gone quiet for a little while. In Buddy's warm, casual voice, "
-    "gently check whether they're still around. Keep it to one short, low-pressure "
-    "line, no guilt, no list of questions."
+    "The user has gone quiet for a bit. In Buddy's warm, casual voice, gently check "
+    "whether they're still there with ONE short, low-pressure line. Make it feel "
+    "spontaneous and specific to this moment: if you two were mid-conversation, "
+    "lightly reference what you were just talking about; otherwise a light, friendly "
+    "check-in. Vary the wording naturally every time and never fall back on a stock "
+    "phrase like 'you still there? no rush.' No guilt, no list of questions."
 )
 
 
@@ -113,6 +55,10 @@ class VoiceSessionRecorder:
         self.turns: list[dict] = []
         self.tool_calls: list[str] = []
         self.done = asyncio.Event()
+        # Latest CUMULATIVE per-model LLM usage (session_usage_updated re-emits
+        # running totals every turn); flushed to Langfuse once at session close
+        # as one per-session generation per model.
+        self._model_usage_totals: dict[str, dict] = {}
 
     def attach(self) -> None:
         """Register every handler on the session. Call once, after construction."""
@@ -196,7 +142,10 @@ class VoiceSessionRecorder:
             )
 
         if role == "assistant":
-            content = getattr(item, "text_content", None) or str(item)
+            # text_content is the raw llm_node output, which still carries the
+            # [laughter] TTS cue (only the caption path strips it). Drop it here
+            # too so post-session summaries never quote a "[laughter]" back.
+            content = strip_nonverbal_cues(getattr(item, "text_content", None) or str(item))
             logger.info("VoiceSession: agent response", {
                 "session_id": self._session_id, "user_id": self._user_id,
                 "text_preview": str(content)[:120],
@@ -207,43 +156,11 @@ class VoiceSessionRecorder:
                 "timestamp": datetime.now(UTC).isoformat(),
             })
 
-        # Tool-call CAPTURE now lives in _on_tools_executed (the function_tools_executed
-        # event), the only signal that actually carries tool names on this stack. ChatMessage
-        # items have no tool_calls field, so the path below never populated self.tool_calls.
-        #
-        # The per-tool "thinking" phrase below is dead for the same reason (item.tool_calls is
-        # always empty here) and is intentionally LEFT IN PLACE pending the post-demo
-        # filler-trigger decision. Do not build on it: function_tools_executed fires AFTER the
-        # tool returns, and no public session event carries the tool name pre-execution.
-        tool_calls = getattr(item, "tool_calls", None) or []
-        if tool_calls:
-            tool_name = getattr(tool_calls[0], "name", "") or ""
-            phrases = TOOL_THINKING_PHRASES.get(tool_name)
-            if phrases:
-                phrase = random.choice(phrases)
-                async def _speak_tool_phrase(p: str = phrase, name: str = tool_name) -> None:
-                    if str(getattr(self._session, "agent_state", "")) != "thinking":
-                        logger.info("VoiceSession: tool phrase skipped (not thinking)", {
-                            "session_id": self._session_id, "user_id": self._user_id,
-                            "tool": name,
-                        })
-                        return
-                    try:
-                        await self._session.say(p, allow_interruptions=True, add_to_chat_ctx=False)
-                    except Exception as exc:
-                        logger.warn("VoiceSession: tool phrase failed", {
-                            "session_id": self._session_id, "user_id": self._user_id,
-                            "error": str(exc),
-                        })
-
-                asyncio.create_task(
-                    _speak_tool_phrase(),
-                    name=f"tool-phrase-{tool_name}-{self._session_id[:8]}",
-                )
-                logger.info("VoiceSession: tool thinking phrase", {
-                    "session_id": self._session_id, "user_id": self._user_id,
-                    "tool": tool_name,
-                })
+        # Tool-call CAPTURE lives in _on_tools_executed (the function_tools_executed
+        # event), the only session event that actually carries tool names on this stack
+        # (ChatMessage items have no tool_calls field). The spoken slow-tool filler fires
+        # pre-execution from BuddyAgent.llm_node via voice/tool_filler.py, since
+        # function_tools_executed fires AFTER the tool returns.
 
     def _on_tools_executed(self, ev) -> None:  # type: ignore[misc]
         # Authoritative tool-call capture. function_tools_executed is the only session event
@@ -282,6 +199,15 @@ class VoiceSessionRecorder:
                 "cache_hit_pct": cache_hit_pct,
                 "output_tokens": getattr(mu, "output_tokens", 0),
             })
+            model = str(getattr(mu, "model", "") or "")
+            if model:
+                # Overwrite, never add: these are running totals for the session.
+                self._model_usage_totals[model] = {
+                    "provider": str(getattr(mu, "provider", "") or ""),
+                    "input_tokens": int(input_tokens or 0),
+                    "cached_tokens": int(cached_tokens or 0),
+                    "output_tokens": int(getattr(mu, "output_tokens", 0) or 0),
+                }
 
     def _on_session_error(self, ev) -> None:  # type: ignore[misc]
         error = getattr(ev, "error", None) or ev
@@ -319,4 +245,28 @@ class VoiceSessionRecorder:
                 publish_client_error(self._ctx, code, message),
                 name=f"voice-client-error-close-{self._session_id[:8]}",
             )
+        self._record_session_llm_usage()
         self.done.set()
+
+    def _record_session_llm_usage(self) -> None:
+        """Emit one Langfuse generation per model with the session's FINAL
+        cumulative token totals (voice cost is tracked per session, not per
+        turn — the LiveKit stack exposes no per-call provider hook). LiveKit's
+        input_tokens INCLUDES the cached subset, so cached is subtracted out of
+        input (Langfuse prices each usage-detail key separately). Best-effort:
+        telemetry never blocks or breaks session close."""
+        for model, totals in self._model_usage_totals.items():
+            recording = start_llm_generation(
+                model=model,
+                provider=totals.get("provider", ""),
+                caller="voice_session",
+                uid=self._user_id,
+            )
+            cached = int(totals.get("cached_tokens", 0) or 0)
+            tokens = {
+                "input": max(0, int(totals.get("input_tokens", 0) or 0) - cached),
+                "output": int(totals.get("output_tokens", 0) or 0),
+            }
+            if cached:
+                tokens["cache_read_input_tokens"] = cached
+            recording.finish(tokens=tokens)

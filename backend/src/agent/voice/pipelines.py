@@ -18,6 +18,7 @@ from livekit.plugins import anthropic, cartesia, deepgram, google, openai
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from ...config.settings import settings
+from .fallback_tts_wrapper import SpeechMarkupStrippingTTS
 
 
 def build_stt_pipeline() -> lk_stt.FallbackAdapter:
@@ -66,14 +67,23 @@ def build_tts_pipeline(sonic3_controls: dict) -> lk_tts.FallbackAdapter:
     Only the sonic-3 primary supports generation_config speed/emotion; the
     Deepgram and sonic-2 fallbacks are left unconditioned. `sonic3_controls` is
     empty for a profile-less user so the primary constructs the exact default voice.
+
+    Both fallbacks are wrapped in SpeechMarkupStrippingTTS: the reply stream can
+    carry sonic-3-only inline markup ([laughter], <emotion/speed/volume> tags
+    from emotion_tags.py) that these engines would otherwise read aloud as
+    literal text.
     """
     return lk_tts.FallbackAdapter(
         [
             cartesia.TTS(
                 api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3", **sonic3_controls
             ),
-            deepgram.TTS(model="aura-2-andromeda-en", api_key=settings.DEEPGRAM_API_KEY.strip()),
-            cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-2"),
+            SpeechMarkupStrippingTTS(
+                deepgram.TTS(model="aura-2-andromeda-en", api_key=settings.DEEPGRAM_API_KEY.strip())
+            ),
+            SpeechMarkupStrippingTTS(
+                cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-2")
+            ),
         ],
         max_retry_per_tts=0,
     )
@@ -117,7 +127,7 @@ def build_agent_session(
         turn_detection=turn_detector if turn_detector is not None else NOT_GIVEN,
         preemptive_generation=True,
         mcp_servers=[mcp_server], 
-        user_away_timeout=15.0,          # Flip user state to "away" after 12s of user silence
+        user_away_timeout=90.0,          # Flip user state to "away" after 90s of user silence (was 30s/15s: still nudged while the user was mid-thought or reading; give them real room before Buddy checks in)
         turn_handling=TurnHandlingOptions(
             # MultilingualModel already guards turn finality semantically,
             # so we lower the endpointing floor from the 0.5s default to 0.2s (~300ms faster reply).

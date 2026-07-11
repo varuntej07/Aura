@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, Uint8List, defaultTargetPlatform;
+    show Uint8List;
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -286,33 +286,19 @@ class VoiceSessionService {
       // the watchdog (with its friendly coded error) always owns the no-show case;
       // the room resets the buffer automatically on disconnect. A real
       // connect failure inside the operation still propagates to the catch below.
-      //
-      // Windows: the pre-connect buffer needs an audio-renderer API livekit's
-      // desktop platform code doesn't implement ("Bad state: Failed to start
-      // audio renderer"), so connect plainly there. Only cost is losing the
-      // speak-while-connecting buffer.
-      if (defaultTargetPlatform == TargetPlatform.windows) {
-        await _room!.connect(
-          lkUrl,
-          lkToken,
-          connectOptions: const ConnectOptions(autoSubscribe: true),
-        );
-        await _room!.localParticipant?.setMicrophoneEnabled(true);
-      } else {
-        await _room!.withPreConnectAudio(
-          () async {
-            await _room!.connect(
-              lkUrl,
-              lkToken,
-              connectOptions: const ConnectOptions(autoSubscribe: true),
-            );
-            await _room!.localParticipant?.setMicrophoneEnabled(true);
-          },
-          timeout: const Duration(seconds: 25),
-          onError: (e) => AppLogger.warning('Preconnect audio buffer error',
-              tag: _tag, metadata: {'error': e.toString()}),
-        );
-      }
+      await _room!.withPreConnectAudio(
+        () async {
+          await _room!.connect(
+            lkUrl,
+            lkToken,
+            connectOptions: const ConnectOptions(autoSubscribe: true),
+          );
+          await _room!.localParticipant?.setMicrophoneEnabled(true);
+        },
+        timeout: const Duration(seconds: 25),
+        onError: (e) => AppLogger.warning('Preconnect audio buffer error',
+            tag: _tag, metadata: {'error': e.toString()}),
+      );
 
       AppLogger.info('LiveKit mic enabled', tag: _tag);
       unawaited(AnalyticsService.logVoiceStarted());
@@ -520,7 +506,12 @@ class VoiceSessionService {
     _replyWatchdog = null;
     if (!_didTrackFirstResponse) {
       _didTrackFirstResponse = true;
-      unawaited(_postHogAnalyticsService.trackEvent('voice_first_response'));
+      // _sessionStopwatch starts on RoomConnectedEvent, so this measures time
+      // from room connect to Buddy's first output.
+      unawaited(_postHogAnalyticsService.trackEvent(
+        'voice_first_response',
+        properties: {'elapsed_ms': _sessionStopwatch.elapsed.inMilliseconds},
+      ));
     }
   }
 

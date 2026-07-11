@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..shared.tools import claude_tool_definitions
+from .analytics.llm_telemetry import start_tool_span
 from .chat_completion import tool_idempotency as _tool_idempotency
 from .firebase import admin_firestore
 from .gmail_connector import GmailConnector
@@ -214,6 +215,10 @@ class ToolExecutor:
         self._created_via = created_via     # How reminders created in this session are tagged
         self._client_message_id = client_message_id
 
+    @property
+    def user_id(self) -> str:
+        return self._user_id
+
     def _db(self) -> fs.Client:
         return admin_firestore()
 
@@ -260,6 +265,9 @@ class ToolExecutor:
             "user_id": self._user_id,
             "input_keys": list(input_data.keys()),
         })
+        # One telemetry span per tool call (ops dashboard tool analytics). The
+        # span object never raises; finish() is idempotent.
+        span = start_tool_span(tool_name=tool_name, source=self._created_via, uid=self._user_id)
         try:
             if self._client_message_id and tool_name in _tool_idempotency.SIDE_EFFECTING_TOOLS:
                 result = await _tool_idempotency.run_idempotent(
@@ -273,6 +281,8 @@ class ToolExecutor:
                 "duration_ms": _ms,
                 "result_keys": list(result.keys()) if isinstance(result, dict) else "non-dict",
             })
+            soft_error = isinstance(result, dict) and bool(result.get("error"))
+            span.finish(success=not soft_error, error_type="soft_error" if soft_error else None)
             return result
         except asyncio.TimeoutError:
             _ms = int((_time.monotonic() - _start) * 1000)
@@ -280,6 +290,7 @@ class ToolExecutor:
                 "user_id": self._user_id,
                 "duration_ms": _ms,
             })
+            span.finish(success=False, error_type="TimeoutError")
             return {"error": True, "user_message": "That took too long. Try again in a moment."}
         except ValueError as exc:
             _ms = int((_time.monotonic() - _start) * 1000)
@@ -288,6 +299,7 @@ class ToolExecutor:
                 "duration_ms": _ms,
                 "error": str(exc),
             })
+            span.finish(success=False, error_type="ValueError")
             return {"error": True, "user_message": str(exc)}
         except Exception as exc:
             _ms = int((_time.monotonic() - _start) * 1000)
@@ -296,6 +308,7 @@ class ToolExecutor:
                 "duration_ms": _ms,
                 "error": str(exc),
             })
+            span.finish(success=False, error_type=type(exc).__name__)
             return {"error": True, "user_message": "Something went wrong. Try again in a bit."}
 
     # Reminders
@@ -698,6 +711,7 @@ class ToolExecutor:
     async def _web_surf(self, inp: dict[str, Any]) -> ToolResult:
         from ..agents.data_fetchers.brave_search import brave_search, peek_cache
         from .entitlement import (
+            EntitlementUnavailableError,
             check_and_increment_daily_web_surf_usage,
             get_user_effective_tier,
         )
@@ -721,7 +735,12 @@ class ToolExecutor:
         # check_and_increment_daily_web_surf_usage stays exactly as-is (one atomic Firestore
         # transaction that reads, limit-checks, and increments together), so two concurrent
         # cache-miss queries cannot exceed the cap.
-        tier = await get_user_effective_tier(self._user_id)
+        try:
+            tier = await get_user_effective_tier(self._user_id)
+        except EntitlementUnavailableError:
+            # Never hand out pro on an outage; the counter below fails open on
+            # the same outage, so the search still proceeds, just gated as free.
+            tier = "free"
         if tier == "free":
             allowed, count = await check_and_increment_daily_web_surf_usage(self._user_id)
             if not allowed:

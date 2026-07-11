@@ -8,7 +8,9 @@ Two units under test:
 
 The invariant tests are the load-bearing ones: they guarantee a typo in a
 mapping value can never ship a speed the sonic-3 plugin rejects (must be float)
-or an emotion Cartesia doesn't recognize (must be a real TTSVoiceEmotion).
+or an emotion sonic-3 doesn't recognize (must be a lowercase canonical name
+from emotion_tags.CARTESIA_SONIC3_EMOTION_NAMES — the API takes lowercase and
+the plugin passes the string through as-is).
 """
 
 from __future__ import annotations
@@ -19,14 +21,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from livekit.plugins.cartesia.tts import TTSVoiceEmotion
 
+from src.agent.voice.emotion_tags import CARTESIA_SONIC3_EMOTION_NAMES
 from src.agent.voice.fetchers import fetch_user_aura_profile
 from src.agent.voice.voice_controls import (
     EMOTIONAL_STATE_TO_VOICE_EMOTION,
     TONE_TO_SPEED,
     derive_voice_controls,
 )
-
-_VALID_EMOTIONS = set(typing.get_args(TTSVoiceEmotion))
 
 
 # --------------------------------------------------------------------------
@@ -58,7 +59,7 @@ def test_tone_and_emotion_combine():
     """Tone and emotion are resolved independently and returned together."""
     speed, emotion = derive_voice_controls("terse", "excited")
     assert speed == TONE_TO_SPEED["terse"]
-    assert emotion == "Excited"
+    assert emotion == "excited"
 
 
 def test_casing_and_whitespace_are_normalized():
@@ -80,10 +81,33 @@ def test_every_speed_value_is_a_valid_sonic3_float():
         assert 0.6 <= speed <= 2.0, f"{tone} speed {speed} out of sonic-3 range"
 
 
-def test_every_emotion_value_is_a_real_cartesia_emotion():
-    """A typo'd emotion would 400 every sonic-3 turn and silently fall back to Deepgram."""
+def test_every_emotion_value_is_a_real_sonic3_emotion():
+    """A typo'd emotion would be silently ignored (or 400) on every sonic-3 turn."""
     for state, emotion in EMOTIONAL_STATE_TO_VOICE_EMOTION.items():
-        assert emotion in _VALID_EMOTIONS, f"{state} -> {emotion!r} is not a TTSVoiceEmotion"
+        assert emotion in CARTESIA_SONIC3_EMOTION_NAMES, (
+            f"{state} -> {emotion!r} is not a canonical sonic-3 emotion name"
+        )
+
+
+def test_every_emotion_value_is_lowercase():
+    """The regression that motivated the fix: sonic-3 takes lowercase names, and the
+    plugin passes the string through as-is, so a Capitalized value ("Excited") is
+    out of contract and likely silently ignored."""
+    for state, emotion in EMOTIONAL_STATE_TO_VOICE_EMOTION.items():
+        assert emotion == emotion.lower(), f"{state} -> {emotion!r} must be lowercase"
+
+
+def test_canonical_emotion_names_track_the_plugin_literal():
+    """Drift guard: every canonical name should still exist (case-insensitively) in
+    the plugin's TTSVoiceEmotion literal — a plugin/API rename shows up here."""
+    plugin_emotion_names_lowered = {
+        value.lower() for value in typing.get_args(TTSVoiceEmotion)
+    }
+    missing = {
+        name for name in CARTESIA_SONIC3_EMOTION_NAMES
+        if name not in plugin_emotion_names_lowered
+    }
+    assert not missing, f"canonical emotions absent from the plugin literal: {missing}"
 
 
 # --------------------------------------------------------------------------

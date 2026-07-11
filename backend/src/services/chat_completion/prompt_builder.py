@@ -58,19 +58,31 @@ _DEPTH_INSTRUCTIONS: dict[str, str] = {
 NOTIFICATION_REASON_MAX_CHARS = 600
 
 
-async def get_user_local_datetime(uid: str) -> str:
-    """Return 'Monday, 3 May 2026 14:32 IST' in the user's timezone, falling back to UTC."""
+async def fetch_user_doc(uid: str) -> dict[str, Any]:
+    """Single read of users/{uid}, shared across the turn's helpers that would
+    otherwise each independently re-fetch this same doc: get_user_local_datetime's
+    timezone, aura_consent_revoked's consent flag, the aura-extractor's and
+    intent-sense's own consent checks -- was 4 uncached reads per chat turn (see
+    firestore_read_audit_20260706 memory). Callers that already have the doc pass
+    it through instead of calling this again; a caller with no doc yet (e.g. the
+    durable background-completion path, a separate invocation) calls this once."""
     from ..firebase import admin_firestore
 
-    def _fetch() -> str | None:
+    def _fetch() -> dict[str, Any]:
         try:
             snap = admin_firestore().collection("users").document(uid).get()
-            d = snap.to_dict()
-            return d.get("timezone") if d else None
+            return (snap.to_dict() or {}) if snap.exists else {}
         except Exception:
-            return None
+            return {}
 
-    tz_str = await asyncio.to_thread(_fetch)
+    return await asyncio.to_thread(_fetch)
+
+
+async def get_user_local_datetime(uid: str, user_doc: dict[str, Any] | None = None) -> str:
+    """Return 'Monday, 3 May 2026 14:32 IST' in the user's timezone, falling back to UTC."""
+    if user_doc is None:
+        user_doc = await fetch_user_doc(uid)
+    tz_str = user_doc.get("timezone")
     try:
         tz = ZoneInfo(tz_str) if tz_str else UTC
     except (ZoneInfoNotFoundError, Exception):
@@ -86,7 +98,7 @@ def _get_aura_cache_lock(uid: str) -> asyncio.Lock:
     return _aura_cache_locks[uid]
 
 
-async def aura_consent_revoked(uid: str) -> bool:
+async def aura_consent_revoked(uid: str, user_doc: dict[str, Any] | None = None) -> bool:
     """True only when the user has EXPLICITLY withdrawn Aura consent — i.e.
     users/{uid}.aura_consent_granted is present and False. Absent or True reads as
     not-revoked, so this never changes behavior for accounts that predate the
@@ -95,22 +107,14 @@ async def aura_consent_revoked(uid: str) -> bool:
     must not silently drop a consented user's personalization, and the next
     successful read applies a real revoke within a turn.
     """
-    from ..firebase import admin_firestore
-
-    def _fetch() -> bool:
-        try:
-            snap = admin_firestore().collection("users").document(uid).get()
-            if not snap.exists:
-                return False
-            return (snap.to_dict() or {}).get("aura_consent_granted", None) is False
-        except Exception:
-            return False
-
-    return await asyncio.to_thread(_fetch)
+    if user_doc is None:
+        user_doc = await fetch_user_doc(uid)
+    return user_doc.get("aura_consent_granted", None) is False
 
 
 async def fetch_cached_aura_data(
     uid: str,
+    user_doc: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     now = datetime.now(UTC)
 
@@ -118,7 +122,7 @@ async def fetch_cached_aura_data(
     # read or inject their stored profile (the writer is already consent-gated in
     # user_aura_extractor). This makes the in-app revoke stop personalization
     # within a turn instead of letting the frozen profile keep shaping chat.
-    if await aura_consent_revoked(uid):
+    if await aura_consent_revoked(uid, user_doc):
         logger.info("Chat: Aura memory revoked, skipping profile personalization", {"user_id": uid})
         return {}, []
 
@@ -366,10 +370,16 @@ async def build_turn_system_blocks(
     uid: str,
     message: str,
     notification_reason: str = "",
+    user_doc: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the full system prompt for one chat turn: datetime + aura profile
     suffix + query-relevant long-term memory, in one place so the live handler and
     the durable completion path are guaranteed identical.
+
+    ``user_doc`` lets a caller that already fetched users/{uid} this turn (the live
+    handler) pass it through instead of this function re-fetching it; a caller with
+    no doc yet (the durable background-completion path, a separate invocation)
+    leaves it None and gets a single fresh fetch.
 
     The memory block runs ONLY when the user has a non-empty (consented) profile --
     an empty profile means revoked consent or a brand-new user with no atoms yet, so
@@ -379,9 +389,11 @@ async def build_turn_system_blocks(
     notification_reason) so per-turn memory never invalidates the system-prompt cache,
     and is deduped against the static <interests> already shown.
     """
+    if user_doc is None:
+        user_doc = await fetch_user_doc(uid)
     local_datetime, (aura_profile, accepted_hints) = await asyncio.gather(
-        get_user_local_datetime(uid),
-        fetch_cached_aura_data(uid),
+        get_user_local_datetime(uid, user_doc),
+        fetch_cached_aura_data(uid, user_doc),
     )
     aura_suffix = build_injected_system_prompt_suffix(aura_profile, accepted_hints, uid)
     blocks = build_system_blocks(

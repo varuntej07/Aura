@@ -145,6 +145,7 @@ async def _write_session_doc(
     ended_at: str,
     duration_ms: int,
     tool_calls: list[str],
+    screen_sight_frame_count: int,
 ) -> None:
     def _write() -> None:
         ref = (
@@ -170,6 +171,9 @@ async def _write_session_doc(
             "summary": summary,
             "archived": False,
             "raw_turns": raw_turns,
+            # Count only — never the frame bytes themselves, which are never
+            # persisted anywhere (see screen_frames.py's module docstring).
+            "screen_sight_frame_count": screen_sight_frame_count,
         })
     await asyncio.to_thread(_write)
 
@@ -341,6 +345,7 @@ async def run_post_session_pipeline(
     ended_at: str,
     duration_ms: int,
     tool_calls: list[str],
+    screen_sight_frame_count: int = 0,
 ) -> None:
     logger.info("VoiceSession: post-session pipeline started", {
         "user_id": user_id, "session_id": session_id,
@@ -382,6 +387,7 @@ async def run_post_session_pipeline(
         _write_session_doc(
             user_id, session_id, summary, turns,
             started_at, ended_at, duration_ms, tool_calls,
+            screen_sight_frame_count,
         ),
         _write_latest_summary(
             user_id, summary, session_id, len(turns), duration_ms,

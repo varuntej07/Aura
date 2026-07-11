@@ -101,10 +101,18 @@ class ScreenFrameStore:
         self._inflight_count = 0
         self._frame_landed = asyncio.Event()
         self._assembly_tasks: set[asyncio.Task] = set()
+        self._frame_count = 0
 
     @property
     def has_ever_received_frame(self) -> bool:
         return self._latest is not None
+
+    @property
+    def frame_count(self) -> int:
+        """How many frames this session ever assembled successfully. Metadata only
+        (for the desktop history screen's "screen-sight used Nx" line) — never the
+        frame bytes themselves, which this store still only ever keeps one of."""
+        return self._frame_count
 
     def handle_stream(self, reader, participant_identity: str) -> None:
         """Sync callback for ``room.register_byte_stream_handler``; assembles async."""
@@ -142,6 +150,7 @@ class ScreenFrameStore:
                 attributes=attributes,
                 received_at_monotonic=time.monotonic(),
             )
+            self._frame_count += 1
             logger.info("VoiceSession: screen frame received", {
                 "session_id": self._session_id,
                 "user_id": self._user_id,

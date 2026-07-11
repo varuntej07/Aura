@@ -76,6 +76,87 @@ def sanitize_for_speech(text: str) -> str:
         return text
 
 
+# Bracketed non-verbal cues like [laughter] or [soft laughter]. Cartesia speaks
+# ONLY the exact cue [laughter] (see voice_prompt.py); every cue is an
+# audio-path instruction that must never show up in the caption or the recorded
+# transcript. Matches letters + spaces inside the brackets, so it never touches
+# a [POINT:...] tag (digits/colons; already stripped upstream in llm_node) or a
+# numeric footnote like "[1]".
+_NONVERBAL_CUE = re.compile(r"\[[A-Za-z][A-Za-z ]*\]")
+
+
+def strip_nonverbal_cues(text: str) -> str:
+    """Remove bracketed non-verbal cues (e.g. [laughter]) from display/record text.
+
+    Pure and deterministic. Returns the original text unchanged on any internal
+    error. Collapses the double space a mid-sentence cue leaves behind.
+    """
+    if not text:
+        return text
+    try:
+        s = _NONVERBAL_CUE.sub("", text)
+        s = _MULTISPACE.sub(" ", s)
+        return s.strip()
+    except Exception:
+        return text
+
+
+def bracket_cue_holdback_index(text: str) -> int:
+    """Index up to which ``text`` is safe to emit without splitting a cue.
+
+    A trailing unclosed ``[`` whose tail could still grow into a cue (only
+    letters/spaces so far) is held back; anything else emits. Mirrors
+    point_tag.holdback_start for the [laughter] grammar. Shared with
+    emotion_tags.convert_audio_cue_stream: one bracket-cue grammar, one holdback.
+    """
+    idx = text.rfind("[")
+    if idx == -1:
+        return len(text)
+    tail = text[idx:]
+    if "]" in tail:
+        return len(text)  # any complete cue was already removed; remainder is safe
+    inner = tail[1:]
+    if inner == "" or re.fullmatch(r"[A-Za-z ]*", inner):
+        return idx  # could still close into a cue - wait for more chunks
+    return len(text)
+
+
+async def strip_nonverbal_cue_stream(
+    text_stream: AsyncIterable[str],
+) -> AsyncIterator[str]:
+    """Strip [laughter]-style cues from a streaming transcript.
+
+    Buffers across chunk boundaries so a cue split as "[laug" + "hter]" is still
+    caught before it reaches the client caption. Fail-open: a bare/unterminated
+    "[..." left at stream end is emitted as-is (it was never a real cue).
+    """
+    pending = ""
+    last_char = " "  # treat the stream start as a boundary: never open with a space
+    async for chunk in text_stream:
+        if not isinstance(chunk, str):
+            if pending:
+                yield pending
+                last_char = pending[-1]
+                pending = ""
+            yield chunk
+            continue
+        # Remove complete cues and collapse the gap they leave inside this buffer.
+        pending = _MULTISPACE.sub(" ", _NONVERBAL_CUE.sub("", pending + chunk))
+        cut = bracket_cue_holdback_index(pending)
+        emit, pending = pending[:cut], pending[cut:]
+        if last_char == " " and emit.startswith(" "):
+            # A cue removed at a chunk boundary would otherwise double the space.
+            emit = emit.lstrip(" ")
+        if emit:
+            last_char = emit[-1]
+            yield emit
+    if pending:
+        if last_char == " ":
+            pending = pending.lstrip(" ")
+        if pending:
+            yield pending
+
+
 # Sentence-ish flush boundaries: synthesize a chunk as soon as a sentence closes so
 # TTS stays incremental instead of waiting for the whole reply.
 _FLUSH_SEPARATORS = (". ", "! ", "? ", ".\n", "!\n", "?\n", "\n")

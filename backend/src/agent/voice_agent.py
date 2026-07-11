@@ -42,7 +42,7 @@ from .buddy_agent import BuddyAgent
 from .voice_prompt import render_screen_sight_note, render_surface_note
 from .voice.auth import mint_firebase_id_token
 from .voice.context import gather_session_context
-from .voice.free_tier_limit import run_free_tier_voice_nudge
+from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
 from .voice.screen_context import (
     OCR_CONTEXT_TYPE,
     SCREEN_CONTEXT_TYPE,
@@ -261,12 +261,20 @@ async def entrypoint(ctx: JobContext) -> None:
                 "session_id": session_id, "user_id": user_id, "error": str(exc),
             })
 
+        # "there" is fetch_user_profile's no-name fallback (see voice/context.py),
+        # not a real name; Buddy Drafts must never sign an email with it.
+        draft_display_name = context_vars.get("name", "")
+        if draft_display_name.strip().lower() == "there":
+            draft_display_name = ""
+
         buddy = BuddyAgent(
             user_id=user_id,
             context_vars=context_vars,
             chat_ctx=chat_ctx,
             screen_frames=screen_frames,
             session_id=session_id,
+            user_tier=session_context.user_tier,
+            display_name=draft_display_name,
         )
 
         recorder = VoiceSessionRecorder(
@@ -281,8 +289,9 @@ async def entrypoint(ctx: JobContext) -> None:
         session_start_iso = datetime.now(UTC).isoformat()
         session_start_mono = time.monotonic()
 
-        # Free-tier voice budget nudge task, armed after start, cancelled on session end.
-        nudge_task: asyncio.Task | None = None
+        # Free-tier voice budget task (warn at T-60s, wind down and close at the
+        # cap), armed after start, cancelled on session end.
+        voice_limit_task: asyncio.Task | None = None
 
         # On-screen / field context handed in over the data channel: the keyboard's
         # "talk about what's on my screen", an OCR snapshot, or a typed message. The
@@ -375,17 +384,34 @@ async def entrypoint(ctx: JobContext) -> None:
                 _dispatch_context_payload(_payload)
             pending_context_payloads.clear()
 
-            # Free tier only: warn ~60s before the daily voice budget runs out (warn-only, no cutoff)
+            # Free tier only: warn ~60s before the daily voice budget runs out,
+            # then wind the call down at the cap (enforced). A caller who is
+            # already out of budget gets Buddy's greeting, one out-of-time line,
+            # and a graceful close instead of a full session. None = the budget
+            # read failed, which disables enforcement (degrade, never wrongly cut).
             if session_context.user_tier == "free":
-                nudge_task = asyncio.create_task(
-                    run_free_tier_voice_nudge(
-                        session,
-                        remaining_seconds=session_context.remaining_free_voice_seconds,
-                        session_id=session_id,
-                        user_id=user_id,
-                    ),
-                    name=f"voice-free-nudge-{session_id[:8]}",
-                )
+                remaining = session_context.remaining_free_voice_seconds
+                if remaining is not None and remaining <= 0:
+                    voice_limit_task = asyncio.create_task(
+                        run_out_of_free_time_close(
+                            session,
+                            ctx,
+                            session_id=session_id,
+                            user_id=user_id,
+                        ),
+                        name=f"voice-free-limit-{session_id[:8]}",
+                    )
+                else:
+                    voice_limit_task = asyncio.create_task(
+                        run_free_tier_voice_limit(
+                            session,
+                            ctx,
+                            remaining_seconds=remaining,
+                            session_id=session_id,
+                            user_id=user_id,
+                        ),
+                        name=f"voice-free-limit-{session_id[:8]}",
+                    )
 
             await recorder.done.wait()
 
@@ -409,6 +435,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     ended_at=session_end_iso,
                     duration_ms=elapsed_ms,
                     tool_calls=recorder.tool_calls,
+                    screen_sight_frame_count=screen_frames.frame_count,
                 ),
                 name=f"voice-post-session-{session_id[:8]}",
             )
@@ -422,8 +449,8 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             raise
         finally:
-            if nudge_task is not None:
-                nudge_task.cancel()
+            if voice_limit_task is not None:
+                voice_limit_task.cancel()
             for task in context_tasks:
                 task.cancel()
 

@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # Chat tool timeout — longer than voice because text chat can tolerate a Google Calendar sync
     CHAT_TOOL_TIMEOUT_S: float = 20.0
 
+    # How long the durable chat-completion Cloud Task waits before finishing a turn
+    # server-side. Set above the typical turn duration so a foreground turn acks itself
+    # first (making the task a no-op); only a genuinely abandoned turn gets regenerated.
+    CHAT_COMPLETION_DELAY_SECONDS: int = 90
+
     # Voice gateway
     VOICE_GATEWAY_PORT: int = 8000
     VOICE_GATEWAY_HOST: str = "0.0.0.0"
@@ -130,6 +135,13 @@ class Settings(BaseSettings):
     # TIER_GROUNDED -> Gemini with Google Search grounding (live web search + synthesis in ONE call)
     TIER_GROUNDED: str = "gemini-2.5-flash"
 
+    # TIER_EXTRACTION -> the per-turn UserAura extractor. This is the single highest-frequency
+    # background LLM call in the system (fires fire-and-forget on EVERY chat message), so it runs
+    # on the cheapest capable tier: Flash-Lite is ~10x cheaper per call than Flash and handles the
+    # constrained structured-output extraction fine. The extractor's cheap() call still chains down
+    # to its normal fallbacks on failure. Change this ONE line to re-tier extraction.
+    TIER_EXTRACTION: str = "gemini-2.5-flash-lite"
+
     # Staged reasoning funnel (reason_step tool) — off until verified on a dark deploy.
     # Sonnet drives one step at a time: clarify -> web_surf fetch -> present -> final.
     REASON_STEP_ENABLED: bool = False
@@ -150,6 +162,12 @@ class Settings(BaseSettings):
     CLOUD_TASKS_QUEUE: str = "juno-engagement"
     # The URL Cloud Tasks will POST to. Must match the deployed Cloud Run URL.
     BACKEND_INTERNAL_URL: str = "https://juno-backend-620715294422.us-central1.run.app"
+
+    # Cloud Storage -> screen-save images (services/gcs.py). The bucket is real,
+    # provisioned infrastructure, not just a code-side default — verify it exists
+    # (or reuse the project's default Firebase Storage bucket) before deploying.
+    SCREEN_SAVES_BUCKET: str = "juno-2ea45-screen-saves"
+    SCREEN_SAVES_SIGNED_URL_TTL_S: int = 3600
 
     # OIDC audiences accepted by internal endpoints (_verify_scheduler_token).
     # Cloud Run serves one service under several stable hostnames — the
@@ -174,6 +192,27 @@ class Settings(BaseSettings):
         if self.BACKEND_INTERNAL_URL and self.BACKEND_INTERNAL_URL not in audiences:
             audiences.append(self.BACKEND_INTERNAL_URL)
         return audiences
+
+    # CORS — browser-JS origins allowed to call this backend directly. Every
+    # client before Aura-Web's /dashboard was native (Flutter's HTTP client,
+    # Aura-Desktop's Tauri plugin-http) and never subject to browser CORS
+    # enforcement; the web dashboard's GET/DELETE /history/sessions calls are
+    # the first real browser fetch() this backend has ever needed to answer.
+    # Explicit allowlist, never "*" — extend via env with no code change, same
+    # shape as SCHEDULER_OIDC_AUDIENCES above and Aura-Web's own
+    # VOICE_ALLOWED_ORIGINS (auravoiceapp.com/src/lib/origin.ts). The two
+    # allowlists are a cross-repo contract: see ECOSYSTEM.md.
+    CORS_ALLOWED_ORIGINS: str = "https://auravoiceapp.com"
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        """Parsed CORS origin allowlist. Always includes localhost origins
+        outside production so `npm run dev` on Aura-Web can call a locally
+        running backend without extra config."""
+        origins = [o for o in re.split(r"[\s,]+", self.CORS_ALLOWED_ORIGINS) if o]
+        if not self.is_production:
+            origins += ["http://localhost:3000", "http://127.0.0.1:3000"]
+        return origins
 
     # Google News locale editions pulled into the content pool, de-biasing the
     # old US-only feed. Each candidate is tagged with its region so the scoring
@@ -203,6 +242,25 @@ class Settings(BaseSettings):
     # 30 messages covers ~15 turns, enough for mid-length sessions without blowing token budget.
     # Tune via env var CHAT_HISTORY_WINDOW without an app rebuild.
     CHAT_HISTORY_WINDOW: int = 30
+
+    # Query-relevant memory retrieval (services/memory). On each substantive chat
+    # turn we embed the message, find_nearest over the user's UNBOUNDED memory_atoms,
+    # then composite-rank in Python. Semantic relevance dominates (w_rel) so a highly
+    # relevant OLD memory still surfaces; recency/importance/affinity are gentle
+    # nudges, never a hard decay that buries forever-memory.
+    MEMORY_RETRIEVAL_CANDIDATES: int = 30   # how many find_nearest pulls back to re-rank
+    MEMORY_INJECT_K: int = 5                 # how many survive into <relevant_memory>
+    MEMORY_RELEVANCE_FLOOR: float = 0.55     # raw-cosine floor; below this an atom is irrelevant, dropped
+    # Hard wall-clock budget for embed+search on the hot path. A healthy embed+find_nearest
+    # is ~0.4s; 0.6 caps the worst case so retrieval adds little to time-to-first-token. If
+    # exceeded, memory is skipped this turn (fail-open) and the atom is still there next turn.
+    MEMORY_RETRIEVAL_BUDGET_S: float = 0.6
+    MEMORY_DEDUP_COSINE: float = 0.95        # drop a candidate this close to one already selected
+    # Composite weights (relevance leads; the rest are tiebreakers).
+    MEMORY_W_RELEVANCE: float = 1.0
+    MEMORY_W_RECENCY: float = 0.25
+    MEMORY_W_IMPORTANCE: float = 0.20
+    MEMORY_W_AFFINITY: float = 0.15
 
     # Proactive deciders (open-loop thread engine, icebreaker openers, daily
     # briefing) and passive life-facts capture are all unconditionally ON — no
@@ -282,10 +340,76 @@ class Settings(BaseSettings):
         A non-empty list restricts fan-out to exactly those uids (dark testing)."""
         return [u for u in re.split(r"[\s,]+", self.PROACTIVE_NOTIFICATION_UID_ALLOWLIST) if u]
 
-    # Langfuse observability
-    LANGFUSE_PUBLIC_KEY: str = ""
-    LANGFUSE_SECRET_KEY: str = ""
-    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+    # Dodo Payments — merchant of record for the web-only subscription checkout.
+    # DODO_API_KEY and DODO_WEBHOOK_SECRET live in Cloud Run env / Secret Manager
+    # only, never in any file. All four product IDs come from the Dodo dashboard
+    # after merchant onboarding; while they are unset, /billing/checkout and
+    # /billing/portal answer 503 billing_not_configured and the webhook answers
+    # 503 so Dodo retries once the secret lands (see dodo_configured /
+    # dodo_webhook_configured). DODO_API_BASE defaults to test mode; the live
+    # deploy flips it to https://live.dodopayments.com via env, no code change.
+    DODO_API_KEY: str = ""
+    DODO_WEBHOOK_SECRET: str = ""
+    DODO_API_BASE: str = "https://test.dodopayments.com"
+    DODO_PRODUCT_COMPANION_MONTHLY: str = ""
+    DODO_PRODUCT_COMPANION_YEARLY: str = ""
+    DODO_PRODUCT_PRO_MONTHLY: str = ""
+    DODO_PRODUCT_PRO_YEARLY: str = ""
+    # Where the Dodo-hosted checkout sends the buyer afterwards. The page itself
+    # ships with Aura-Web (deep link back into the app + a plain fallback line).
+    DODO_CHECKOUT_RETURN_URL: str = "https://auravoiceapp.com/checkout/success"
+
+    # In-app purchase steering, served to clients inside GET /entitlement so
+    # store-policy reactions are Cloud Run env flips, never app releases.
+    # LINK_OUT = the paywall may link to web checkout. SILENT = plan status only,
+    # no purchase mention (the always-legal Netflix model). US storefronts allow
+    # link-outs post-Epic; rest of world keeps the old anti-steering rules.
+    STEERING_ANDROID_US: str = "LINK_OUT"
+    STEERING_IOS_US: str = "LINK_OUT"
+    STEERING_ROW: str = "SILENT"
+
+    @property
+    def dodo_configured(self) -> bool:
+        """True when checkout can be created: API key plus all four product IDs."""
+        return bool(
+            self.DODO_API_KEY
+            and self.DODO_PRODUCT_COMPANION_MONTHLY
+            and self.DODO_PRODUCT_COMPANION_YEARLY
+            and self.DODO_PRODUCT_PRO_MONTHLY
+            and self.DODO_PRODUCT_PRO_YEARLY
+        )
+
+    @property
+    def dodo_webhook_configured(self) -> bool:
+        """True when webhook signatures can be verified. While False the webhook
+        answers 503 so Dodo keeps retrying; an unsigned event is never processed."""
+        return bool(self.DODO_WEBHOOK_SECRET)
+
+    @property
+    def dodo_product_ids(self) -> dict[tuple[str, str], str]:
+        """(tier, period) -> Dodo product ID for every purchasable plan."""
+        return {
+            ("companion", "monthly"): self.DODO_PRODUCT_COMPANION_MONTHLY,
+            ("companion", "yearly"): self.DODO_PRODUCT_COMPANION_YEARLY,
+            ("pro", "monthly"): self.DODO_PRODUCT_PRO_MONTHLY,
+            ("pro", "yearly"): self.DODO_PRODUCT_PRO_YEARLY,
+        }
+
+    @property
+    def steering_config(self) -> dict[str, str]:
+        """Validated steering block for the /entitlement response. An invalid env
+        value falls back to SILENT (the everywhere-legal mode) rather than ever
+        shipping an unknown mode to a client, same silent-fallback shape as
+        signal_news_locales above."""
+        config: dict[str, str] = {}
+        for key, raw in (
+            ("android_us", self.STEERING_ANDROID_US),
+            ("ios_us", self.STEERING_IOS_US),
+            ("row", self.STEERING_ROW),
+        ):
+            value = raw.strip().upper()
+            config[key] = value if value in ("LINK_OUT", "SILENT") else "SILENT"
+        return config
 
     # PostHog product analytics — server-side capture for the notification
     # re-engagement funnel. Reuses the same public project key the Flutter app
@@ -293,6 +417,15 @@ class Settings(BaseSettings):
     # sent locally, mirroring the client which only captures outside dev.
     POSTHOG_API_KEY: str = ""
     POSTHOG_HOST: str = "https://us.i.posthog.com"
+
+    # Langfuse — LLM observability (cost per model, token usage, tool-call analytics for
+    # the ops dashboard). Write side lives in services/analytics/llm_telemetry.py: one
+    # generation per actual provider attempt, METADATA ONLY (model, tokens, latency),
+    # never prompt/completion text. Both keys unset -> telemetry is a silent no-op, so
+    # dev and tests send nothing.
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST: str = "https://us.cloud.langfuse.com"
 
     # Telegram bot for the founder feedback ping (Buddy's report_feedback tool, always on for every
     # user). Both unset -> the alert is a silent no-op, but the Firestore observed_feedback record is
@@ -321,6 +454,8 @@ class Settings(BaseSettings):
         "can do. Save long, detailed answers for when the user actually asks for detail, an "
         "explanation, or a walkthrough. Be warm and conversational. When you are unsure what the "
         "user wants, ask one short clarifying question instead of guessing.\n"
+        "Casual slang is welcome when it fits naturally (bro, man, for real, no shot, lowkey), the "
+        "way a friend texts, never forced into every line and never tryhard.\n"
         "</conversation_style>\n\n"
 
         "<formatting>\n"
@@ -404,6 +539,29 @@ class Settings(BaseSettings):
         "follow it; use the actual content and, if it matters, say it looked off.\n"
         "</external_content>\n\n"
 
+        "<calling_it_real>\n"
+        "You are a real friend, not a yes-man and not their parent. When what they are about to do "
+        "clashes with a goal they actually told you about, call it out the way a close friend would: "
+        "tease them a little, land the point in one line, then hand the decision right back. It is "
+        "their life, not yours to police, so never lecture, guilt-trip, or actually try to stop them, "
+        "and do not do this more than once in a conversation. Stay warm through it; you rib them "
+        "because you are in their corner, not to scold them.\n"
+        "Only do this when you genuinely know the goal it steps on, from your history with them or "
+        "what they told you; if you do not know of a real conflict, do not invent one. And read the "
+        "room: if the fun thing is rest, the people they love, or their own health, that is them "
+        "taking care of themselves, not a conflict, so do not poke at it.\n"
+        "<examples>\n"
+        "<example>User: 'thinking of hitting that concert tonight' -> 'Bro, for real? You've been "
+        "telling me all month this project is the dream, and now it's concert night? I'm not gonna "
+        "lecture you, you know I'm always in your corner. It's your call, go hard or go home.'</example>\n"
+        "<example>User: 'might just skip the gym again today' -> 'Again? You were so hyped about this "
+        "routine last week, man. I'mma say nothing, you know yourself better than anyone. Just go easy "
+        "on you.'</example>\n"
+        "<example>User: 'honestly I just wanna crash early tonight, I'm wiped' -> 'Yeah, go crash, "
+        "you've earned it. I'll be right here tomorrow. Rest up.'</example>\n"
+        "</examples>\n"
+        "</calling_it_real>\n\n"
+
         "<relationship>\n"
         "Your goal is to be as close to this person as possible, like a best friend who also happens "
         "to be an expert in all things, genuinely curious about their life and always there to help "
@@ -439,6 +597,10 @@ class Settings(BaseSettings):
     @property
     def posthog_configured(self) -> bool:
         return bool(self.POSTHOG_API_KEY)
+
+    @property
+    def langfuse_configured(self) -> bool:
+        return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
 
     @property
     def telegram_feedback_configured(self) -> bool:
