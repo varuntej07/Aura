@@ -1,21 +1,17 @@
-import 'package:in_app_purchase/in_app_purchase.dart';
-
 import '../../core/base/safe_change_notifier.dart';
-import '../../core/logging/app_logger.dart';
 import '../../data/models/subscription_plan.dart';
 import '../../data/services/subscription_service.dart';
 
 /// Thin ViewModel that exposes [SubscriptionService] state to the UI.
 ///
-/// No business logic lives here — all decisions (trial logic, platform
-/// routing, Firestore writes) stay in [SubscriptionService].
-/// The VM's job is to drive loading state for the paywall screen and
-/// translate user actions into service calls.
+/// No business logic lives here; all decisions (steering resolution, caching,
+/// checkout session creation) stay in [SubscriptionService]. The VM's job is
+/// to drive loading state for the paywall screen and translate user actions
+/// into service calls.
 class SubscriptionViewModel extends SafeChangeNotifier {
   final SubscriptionService _subscriptionService;
 
-  bool _isPurchasing = false;
-  bool _isRestoring = false;
+  bool _isOpeningCheckout = false;
   String? _feedbackMessage;
 
   SubscriptionViewModel({required SubscriptionService subscriptionService})
@@ -29,52 +25,43 @@ class SubscriptionViewModel extends SafeChangeNotifier {
   bool get isTrialActive => _subscriptionService.isTrialActive;
   int get daysLeftInTrial => _subscriptionService.daysLeftInTrial;
   bool get hasFeatureAccess => _subscriptionService.hasFeatureAccess;
-  bool get isStoreAvailable => _subscriptionService.isStoreAvailable;
-  bool get isLoading => _subscriptionService.isLoading || _isPurchasing || _isRestoring;
-  List<ProductDetails> get products => _subscriptionService.products;
+  bool get isLoading => _subscriptionService.isLoading || _isOpeningCheckout;
   String? get errorMessage => _subscriptionService.errorMessage ?? _feedbackMessage;
   UserEntitlement? get entitlement => _subscriptionService.entitlement;
+  SteeringMode get steeringMode => _subscriptionService.steeringMode;
 
-  /// Convenience getters for the paywall screen — avoid repeating tier logic in UI.
+  /// Convenience getters for the paywall screen, so tier logic is not repeated in UI.
   bool get isOnCompanionPlan => currentTier == SubscriptionTier.companion;
   bool get isOnProPlan => currentTier == SubscriptionTier.pro;
   bool get isOnFreePlan => currentTier == SubscriptionTier.free && !isTrialActive;
+  bool get isPaid => _subscriptionService.entitlement?.isPaid ?? false;
 
   // Actions
 
-  /// Beta-only: record interest in a tier instead of opening the store sheet.
-  /// Use this everywhere the paywall CTA is tapped until real IAP is enabled.
-  Future<void> captureInterest({
+  /// Creates the web checkout session and opens the system browser.
+  /// The unlock arrives via the entitlement-updated push (or the resume
+  /// refetch); nothing is granted client-side.
+  Future<bool> openCheckout({
     required SubscriptionTier tier,
     required bool annual,
-  }) =>
-      _subscriptionService.captureInterest(tier: tier, annual: annual);
-
-  Future<void> purchaseCompanion({bool annual = false}) async {
-    final productId = annual
-        ? SubscriptionProductIds.companionAnnual
-        : SubscriptionProductIds.companionMonthly;
-    await _purchaseById(productId);
-  }
-
-  Future<void> purchasePro({bool annual = false}) async {
-    final productId = annual
-        ? SubscriptionProductIds.proAnnual
-        : SubscriptionProductIds.proMonthly;
-    await _purchaseById(productId);
-  }
-
-  Future<void> restorePurchases() async {
-    _isRestoring = true;
+  }) async {
+    _isOpeningCheckout = true;
     _feedbackMessage = null;
     safeNotifyListeners();
 
-    await _subscriptionService.restorePurchases();
+    final opened = await _subscriptionService.openCheckout(
+      tier: tier,
+      annual: annual,
+    );
 
-    _isRestoring = false;
-    _feedbackMessage = 'Purchases restored.';
+    _isOpeningCheckout = false;
     safeNotifyListeners();
+    return opened;
   }
+
+  /// Refetches entitlement from the backend (e.g. when the app resumes after
+  /// the user paid in the browser).
+  Future<void> refreshEntitlement() => _subscriptionService.refreshEntitlement();
 
   Future<bool> redeemPromoCode(String code) async {
     _feedbackMessage = null;
@@ -89,31 +76,7 @@ class SubscriptionViewModel extends SafeChangeNotifier {
     safeNotifyListeners();
   }
 
-  // Private 
-
-  Future<void> _purchaseById(String productId) async {
-    final product = products.where((p) => p.id == productId).firstOrNull;
-
-    if (product == null) {
-      AppLogger.warning(
-        'Product not found, store may not be initialised',
-        tag: 'SubscriptionViewModel',
-        metadata: {'productId': productId},
-      );
-      _feedbackMessage = "Purchase couldn't be completed. Try again or contact support.";
-      safeNotifyListeners();
-      return;
-    }
-
-    _isPurchasing = true;
-    _feedbackMessage = null;
-    safeNotifyListeners();
-
-    await _subscriptionService.purchaseProduct(product);
-
-    _isPurchasing = false;
-    safeNotifyListeners();
-  }
+  // Private
 
   void _onServiceChanged() => safeNotifyListeners();
 

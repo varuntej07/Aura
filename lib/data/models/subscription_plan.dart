@@ -1,139 +1,89 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-
 enum SubscriptionTier { free, companion, pro }
 
-enum SubscriptionStatus { active, expired, gracePeriod }
+enum SubscriptionStatus { trialing, active, expired, gracePeriod }
 
-/// How the entitlement was granted. Kept in Firestore so the backend
-/// entitlement middleware can handle each platform's receipt format correctly,
-/// and so web/promo grants can be added later without schema changes.
-enum EntitlementPlatform { ios, android, promo, web }
+/// What the paywall is allowed to do on this storefront, served by the backend
+/// inside GET /entitlement so store-policy reactions are backend config flips,
+/// never app releases.
+///
+/// [linkOut] = the paywall may link out to web checkout (US storefronts).
+/// [silent] = plan status only, no purchase mention at all (the always-legal
+/// Netflix model, everywhere else).
+enum SteeringMode { linkOut, silent }
 
-/// Trial length granted to every new account. Set to 45 days for the beta so
-/// every tester has full (Pro) access for the whole beta window. The backend
-/// entitlement check honours this automatically — it reads `trial_end_date`
-/// from the doc the client writes (no backend change needed). Drop back down
-/// when payments go live.
+/// Trial length granted to every account, server-stamped by the backend on the
+/// first GET /entitlement. Kept here only for paywall copy; the authoritative
+/// clock is the backend's `trial_end_date`.
 const int kTrialDurationDays = 45;
 
 class UserEntitlement {
   final SubscriptionTier tier;
   final SubscriptionStatus status;
-  final EntitlementPlatform? platform;
-  final String? productId;
   final DateTime? expiresAt;
-  final DateTime trialStartDate;
-  final DateTime trialEndDate;
-  final DateTime? originalPurchaseDate;
-  final DateTime updatedAt;
+  final DateTime? trialEndDate;
+  final bool cancelAtPeriodEnd;
+
+  /// The backend's authoritative access resolution (trial window counts as
+  /// pro, expired resolves free). Preferred over any client-side math.
+  final SubscriptionTier serverEffectiveTier;
 
   const UserEntitlement({
     required this.tier,
     required this.status,
-    required this.trialStartDate,
-    required this.trialEndDate,
-    required this.updatedAt,
-    this.platform,
-    this.productId,
+    required this.serverEffectiveTier,
     this.expiresAt,
-    this.originalPurchaseDate,
+    this.trialEndDate,
+    this.cancelAtPeriodEnd = false,
   });
 
   // Computed
   bool get isTrialActive =>
-      tier == SubscriptionTier.free &&
-      DateTime.now().isBefore(trialEndDate);
+      status == SubscriptionStatus.trialing &&
+      trialEndDate != null &&
+      DateTime.now().isBefore(trialEndDate!);
 
   bool get isPaid => tier != SubscriptionTier.free;
 
-  /// Returns 0 when trial has expired or user is on a paid plan.
+  /// Returns 0 when the trial has expired or the user is on a paid plan.
   int get daysLeftInTrial {
     if (!isTrialActive) return 0;
-    return trialEndDate.difference(DateTime.now()).inDays.clamp(0, kTrialDurationDays);
+    return trialEndDate!
+        .difference(DateTime.now())
+        .inDays
+        .clamp(0, kTrialDurationDays);
   }
 
-  /// The effective tier the user should receive access to.
-  /// During trial, the user gets Pro access regardless of their tier field.
-  SubscriptionTier get effectiveTier =>
-      isTrialActive ? SubscriptionTier.pro : tier;
+  /// The tier the user actually gets access to. The backend already resolved
+  /// the trial window and expiry, so this is a straight read.
+  SubscriptionTier get effectiveTier => serverEffectiveTier;
 
   bool get hasFeatureAccess => effectiveTier != SubscriptionTier.free;
 
-  // Factory
-  factory UserEntitlement.fromFirestore(Map<String, dynamic> data) {
-    final now = DateTime.now();
-    final trialStart = (data['trial_start_date'] as Timestamp?)?.toDate() ?? now;
-    final trialEnd = (data['trial_end_date'] as Timestamp?)?.toDate() ??
-        trialStart.add(const Duration(days: kTrialDurationDays));
-
+  /// Parses the GET /entitlement response (ISO 8601 timestamps, snake_case).
+  factory UserEntitlement.fromBackend(Map<String, dynamic> json) {
     return UserEntitlement(
-      tier: _parseTier(data['tier'] as String?),
-      status: _parseStatus(data['status'] as String?),
-      platform: _parsePlatform(data['platform'] as String?),
-      productId: data['product_id'] as String?,
-      expiresAt: (data['expires_at'] as Timestamp?)?.toDate(),
-      trialStartDate: trialStart,
-      trialEndDate: trialEnd,
-      originalPurchaseDate: (data['original_purchase_date'] as Timestamp?)?.toDate(),
-      updatedAt: (data['updated_at'] as Timestamp?)?.toDate() ?? now,
+      tier: _parseTier(json['tier'] as String?),
+      status: _parseStatus(json['status'] as String?),
+      serverEffectiveTier: _parseTier(json['effective_tier'] as String?),
+      expiresAt: _parseDate(json['expires_at']),
+      trialEndDate: _parseDate(json['trial_end_date']),
+      cancelAtPeriodEnd: json['cancel_at_period_end'] == true,
     );
   }
 
-  /// Default entitlement for a brand-new user. Trial starts immediately.
-  factory UserEntitlement.newUser() {
-    final now = DateTime.now();
-    return UserEntitlement(
-      tier: SubscriptionTier.free,
-      status: SubscriptionStatus.active,
-      trialStartDate: now,
-      trialEndDate: now.add(const Duration(days: kTrialDurationDays)),
-      updatedAt: now,
-    );
-  }
+  /// Round-trips through the local offline cache (SharedPreferences JSON).
+  factory UserEntitlement.fromCacheJson(Map<String, dynamic> json) =>
+      UserEntitlement.fromBackend(json);
 
-  Map<String, dynamic> toFirestore() => {
+  Map<String, dynamic> toCacheJson() => {
         'tier': tier.name,
         'status': status.name,
-        if (platform != null) 'platform': platform!.name,
-        if (productId != null) 'product_id': productId,
-        if (expiresAt != null) 'expires_at': Timestamp.fromDate(expiresAt!),
-        'trial_start_date': Timestamp.fromDate(trialStartDate),
-        'trial_end_date': Timestamp.fromDate(trialEndDate),
-        if (originalPurchaseDate != null)
-          'original_purchase_date': Timestamp.fromDate(originalPurchaseDate!),
-        'updated_at': FieldValue.serverTimestamp(),
-        // Backend-owned trial-lifecycle-notification claim flags (entitlement_notifications.py).
-        // Written false only so the fields EXIST on doc creation — a Firestore equality
-        // filter on `== false` never matches a field that's simply absent. The backend is
-        // the only writer of `true`; a later Flutter write (e.g. on purchase) resetting
-        // these to false is harmless because the backend query also filters `tier == free`,
-        // which excludes anyone who's upgraded regardless of these flags.
-        'trial_notified_3d': false,
-        'trial_notified_expired': false,
+        'effective_tier': serverEffectiveTier.name,
+        if (expiresAt != null) 'expires_at': expiresAt!.toIso8601String(),
+        if (trialEndDate != null)
+          'trial_end_date': trialEndDate!.toIso8601String(),
+        'cancel_at_period_end': cancelAtPeriodEnd,
       };
-
-  UserEntitlement copyWith({
-    SubscriptionTier? tier,
-    SubscriptionStatus? status,
-    EntitlementPlatform? platform,
-    String? productId,
-    DateTime? expiresAt,
-    DateTime? trialStartDate,
-    DateTime? trialEndDate,
-    DateTime? originalPurchaseDate,
-    DateTime? updatedAt,
-  }) =>
-      UserEntitlement(
-        tier: tier ?? this.tier,
-        status: status ?? this.status,
-        platform: platform ?? this.platform,
-        productId: productId ?? this.productId,
-        expiresAt: expiresAt ?? this.expiresAt,
-        trialStartDate: trialStartDate ?? this.trialStartDate,
-        trialEndDate: trialEndDate ?? this.trialEndDate,
-        originalPurchaseDate: originalPurchaseDate ?? this.originalPurchaseDate,
-        updatedAt: updatedAt ?? this.updatedAt,
-      );
 
   // Private parsers
   static SubscriptionTier _parseTier(String? value) =>
@@ -142,45 +92,57 @@ class UserEntitlement {
         orElse: () => SubscriptionTier.free,
       );
 
-  static SubscriptionStatus _parseStatus(String? value) =>
-      SubscriptionStatus.values.firstWhere(
-        (s) => s.name == value,
-        orElse: () => SubscriptionStatus.active,
-      );
-
-  static EntitlementPlatform? _parsePlatform(String? value) {
-    if (value == null) return null;
-    return EntitlementPlatform.values.firstWhere(
-      (p) => p.name == value,
-      orElse: () => EntitlementPlatform.ios,
+  static SubscriptionStatus _parseStatus(String? value) {
+    // Backend values (trialing, active, gracePeriod, expired) match the enum
+    // names exactly. Anything unrecognized resolves expired: never grant
+    // access off a value this client doesn't understand.
+    return SubscriptionStatus.values.firstWhere(
+      (s) => s.name == value,
+      orElse: () => SubscriptionStatus.expired,
     );
+  }
+
+  static DateTime? _parseDate(dynamic value) {
+    if (value is! String || value.isEmpty) return null;
+    return DateTime.tryParse(value);
   }
 }
 
-/// Product IDs as defined in App Store Connect and Play Console.
-/// Single source of truth — never hardcode these at callsites.
-class SubscriptionProductIds {
-  SubscriptionProductIds._();
+/// The steering block from GET /entitlement: which paywall behavior each
+/// storefront gets. Defaults to silent everywhere, the always-legal mode, so
+/// a missing or malformed block can never show a purchase UI it shouldn't.
+class SteeringConfig {
+  final SteeringMode androidUs;
+  final SteeringMode iosUs;
+  final SteeringMode restOfWorld;
 
-  static const String companionMonthly = 'aura_companion_monthly';
-  static const String companionAnnual = 'aura_companion_annual';
-  static const String proMonthly = 'aura_pro_monthly';
-  static const String proAnnual = 'aura_pro_annual';
+  const SteeringConfig({
+    required this.androidUs,
+    required this.iosUs,
+    required this.restOfWorld,
+  });
 
-  static const Set<String> all = {
-    companionMonthly,
-    companionAnnual,
-    proMonthly,
-    proAnnual,
-  };
+  static const SteeringConfig allSilent = SteeringConfig(
+    androidUs: SteeringMode.silent,
+    iosUs: SteeringMode.silent,
+    restOfWorld: SteeringMode.silent,
+  );
 
-  static SubscriptionTier tierForProductId(String productId) {
-    if (productId == companionMonthly || productId == companionAnnual) {
-      return SubscriptionTier.companion;
-    }
-    if (productId == proMonthly || productId == proAnnual) {
-      return SubscriptionTier.pro;
-    }
-    return SubscriptionTier.free;
+  factory SteeringConfig.fromBackend(Map<String, dynamic>? json) {
+    if (json == null) return allSilent;
+    return SteeringConfig(
+      androidUs: _parseMode(json['android_us']),
+      iosUs: _parseMode(json['ios_us']),
+      restOfWorld: _parseMode(json['row']),
+    );
   }
+
+  Map<String, dynamic> toCacheJson() => {
+        'android_us': androidUs == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
+        'ios_us': iosUs == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
+        'row': restOfWorld == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
+      };
+
+  static SteeringMode _parseMode(dynamic value) =>
+      value == 'LINK_OUT' ? SteeringMode.linkOut : SteeringMode.silent;
 }

@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/models/subscription_plan.dart';
+import '../../../data/services/notification_service.dart';
 import '../../../data/services/posthog_analytics_service.dart';
 import '../../viewmodels/subscription_viewmodel.dart';
 
@@ -14,13 +15,20 @@ enum _PlanToggle { free, companion, pro }
 enum _BillingPeriod { monthly, annual }
 
 class PaywallScreen extends StatefulWidget {
-  const PaywallScreen({super.key});
+  /// Set when the paywall was opened by tapping a trial-lifecycle notification
+  /// (3-days-left warning or trial-ended notice); drives contextual copy instead
+  /// of the generic entry-point subtitle. Null for every other entry point
+  /// (Settings, in-chat upsell, etc).
+  final TrialTapPayload? trialReason;
+
+  const PaywallScreen({super.key, this.trialReason});
 
   @override
   State<PaywallScreen> createState() => _PaywallScreenState();
 }
 
-class _PaywallScreenState extends State<PaywallScreen> {
+class _PaywallScreenState extends State<PaywallScreen>
+    with WidgetsBindingObserver {
   _PlanToggle _activePlan = _PlanToggle.companion;
   _BillingPeriod _billingPeriod = _BillingPeriod.annual;
   final PageController _togglePageController = PageController(initialPage: 1);
@@ -28,14 +36,39 @@ class _PaywallScreenState extends State<PaywallScreen> {
   @override
   void initState() {
     super.initState();
-    unawaited(context.read<PostHogAnalyticsService>().trackEvent('paywall_viewed'));
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(context.read<PostHogAnalyticsService>().trackEvent(
+      'paywall_viewed',
+      properties: {'trigger': widget.trialReason?.variant ?? 'direct'},
+    ));
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _togglePageController.dispose();
     super.dispose();
   }
+
+  /// The user pays in the system browser, so the unlock moment is usually
+  /// "came back to the app": refetch entitlement on every resume while the
+  /// paywall is up (one backend read, and the FCM push covers the rest).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      unawaited(context.read<SubscriptionViewModel>().refreshEntitlement());
+    }
+  }
+
+  /// Warm, contextual subtitle when arriving from a trial-lifecycle notification
+  /// tap, otherwise the generic entry-point copy.
+  String get _subtitle => switch (widget.trialReason?.variant) {
+        '3d_warning' =>
+          "Your trial wraps up in 3 days. Let's keep this going.",
+        'expired' =>
+          "Your trial's over, but Buddy's not going anywhere. Pick back up anytime.",
+        _ => '$kTrialDurationDays-day free trial. Cancel anytime.',
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -77,9 +110,9 @@ class _PaywallScreenState extends State<PaywallScreen> {
                             textAlign: TextAlign.center,
                           ),
                           const SizedBox(height: 6),
-                          const Text(
-                            '7-day free trial. Cancel anytime.',
-                            style: TextStyle(
+                          Text(
+                            _subtitle,
+                            style: const TextStyle(
                               color: AppColors.textTertiary,
                               fontSize: 14,
                             ),
@@ -121,49 +154,65 @@ class _PaywallScreenState extends State<PaywallScreen> {
                           ),
                           const SizedBox(height: 24),
 
-                          // Side-by-side billing cards
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: _BillingCard(
-                                  period: _BillingPeriod.monthly,
-                                  selected: _billingPeriod == _BillingPeriod.monthly,
-                                  enabled: _activePlan != _PlanToggle.free,
-                                  pricing: activePricing,
-                                  onTap: _activePlan != _PlanToggle.free
-                                      ? () => setState(() => _billingPeriod = _BillingPeriod.monthly)
-                                      : null,
+                          // Purchase UI only where the storefront allows a
+                          // web-checkout link-out (backend-served steering) and
+                          // the user is not already paying. SILENT mode and paid
+                          // users get plan status only: no prices, no purchase
+                          // mention, which is legal on every storefront.
+                          if (vm.steeringMode == SteeringMode.linkOut &&
+                              !vm.isPaid) ...[
+                            // Side-by-side billing cards
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Expanded(
+                                  child: _BillingCard(
+                                    period: _BillingPeriod.monthly,
+                                    selected: _billingPeriod == _BillingPeriod.monthly,
+                                    enabled: _activePlan != _PlanToggle.free,
+                                    pricing: activePricing,
+                                    onTap: _activePlan != _PlanToggle.free
+                                        ? () => setState(() => _billingPeriod = _BillingPeriod.monthly)
+                                        : null,
+                                  ),
                                 ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: _BillingCard(
+                                    period: _BillingPeriod.annual,
+                                    selected: _billingPeriod == _BillingPeriod.annual,
+                                    enabled: _activePlan != _PlanToggle.free,
+                                    pricing: activePricing,
+                                    onTap: _activePlan != _PlanToggle.free
+                                        ? () => setState(() => _billingPeriod = _BillingPeriod.annual)
+                                        : null,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 28),
+
+                            // CTA: checkout happens on the web, in the system
+                            // browser. This device unlocks by push or refetch.
+                            if (_activePlan != _PlanToggle.free) ...[
+                              _CtaButton(
+                                label: _activePlan == _PlanToggle.pro
+                                    ? 'Upgrade on the web · Pro'
+                                    : 'Upgrade on the web · Companion',
+                                isLoading: vm.isLoading,
+                                onTap: () => _onSubscribe(context, vm),
                               ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: _BillingCard(
-                                  period: _BillingPeriod.annual,
-                                  selected: _billingPeriod == _BillingPeriod.annual,
-                                  enabled: _activePlan != _PlanToggle.free,
-                                  pricing: activePricing,
-                                  onTap: _activePlan != _PlanToggle.free
-                                      ? () => setState(() => _billingPeriod = _BillingPeriod.annual)
-                                      : null,
-                                ),
+                            ] else ...[
+                              _GhostButton(
+                                label: 'Continue with Free',
+                                onTap: () => Navigator.pop(context),
                               ),
                             ],
-                          ),
-                          const SizedBox(height: 28),
-
-                          // CTA
-                          if (_activePlan != _PlanToggle.free) ...[
-                            _CtaButton(
-                              label: _activePlan == _PlanToggle.pro
-                                  ? 'Start 7-day trial · Pro'
-                                  : 'Start 7-day trial · Companion',
-                              isLoading: vm.isLoading,
-                              onTap: () => _onSubscribe(context, vm),
-                            ),
                           ] else ...[
+                            _PlanStatusCard(vm: vm),
+                            const SizedBox(height: 20),
                             _GhostButton(
-                              label: 'Continue with Free',
+                              label: 'Done',
                               onTap: () => Navigator.pop(context),
                             ),
                           ],
@@ -197,20 +246,15 @@ class _PaywallScreenState extends State<PaywallScreen> {
     final tier = _activePlan == _PlanToggle.pro
         ? SubscriptionTier.pro
         : SubscriptionTier.companion;
-    final tierLabel = _activePlan == _PlanToggle.pro ? 'Pro' : 'Companion';
     final annual = _billingPeriod == _BillingPeriod.annual;
 
-    unawaited(vm.captureInterest(tier: tier, annual: annual));
+    final opened = await vm.openCheckout(tier: tier, annual: annual);
 
-    if (!context.mounted) return;
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => _InterestCapturedDialog(
-        tierLabel: tierLabel,
-        period: annual ? 'yearly' : 'monthly',
-      ),
-    );
+    if (opened && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Finishing up in your browser. Buddy unlocks here the moment payment lands.'),
+      ));
+    }
   }
 
   static int _planIndex(_PlanToggle plan) {
@@ -255,15 +299,15 @@ class _PlanPricing {
 const _companionPricing = _PlanPricing(
   symbol: '\$',
   monthly: '19.99',
-  annual: '179.99',
-  monthlyEquivalent: '14.99',
+  annual: '191',
+  monthlyEquivalent: '15.92',
 );
 
 const _proPricing = _PlanPricing(
   symbol: '\$',
   monthly: '34.99',
-  annual: '314.99',
-  monthlyEquivalent: '26.25',
+  annual: '335',
+  monthlyEquivalent: '27.92',
 );
 
 _PlanPricing _pricingForPlan(_PlanToggle plan) {
@@ -370,12 +414,12 @@ class _FeatureItem {
 const _freeFeatureItems = [
   _FeatureItem(
     icon: Icons.record_voice_over_outlined,
-    text: '60 voice minutes per month',
+    text: '10 voice minutes every day',
     included: true,
   ),
   _FeatureItem(
-    icon: Icons.all_inclusive_rounded,
-    text: 'Unlimited chat',
+    icon: Icons.chat_bubble_outline_rounded,
+    text: '25 chat messages every day',
     included: true,
   ),
   _FeatureItem(
@@ -398,7 +442,7 @@ const _freeFeatureItems = [
 const _companionFeatureItems = [
   _FeatureItem(
     icon: Icons.record_voice_over_outlined,
-    text: '400 voice minutes per month',
+    text: 'Unlimited voice, whenever you want',
     included: true,
   ),
   _FeatureItem(
@@ -426,7 +470,7 @@ const _companionFeatureItems = [
 const _proFeatureItems = [
   _FeatureItem(
     icon: Icons.record_voice_over_outlined,
-    text: '700 voice minutes per month',
+    text: 'Unlimited voice, whenever you want',
     included: true,
   ),
   _FeatureItem(
@@ -606,7 +650,7 @@ class _BillingCard extends StatelessWidget {
                         borderRadius: BorderRadius.circular(5),
                       ),
                       child: const Text(
-                        'Save 25%',
+                        'Save 20%',
                         style: TextStyle(
                           color: AppColors.accent,
                           fontSize: 9,
@@ -763,55 +807,64 @@ class _GhostButton extends StatelessWidget {
   }
 }
 
-// Acknowledgement dialog shown during beta in place of real IAP
+// Plan status card, shown instead of any purchase UI when the storefront's
+// steering mode is SILENT (no purchase mention allowed) or the user already
+// pays. Status only: current plan, trial countdown, renewal state.
 
-class _InterestCapturedDialog extends StatelessWidget {
-  final String tierLabel;
-  final String period;
+class _PlanStatusCard extends StatelessWidget {
+  final SubscriptionViewModel vm;
 
-  const _InterestCapturedDialog({
-    required this.tierLabel,
-    required this.period,
-  });
+  const _PlanStatusCard({required this.vm});
+
+  String get _planLabel => switch (vm.currentTier) {
+        SubscriptionTier.pro => 'Pro',
+        SubscriptionTier.companion => 'Companion',
+        SubscriptionTier.free => 'Free',
+      };
+
+  String get _statusLine {
+    if (vm.isTrialActive) {
+      final days = vm.daysLeftInTrial;
+      return days == 1
+          ? 'Trial: 1 day left with the full Pro experience.'
+          : 'Trial: $days days left with the full Pro experience.';
+    }
+    if (vm.isPaid) {
+      if (vm.entitlement?.cancelAtPeriodEnd == true) {
+        return 'Your plan stays active until the end of this billing period.';
+      }
+      return "You're all set. Manage your plan anytime at auravoiceapp.com.";
+    }
+    return "You're on the free plan.";
+  }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      backgroundColor: AppColors.deepBackground,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-        side: BorderSide(color: AppColors.glassBorderLight),
-      ),
-      title: const Text(
-        'Thanks for your interest!',
-        style: TextStyle(
-          color: AppColors.textPrimary,
-          fontSize: 18,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      content: Text(
-        "Payments aren't live yet. We're shipping the final pieces. "
-        "We saved your interest in $tierLabel ($period) and you'll be the "
-        "first to know the moment it goes live.",
-        style: const TextStyle(
-          color: AppColors.textSecondary,
-          fontSize: 14,
-          height: 1.4,
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text(
-            'Got it',
-            style: TextStyle(
-              color: AppColors.accent,
-              fontWeight: FontWeight.w600,
+    return FauxGlassCard(
+      borderRadius: 18,
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Current plan: $_planLabel',
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
             ),
           ),
-        ),
-      ],
+          const SizedBox(height: 6),
+          Text(
+            _statusLine,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 14,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

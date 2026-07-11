@@ -1,51 +1,64 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io' show Platform;
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
-import 'package:in_app_purchase/in_app_purchase.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/config/environment.dart';
+import '../../core/constants/api_endpoints.dart';
 import '../../core/logging/app_logger.dart';
+import '../../core/network/api_client.dart';
 import '../models/subscription_plan.dart';
 import 'firebase_auth_service.dart';
-import 'firestore_service.dart';
 import 'posthog_analytics_service.dart';
 
 const _tag = 'SubscriptionService';
 
-/// Manages the full subscription lifecycle: store initialisation, product
-/// loading, purchase, restore, and Firestore entitlement sync.
+/// Set by main.dart's background FCM handler when an entitlement push arrives
+/// while the app is backgrounded (the background isolate cannot reach this
+/// isolate's streams, SharedPreferences is the only channel); consumed by
+/// [SubscriptionService.consumePendingBackgroundRefresh] on the next resume.
+const kEntitlementRefreshPendingKey = 'entitlement_refresh_pending_v1';
+
+/// Reads the account's subscription state from the backend and opens the web
+/// checkout. This client never writes entitlement anywhere: the backend stamps
+/// the 45-day trial on the first GET /entitlement and the Dodo payment webhook
+/// is the doc's only writer. In-app purchases are gone entirely; purchases
+/// happen on the web and unlock every device through the shared account.
 ///
-/// In dev mode the store is bypassed entirely and a hardcoded Pro entitlement
-/// is returned so UI work can proceed without StoreKit / Play Billing.
+/// Offline behavior: the last good /entitlement response is cached locally and
+/// honored for up to 7 days when the fetch fails, then access degrades to free.
+/// Never crash, never lock out, never silently grant.
 ///
-/// Entitlement source of truth is Firestore `users/{uid}/entitlement`.
-/// The backend entitlement middleware reads the same doc — this is the single
-/// field both sides share.
+/// In dev mode the backend is bypassed and a hardcoded Pro entitlement is
+/// returned so UI work needs no backend or account.
 class SubscriptionService extends ChangeNotifier {
   final FirebaseAuthService _authService;
   final PostHogAnalyticsService _postHogAnalyticsService;
-
-  StreamSubscription<List<PurchaseDetails>>? _purchaseStreamSub;
+  final ApiClient _apiClient;
 
   UserEntitlement? _entitlement;
-  List<ProductDetails> _products = const [];
-  bool _isStoreAvailable = false;
+  SteeringConfig _steering = SteeringConfig.allSilent;
+  String? _serverCountry;
   bool _isLoading = false;
   String? _errorMessage;
 
+  static const _cacheKey = 'entitlement_cache_v1';
+  static const _offlineGrace = Duration(days: 7);
+
   SubscriptionService({
-    required FirestoreService firestoreService,
     required FirebaseAuthService authService,
     required PostHogAnalyticsService postHogAnalyticsService,
+    required ApiClient apiClient,
   })  : _authService = authService,
-        _postHogAnalyticsService = postHogAnalyticsService;
+        _postHogAnalyticsService = postHogAnalyticsService,
+        _apiClient = apiClient;
 
   // ── Getters ────────────────────────────────────────────────────────────────
 
   UserEntitlement? get entitlement => _entitlement;
-  List<ProductDetails> get products => _products;
-  bool get isStoreAvailable => _isStoreAvailable;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
 
@@ -57,307 +70,228 @@ class SubscriptionService extends ChangeNotifier {
 
   bool get hasFeatureAccess => _entitlement?.hasFeatureAccess ?? false;
 
-  // ── Init ───────────────────────────────────────────────────────────────────
+  /// What the paywall may do on THIS device: web-checkout link-out or plan
+  /// status only. Picks the storefront key by platform and the country the
+  /// BACKEND resolved for this account's requests (GET /entitlement `country`).
+  /// The device locale is deliberately not consulted: it is user-configurable
+  /// and says nothing about the store storefront. While the backend cannot
+  /// resolve a country (`country` null), every device gets the always-legal
+  /// silent mode.
+  SteeringMode get steeringMode {
+    final country = _serverCountry;
+    if (country == null || country.isEmpty) return SteeringMode.silent;
+    if (country != 'US') return _steering.restOfWorld;
+    if (Platform.isAndroid) return _steering.androidUs;
+    if (Platform.isIOS) return _steering.iosUs;
+    // Desktop/web builds are not store-constrained; link-out is always fine
+    // there, but this service is only wired on mobile, so stay conservative.
+    return _steering.restOfWorld;
+  }
 
-  /// Call once after the user is authenticated. Safe to call multiple times.
-  Future<void> initStore() async {
+  /// Test hook: [steeringMode] reads private state normally set only by
+  /// [refreshEntitlement], whose backend leg is bypassed under flutter test
+  /// (dev mode).
+  @visibleForTesting
+  void debugSetSteeringState(SteeringConfig steering, String? country) {
+    _steering = steering;
+    _serverCountry = country;
+  }
+
+  // ── Entitlement fetch ──────────────────────────────────────────────────────
+
+  /// Fetches entitlement from the backend. Call after sign-in and whenever an
+  /// entitlement-updated push arrives. Safe to call repeatedly.
+  ///
+  /// On failure the last cached copy is served if it is fresher than 7 days,
+  /// otherwise access degrades to free until a fetch succeeds.
+  Future<void> refreshEntitlement() async {
     if (Environment.isDev) {
       _entitlement = _devProEntitlement();
-      _isStoreAvailable = false;
       AppLogger.info('Dev mode: subscription bypassed with Pro entitlement', tag: _tag);
       notifyListeners();
       return;
     }
 
+    final uid = _authService.currentUser?.uid;
+    if (uid == null) return;
+
     _setLoading(true);
 
-    await _loadOrCreateEntitlement();
+    final result = await _apiClient.get<Map<String, dynamic>>(
+      ApiEndpoints.entitlement,
+      (json) => json,
+    );
 
-    final available = await InAppPurchase.instance.isAvailable();
-    _isStoreAvailable = available;
+    await result.when(
+      success: (json) async {
+        _entitlement = UserEntitlement.fromBackend(json);
+        _steering = SteeringConfig.fromBackend(
+          json['steering'] as Map<String, dynamic>?,
+        );
+        _serverCountry = json['country'] as String?;
+        _errorMessage = null;
+        await _writeCache(uid, json);
+        AppLogger.info('Entitlement loaded', tag: _tag, metadata: {
+          'tier': _entitlement!.tier.name,
+          'status': _entitlement!.status.name,
+        });
+      },
+      failure: (error) async {
+        AppLogger.warning('Entitlement fetch failed, trying cache', tag: _tag,
+            metadata: {'error': error.message});
+        await _loadFromCache(uid);
+      },
+    );
 
-    if (!available) {
-      AppLogger.warning('Store not available on this device', tag: _tag);
-      _setLoading(false);
-      return;
-    }
-
-    _purchaseStreamSub?.cancel();
-    _purchaseStreamSub = InAppPurchase.instance.purchaseStream
-        .listen(_onPurchaseUpdate, onError: _onPurchaseStreamError);
-
-    await fetchProducts();
     _setLoading(false);
   }
 
-  // ── Products ───────────────────────────────────────────────────────────────
-
-  Future<void> fetchProducts() async {
-    if (!_isStoreAvailable) return;
+  /// Refetches entitlement if the background FCM isolate flagged that a
+  /// billing push arrived while the app was backgrounded. Cheap no-op when
+  /// nothing is pending; called from a global on-resume lifecycle hook.
+  Future<void> consumePendingBackgroundRefresh() async {
     try {
-      final response = await InAppPurchase.instance
-          .queryProductDetails(SubscriptionProductIds.all);
-
-      if (response.error != null) {
-        AppLogger.error(
-          'Product query error',
-          tag: _tag,
-          metadata: {'error': response.error!.message},
-        );
-      }
-
-      if (response.notFoundIDs.isNotEmpty) {
-        AppLogger.warning(
-          'Products not found in store',
-          tag: _tag,
-          metadata: {'ids': response.notFoundIDs.join(', ')},
-        );
-      }
-
-      _products = response.productDetails;
-      notifyListeners();
-    } catch (e, st) {
-      AppLogger.error('Failed to fetch products', error: e, stackTrace: st, tag: _tag);
+      final prefs = await SharedPreferences.getInstance();
+      // The flag was written by another isolate after this isolate's
+      // preference cache loaded; reload() is what makes it visible.
+      await prefs.reload();
+      if (!(prefs.getBool(kEntitlementRefreshPendingKey) ?? false)) return;
+      await prefs.remove(kEntitlementRefreshPendingKey);
+      AppLogger.info('Background entitlement push pending, refetching', tag: _tag);
+    } catch (e) {
+      AppLogger.warning('Background refresh marker check failed', tag: _tag,
+          metadata: {'error': e.toString()});
+      return;
     }
+    await refreshEntitlement();
   }
 
-  // ── Purchase ───────────────────────────────────────────────────────────────
+  // ── Web checkout ───────────────────────────────────────────────────────────
 
-  Future<void> purchaseProduct(ProductDetails product) async {
-    if (!_isStoreAvailable) return;
-    _clearError();
-
-    unawaited(_postHogAnalyticsService.trackEvent(
-      'purchase_initiated',
-      properties: {'product_id': product.id},
-    ));
-
-    final uid = _authService.currentUser?.uid;
-    final params = PurchaseParam(
-      productDetails: product,
-      applicationUserName: uid,
-    );
-
-    try {
-      await InAppPurchase.instance.buyNonConsumable(purchaseParam: params);
-    } catch (e, st) {
-      AppLogger.error('Purchase initiation failed', error: e, stackTrace: st, tag: _tag);
-      _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
-      notifyListeners();
-    }
-  }
-
-  Future<void> restorePurchases() async {
-    if (!_isStoreAvailable) return;
-    _setLoading(true);
-    _clearError();
-    try {
-      await InAppPurchase.instance.restorePurchases();
-    } catch (e, st) {
-      AppLogger.error('Restore failed', error: e, stackTrace: st, tag: _tag);
-      _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
-      _setLoading(false);
-      notifyListeners();
-    }
-  }
-
-  // ── Beta interest capture ──────────────────────────────────────────────────
-
-  /// Beta-only path used while real IAP is disabled. Records a tier-intent
-  /// signal so we can size willingness-to-pay before turning on payments.
-  /// Writes `users/{uid}/payment_intent/{tier}_{period}` in Firestore and
-  /// fires a PostHog `paywall_intent` event with the same fields.
-  Future<void> captureInterest({
+  /// Creates a checkout session on the backend and opens it in the system
+  /// browser (external, never a webview: that is what keeps the link-out
+  /// store-compliant). Returns true when the browser was opened.
+  Future<bool> openCheckout({
     required SubscriptionTier tier,
     required bool annual,
   }) async {
-    final period = annual ? 'annual' : 'monthly';
-    final uid = _authService.currentUser?.uid;
+    if (tier == SubscriptionTier.free) return false;
+    _clearError();
+    final period = annual ? 'yearly' : 'monthly';
 
     unawaited(_postHogAnalyticsService.trackEvent(
-      'paywall_intent',
-      properties: {
-        'tier': tier.name,
-        'billing_period': period,
-      },
+      'checkout_opened',
+      properties: {'tier': tier.name, 'billing_period': period},
     ));
 
-    if (uid == null) {
-      AppLogger.info('Interest captured pre-auth, PostHog only', tag: _tag);
-      return;
+    final result = await _apiClient.post<String>(
+      ApiEndpoints.billingCheckout,
+      {'tier': tier.name, 'period': period},
+      (json) => json['checkout_url'] as String? ?? '',
+    );
+
+    final url = result.dataOrNull;
+    if (url == null || url.isEmpty) {
+      AppLogger.error('Checkout session creation failed', tag: _tag,
+          metadata: {'error': result.errorOrNull?.message ?? 'empty checkout_url'});
+      _errorMessage = "Couldn't reach checkout right now. Give it another try in a bit.";
+      notifyListeners();
+      return false;
     }
 
     try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .collection('payment_intent')
-          .doc('${tier.name}_$period')
-          .set({
-        'tier': tier.name,
-        'billing_period': period,
-        'captured_at': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+      final opened = await launchUrl(
+        Uri.parse(url),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        _errorMessage = "Couldn't open your browser. Try again from Settings.";
+        notifyListeners();
+      }
+      return opened;
     } catch (e, st) {
-      AppLogger.error('Failed to write payment_intent', error: e, stackTrace: st, tag: _tag);
+      AppLogger.error('Checkout launch failed', error: e, stackTrace: st, tag: _tag);
+      _errorMessage = "Couldn't open your browser. Try again from Settings.";
+      notifyListeners();
+      return false;
     }
   }
 
   // ── Promo code redemption ──────────────────────────────────────────────────
 
-  /// Redeems a custom promo code via the backend. The backend validates the
-  /// code, increments usage, and writes the entitlement to Firestore directly.
-  /// This method just refreshes the local entitlement after the backend confirms.
+  /// Redeems a custom promo code via the backend. Not yet wired.
   Future<bool> redeemPromoCode(String code) async {
-    // TODO: call POST /redeem-promo once the backend endpoint exists (May 22).
-    // For now, signal not implemented.
     AppLogger.info('Promo redemption not yet wired to backend', tag: _tag);
     return false;
   }
 
-  // ── Private: purchase stream ───────────────────────────────────────────────
+  // ── Private: offline cache ─────────────────────────────────────────────────
 
-  Future<void> _onPurchaseUpdate(List<PurchaseDetails> purchases) async {
-    for (final purchase in purchases) {
-      switch (purchase.status) {
-        case PurchaseStatus.pending:
-          AppLogger.info('Purchase pending', tag: _tag,
-              metadata: {'productId': purchase.productID});
+  Future<void> _writeCache(String uid, Map<String, dynamic> json) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_cacheKey, jsonEncode({
+        'uid': uid,
+        'fetched_at': DateTime.now().toIso8601String(),
+        'entitlement': UserEntitlement.fromBackend(json).toCacheJson(),
+        'steering': SteeringConfig.fromBackend(
+          json['steering'] as Map<String, dynamic>?,
+        ).toCacheJson(),
+        'country': json['country'] as String?,
+      }));
+    } catch (e) {
+      AppLogger.warning('Entitlement cache write failed', tag: _tag,
+          metadata: {'error': e.toString()});
+    }
+  }
 
-        case PurchaseStatus.purchased:
-        case PurchaseStatus.restored:
-          await _verifyAndGrantEntitlement(purchase);
-          await InAppPurchase.instance.completePurchase(purchase);
-
-        case PurchaseStatus.error:
-          AppLogger.error('Purchase error', tag: _tag, metadata: {
-            'productId': purchase.productID,
-            'error': purchase.error?.message ?? 'unknown',
-          });
-          _errorMessage = "Purchase couldn't be completed. Try again or contact support.";
-          await InAppPurchase.instance.completePurchase(purchase);
+  /// Serves the cached entitlement when it belongs to this uid and is fresher
+  /// than the 7-day offline grace window; otherwise degrades to free.
+  Future<void> _loadFromCache(String uid) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_cacheKey);
+      if (raw != null) {
+        final cached = jsonDecode(raw) as Map<String, dynamic>;
+        final fetchedAt = DateTime.tryParse(cached['fetched_at'] as String? ?? '');
+        final cachedUid = cached['uid'] as String?;
+        if (cachedUid == uid &&
+            fetchedAt != null &&
+            DateTime.now().difference(fetchedAt) < _offlineGrace) {
+          _entitlement = UserEntitlement.fromCacheJson(
+            (cached['entitlement'] as Map).cast<String, dynamic>(),
+          );
+          _steering = SteeringConfig.fromBackend(
+            (cached['steering'] as Map?)?.cast<String, dynamic>(),
+          );
+          _serverCountry = cached['country'] as String?;
+          AppLogger.info('Serving cached entitlement (offline grace)', tag: _tag);
           notifyListeners();
-
-        case PurchaseStatus.canceled:
-          AppLogger.info('Purchase cancelled', tag: _tag,
-              metadata: {'productId': purchase.productID});
+          return;
+        }
       }
-    }
-    _setLoading(false);
-  }
-
-  void _onPurchaseStreamError(Object error, StackTrace st) {
-    AppLogger.error('Purchase stream error', error: error, stackTrace: st, tag: _tag);
-  }
-
-  /// Optimistic verification: trust the platform receipt and write to Firestore.
-  /// Replace with server-side Apple/Google receipt verification post-launch.
-  Future<void> _verifyAndGrantEntitlement(PurchaseDetails purchase) async {
-    final uid = _authService.currentUser?.uid;
-    if (uid == null) {
-      AppLogger.warning('Cannot grant entitlement, no user', tag: _tag);
-      return;
+    } catch (e) {
+      AppLogger.warning('Entitlement cache read failed', tag: _tag,
+          metadata: {'error': e.toString()});
     }
 
-    final tier = SubscriptionProductIds.tierForProductId(purchase.productID);
-    final platform = defaultTargetPlatform == TargetPlatform.iOS
-        ? EntitlementPlatform.ios
-        : EntitlementPlatform.android;
-
-    final existing = _entitlement;
-    final updated = (existing ?? UserEntitlement.newUser()).copyWith(
-      tier: tier,
-      status: SubscriptionStatus.active,
-      platform: platform,
-      productId: purchase.productID,
-      expiresAt: _expiresAtFromPurchase(purchase),
-      originalPurchaseDate: existing?.originalPurchaseDate ?? DateTime.now(),
-      updatedAt: DateTime.now(),
-    );
-
-    await _writeEntitlementToFirestore(uid, updated);
-    _entitlement = updated;
+    // No usable cache: degrade to free (never crash, never lock out UI, and
+    // never silently grant paid access we cannot confirm).
+    _entitlement = null;
+    _steering = SteeringConfig.allSilent;
+    _serverCountry = null;
     notifyListeners();
-
-    unawaited(_postHogAnalyticsService.trackEvent(
-      'purchase_completed',
-      properties: {'product_id': purchase.productID, 'tier': tier.name},
-    ));
-
-    AppLogger.info('Entitlement granted', tag: _tag,
-        metadata: {'tier': tier.name, 'productId': purchase.productID});
-  }
-
-  // ── Private: Firestore ─────────────────────────────────────────────────────
-
-  Future<void> _loadOrCreateEntitlement() async {
-    final uid = _authService.currentUser?.uid;
-    if (uid == null) return;
-
-    try {
-      final firestore = FirebaseFirestore.instance;
-      final doc = await firestore
-          .collection('users')
-          .doc(uid)
-          .collection('entitlement')
-          .doc('current')
-          .get();
-
-      if (doc.exists && doc.data() != null) {
-        _entitlement = UserEntitlement.fromFirestore(doc.data()!);
-        AppLogger.info('Entitlement loaded', tag: _tag,
-            metadata: {'tier': _entitlement!.tier.name});
-      } else {
-        // First install — create trial entitlement
-        final newEntitlement = UserEntitlement.newUser();
-        await _writeEntitlementToFirestore(uid, newEntitlement);
-        _entitlement = newEntitlement;
-        AppLogger.info('Trial entitlement created for new user', tag: _tag);
-      }
-      notifyListeners();
-    } catch (e, st) {
-      AppLogger.error('Failed to load entitlement', error: e, stackTrace: st, tag: _tag);
-    }
-  }
-
-  Future<void> _writeEntitlementToFirestore(
-    String uid,
-    UserEntitlement entitlement,
-  ) async {
-    try {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .collection('entitlement')
-          .doc('current')
-          .set(entitlement.toFirestore(), SetOptions(merge: true));
-    } catch (e, st) {
-      AppLogger.error('Failed to write entitlement', error: e, stackTrace: st, tag: _tag);
-    }
   }
 
   // ── Private: helpers ───────────────────────────────────────────────────────
-
-  /// Extracts an expiry from the purchase. StoreKit and Play Billing surface
-  /// this differently — for now we approximate from the product ID.
-  /// Replace with receipt parsing once server-side verification is live.
-  DateTime? _expiresAtFromPurchase(PurchaseDetails purchase) {
-    final id = purchase.productID;
-    if (id.contains('annual')) {
-      return DateTime.now().add(const Duration(days: 365));
-    }
-    return DateTime.now().add(const Duration(days: 31));
-  }
 
   UserEntitlement _devProEntitlement() {
     final now = DateTime.now();
     return UserEntitlement(
       tier: SubscriptionTier.pro,
       status: SubscriptionStatus.active,
-      platform: null,
-      trialStartDate: now,
+      serverEffectiveTier: SubscriptionTier.pro,
       trialEndDate: now.add(const Duration(days: kTrialDurationDays)),
-      updatedAt: now,
     );
   }
 
@@ -368,13 +302,5 @@ class SubscriptionService extends ChangeNotifier {
 
   void _clearError() {
     _errorMessage = null;
-  }
-
-  // ── Dispose ────────────────────────────────────────────────────────────────
-
-  @override
-  void dispose() {
-    _purchaseStreamSub?.cancel();
-    super.dispose();
   }
 }
