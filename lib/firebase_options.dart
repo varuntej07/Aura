@@ -26,8 +26,6 @@ class DefaultFirebaseOptions {
         return ios;
       case TargetPlatform.macOS:
         return macos;
-      case TargetPlatform.windows:
-        return windows;
       case TargetPlatform.linux:
         throw UnsupportedError(
           'DefaultFirebaseOptions have not been configured for linux - '
@@ -78,16 +76,6 @@ class DefaultFirebaseOptions {
     androidClientId: '620715294422-hbaqdmqiji1b2trn80rh22dvsjfniuf5.apps.googleusercontent.com',
     iosClientId: '620715294422-8eardf337q20amjabr9ht8c762g2too5.apps.googleusercontent.com',
     iosBundleId: 'com.varundevs.aura',
-  );
-
-  static const FirebaseOptions windows = FirebaseOptions(
-    apiKey: 'AIzaSyDrA4TpUuZpIcLq9vkuU_V89dGWmzROznM',
-    appId: '1:620715294422:web:9c82666ee2dfe6986e1377',
-    messagingSenderId: '620715294422',
-    projectId: 'juno-2ea45',
-    authDomain: 'juno-2ea45.firebaseapp.com',
-    storageBucket: 'juno-2ea45.firebasestorage.app',
-    measurementId: 'G-36N6LM52NS',
   );
 
 }

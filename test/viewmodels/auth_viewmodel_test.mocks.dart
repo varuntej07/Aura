@@ -267,6 +267,35 @@ class MockNotificationService extends _i1.Mock
           as _i3.Stream<_i8.TrackerUpdateTapPayload>);
 
   @override
+  _i3.Stream<_i8.ChatReplyTapPayload> get chatReplyTapStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#chatReplyTapStream),
+            returnValue: _i3.Stream<_i8.ChatReplyTapPayload>.empty(),
+            returnValueForMissingStub:
+                _i3.Stream<_i8.ChatReplyTapPayload>.empty(),
+          )
+          as _i3.Stream<_i8.ChatReplyTapPayload>);
+
+  @override
+  _i3.Stream<_i8.TrialTapPayload> get trialTapStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#trialTapStream),
+            returnValue: _i3.Stream<_i8.TrialTapPayload>.empty(),
+            returnValueForMissingStub: _i3.Stream<_i8.TrialTapPayload>.empty(),
+          )
+          as _i3.Stream<_i8.TrialTapPayload>);
+
+  @override
+  _i3.Stream<_i8.EntitlementUpdatedPayload> get entitlementUpdatedStream =>
+      (super.noSuchMethod(
+            Invocation.getter(#entitlementUpdatedStream),
+            returnValue: _i3.Stream<_i8.EntitlementUpdatedPayload>.empty(),
+            returnValueForMissingStub:
+                _i3.Stream<_i8.EntitlementUpdatedPayload>.empty(),
+          )
+          as _i3.Stream<_i8.EntitlementUpdatedPayload>);
+
+  @override
   _i3.Future<void> initialize(String? userId) =>
       (super.noSuchMethod(
             Invocation.method(#initialize, [userId]),
@@ -468,6 +497,46 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
                   _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
                     this,
                     Invocation.method(#refreshBuddyPills, []),
+                  ),
+                ),
+          )
+          as _i3.Future<_i6.Result<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<_i6.Result<Map<String, dynamic>>> startDevicePairing() =>
+      (super.noSuchMethod(
+            Invocation.method(#startDevicePairing, []),
+            returnValue: _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+              _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#startDevicePairing, []),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+                  _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#startDevicePairing, []),
+                  ),
+                ),
+          )
+          as _i3.Future<_i6.Result<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<_i6.Result<Map<String, dynamic>>> unlinkDevice(String? deviceId) =>
+      (super.noSuchMethod(
+            Invocation.method(#unlinkDevice, [deviceId]),
+            returnValue: _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+              _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#unlinkDevice, [deviceId]),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+                  _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#unlinkDevice, [deviceId]),
                   ),
                 ),
           )

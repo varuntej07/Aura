@@ -11,7 +11,7 @@ import '../../core/analytics/funnel_events.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
 import 'backend_api_service.dart';
-import 'posthog_analytics_service.dart';
+import '../../core/analytics/analytics_client.dart';
 import 'thread_notification_handler.dart';
 
 /// Payload emitted when the user taps an engagement notification.
@@ -124,6 +124,29 @@ class ChatReplyTapPayload {
   });
 }
 
+/// Payload emitted when the user taps a trial-lifecycle notification (3-days-left
+/// warning or trial-ended notice, `entitlement_notifications.py`). Opens the paywall
+/// with copy contextualized by [variant] ('3d_warning' | 'expired').
+class TrialTapPayload {
+  final String variant;
+
+  const TrialTapPayload({this.variant = ''});
+}
+
+/// Payload emitted when an entitlement-updated push arrives (the billing
+/// webhook just rewrote this account's entitlement: purchase, renewal, payment
+/// trouble, refund). [tier]/[status] are hints for logging; the consumer's job
+/// is to refetch GET /entitlement, never to trust the push payload itself.
+class EntitlementUpdatedPayload {
+  final String tier;
+  final String status;
+
+  const EntitlementUpdatedPayload({this.tier = '', this.status = ''});
+}
+
+/// notification_type sent by the backend's billing webhook sync push.
+const kEntitlementUpdatedType = 'entitlement_updated';
+
 const _tag = 'NotificationService';
 
 /// Android notification channel used for all Aura notifications.
@@ -145,12 +168,12 @@ const _kAndroidChannelName = 'Aura Notifications';
 class NotificationService {
   final ApiClient _apiClient;
   final BackendApiService? _signalEventSink;
-  final PostHogAnalyticsService _postHogAnalyticsService;
+  final AnalyticsClient _postHogAnalyticsService;
 
   NotificationService({
     required ApiClient apiClient,
     BackendApiService? signalEventSink,
-    required PostHogAnalyticsService postHogAnalyticsService,
+    required AnalyticsClient postHogAnalyticsService,
   })  : _apiClient = apiClient,
         _signalEventSink = signalEventSink,
         _postHogAnalyticsService = postHogAnalyticsService;
@@ -176,6 +199,9 @@ class NotificationService {
       StreamController<TrackerUpdateTapPayload>.broadcast();
   final _chatReplyTapController =
       StreamController<ChatReplyTapPayload>.broadcast();
+  final _trialTapController = StreamController<TrialTapPayload>.broadcast();
+  final _entitlementUpdatedController =
+      StreamController<EntitlementUpdatedPayload>.broadcast();
 
   // Emits when the user taps an engagement notification.
   Stream<EngagementTapPayload> get engagementTapStream => _engagementTapController.stream;
@@ -208,6 +234,16 @@ class NotificationService {
   // session and hydrates the reply that finished while the app was backgrounded.
   Stream<ChatReplyTapPayload> get chatReplyTapStream =>
       _chatReplyTapController.stream;
+
+  // Emits when the user taps a trial-lifecycle notification — opens the paywall with
+  // copy contextualized to why they're there.
+  Stream<TrialTapPayload> get trialTapStream => _trialTapController.stream;
+
+  // Emits when an entitlement-updated push arrives (on receipt while
+  // foregrounded, or on tap) — the subscriber refetches /entitlement so every
+  // surface reflects the purchase/downgrade within seconds.
+  Stream<EntitlementUpdatedPayload> get entitlementUpdatedStream =>
+      _entitlementUpdatedController.stream;
 
   // Public API
 
@@ -332,6 +368,8 @@ class NotificationService {
     await _dailyBriefingTapController.close();
     await _trackerUpdateTapController.close();
     await _chatReplyTapController.close();
+    await _trialTapController.close();
+    await _entitlementUpdatedController.close();
   }
 
   // Private helpers
@@ -415,6 +453,14 @@ class NotificationService {
     // the interactive chip notification ourselves, same as in the background.
     if (isThreadFollowUp(message)) {
       await showThreadFollowUpNotification(message);
+      return;
+    }
+
+    // Entitlement sync push (billing webhook): the action is a refetch, there
+    // is nothing to render. Emitted on RECEIPT, not on tap, so an open app
+    // unlocks the moment payment lands in the browser next door.
+    if (message.data['notification_type'] == kEntitlementUpdatedType) {
+      _emitEntitlementUpdated(message.data);
       return;
     }
 
@@ -678,7 +724,28 @@ class NotificationService {
           sessionId: data['session_id'] as String? ?? '',
         ));
       }
+    } else if (notificationType == 'trial') {
+      // Trial 3-days-left warning or trial-ended notice tapped: open the paywall,
+      // contextualized by trial_variant.
+      _trialTapController.add(TrialTapPayload(
+        variant: data['trial_variant'] as String? ?? '',
+      ));
+    } else if (notificationType == kEntitlementUpdatedType) {
+      // Entitlement-updated tapped (iOS shows it as a visible alert): same
+      // refetch as the on-receipt path, no navigation.
+      _emitEntitlementUpdated(data);
     }
+  }
+
+  void _emitEntitlementUpdated(Map<String, dynamic> data) {
+    AppLogger.info('Entitlement-updated push received', tag: _tag, metadata: {
+      'tier': data['tier'],
+      'status': data['status'],
+    });
+    _entitlementUpdatedController.add(EntitlementUpdatedPayload(
+      tier: data['tier'] as String? ?? '',
+      status: data['status'] as String? ?? '',
+    ));
   }
 
   /// Relays an Android notification body tap (from the local-notifications

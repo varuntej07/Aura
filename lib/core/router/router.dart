@@ -14,6 +14,7 @@ import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_backup_service.dart';
 import '../../data/services/chat_session_manager.dart';
 import '../../data/services/feedback_service.dart';
+import '../../data/services/notification_service.dart';
 import '../../data/services/posthog_analytics_service.dart';
 import '../../core/network/connectivity_service.dart';
 import '../../presentation/screens/app_shell.dart';
@@ -152,8 +153,10 @@ GoRouter buildRouter(
       GoRoute(
         path: '/paywall',
         name: 'Paywall',
-        pageBuilder: (context, state) =>
-            _slidePage(state, const PaywallScreen()),
+        pageBuilder: (context, state) => _slidePage(
+          state,
+          PaywallScreen(trialReason: state.extra as TrialTapPayload?),
+        ),
       ),
       GoRoute(
         path: '/reminders',

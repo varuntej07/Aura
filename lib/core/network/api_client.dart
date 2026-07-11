@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
 import '../constants/app_constants.dart';
 import '../config/environment.dart';
 import '../errors/app_exception.dart';
@@ -15,17 +16,41 @@ class ApiClient {
   final ConnectivityService _connectivity;
   final Future<String?> Function({bool forceRefresh}) _tokenProvider;
 
+  /// Platform identifier sent on every request ("android" | "ios" | "windows"
+  /// | ...). Computed once; this app never runs on the web, so dart:io is safe.
+  static final String _platformHeaderValue = Platform.operatingSystem;
+
+  /// App version sent on every request. Resolved from PackageInfo exactly once
+  /// (kicked off in the constructor); empty until the async lookup completes
+  /// so no request is ever delayed waiting for it.
+  static String _appVersionHeaderValue = '';
+  static Future<void>? _appVersionResolution;
+
   ApiClient({
     required ConnectivityService connectivity,
     required Future<String?> Function({bool forceRefresh}) tokenProvider,
   })  : _connectivity = connectivity,
-        _tokenProvider = tokenProvider;
+        _tokenProvider = tokenProvider {
+    _ensureAppVersionResolved();
+  }
+
+  static void _ensureAppVersionResolved() {
+    _appVersionResolution ??= PackageInfo.fromPlatform().then((info) {
+      _appVersionHeaderValue = info.version;
+    }).catchError((Object e) {
+      // A missing version header is harmless; never let it affect requests.
+      AppLogger.warning('Failed to resolve app version for request headers',
+          tag: 'ApiClient', metadata: {'error': e.toString()});
+    });
+  }
 
   Future<Map<String, String>> _headers() async {
     final token = await _resolveAuthToken();
     return {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
+      'X-Aura-Platform': _platformHeaderValue,
+      'X-Aura-App-Version': _appVersionHeaderValue,
       if (token != null) 'Authorization': 'Bearer $token',
     };
   }

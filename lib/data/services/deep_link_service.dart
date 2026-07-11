@@ -21,6 +21,10 @@ class DeepLinkService {
   DeepLinkService._();
   static final DeepLinkService instance = DeepLinkService._();
 
+  /// `aura://checkout`: the web checkout return page hands the buyer back to
+  /// the app; the only action is an entitlement refetch, no navigation.
+  static const String launchActionEntitlementRefresh = 'entitlement_refresh';
+
   // Visible for tests (so a fake AppLinks can be injected).
   @visibleForTesting
   AppLinks appLinks = AppLinks();
@@ -68,11 +72,16 @@ class DeepLinkService {
   String? _actionForUri(Uri uri) => actionForUri(uri);
 
   /// Maps a deep link to a launch action, or null if it is not one we handle.
-  /// Accepts `aura://voice` and the `auravoiceapp.com/voice` http(s) App Link path.
-  /// The host is checked so a stray `/voice` on any other site never opens voice.
-  /// Static and pure so it can be unit-tested without the app_links plugin.
+  /// Accepts `aura://voice` (plus the `auravoiceapp.com/voice` http(s) App Link
+  /// path) for voice, and `aura://checkout` for the post-payment entitlement
+  /// refresh. The host is checked so a stray `/voice` on any other site never
+  /// opens voice. Static and pure so it can be unit-tested without the
+  /// app_links plugin.
   @visibleForTesting
   static String? actionForUri(Uri uri) {
+    if (uri.scheme == 'aura' && uri.host == 'checkout') {
+      return launchActionEntitlementRefresh;
+    }
     final isAuraScheme = uri.scheme == 'aura' && uri.host == 'voice';
     // A trailing slash (.../voice/) yields an empty final segment; drop it so the
     // App Link still matches.

@@ -25,6 +25,29 @@ void main() {
       );
     });
 
+    test('aura://checkout maps to the entitlement refresh action', () {
+      expect(
+        DeepLinkService.actionForUri(Uri.parse('aura://checkout')),
+        DeepLinkService.launchActionEntitlementRefresh,
+      );
+    });
+
+    test('aura://checkout with a trailing slash still maps', () {
+      expect(
+        DeepLinkService.actionForUri(Uri.parse('aura://checkout/')),
+        DeepLinkService.launchActionEntitlementRefresh,
+      );
+    });
+
+    test('https /checkout path does NOT map (aura scheme only)', () {
+      expect(
+        DeepLinkService.actionForUri(
+          Uri.parse('https://auravoiceapp.com/checkout'),
+        ),
+        isNull,
+      );
+    });
+
     test('unrelated links return null', () {
       for (final url in [
         'aura://settings',

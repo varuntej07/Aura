@@ -8,6 +8,7 @@ import '../../data/models/user_model.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/services/backend_api_service.dart';
 import '../../data/services/notification_service.dart';
+import '../../data/services/subscription_service.dart';
 import '../../core/analytics/analytics_client.dart';
 import 'view_state.dart';
 
@@ -17,18 +18,29 @@ class AuthViewModel extends SafeChangeNotifier {
   final AuthRepository _authRepository;
   final NotificationService _notificationService;
   final BackendApiService _backendApiService;
+  // Nullable: the desktop DI graph excludes the subscription service entirely
+  // (no paywall/entitlement surface there), so it never supplies this.
+  final SubscriptionService? _subscriptionService;
   final AnalyticsClient _postHogAnalyticsService;
   StreamSubscription<UserModel?>? _authSubscription;
+  StreamSubscription<EntitlementUpdatedPayload>? _entitlementUpdatedSub;
 
   AuthViewModel({
     required AuthRepository authRepository,
     required NotificationService notificationService,
     required BackendApiService backendApiService,
+    SubscriptionService? subscriptionService,
     required AnalyticsClient postHogAnalyticsService,
   })  : _authRepository = authRepository,
         _notificationService = notificationService,
         _backendApiService = backendApiService,
-        _postHogAnalyticsService = postHogAnalyticsService;
+        _subscriptionService = subscriptionService,
+        _postHogAnalyticsService = postHogAnalyticsService {
+    // The billing webhook's sync push: refetch entitlement so this device
+    // unlocks (or downgrades) within seconds of the payment event landing.
+    _entitlementUpdatedSub = _notificationService.entitlementUpdatedStream
+        .listen((_) => _subscriptionService?.refreshEntitlement());
+  }
 
   ViewState _state = ViewState.idle;
   UserModel? _user;
@@ -78,6 +90,9 @@ class AuthViewModel extends SafeChangeNotifier {
         if (user != null) {
           ErrorHandler.setUser(user.uid);
           unawaited(_notificationService.initialize(user.uid));
+          if (_subscriptionService != null) {
+            unawaited(_subscriptionService.refreshEntitlement());
+          }
           unawaited(_postHogAnalyticsService.identifyUser(user.uid));
         }
         final nextState = user != null ? ViewState.loaded : ViewState.idle;
@@ -268,6 +283,7 @@ class AuthViewModel extends SafeChangeNotifier {
   @override
   void dispose() {
     _authSubscription?.cancel();
+    _entitlementUpdatedSub?.cancel();
     super.dispose();
   }
 }

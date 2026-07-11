@@ -44,6 +44,9 @@ void main() {
       Result.failure(AppException.unexpected('dummy')),
     );
     provideDummy<Result<void>>(const Result.success(null));
+    provideDummy<Stream<EntitlementUpdatedPayload>>(
+      const Stream<EntitlementUpdatedPayload>.empty(),
+    );
   });
 
   late MockAuthRepository authRepository;
@@ -64,6 +67,9 @@ void main() {
     when(authRepository.signOut())
         .thenAnswer((_) async => const Result.success(null));
     when(notificationService.initialize(any)).thenAnswer((_) async {});
+    // The VM subscribes to this in its constructor (entitlement sync push).
+    when(notificationService.entitlementUpdatedStream)
+        .thenAnswer((_) => const Stream<EntitlementUpdatedPayload>.empty());
     when(postHog.identifyUser(any)).thenAnswer((_) async {});
     when(postHog.reset()).thenAnswer((_) async {});
 

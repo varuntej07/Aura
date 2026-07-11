@@ -12,7 +12,9 @@ import 'core/errors/error_handler.dart';
 import 'core/logging/app_logger.dart';
 import 'data/services/analytics_service.dart';
 import 'data/services/keyboard_credential_bridge.dart';
+import 'data/services/notification_service.dart' show kEntitlementUpdatedType;
 import 'data/services/posthog_analytics_service.dart';
+import 'data/services/subscription_service.dart' show kEntitlementRefreshPendingKey;
 import 'data/services/thread_notification_handler.dart';
 import 'data/services/voice_launcher_bridge.dart';
 import 'data/services/deep_link_service.dart';
@@ -34,10 +36,19 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   );
 
   // Curiosity follow-ups arrive data-only so we can render interactive
-  // suggestion chips ourselves (FCM cannot draw action buttons). 
+  // suggestion chips ourselves (FCM cannot draw action buttons).
   // Build the rich notification here in the background isolate.
   if (isThreadFollowUp(message)) {
     await showThreadFollowUpNotification(message);
+  }
+
+  // Billing sync push while backgrounded: this isolate cannot reach the UI
+  // isolate's streams, so persist a marker that SubscriptionService consumes
+  // on the next app resume. Without it a refund/renewal landing while the app
+  // is backgrounded stays invisible until a restart or paywall visit.
+  if (message.data['notification_type'] == kEntitlementUpdatedType) {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(kEntitlementRefreshPendingKey, true);
   }
 }
 

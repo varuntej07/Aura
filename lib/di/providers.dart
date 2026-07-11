@@ -88,9 +88,9 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
 
   final wakeWordService = WakeWordService();
   final subscriptionService = SubscriptionService(
-    firestoreService: firestoreService,
     authService: firebaseAuthService,
     postHogAnalyticsService: postHogAnalyticsService,
+    apiClient: apiClient,
   );
 
   // Domain repositories
@@ -155,6 +155,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
         authRepository: authRepository,
         notificationService: notificationService,
         backendApiService: backendApiService,
+        subscriptionService: subscriptionService,
         postHogAnalyticsService: postHogAnalyticsService,
       ),
     ),

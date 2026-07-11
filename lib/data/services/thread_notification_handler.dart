@@ -20,10 +20,13 @@ import '../../core/logging/app_logger.dart';
 /// therefore packaged here as top-level functions with no app-state dependency.
 ///
 /// Android: the notification carries a `Reply` action backed by RemoteInput with
-/// the LLM's suggestion chips. Tapping a chip (or typing) posts the answer to
-/// `/threads/reply` and re-posts the notification showing Buddy's reply — the
-/// app never opens. iOS has no dynamic chips, so it shows a plain push and the
-/// pills render in-chat on tap (handled by [NotificationService]).
+/// the LLM's suggestion chips (send-only). Tapping a chip optimistically re-posts
+/// the user's own words straight away (clearing Android's "sending" spinner),
+/// posts the answer to `/threads/reply`, and Buddy's reply arrives as its own
+/// follow-up push that updates the same notification — so it lands even if this
+/// isolate is reaped the instant the request flushes. The app never opens. iOS
+/// has no dynamic chips, so it shows a plain push and the pills render in-chat on
+/// tap (handled by [NotificationService]).
 ///
 /// VERIFICATION: the RemoteInput + background-isolate flow only runs on a
 /// physical Android device. Run `flutter analyze` and dogfood on-device before
@@ -76,10 +79,23 @@ List<String> _decodeSuggestedReplies(Map<String, dynamic> data) {
 Future<void> showThreadFollowUpNotification(RemoteMessage message) async {
   final data = message.data;
   final threadId = data['thread_id'] as String? ?? '';
+  if (threadId.isEmpty) return;
+
+  // Buddy's async reply to a shade answer rides this same type tagged
+  // kind=reply: update the SAME notification with his words and no chips (the
+  // conversation continues in the app on a body tap).
+  final buddyReply = data['buddy_reply'] as String? ?? '';
+  if (data['kind'] == 'reply' || buddyReply.isNotEmpty) {
+    if (buddyReply.isEmpty) return;
+    await _repostThreadConversation(threadId: threadId, body: buddyReply);
+    return;
+  }
+
   final question = data['question'] as String? ?? '';
-  if (threadId.isEmpty || question.isEmpty) return;
+  if (question.isEmpty) return;
 
   final replies = _decodeSuggestedReplies(data);
+  final notificationReason = data['notification_reason'] as String? ?? '';
 
   await _ensureIsolatePluginInitialized();
 
@@ -92,12 +108,16 @@ Future<void> showThreadFollowUpNotification(RemoteMessage message) async {
       AndroidNotificationAction(
         _kReplyActionId,
         'Reply',
-        // RemoteInput: tapping shows the suggestion chips and a free-form field.
+        // RemoteInput with choices only (no free-form field). With
+        // allowFreeFormInput:false Android renders the choices as instant-send
+        // buttons: tapping a chip dispatches the action immediately instead of
+        // loading the chip text into an editable field the user must then send.
+        // Free-form typing lives on the body-tap -> chat path instead.
         inputs: <AndroidNotificationActionInput>[
           AndroidNotificationActionInput(
             label: 'Tell Buddy',
             choices: replies,
-            allowFreeFormInput: true,
+            allowFreeFormInput: false,
           ),
         ],
         // Handle in the background isolate — do not launch the UI, keep the
@@ -114,11 +134,13 @@ Future<void> showThreadFollowUpNotification(RemoteMessage message) async {
     body: question,
     notificationDetails: NotificationDetails(android: androidDetails),
     // Carry everything the tap/reply handlers need through the single payload
-    // slot — including the chips, so a body tap can open chat with the pills.
+    // slot, including the chips, so a body tap can open chat with the pills (the
+    // path for a free-form / custom reply, since the shade chips are send-only).
     payload: jsonEncode({
       'thread_id': threadId,
       'question': question,
       'suggested_replies': replies,
+      'notification_reason': notificationReason,
     }),
   );
 }
@@ -144,6 +166,7 @@ void _emitBodyTap(String? payload) {
       'suggested_replies':
           (decoded['suggested_replies'] as List?)?.map((e) => e.toString()).toList() ??
               const <String>[],
+      'notification_reason': decoded['notification_reason'] as String? ?? '',
     });
   } catch (_) {
     // Malformed payload just means no routing — never throw out of a tap.
@@ -170,9 +193,11 @@ Future<void> handleThreadNotificationColdLaunch() async {
 /// Registered via `onDidReceiveBackgroundNotificationResponse`. Must be
 /// top-level and annotated so tree-shaking keeps it.
 @pragma('vm:entry-point')
-void threadReplyNotificationBackground(NotificationResponse response) {
-  // Fire-and-forget: the isolate stays alive for the returned future.
-  handleThreadReplyResponse(response);
+Future<void> threadReplyNotificationBackground(NotificationResponse response) async {
+  // Await so this isolate stays alive through the optimistic echo (which clears
+  // the chip spinner) and the flush of the reply request. A fire-and-forget call
+  // could tear the isolate down before the echo, leaving the chip spinning.
+  await handleThreadReplyResponse(response);
 }
 
 /// Shared reply handling, callable from foreground or background.
@@ -195,24 +220,71 @@ Future<void> handleThreadReplyResponse(NotificationResponse response) async {
 
   String threadId;
   String question;
+  String notificationReason;
   try {
     final decoded = jsonDecode(payload) as Map<String, dynamic>;
     threadId = decoded['thread_id'] as String? ?? '';
     question = decoded['question'] as String? ?? '';
+    notificationReason = decoded['notification_reason'] as String? ?? '';
   } catch (_) {
     return;
   }
   if (threadId.isEmpty) return;
 
-  final buddyReply = await _postThreadReply(
+  // 1. Optimistic echo FIRST. Android keeps a "sending" spinner on the chip
+  //    until this notification is updated, so doing it before any auth/network/
+  //    LLM work clears it in well under a second — and it survives this isolate
+  //    being reaped mid-request. This is the WhatsApp move: your own words land
+  //    instantly, the reply follows.
+  try {
+    await _repostThreadConversation(
+      threadId: threadId,
+      body: reply,
+      question: question,
+      notificationReason: notificationReason,
+    );
+  } catch (e) {
+    // If even the echo failed, cancel the notification so the spinner can never
+    // hang — a cleared notification beats a stuck one.
+    try {
+      await _isolatePlugin.cancel(id: _notificationIdForThread(threadId));
+    } catch (_) {}
+    AppLogger.warning(
+      'Thread optimistic echo failed',
+      tag: _tag,
+      metadata: {'error': e.toString()},
+    );
+  }
+
+  // 2. Deliver the answer to the backend. Buddy's reply comes back as its OWN
+  //    follow-up push (handled by showThreadFollowUpNotification) that updates
+  //    this same notification, so it lands even if this isolate is gone the
+  //    moment the request flushes. We deliberately do not re-post Buddy's reply
+  //    here, and we leave the echo in place on failure rather than clobber a
+  //    reply push that may already be arriving.
+  final sent = await _postThreadReply(
     threadId: threadId,
     question: question,
     reply: reply,
   );
+  if (!sent) {
+    AppLogger.warning(
+      'Thread reply not delivered; optimistic echo left in shade',
+      tag: _tag,
+      metadata: {'thread_id': threadId},
+    );
+  }
+}
 
-  // Re-post the same notification id with Buddy's reply so the conversation
-  // continues in the shade. On failure, show a gentle, honest fallback rather
-  // than leaving the user wondering if their reply vanished.
+/// Re-post the thread notification as a plain (no-action) message with [body],
+/// replacing whatever is shown for this thread (same stable id). Used for the
+/// optimistic echo of the user's reply and for Buddy's incoming reply push.
+Future<void> _repostThreadConversation({
+  required String threadId,
+  required String body,
+  String question = '',
+  String notificationReason = '',
+}) async {
   await _ensureIsolatePluginInitialized();
   const androidDetails = AndroidNotificationDetails(
     _kAndroidChannelId,
@@ -223,25 +295,32 @@ Future<void> handleThreadReplyResponse(NotificationResponse response) async {
   await _isolatePlugin.show(
     id: _notificationIdForThread(threadId),
     title: 'Buddy',
-    body: buddyReply ?? "got it. i'll pick this up with you in the app.",
+    body: body,
     notificationDetails: const NotificationDetails(android: androidDetails),
-    payload: jsonEncode({'thread_id': threadId, 'question': question}),
+    payload: jsonEncode({
+      'thread_id': threadId,
+      'question': question,
+      'notification_reason': notificationReason,
+    }),
   );
 }
 
 /// POST the answer to `/threads/reply` with the user's Firebase token.
-/// Returns Buddy's reply text, or null on any failure.
-Future<String?> _postThreadReply({
+///
+/// Returns true if the backend accepted it (HTTP 200), false on any failure.
+/// Buddy's reply is delivered separately as a follow-up push, so its text is no
+/// longer read from this response.
+Future<bool> _postThreadReply({
   required String threadId,
   required String question,
   required String reply,
 }) async {
   try {
     await FirebaseConfig.initialize();
-    final token = await FirebaseAuth.instance.currentUser?.getIdToken();
+    final token = await _resolveIsolateToken();
     if (token == null) {
       AppLogger.warning('No auth token in isolate; cannot post reply', tag: _tag);
-      return null;
+      return false;
     }
 
     final uri = Uri.parse('${Environment.current.apiBaseUrl}$_kThreadReplyEndpoint');
@@ -266,12 +345,34 @@ Future<String?> _postThreadReply({
         tag: _tag,
         metadata: {'status': res.statusCode},
       );
-      return null;
+      return false;
     }
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
-    return body['reply'] as String?;
+    return true;
   } catch (e) {
     AppLogger.warning('Thread reply post failed', tag: _tag, metadata: {'error': e.toString()});
+    return false;
+  }
+}
+
+/// Fetch the Firebase ID token inside a background isolate.
+///
+/// A cold isolate restores persisted auth state asynchronously, so
+/// `currentUser` is briefly null right after `FirebaseConfig.initialize()`.
+/// Reading it immediately (as the old code did) made the reply silently fail
+/// with "no auth token". We use the current user when it is already present, and
+/// otherwise wait for the first restored signed-in state, bounded by a timeout
+/// so a genuinely signed-out isolate never hangs.
+Future<String?> _resolveIsolateToken() async {
+  var user = FirebaseAuth.instance.currentUser;
+  user ??= await FirebaseAuth.instance
+      .authStateChanges()
+      .firstWhere((u) => u != null)
+      .timeout(const Duration(seconds: 5), onTimeout: () => null);
+  if (user == null) return null;
+  try {
+    return await user.getIdToken();
+  } catch (e) {
+    AppLogger.warning('getIdToken failed in isolate', tag: _tag, metadata: {'error': e.toString()});
     return null;
   }
 }

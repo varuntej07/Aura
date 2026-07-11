@@ -18,6 +18,7 @@ import '../../../data/services/chat_backup_service.dart';
 import '../../../data/services/chat_session_manager.dart';
 import '../../../data/services/feedback_service.dart';
 import '../../../data/services/posthog_analytics_service.dart';
+import '../../../data/services/subscription_service.dart';
 import '../../../data/services/voice_launcher_bridge.dart';
 import '../../../data/services/deep_link_service.dart';
 import '../../../core/network/connectivity_service.dart';
@@ -273,6 +274,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   void _handleLaunchAction(String action) {
     if (action == VoiceLauncherBridge.launchActionVoice) {
       unawaited(_startVoiceFromWidget());
+      return;
+    }
+    if (action == DeepLinkService.launchActionEntitlementRefresh) {
+      // aura://checkout: the browser checkout just finished; pull the new plan
+      // now instead of waiting for the push or the next paywall visit. No
+      // navigation, the current screen simply reflects the unlock.
+      unawaited(context.read<SubscriptionService>().refreshEntitlement());
     }
   }
 

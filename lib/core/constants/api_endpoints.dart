@@ -15,4 +15,10 @@ class ApiEndpoints {
 
   // Voice session returns LiveKit room token for the Flutter client
   static String get voiceToken => '$baseUrl/voice/token';
+
+  // Subscription state + web checkout. Relative paths on purpose: these are
+  // passed to ApiClient, which prepends the base URL itself (unlike the full
+  // URLs above, which belong to callers that build their own requests).
+  static const String entitlement = '/entitlement';
+  static const String billingCheckout = '/billing/checkout';
 }

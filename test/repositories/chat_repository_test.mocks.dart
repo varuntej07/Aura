@@ -84,6 +84,18 @@ class MockChatBackupService extends _i1.Mock implements _i2.ChatBackupService {
           as _i3.Future<bool>);
 
   @override
+  _i3.Future<_i2.ServerReply?> fetchServerReply(
+    String? userId,
+    String? clientMessageId,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#fetchServerReply, [userId, clientMessageId]),
+            returnValue: _i3.Future<_i2.ServerReply?>.value(),
+            returnValueForMissingStub: _i3.Future<_i2.ServerReply?>.value(),
+          )
+          as _i3.Future<_i2.ServerReply?>);
+
+  @override
   _i3.Future<bool> restoreFromBackupIfLocalEmpty(String? userId) =>
       (super.noSuchMethod(
             Invocation.method(#restoreFromBackupIfLocalEmpty, [userId]),

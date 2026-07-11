@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -6,6 +8,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/services/buddy_pills_refresher.dart';
 import '../../../data/services/session_consolidator.dart';
+import '../../../data/services/subscription_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../../widgets/chat_message_list.dart';
@@ -76,9 +79,15 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
       final chatVm = context.read<TextChatViewModel>();
       chatVm.flushPendingBackup(uid);
       // Returning to the app: pull in any reply that finished server-side while we were
-      // away, replacing its "finishing up" placeholder with the real answer.
+      // away, replacing its "finishing up" placeholder with the real answer. Also
+      // consume a background billing push's refresh marker; this panel is the
+      // always-mounted lifecycle observer, so payment while backgrounded unlocks
+      // here instead of waiting for the paywall or the next cold start.
       if (state == AppLifecycleState.resumed) {
         chatVm.reconcilePendingTurns();
+        unawaited(
+          context.read<SubscriptionService>().consumePendingBackgroundRefresh(),
+        );
       }
       // Leaving the app after a session: if the user did anything, regenerate
       // the Buddy pills so fresh ones are waiting on their next visit, and ship the

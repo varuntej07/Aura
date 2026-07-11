@@ -1,10 +1,9 @@
-/// Analytics surface shared by every platform build.
+/// Analytics surface the app depends on instead of a concrete SDK.
 ///
 /// Mobile implements this with the posthog_flutter plugin
-/// ([PostHogAnalyticsService]); Windows desktop implements it with a direct
-/// HTTP capture client ([PostHogHttpAnalytics]) because posthog_flutter has no
-/// Windows implementation. Same event names flow through both, so the funnel
-/// contract in funnel_events.dart holds across platforms.
+/// ([PostHogAnalyticsService]). Keeping the interface (rather than calling the
+/// plugin directly) lets tests stub analytics and keeps the funnel contract in
+/// funnel_events.dart independent of any one SDK.
 abstract class AnalyticsClient {
   Future<void> trackEvent(String event, {Map<String, Object>? properties});
 
