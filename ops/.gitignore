@@ -1,0 +1,10 @@
+# Secrets — never commit
+.env
+service-account.json
+*.json.key
+
+# Python noise
+__pycache__/
+*.pyc
+.venv/
+venv/

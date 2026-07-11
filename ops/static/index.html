@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Aura Ops</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="gate" hidden>
+    <div class="gate-card">
+      <div class="brand"><span class="dot"></span>AURA OPS</div>
+      <p class="muted">Founder console. Passcode required.</p>
+      <input id="pc" type="password" placeholder="Passcode" autocomplete="current-password" />
+      <button class="primary" id="enter">Open console</button>
+      <p id="gateMsg" class="bad"></p>
+    </div>
+  </div>
+
+  <div id="app" hidden>
+    <header>
+      <div class="brand"><span class="dot"></span>AURA OPS</div>
+      <nav id="tabs">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="mobile">Mobile</button>
+        <button class="tab" data-tab="desktop">Desktop</button>
+        <button class="tab" data-tab="web">Web</button>
+        <button class="tab" data-tab="logs">Logs</button>
+      </nav>
+      <span class="spacer"></span>
+      <span id="stamp" class="muted"></span>
+      <button id="refresh" title="Refresh active tab">Refresh</button>
+      <button id="lock" title="Forget passcode">Lock</button>
+    </header>
+    <main class="wrap" id="content"></main>
+  </div>
+
+  <script src="vendor/chart.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
