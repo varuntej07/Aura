@@ -14,13 +14,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc \
 
 # Install third-party dependencies keyed only on pyproject.toml. A stub package lets
 # `pip install .` resolve without the real source, so editing code does NOT invalidate
-# this layer — deps reinstall only when pyproject.toml changes. The real src/ is copied
-# into the runtime stage from the build context below, not from this builder.
-COPY pyproject.toml ./
+# this layer — deps reinstall only when pyproject.toml or constraints.txt changes.
+# The real src/ is copied into the runtime stage from the build context below, not
+# from this builder.
+COPY pyproject.toml constraints.txt ./
 RUN mkdir -p src && touch src/__init__.py
 
+# -c constraints.txt: pins the already-verified compatible dependency set so pip's
+# backtracking resolver doesn't have to search a clean container's whole graph from
+# scratch (see the constraints.txt header, and Dockerfile's matching comment, for why
+# an unconstrained `pip install .` here can hit "resolution-too-deep").
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir -c constraints.txt .
 
 # ── Stage 2: Lean runtime image ───────────────────────────────────────────────
 FROM python:3.12-slim AS runtime

@@ -17,11 +17,19 @@ dependencies = [
     "python-dotenv>=1.0",
 
     # LiveKit — voice pipeline (STT: Deepgram, LLM: OpenAI/Anthropic/Gemini, TTS: Cartesia, VAD: Silero)
-    "livekit-agents[deepgram,anthropic,cartesia,silero,google,turn-detector,openai]>=1.5",
+    # >=1.6.4: async tools (ctx.update / ctx.with_filler, 1.6.0) used by
+    # draft_outbound_message; 1.6.1+ ships Turn Detector v1.0 (re-run
+    # download-files after upgrading).
+    "livekit-agents[deepgram,anthropic,cartesia,silero,google,turn-detector,openai]>=1.6.4",
     "livekit-api>=0.7",
 
     # Anthropic Claude
     "anthropic>=0.52",
+
+    # OpenAI — GPT chat-fallback tier (services/openai_chat_fallback.py). Previously only
+    # pulled in transitively via livekit-agents[openai] for the voice worker; now imported
+    # directly by the text-chat path too, so it needs its own explicit floor.
+    "openai>=1.50",
 
     # Firebase
     "firebase-admin>=6.7",
@@ -37,6 +45,11 @@ dependencies = [
     # Google Cloud Tasks (durable delayed job scheduling)
     "google-cloud-tasks>=2.16",
 
+    # Google Cloud Storage (screen-save images, services/gcs.py). Already pulled in
+    # transitively via firebase-admin, but declared explicitly since it's now imported
+    # directly (same reasoning as the openai>=1.50 floor above).
+    "google-cloud-storage>=2.18",
+
     # RSS feed parsing (daily notification news fallback)
     "feedparser>=6.0",
 
@@ -46,14 +59,15 @@ dependencies = [
     # Async HTTP clients for scheduled agent data fetchers
     "httpx>=0.28",
 
-    # Langfuse for LLM observability and tracing
-    "langfuse>=4.0",
-
     # PostHog — server-side product analytics (notification re-engagement funnel).
     # Pinned to the 5.x line (installed + tested locally: 5.4.0). The
     # Posthog(project_api_key=..., host=...) ctor and capture(distinct_id, event,
     # properties) signature this code calls are verified against 5.x.
     "posthog>=5.4,<6",
+
+    # Langfuse — LLM observability write side (services/analytics/llm_telemetry.py).
+    # v3 is the OTel-based SDK line; batched background ingestion, atexit flush.
+    "langfuse>=3.0",
 
 ]
 

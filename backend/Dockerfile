@@ -16,12 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc \
 # Install third-party dependencies keyed only on pyproject.toml. A stub package lets
 # `pip install .` resolve without the real source, so editing code does NOT invalidate
 # this layer (nor the ~332MB download-files layer below it that depends on it). Deps
-# reinstall only when pyproject.toml changes. The real src/ is copied into the runtime
-# stage from the build context below, not from this builder.
-COPY pyproject.toml ./
+# reinstall only when pyproject.toml or constraints.txt changes. The real src/ is
+# copied into the runtime stage from the build context below, not from this builder.
+COPY pyproject.toml constraints.txt ./
 RUN mkdir -p src && touch src/__init__.py
 
-RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+# -c constraints.txt: this is a clean container, so pip must resolve the WHOLE
+# graph from scratch every build. Nearly every dep in pyproject.toml is a bare
+# `>=X` floor with no upper bound, and livekit-agents pulls in tightly-pinned
+# transitives (click, aiohttp, opentelemetry-*) that fight those loose floors,
+# so pip's backtracking resolver can hit "resolution-too-deep" trying every
+# historical version before it (eventually) finds a compatible set. The
+# constraints file is that already-verified compatible set (see its own header
+# for how to regenerate it) — it doesn't add requirements, it just removes the
+# search.
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -c constraints.txt .
 
 # ── Lean runtime image ───────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
