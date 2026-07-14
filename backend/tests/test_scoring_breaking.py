@@ -47,7 +47,6 @@ def _stub_common(monkeypatch):
     monkeypatch.setattr(scoring_loop, "_sweep_timeouts", AsyncMock(return_value=0))
     monkeypatch.setattr(scoring_loop, "is_within_active_hours", lambda *a, **k: True)
     monkeypatch.setattr(scoring_loop, "_read_user_aura", AsyncMock(return_value={}))
-    monkeypatch.setattr(scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         scoring_loop, "_build_framing_context",
         lambda *a, **k: scoring_loop.UserFramingContext(),
@@ -62,11 +61,10 @@ def _stub_common(monkeypatch):
 
 async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
     submit_mock = _stub_common(monkeypatch)
-    monkeypatch.setattr(scoring_loop, "_load_recent_sent_content_ids", AsyncMock(return_value=set()))
-    monkeypatch.setattr(
-        scoring_loop, "list_recent_breaking_candidates",
-        AsyncMock(return_value=[_breaking_candidate()]),
-    )
+    # run_tick now fetches breaking candidates ONCE per tick and passes them into
+    # _score_one_user, rather than _try_send_breaking querying per-user — so the
+    # candidate list is supplied directly here instead of via a monkeypatched query.
+    breaking_candidates = [_breaking_candidate()]
     monkeypatch.setattr(scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         scoring_loop, "frame_notification",
@@ -78,11 +76,13 @@ async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
     )
 
     # Fresh user: zero vector, not yet bootstrapped — the personal lane would skip,
-    # but breaking runs first and is vector-independent.
+    # but breaking runs first and is vector-independent. recent_sends_backfilled=True
+    # so the tick doesn't try a real backfill query against no mocked Firestore.
     state = feature_store.SignalStoreState()
+    state.recent_sends_backfilled = True
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-fresh", MagicMock(), summary)
+        await scoring_loop._score_one_user("uid-fresh", MagicMock(), summary, breaking_candidates)
 
     assert summary.notifications_sent == 1  # enqueued
     submit_mock.assert_awaited_once()
@@ -101,9 +101,7 @@ async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
 
 async def test_breaking_capped_once_per_day(monkeypatch):
     submit_mock = _stub_common(monkeypatch)
-    monkeypatch.setattr(scoring_loop, "_load_recent_sent_content_ids", AsyncMock(return_value=set()))
-    breaking_query = AsyncMock(return_value=[_breaking_candidate()])
-    monkeypatch.setattr(scoring_loop, "list_recent_breaking_candidates", breaking_query)
+    breaking_candidates = [_breaking_candidate()]
     monkeypatch.setattr(scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[]))
 
     # Breaking quota already exhausted for today (the per-day breaking cap is
@@ -113,34 +111,33 @@ async def test_breaking_capped_once_per_day(monkeypatch):
     # or the per-day reset would wipe breaking_sends_today back to 0.
     state = feature_store.SignalStoreState()
     state.bootstrap_done = True
+    state.recent_sends_backfilled = True
     state.breaking_sends_today = scoring_loop.MAX_BREAKING_SENDS_PER_DAY
     state.sends_today_date = datetime.now(UTC).date().isoformat()
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-capped", MagicMock(), summary)
+        await scoring_loop._score_one_user("uid-capped", MagicMock(), summary, breaking_candidates)
 
     assert summary.notifications_sent == 0
-    submit_mock.assert_not_awaited()
-    breaking_query.assert_not_called()  # gate short-circuits before querying
+    submit_mock.assert_not_awaited()  # gate short-circuits before ever trying to send
 
 
 async def test_personal_lane_suppresses_already_sent_story(monkeypatch):
     submit_mock = _stub_common(monkeypatch)
     # No breaking candidate this tick; the one personal candidate was already sent.
-    monkeypatch.setattr(scoring_loop, "list_recent_breaking_candidates", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        scoring_loop, "_load_recent_sent_content_ids", AsyncMock(return_value={"gn_seen"})
-    )
+    breaking_candidates: list[ScoredCandidate] = []
     monkeypatch.setattr(
         scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[_personal_candidate()])
     )
 
     state = feature_store.SignalStoreState()
     state.bootstrap_done = True
+    state.recent_sends_backfilled = True
+    state.recent_sends = [{"content_id": "gn_seen", "category": "tech", "sent_at": datetime.now(UTC)}]
     state.user_vector = [0.1] * feature_store.USER_VECTOR_DIMENSION
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-dup", MagicMock(), summary)
+        await scoring_loop._score_one_user("uid-dup", MagicMock(), summary, breaking_candidates)
 
     assert summary.notifications_sent == 0  # only candidate was suppressed
     submit_mock.assert_not_awaited()

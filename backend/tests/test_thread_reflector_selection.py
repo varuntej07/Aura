@@ -13,6 +13,7 @@ from src.services.threads.thread_reflector import (
     FOLLOW_UP_COOLDOWN,
     MAX_FOLLOW_UPS_PER_THREAD,
     MIN_THREAD_AGE_BEFORE_FOLLOW_UP,
+    REMINDER_SETTLE_BUFFER,
     select_thread_to_follow_up,
 )
 
@@ -27,6 +28,7 @@ def _thread(
     touched_ago: timedelta = timedelta(hours=5),
     follow_ups_sent: int = 0,
     last_follow_up_ago: timedelta | None = None,
+    expected_resolution_at: datetime | None = None,
 ) -> Thread:
     return Thread(
         thread_id=thread_id,
@@ -37,6 +39,7 @@ def _thread(
         last_touched_at=NOW - touched_ago,
         follow_ups_sent=follow_ups_sent,
         last_follow_up_at=None if last_follow_up_ago is None else NOW - last_follow_up_ago,
+        expected_resolution_at=expected_resolution_at,
     )
 
 
@@ -73,6 +76,25 @@ def test_thread_past_cooldown_is_eligible():
     ready = _thread("a", follow_ups_sent=1, last_follow_up_ago=FOLLOW_UP_COOLDOWN + timedelta(hours=1))
     chosen = select_thread_to_follow_up([ready], NOW)
     assert chosen is not None and chosen.thread_id == "a"
+
+
+def test_reminder_still_within_settle_buffer_is_excluded():
+    # Due 30 min ago -> still inside the 2h settle buffer.
+    just_fired = _thread("a", expected_resolution_at=NOW - timedelta(minutes=30))
+    assert select_thread_to_follow_up([just_fired], NOW) is None
+
+
+def test_reminder_past_settle_buffer_is_eligible():
+    settled = _thread("a", expected_resolution_at=NOW - (REMINDER_SETTLE_BUFFER + timedelta(minutes=1)))
+    chosen = select_thread_to_follow_up([settled], NOW)
+    assert chosen is not None and chosen.thread_id == "a"
+
+
+def test_reminder_not_yet_due_is_excluded():
+    # A reminder set far in the future must not be followed up on before it's due,
+    # even though the thread itself is already past MIN_THREAD_AGE_BEFORE_FOLLOW_UP.
+    not_due = _thread("a", expected_resolution_at=NOW + timedelta(hours=1))
+    assert select_thread_to_follow_up([not_due], NOW) is None
 
 
 def test_prefers_fewest_follow_ups_then_most_recent_mention():

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from src.services.tracking import fields as f
-from src.services.tracking.models import Checkpoint, TrackedTopic, Tracker
+from src.services.tracking.models import Checkpoint, Fixture, TrackedTopic, Tracker
 
 _NOW = datetime(2026, 6, 15, 9, 0, tzinfo=UTC)
 
@@ -66,6 +66,8 @@ def test_tracker_round_trip():
         updates_sent=4,
         last_update_at=_NOW,
         last_sent_summary="RCB won by 4 wickets",
+        sent_today=2,
+        sent_today_date="2026-06-15",
     )
     restored = Tracker.from_dict(tracker.to_dict())
     assert restored == tracker
@@ -87,9 +89,34 @@ def test_checkpoint_round_trip():
         last_fetch_at=_NOW,
         last_error=None,
         created_at=_NOW,
+        fixture_id="20260619-1400",
+        result_checks=2,
     )
     restored = Checkpoint.from_dict(checkpoint.to_dict())
     assert restored == checkpoint
+
+
+def test_fixture_round_trip():
+    fixture = Fixture(
+        id="20260710-1800",
+        topic_key="fifa-world-cup-2026",
+        label="Quarter-final: Spain vs Belgium",
+        start_at=_NOW,
+        expected_end_at=_NOW,
+        kind=f.EVENT_KIND_SPAN,
+        lead_minutes=45,
+        wake_override=True,
+        status=f.FIXTURE_STATUS_FINISHED,
+        fact_score="1-0",
+        fact_winner="Spain",
+        fact_note="Merino scored the decisive goal",
+        facts_updated_at=_NOW,
+        last_transition="live->finished",
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    restored = Fixture.from_dict(fixture.to_dict())
+    assert restored == fixture
 
 
 def test_defaults_survive_empty_dict():
@@ -103,3 +130,20 @@ def test_defaults_survive_empty_dict():
     tracker = Tracker.from_dict({f.TRACKER_ID: "t", f.TRACKER_USER_ID: "u", f.TRACKER_TOPIC_KEY: "k"})
     assert tracker.status == f.TRACKER_STATUS_ACTIVE
     assert tracker.updates_sent == 0
+    assert tracker.sent_today == 0
+    assert tracker.sent_today_date == ""
+
+    # Pre-migration checkpoint docs carry no fixture binding — they must read back as
+    # the legacy discriminator values (empty fixture_id), never crash.
+    checkpoint = Checkpoint.from_dict({
+        f.CHECKPOINT_ID: "c", f.CHECKPOINT_TOPIC_KEY: "k",
+        f.CHECKPOINT_EVENT_LABEL: "e", f.CHECKPOINT_PHASE: f.CHECKPOINT_PHASE_LIVE,
+        f.CHECKPOINT_FIRE_AT: _NOW,
+    })
+    assert checkpoint.fixture_id == ""
+    assert checkpoint.result_checks == 0
+
+    fixture = Fixture.from_dict({f.FIXTURE_ID: "x", f.FIXTURE_TOPIC_KEY: "k", f.FIXTURE_START_AT: _NOW})
+    assert fixture.status == f.FIXTURE_STATUS_SCHEDULED
+    assert fixture.fact_winner == ""
+    assert fixture.last_transition == ""

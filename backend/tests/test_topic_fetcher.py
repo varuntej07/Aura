@@ -132,12 +132,46 @@ def test_google_news_url_default_matches_legacy_us_english():
     )
 
 
-async def test_locale_is_part_of_cache_identity(monkeypatch):
-    # Same query, different region => a genuinely different fetch, must not collide.
+async def test_locale_and_cutoff_are_part_of_cache_identity(monkeypatch):
+    # Same query, different region OR different temporal cutoff => a genuinely
+    # different fetch, must not collide (a pulse's unfiltered result must never
+    # serve a result-moment's not_before-filtered one).
     monkeypatch.setitem(topic_fetcher._TIER_FETCHERS, TIER_RSS, _stub(_LONG))
     monkeypatch.setattr(topic_fetcher, "_cache", {})
     await topic_fetcher.fetch_topic("election", country="US", language="en", use_cache=True)
     await topic_fetcher.fetch_topic("election", country="IN", language="hi", use_cache=True)
+    cutoff = datetime(2026, 7, 10, 16, 0, tzinfo=UTC)
+    await topic_fetcher.fetch_topic(
+        "election", country="US", language="en", use_cache=True, not_before=cutoff,
+    )
     keys = set(topic_fetcher._cache.keys())
-    assert any(k.endswith("|US:en") for k in keys)
-    assert any(k.endswith("|IN:hi") for k in keys)
+    assert any("|US:en|" in k and k.endswith("|") for k in keys)  # no cutoff -> empty segment
+    assert any("|IN:hi|" in k for k in keys)
+    assert any(k.endswith(f"|{cutoff.isoformat()}") for k in keys)
+    assert len(keys) == 3
+
+
+async def test_fetch_brave_parses_iso_latest_published(monkeypatch):
+    from src.agents.data_fetchers import brave_search as brave_module
+
+    async def _fake_brave_search(query, *, uid, recency="any", timeout_s=7.0):
+        return {
+            "text": _LONG, "sources": [], "query": query, "cached": False,
+            "latest_published": "2026-07-07T18:00:29+00:00",
+        }
+
+    monkeypatch.setattr(brave_module, "brave_search", _fake_brave_search)
+    text, sources, latest_published = await topic_fetcher._fetch_brave("q", topic_fetcher.Locale())
+    assert text == _LONG
+    assert latest_published == datetime(2026, 7, 7, 18, 0, 29, tzinfo=UTC)
+
+
+async def test_fetch_brave_none_when_latest_published_absent(monkeypatch):
+    from src.agents.data_fetchers import brave_search as brave_module
+
+    async def _fake_brave_search(query, *, uid, recency="any", timeout_s=7.0):
+        return {"text": _LONG, "sources": [], "query": query, "cached": False, "latest_published": ""}
+
+    monkeypatch.setattr(brave_module, "brave_search", _fake_brave_search)
+    _, _, latest_published = await topic_fetcher._fetch_brave("q", topic_fetcher.Locale())
+    assert latest_published is None

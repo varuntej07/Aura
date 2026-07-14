@@ -1,23 +1,26 @@
 """The thread follow-up is a behavioural touch, so it must honour the same Aura
 consent gate as the briefing / icebreaker. This pins the GDPR guarantee: with
-consent withheld, the reflector sends nothing and records the skip — closing the
-gap where a withheld-consent user (or a minor, who is forced to consent=false)
-could still receive curiosity follow-ups.
+consent withheld, the curiosity agent stands down and never reaches thread
+selection — closing the gap where a withheld-consent user (or a minor, who is
+forced to consent=false) could still receive curiosity follow-ups.
+
+The consent gate lives in ``CuriosityThreadFollowUpAgent.sense`` (the reactive
+orchestration cut-over moved it here from the old ``thread_reflector`` fan-out).
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from datetime import UTC, datetime
 
 import pytest
 
-from src.services.threads import thread_reflector as tr
+from src.services.reactive.agent import UserContext
+from src.services.reactive.agents import curiosity
+from src.services.reactive.agents.curiosity import CuriosityThreadFollowUpAgent
 
 
 @pytest.mark.asyncio
-async def test_reflect_skips_when_consent_not_granted(monkeypatch):
-    summary = tr.ReflectionSummary()
-
+async def test_sense_skips_when_consent_not_granted(monkeypatch):
     async def _no_consent(_uid):
         return "UTC", False
 
@@ -26,33 +29,32 @@ async def test_reflect_skips_when_consent_not_granted(monkeypatch):
     async def _boom(*_a, **_k):
         raise AssertionError("no-consent user must never reach thread selection")
 
-    monkeypatch.setattr(tr, "_load_tz_and_consent", _no_consent)
-    monkeypatch.setattr(tr.thread_store, "read_follow_ups_today", _boom)
-    monkeypatch.setattr(tr.thread_store, "list_open_threads", _boom)
+    monkeypatch.setattr(curiosity, "_load_consent_and_timezone", _no_consent)
+    monkeypatch.setattr(curiosity.thread_store, "read_follow_ups_today", _boom)
+    monkeypatch.setattr(curiosity.thread_store, "list_open_threads", _boom)
 
-    await tr._reflect_one_user("u1", MagicMock(), summary)
+    inputs = await CuriosityThreadFollowUpAgent().sense(UserContext(user_id="u1"))
 
-    assert summary.skipped_no_consent == 1
-    assert summary.enqueued == 0
+    assert inputs.eligible is False
+    assert inputs.reason == "no_consent"
 
 
 @pytest.mark.asyncio
-async def test_reflect_consent_granted_proceeds_to_active_hours(monkeypatch):
-    # Consent granted but it's the dead of night → it should pass the consent gate and
-    # stand down at the quiet-hours gate (proving consent isn't the thing blocking it).
-    summary = tr.ReflectionSummary()
-
-    async def _consent_midnight(_uid):
+async def test_sense_consent_granted_proceeds_to_active_hours(monkeypatch):
+    # Consent granted but it's the dead of night -> it should pass the consent gate
+    # and stand down at the quiet-hours gate (proving consent isn't what blocked it).
+    async def _consent(_uid):
         return "UTC", True
 
-    monkeypatch.setattr(tr, "_load_tz_and_consent", _consent_midnight)
+    monkeypatch.setattr(curiosity, "_load_consent_and_timezone", _consent)
     # Force "middle of the night" regardless of wall clock.
-    monkeypatch.setattr(tr, "_local_now", lambda _tz: __import__("datetime").datetime(
-        2026, 6, 10, 3, 0, tzinfo=__import__("datetime").timezone.utc
-    ))
-    monkeypatch.setattr(tr, "is_within_active_hours", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        curiosity, "_local_now",
+        lambda _tz: datetime(2026, 6, 10, 3, 0, tzinfo=UTC),
+    )
+    monkeypatch.setattr(curiosity, "is_within_active_hours", lambda *_a, **_k: False)
 
-    await tr._reflect_one_user("u1", MagicMock(), summary)
+    inputs = await CuriosityThreadFollowUpAgent().sense(UserContext(user_id="u1"))
 
-    assert summary.skipped_no_consent == 0
-    assert summary.skipped_quiet_hours == 1
+    assert inputs.eligible is False
+    assert inputs.reason == "quiet_hours"

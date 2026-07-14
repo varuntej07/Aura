@@ -42,6 +42,7 @@ def _candidate(category: str, cosine: float, region: str = "") -> ScoredCandidat
 def _ready_state() -> feature_store.SignalStoreState:
     state = feature_store.SignalStoreState()
     state.bootstrap_done = True
+    state.recent_sends_backfilled = True
     state.user_vector = [0.1] * feature_store.USER_VECTOR_DIMENSION
     state.sends_today = 0
     state.consecutive_no_open_ticks = 0
@@ -57,9 +58,6 @@ def patched(monkeypatch):
     monkeypatch.setattr(scoring_loop, "_sweep_timeouts", AsyncMock(return_value=0))
     monkeypatch.setattr(scoring_loop, "_should_refresh_user_vector", lambda state: False)
     monkeypatch.setattr(scoring_loop, "is_within_active_hours", lambda *a, **k: True)
-    monkeypatch.setattr(
-        scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=[])
-    )
     monkeypatch.setattr(
         scoring_loop, "_build_framing_context", lambda *a, **k: scoring_loop.UserFramingContext()
     )
@@ -90,7 +88,7 @@ async def _run(monkeypatch, *, user_doc, candidates):
     )
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary)
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
     return summary
 
 
@@ -146,7 +144,7 @@ async def test_legacy_affinity_key_contributes_via_map(patched, monkeypatch):
     )
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary)
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
     assert summary.notifications_sent == 1
 
 

@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from src.agents.data_fetchers import brave_search as brave_module
-from src.agents.data_fetchers.brave_search import brave_search
+from src.agents.data_fetchers.brave_search import brave_search, peek_cache
 
 # Bound before any monkeypatching so the mock factory can build a real client
 # without recursing into its own patch.
@@ -30,6 +30,25 @@ _SAMPLE_RESPONSE = {
                 "title": "Match report",
                 "url": "https://example.com/cricket",  # duplicate url -> deduped
                 "description": "Full scorecard inside.",
+            },
+        ]
+    }
+}
+
+_RESPONSE_WITH_PAGE_AGE = {
+    "web": {
+        "results": [
+            {
+                "title": "Older recap",
+                "url": "https://example.com/old",
+                "description": "An earlier update.",
+                "page_age": "2026-07-03T10:00:00",
+            },
+            {
+                "title": "Latest score",
+                "url": "https://example.com/new",
+                "description": "The freshest update.",
+                "page_age": "2026-07-07T18:00:29",
             },
         ]
     }
@@ -97,6 +116,26 @@ async def test_any_recency_omits_freshness_param(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_latest_published_is_the_freshest_page_age(monkeypatch):
+    captured: dict = {}
+    _install_mock(monkeypatch, captured, payload=_RESPONSE_WITH_PAGE_AGE)
+
+    result = await brave_search("some query", uid="u1", recency="any")
+
+    assert result["latest_published"] == "2026-07-07T18:00:29+00:00"
+
+
+@pytest.mark.asyncio
+async def test_latest_published_empty_when_no_result_carries_page_age(monkeypatch):
+    captured: dict = {}
+    _install_mock(monkeypatch, captured)  # _SAMPLE_RESPONSE has no page_age fields
+
+    result = await brave_search("India cricket score", uid="u1", recency="any")
+
+    assert result["latest_published"] == ""
+
+
+@pytest.mark.asyncio
 async def test_non_200_degrades_to_empty_result(monkeypatch):
     captured: dict = {}
     _install_mock(monkeypatch, captured, payload={}, status_code=429)
@@ -112,3 +151,37 @@ async def test_missing_api_key_raises(monkeypatch):
 
     with pytest.raises(ValueError, match="BRAVE_API_KEY"):
         await brave_search("anything", uid="u1")
+
+
+def test_peek_cache_misses_on_empty_cache():
+    assert peek_cache("never searched", uid="u1", recency="any") is None
+
+
+@pytest.mark.asyncio
+async def test_peek_cache_hits_what_brave_search_cached(monkeypatch):
+    """peek_cache must hit the exact entry brave_search wrote (shared _cache_key)."""
+    captured: dict = {}
+    _install_mock(monkeypatch, captured)
+
+    # Populate the cache via a real (mocked-transport) search.
+    await brave_search("India cricket score", uid="u1", recency="any")
+
+    # A peek with the same query/uid/recency (here with different casing/spacing to
+    # exercise normalization) returns the cached result without any network call.
+    hit = peek_cache("  India   Cricket SCORE ", uid="u1", recency="any")
+    assert hit is not None
+    assert hit["cached"] is True
+    assert "India beat Australia" in hit["text"]
+
+
+@pytest.mark.asyncio
+async def test_peek_cache_is_keyed_by_uid_and_recency(monkeypatch):
+    captured: dict = {}
+    _install_mock(monkeypatch, captured)
+    await brave_search("same query", uid="u1", recency="any")
+
+    # Different user, different recency, or an unknown recency (clamped to 'any' so it
+    # DOES match) are independent entries.
+    assert peek_cache("same query", uid="u2", recency="any") is None
+    assert peek_cache("same query", uid="u1", recency="fresh") is None
+    assert peek_cache("same query", uid="u1", recency="bogus") is not None  # clamps to 'any'

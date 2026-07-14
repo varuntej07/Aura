@@ -208,6 +208,68 @@ async def test_recent_engagement_fails_open_to_zero():
 
 
 @pytest.mark.asyncio
+async def test_has_recent_delivery_true_when_type_matches_a_sent_row():
+    def _row(status: str, notif_type: str) -> MagicMock:
+        s = MagicMock()
+        s.to_dict.return_value = {nl.FIELD_STATUS: status, nl.FIELD_TYPE: notif_type}
+        return s
+
+    rows = [
+        _row(nl.STATUS_SENT, "signal_engine"),
+        _row(nl.STATUS_FAILED, "tracker_update"),  # failed send never counts
+        _row(nl.STATUS_SENT, "tracker_update"),
+    ]
+    mock_db = MagicMock()
+    stream_chain = (
+        mock_db.collection.return_value
+        .document.return_value
+        .collection.return_value
+        .where.return_value
+        .limit.return_value
+    )
+    stream_chain.stream.return_value = rows
+
+    with patch.object(nl, "admin_firestore", return_value=mock_db):
+        result = await nl.has_recent_delivery(
+            "u1", "tracker_update", since=datetime(2026, 7, 7, tzinfo=UTC)
+        )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_has_recent_delivery_false_when_no_matching_type():
+    def _row(status: str, notif_type: str) -> MagicMock:
+        s = MagicMock()
+        s.to_dict.return_value = {nl.FIELD_STATUS: status, nl.FIELD_TYPE: notif_type}
+        return s
+
+    mock_db = MagicMock()
+    stream_chain = (
+        mock_db.collection.return_value
+        .document.return_value
+        .collection.return_value
+        .where.return_value
+        .limit.return_value
+    )
+    stream_chain.stream.return_value = [_row(nl.STATUS_SENT, "signal_engine")]
+
+    with patch.object(nl, "admin_firestore", return_value=mock_db):
+        result = await nl.has_recent_delivery(
+            "u1", "tracker_update", since=datetime(2026, 7, 7, tzinfo=UTC)
+        )
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_has_recent_delivery_fails_open_to_false():
+    with patch.object(nl, "admin_firestore", side_effect=RuntimeError("firestore down")):
+        result = await nl.has_recent_delivery(
+            "u1", "tracker_update", since=datetime(2026, 7, 7, tzinfo=UTC)
+        )
+    assert result is False
+
+
+@pytest.mark.asyncio
 async def test_record_dismiss_only_flips_pending():
     snap = MagicMock()
     snap.exists = True

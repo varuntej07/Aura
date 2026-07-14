@@ -14,6 +14,7 @@ from src.services import notification_budget, notification_ledger
 from src.services.notification_budget import BudgetDecision
 from src.services.notification_service import NotificationResult
 from src.services.notifications import orchestrator, post_send, proposal, queue_store, tap_gate
+from src.services.reactive import idempotency
 from src.services.notifications.proposal import (
     Disposition,
     NotificationProposal,
@@ -116,14 +117,14 @@ async def test_committed_fresh_sends_and_records(monkeypatch):
         delivered.append(p)
         return NotificationResult(tokens_targeted=1, success_count=1, failure_count=0)
 
-    async def _no_recent(uid, *, since):
-        return set()
+    async def _claim(key, *, scope, ttl=None):
+        return True
 
     async def _record(uid, *, source, now=None):
         recorded.append(source)
 
     monkeypatch.setattr(orchestrator, "_deliver", _fake_deliver)
-    monkeypatch.setattr(notification_ledger, "recent_dedup_keys", _no_recent)
+    monkeypatch.setattr(idempotency, "idempotent", _claim)
     monkeypatch.setattr(notification_budget, "record_committed_send", _record)
 
     p = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
@@ -159,11 +160,11 @@ async def test_committed_duplicate_drops(monkeypatch):
         delivered.append(p)
         return NotificationResult(tokens_targeted=1, success_count=1, failure_count=0)
 
-    async def _recent(uid, *, since):
-        return {"dupe"}
+    async def _claim(key, *, scope, ttl=None):
+        return False  # already claimed elsewhere = duplicate
 
     monkeypatch.setattr(orchestrator, "_deliver", _fake_deliver)
-    monkeypatch.setattr(notification_ledger, "recent_dedup_keys", _recent)
+    monkeypatch.setattr(idempotency, "idempotent", _claim)
 
     p = _proposal(SOURCE_TRACKING, kind=ProposalKind.COMMITTED, dedup_key="dupe")
     decision = await orchestrator.submit(p, now=NOW)
@@ -191,7 +192,7 @@ async def test_proactive_submit_enqueues(monkeypatch):
     assert len(enqueued) == 1
 
 
-def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True):
+def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True, active_tracker=False):
     """Wire the drain's I/O seams. ``pending`` is a list of (pid, proposal)."""
     marks: list[tuple[str, str]] = []
     delivered: list[NotificationProposal] = []
@@ -202,12 +203,18 @@ def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True):
     async def _no_recent(uid, *, since):
         return set()
 
+    async def _claim_dedup(key, *, scope, ttl=None):
+        return True
+
+    async def _release_dedup(key, *, scope):
+        pass
+
     async def _user_local(uid, now):
         # 03:00 local = quiet; 15:00 local = awake
         local = now.replace(hour=3) if quiet else now.replace(hour=15)
         return local, local.date().isoformat()
 
-    async def _claim(uid, *, source, user_local_date=None, now=None, priority=False):
+    async def _claim_budget(uid, *, source, user_local_date=None, now=None, priority=False):
         return BudgetDecision(budget_ok, None if budget_ok else "global_daily_cap")
 
     async def _mark(uid, pid, status, *, now=None):
@@ -226,12 +233,18 @@ def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True):
     async def _preferred_slot(uid, local_now):
         return True
 
+    async def _active_tracker(uid, now):
+        return active_tracker
+
     monkeypatch.setattr(queue_store, "list_pending", _list_pending)
     monkeypatch.setattr(queue_store, "mark", _mark)
     monkeypatch.setattr(notification_ledger, "recent_dedup_keys", _no_recent)
-    monkeypatch.setattr(notification_budget, "try_claim_proactive_slot", _claim)
+    monkeypatch.setattr(idempotency, "idempotent", _claim_dedup)
+    monkeypatch.setattr(idempotency, "release", _release_dedup)
+    monkeypatch.setattr(notification_budget, "try_claim_proactive_slot", _claim_budget)
     monkeypatch.setattr(orchestrator, "_user_local", _user_local)
     monkeypatch.setattr(orchestrator, "_deliver", _deliver)
+    monkeypatch.setattr(orchestrator, "_has_active_tracker", _active_tracker)
     # The tap-gate (LLM), post-send dispatch, and smart-timing slot read are I/O seams
     # too — patch them so the drain tests exercise routing without an LLM call, producer
     # bookkeeping, or Firestore. Dedicated tests below cover the real tap-gate drop and
@@ -263,6 +276,21 @@ async def test_drain_quiet_hours_holds_all(monkeypatch):
 
     assert decision.disposition == Disposition.HOLD
     assert decision.reason == proposal.REASON_QUIET_HOURS
+    assert delivered == []
+    assert ("p_news", queue_store.STATUS_HELD) in marks
+
+
+async def test_drain_active_tracker_holds_all(monkeypatch):
+    # A tracker update fired recently (a live match in progress) — unrelated proactive
+    # content (thread/icebreaker/news) is held so it doesn't dilute the tracked event,
+    # per the user's report of a flood of unrelated pushes during a live World Cup match.
+    news = ("p_news", _proposal(SOURCE_NEWS, kind=ProposalKind.PROACTIVE, dedup_key="b"))
+    marks, delivered = _patch_drain_io(monkeypatch, pending=[news], active_tracker=True)
+
+    decision = await orchestrator.drain_user_queue("u1", now=NOW)
+
+    assert decision.disposition == Disposition.HOLD
+    assert decision.reason == proposal.REASON_ACTIVE_TRACKER
     assert delivered == []
     assert ("p_news", queue_store.STATUS_HELD) in marks
 
@@ -317,6 +345,29 @@ async def test_drain_drops_winner_failing_tap_gate(monkeypatch):
     assert decision.reason == proposal.REASON_TAP_GATE
     assert delivered == []
     assert ("p_news", queue_store.STATUS_DROPPED) in marks
+
+
+async def test_drain_drops_winner_failing_dedup_claim(monkeypatch):
+    # Two overlapping drains (or a drain racing a committed send) sharing a
+    # dedup_key: the loser of the atomic claim drops the winner as a duplicate
+    # instead of sending, and still holds the other queued losers.
+    news = ("p_news", _proposal(SOURCE_NEWS, kind=ProposalKind.PROACTIVE, dedup_key="b"))
+    other = ("p_other", _proposal(SOURCE_THREAD, kind=ProposalKind.PROACTIVE, dedup_key="c"))
+    marks, delivered = _patch_drain_io(monkeypatch, pending=[news, other])
+
+    async def _claim_taken(key, *, scope, ttl=None):
+        return False
+
+    monkeypatch.setattr(idempotency, "idempotent", _claim_taken)
+
+    decision = await orchestrator.drain_user_queue("u1", now=NOW)
+
+    assert decision is not None
+    assert decision.disposition == Disposition.DROP
+    assert decision.reason == proposal.REASON_DUPLICATE
+    assert delivered == []
+    assert ("p_other", queue_store.STATUS_DROPPED) in marks  # arbitration winner (thread > news)
+    assert ("p_news", queue_store.STATUS_HELD) in marks       # loser held, not lost
 
 
 async def test_drain_holds_news_off_peak(monkeypatch):

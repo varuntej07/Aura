@@ -18,6 +18,7 @@ from src.services.signal_engine.notification_framer import (
     FramedNotification,
     _normalise,
     copy_violations,
+    truncate_at_word_boundary,
 )
 
 
@@ -149,6 +150,39 @@ def test_normalise_enforces_length_and_url_routing():
     assert len(normalised.title) <= NOTIFICATION_TITLE_MAX_CHARS
     assert len(normalised.body) <= NOTIFICATION_BODY_MAX_CHARS
     assert normalised.content_kind == CONTENT_KIND_READ
+
+
+def test_truncate_never_cuts_mid_word():
+    """Regression: a body over the cap was sliced mid-token ("...for you" ->
+    "...for y") and shipped to the shade. Truncation must land on a word boundary
+    and never end with a half word."""
+    over = "saw a piece on how trainium is picking up steam in ml workloads, curious if this shifts anything for you"
+    out = truncate_at_word_boundary(over, NOTIFICATION_BODY_MAX_CHARS)
+    assert len(out) <= NOTIFICATION_BODY_MAX_CHARS
+    assert out.endswith("…")
+    # the last real word is whole, not a fragment like "y" or "yo"
+    assert out.rstrip("…").split()[-1] == "anything"
+
+
+def test_truncate_leaves_short_copy_untouched():
+    fits = "short and complete"
+    assert truncate_at_word_boundary(fits, NOTIFICATION_BODY_MAX_CHARS) == fits
+
+
+def test_normalise_truncates_overlength_body_on_word_boundary():
+    raw = FramedNotification(
+        title="t",
+        body="trainium chips are picking up real momentum in machine learning workloads and that could matter for you",
+        opening_chat_message="o",
+        is_relevant=True,
+        relevance_reason="a reason that names the subject",
+        content_kind=CONTENT_KIND_READ,
+    )
+    normalised = _normalise(raw, _candidate(url="https://example.com/x"))
+    assert len(normalised.body) <= NOTIFICATION_BODY_MAX_CHARS
+    # no dangling single/double-letter fragment at the end
+    last_word = normalised.body.rstrip("…").split()[-1]
+    assert len(last_word) > 2
 
 
 def test_normalise_urlless_item_is_discuss():

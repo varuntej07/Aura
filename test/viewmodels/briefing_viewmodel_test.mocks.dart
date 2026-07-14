@@ -160,6 +160,46 @@ class MockBackendApiService extends _i1.Mock implements _i2.BackendApiService {
           as _i3.Future<_i4.Result<Map<String, dynamic>>>);
 
   @override
+  _i3.Future<_i4.Result<Map<String, dynamic>>> startDevicePairing() =>
+      (super.noSuchMethod(
+            Invocation.method(#startDevicePairing, []),
+            returnValue: _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+              _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#startDevicePairing, []),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+                  _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#startDevicePairing, []),
+                  ),
+                ),
+          )
+          as _i3.Future<_i4.Result<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<_i4.Result<Map<String, dynamic>>> unlinkDevice(String? deviceId) =>
+      (super.noSuchMethod(
+            Invocation.method(#unlinkDevice, [deviceId]),
+            returnValue: _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+              _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#unlinkDevice, [deviceId]),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+                  _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#unlinkDevice, [deviceId]),
+                  ),
+                ),
+          )
+          as _i3.Future<_i4.Result<Map<String, dynamic>>>);
+
+  @override
   _i3.Future<_i4.Result<Map<String, dynamic>>> consolidateSession({
     required String? sessionId,
     required List<Map<String, dynamic>>? turns,

@@ -36,6 +36,9 @@ def _patch_common(monkeypatch, *, uid="u_1", reply_text="love that, tell me more
     monkeypatch.setattr(handler, "get_model_provider", lambda: MagicMock())
     monkeypatch.setattr(handler, "generate_thread_reply", AsyncMock(return_value=reply_text))
     monkeypatch.setattr(handler, "extract_and_update_user_aura", AsyncMock(return_value=None))
+    # Buddy's reply now also goes out as a follow-up push; stub it so no real FCM
+    # send happens. Tests read it back via ``handler.send_notification``.
+    monkeypatch.setattr(handler, "send_notification", AsyncMock(return_value=None))
     return append, set_status
 
 
@@ -82,6 +85,45 @@ async def test_happy_path_persists_both_turns_and_returns_reply(monkeypatch):
     # Thread flipped to engaged.
     status_arg = set_status.await_args_list[0].args[2]
     assert status_arg == ThreadStatus.ENGAGED
+
+
+async def test_buddy_reply_pushed_to_shade_as_followup(monkeypatch):
+    _patch_common(monkeypatch, reply_text="oh nice, what's it for?")
+
+    resp = await handler.handle_thread_reply(_FakeRequest({
+        "thread_id": "rem_88",
+        "question": "what are you building?",
+        "reply": "a side project",
+    }))
+
+    assert resp.status_code == 200
+
+    # Buddy's reply is delivered as a data-only thread_followup push tagged
+    # kind=reply, so the client updates the shade even if its isolate was reaped.
+    push = handler.send_notification
+    push.assert_awaited_once()
+    assert push.await_args.args[0] == "u_1"  # user_id
+    kwargs = push.await_args.kwargs
+    assert kwargs["notification_type"] == "thread_followup"
+    assert kwargs["data_only"] is True
+    assert kwargs["collapse_key"] == "thread_rem_88"
+    assert kwargs["data"]["kind"] == "reply"
+    assert kwargs["data"]["thread_id"] == "rem_88"
+    assert kwargs["data"]["buddy_reply"] == "oh nice, what's it for?"
+
+
+async def test_push_failure_does_not_fail_reply(monkeypatch):
+    _patch_common(monkeypatch, reply_text="got it")
+    monkeypatch.setattr(handler, "send_notification", AsyncMock(side_effect=RuntimeError("fcm down")))
+
+    resp = await handler.handle_thread_reply(_FakeRequest({
+        "thread_id": "rem_99",
+        "reply": "yes",
+    }))
+
+    # The answer was still persisted and the endpoint still returns Buddy's reply.
+    assert resp.status_code == 200
+    assert json.loads(resp.body)["reply"] == "got it"
 
 
 async def test_reply_too_long_is_400(monkeypatch):

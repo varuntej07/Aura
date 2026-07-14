@@ -44,6 +44,7 @@ def _candidate(category: str, cosine: float) -> ScoredCandidate:
 def _ready_state() -> feature_store.SignalStoreState:
     state = feature_store.SignalStoreState()
     state.bootstrap_done = True
+    state.recent_sends_backfilled = True
     state.user_vector = [0.1] * feature_store.USER_VECTOR_DIMENSION
     state.sends_today = 0
     state.consecutive_no_open_ticks = 0
@@ -95,13 +96,12 @@ async def test_same_category_recent_send_does_not_block(patched_scoring_path, mo
     cand = _candidate("tech", cosine=0.6)  # base ~0.6, clears 0.45 on its own
     monkeypatch.setattr(scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[cand]))
     # Most recent outcome is the same category -> diversity_penalty returns 0.6.
-    monkeypatch.setattr(
-        scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=["tech"])
-    )
+    state = _ready_state()
+    state.recent_sends = [{"content_id": "prior", "category": "tech", "sent_at": datetime.now(UTC)}]
 
     summary = scoring_loop.TickSummary()
-    with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid-1", MagicMock(), summary)
+    with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
+        await scoring_loop._score_one_user("uid-1", MagicMock(), summary, [])
 
     assert summary.notifications_sent == 1
     assert summary.blocked_below_threshold == 0
@@ -114,13 +114,10 @@ async def test_weak_candidate_still_blocked(patched_scoring_path, monkeypatch):
     send_mock = patched_scoring_path
     cand = _candidate("tech", cosine=0.30)  # base ~0.30, below threshold
     monkeypatch.setattr(scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[cand]))
-    monkeypatch.setattr(
-        scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=[])
-    )
 
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid-2", MagicMock(), summary)
+        await scoring_loop._score_one_user("uid-2", MagicMock(), summary, [])
 
     assert summary.notifications_sent == 0
     assert summary.blocked_below_threshold == 1
@@ -139,13 +136,12 @@ async def test_diversity_prefers_fresh_category_among_sendable(patched_scoring_p
     )
     # "tech" was just sent -> tech gets 0.6x in the tie-break, so sports should win
     # even though tech's base is marginally higher.
-    monkeypatch.setattr(
-        scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=["tech"])
-    )
+    state = _ready_state()
+    state.recent_sends = [{"content_id": "prior", "category": "tech", "sent_at": datetime.now(UTC)}]
 
     summary = scoring_loop.TickSummary()
-    with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid-3", MagicMock(), summary)
+    with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
+        await scoring_loop._score_one_user("uid-3", MagicMock(), summary, [])
 
     assert summary.notifications_sent == 1
     # The chosen candidate now rides in the enqueued proposal (submit's first arg).

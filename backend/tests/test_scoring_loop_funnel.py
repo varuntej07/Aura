@@ -51,6 +51,7 @@ def _ready_state() -> feature_store.SignalStoreState:
     # zero query vector has no meaningful nearest neighbours), and a clean daily
     # counter so the send isn't capped.
     state.bootstrap_done = True
+    state.recent_sends_backfilled = True
     state.user_vector = [0.1] * feature_store.USER_VECTOR_DIMENSION
     state.sends_today = 0
     state.consecutive_no_open_ticks = 0
@@ -73,9 +74,6 @@ def patched_send_path(monkeypatch):
     monkeypatch.setattr(scoring_loop, "is_within_active_hours", lambda *a, **k: True)
     monkeypatch.setattr(
         scoring_loop, "find_nearest_for_user", AsyncMock(return_value=[cand])
-    )
-    monkeypatch.setattr(
-        scoring_loop, "_load_recent_outcome_categories", AsyncMock(return_value=[])
     )
     # Force everything sendable so the test doesn't depend on time-of-day scoring.
     monkeypatch.setattr(scoring_loop, "NOTIFICATION_SCORE_THRESHOLD", 0.0)
@@ -122,7 +120,7 @@ async def test_successful_send_enqueues_join_keys_then_hook_emits_funnel(
     with patch.object(
         feature_store, "read_state", AsyncMock(return_value=_ready_state())
     ):
-        await scoring_loop._score_one_user("uid-42", models, summary)
+        await scoring_loop._score_one_user("uid-42", models, summary, [])
 
     # 1. The tick ENQUEUES (no inline send / funnel). The join keys the client tap event
     #    reuses must ride on the proposal so the hook can emit them on delivery.
@@ -133,6 +131,9 @@ async def test_successful_send_enqueues_join_keys_then_hook_emits_funnel(
     assert proposal.data["content_id"] == cand.content_id
     assert proposal.data["notification_id"]
     assert proposal.data["category"] == cand.category
+    # The Buddy-facing "why I reached out" note rides the payload (mirrors the
+    # framer's relevance_reason) so a tap → chat injects it on the first reply.
+    assert proposal.data["notification_reason"] == "matches your tech interest"
     capture.assert_not_awaited()  # the funnel event has NOT fired yet (not delivered)
 
     # 2. On a REAL delivery, on_news_delivered fires the top-of-funnel event with the
@@ -165,10 +166,11 @@ async def test_run_tick_warns_when_sends_happen_but_posthog_unconfigured(monkeyp
         AsyncMock(return_value=["uid-1"]),
     )
 
-    async def _fake_score(user_id, models, summary):
+    async def _fake_score(user_id, models, summary, breaking_candidates):
         summary.notifications_sent += 1
 
     monkeypatch.setattr(scoring_loop, "_score_one_user", _fake_score)
+    monkeypatch.setattr(scoring_loop, "list_recent_breaking_candidates", AsyncMock(return_value=[]))
     monkeypatch.setattr(scoring_loop, "get_model_provider", lambda: MagicMock())
     monkeypatch.setattr(scoring_loop.posthog_client, "flush", AsyncMock())
     monkeypatch.setattr(scoring_loop.settings, "POSTHOG_API_KEY", "")  # unconfigured
@@ -190,10 +192,11 @@ async def test_run_tick_no_warn_when_posthog_configured(monkeypatch):
         AsyncMock(return_value=["uid-1"]),
     )
 
-    async def _fake_score(user_id, models, summary):
+    async def _fake_score(user_id, models, summary, breaking_candidates):
         summary.notifications_sent += 1
 
     monkeypatch.setattr(scoring_loop, "_score_one_user", _fake_score)
+    monkeypatch.setattr(scoring_loop, "list_recent_breaking_candidates", AsyncMock(return_value=[]))
     monkeypatch.setattr(scoring_loop, "get_model_provider", lambda: MagicMock())
     monkeypatch.setattr(scoring_loop.posthog_client, "flush", AsyncMock())
     monkeypatch.setattr(scoring_loop.settings, "POSTHOG_API_KEY", "phc_live_key")
