@@ -37,10 +37,12 @@ class _PaywallScreenState extends State<PaywallScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    unawaited(context.read<PostHogAnalyticsService>().trackEvent(
-      'paywall_viewed',
-      properties: {'trigger': widget.trialReason?.variant ?? 'direct'},
-    ));
+    unawaited(
+      context.read<PostHogAnalyticsService>().trackEvent(
+        'paywall_viewed',
+        properties: {'trigger': widget.trialReason?.variant ?? 'direct'},
+      ),
+    );
   }
 
   @override
@@ -63,12 +65,11 @@ class _PaywallScreenState extends State<PaywallScreen>
   /// Warm, contextual subtitle when arriving from a trial-lifecycle notification
   /// tap, otherwise the generic entry-point copy.
   String get _subtitle => switch (widget.trialReason?.variant) {
-        '3d_warning' =>
-          "Your trial wraps up in 3 days. Let's keep this going.",
-        'expired' =>
-          "Your trial's over, but Buddy's not going anywhere. Pick back up anytime.",
-        _ => '$kTrialDurationDays-day free trial. Cancel anytime.',
-      };
+    '3d_warning' => "Your trial wraps up in 3 days. Let's keep this going.",
+    'expired' =>
+      "Your trial's over, but Buddy's not going anywhere. Pick back up anytime.",
+    _ => '$kTrialDurationDays-day free trial. Cancel anytime.',
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -81,7 +82,10 @@ class _PaywallScreenState extends State<PaywallScreen>
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 12,
+                ),
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: GlassIconButton(
@@ -154,13 +158,11 @@ class _PaywallScreenState extends State<PaywallScreen>
                           ),
                           const SizedBox(height: 24),
 
-                          // Purchase UI only where the storefront allows a
-                          // web-checkout link-out (backend-served steering) and
-                          // the user is not already paying. SILENT mode and paid
-                          // users get plan status only: no prices, no purchase
-                          // mention, which is legal on every storefront.
-                          if (vm.steeringMode == SteeringMode.linkOut &&
-                              !vm.isPaid) ...[
+                          // Purchase UI appears only after the free trial ends,
+                          // Dodo is fully configured, and backend-served
+                          // steering allows web checkout for this storefront.
+                          // Trial, paid, and SILENT users see plan status only.
+                          if (vm.canPurchaseSubscription) ...[
                             // Side-by-side billing cards
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -168,11 +170,16 @@ class _PaywallScreenState extends State<PaywallScreen>
                                 Expanded(
                                   child: _BillingCard(
                                     period: _BillingPeriod.monthly,
-                                    selected: _billingPeriod == _BillingPeriod.monthly,
+                                    selected:
+                                        _billingPeriod ==
+                                        _BillingPeriod.monthly,
                                     enabled: _activePlan != _PlanToggle.free,
                                     pricing: activePricing,
                                     onTap: _activePlan != _PlanToggle.free
-                                        ? () => setState(() => _billingPeriod = _BillingPeriod.monthly)
+                                        ? () => setState(
+                                            () => _billingPeriod =
+                                                _BillingPeriod.monthly,
+                                          )
                                         : null,
                                   ),
                                 ),
@@ -180,11 +187,15 @@ class _PaywallScreenState extends State<PaywallScreen>
                                 Expanded(
                                   child: _BillingCard(
                                     period: _BillingPeriod.annual,
-                                    selected: _billingPeriod == _BillingPeriod.annual,
+                                    selected:
+                                        _billingPeriod == _BillingPeriod.annual,
                                     enabled: _activePlan != _PlanToggle.free,
                                     pricing: activePricing,
                                     onTap: _activePlan != _PlanToggle.free
-                                        ? () => setState(() => _billingPeriod = _BillingPeriod.annual)
+                                        ? () => setState(
+                                            () => _billingPeriod =
+                                                _BillingPeriod.annual,
+                                          )
                                         : null,
                                   ),
                                 ),
@@ -228,7 +239,6 @@ class _PaywallScreenState extends State<PaywallScreen>
                               textAlign: TextAlign.center,
                             ),
                           ],
-
                         ],
                       );
                     },
@@ -242,7 +252,10 @@ class _PaywallScreenState extends State<PaywallScreen>
     );
   }
 
-  Future<void> _onSubscribe(BuildContext context, SubscriptionViewModel vm) async {
+  Future<void> _onSubscribe(
+    BuildContext context,
+    SubscriptionViewModel vm,
+  ) async {
     final tier = _activePlan == _PlanToggle.pro
         ? SubscriptionTier.pro
         : SubscriptionTier.companion;
@@ -251,9 +264,13 @@ class _PaywallScreenState extends State<PaywallScreen>
     final opened = await vm.openCheckout(tier: tier, annual: annual);
 
     if (opened && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Finishing up in your browser. Buddy unlocks here the moment payment lands.'),
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Finishing up in your browser. Buddy unlocks here the moment payment lands.',
+          ),
+        ),
+      );
     }
   }
 
@@ -321,10 +338,7 @@ class _PlanToggleSwitch extends StatelessWidget {
   final _PlanToggle selected;
   final ValueChanged<_PlanToggle> onChanged;
 
-  const _PlanToggleSwitch({
-    required this.selected,
-    required this.onChanged,
-  });
+  const _PlanToggleSwitch({required this.selected, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -517,10 +531,7 @@ class _FeatureList extends StatelessWidget {
             if (i > 0)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Divider(
-                  height: 1,
-                  color: AppColors.glassBorderDim,
-                ),
+                child: Divider(height: 1, color: AppColors.glassBorderDim),
               ),
             _FeatureRow(item: items[i]),
           ],
@@ -559,7 +570,9 @@ class _FeatureRow extends StatelessWidget {
           child: Text(
             item.text,
             style: TextStyle(
-              color: item.included ? AppColors.textSecondary : AppColors.textDisabled,
+              color: item.included
+                  ? AppColors.textSecondary
+                  : AppColors.textDisabled,
               fontSize: 14,
             ),
           ),
@@ -615,10 +628,7 @@ class _BillingCard extends StatelessWidget {
                       AppColors.accent.withValues(alpha: 0.20),
                       AppColors.accent.withValues(alpha: 0.08),
                     ]
-                  : [
-                      const Color(0x0F2B2A26),
-                      const Color(0x082B2A26),
-                    ],
+                  : [const Color(0x0F2B2A26), const Color(0x082B2A26)],
             ),
             borderRadius: BorderRadius.circular(18),
             border: Border.all(
@@ -636,7 +646,9 @@ class _BillingCard extends StatelessWidget {
                   Text(
                     isAnnual ? 'Yearly' : 'Monthly',
                     style: TextStyle(
-                      color: isActive ? AppColors.accent : AppColors.textPrimary,
+                      color: isActive
+                          ? AppColors.accent
+                          : AppColors.textPrimary,
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
                     ),
@@ -644,7 +656,10 @@ class _BillingCard extends StatelessWidget {
                   if (isAnnual) ...[
                     const SizedBox(width: 5),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: AppColors.accent.withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(5),
@@ -703,10 +718,7 @@ class _BillingCard extends StatelessWidget {
                 const SizedBox(height: 4),
                 const Text(
                   'billed monthly',
-                  style: TextStyle(
-                    color: AppColors.textTertiary,
-                    fontSize: 11,
-                  ),
+                  style: TextStyle(color: AppColors.textTertiary, fontSize: 11),
                 ),
               ],
             ],
@@ -757,7 +769,10 @@ class _CtaButton extends StatelessWidget {
                 ? const SizedBox(
                     width: 22,
                     height: 22,
-                    child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                    child: CircularProgressIndicator(
+                      color: Colors.white,
+                      strokeWidth: 2,
+                    ),
                   )
                 : Text(
                     label,
@@ -817,10 +832,10 @@ class _PlanStatusCard extends StatelessWidget {
   const _PlanStatusCard({required this.vm});
 
   String get _planLabel => switch (vm.currentTier) {
-        SubscriptionTier.pro => 'Pro',
-        SubscriptionTier.companion => 'Companion',
-        SubscriptionTier.free => 'Free',
-      };
+    SubscriptionTier.pro => 'Pro',
+    SubscriptionTier.companion => 'Companion',
+    SubscriptionTier.free => 'Free',
+  };
 
   String get _statusLine {
     if (vm.isTrialActive) {

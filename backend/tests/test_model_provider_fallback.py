@@ -173,6 +173,47 @@ async def test_balanced_falls_back_to_gemini(monkeypatch):
     assert create.await_count == mp._MAX_RETRIES
 
 
+async def test_balanced_images_ride_into_anthropic_blocks():
+    """balanced(images=...) builds Anthropic base64 image blocks before the text."""
+    # A tiny valid-base64 payload; the screen-demo endpoint sends real JPEGs.
+    image_b64 = "aGVsbG8="
+    create = AsyncMock(return_value=_text_response("i can see it"))
+    provider = _provider_with_anthropic(create)
+
+    result = await provider.balanced(
+        "what is on screen",
+        images=[{"media_type": "image/jpeg", "data": image_b64}],
+    )
+
+    assert result == "i can see it"
+    assert create.await_args is not None
+    content = create.await_args.kwargs["messages"][-1]["content"]
+    assert content[0]["type"] == "image"
+    assert content[0]["source"]["data"] == image_b64
+    assert content[0]["source"]["media_type"] == "image/jpeg"
+    assert content[-1] == {"type": "text", "text": "what is on screen"}
+
+
+async def test_balanced_images_survive_the_gemini_fallback_hop(monkeypatch):
+    """The vision payload must not be dropped when Haiku falls over to Gemini."""
+    image_b64 = "aGVsbG8="
+    create = AsyncMock(side_effect=_rate_limit())
+    provider = _provider_with_anthropic(create)
+    g_client = _attach_gemini(provider, "gemini saw it", monkeypatch)
+    monkeypatch.setattr(mp.asyncio, "sleep", AsyncMock())
+
+    result = await provider.balanced(
+        "what is on screen",
+        images=[{"media_type": "image/jpeg", "data": image_b64}],
+    )
+
+    assert result == "gemini saw it"
+    contents = g_client.models.generate_content.call_args.kwargs["contents"]
+    # Image part first (from_bytes), prompt last — the image crossed providers.
+    assert len(contents) == 2
+    assert contents[-1] == "what is on screen"
+
+
 async def test_call_anthropic_recovers_on_fallback_model(monkeypatch):
     """Primary 429s through its retries; the fallback Anthropic model then succeeds."""
     create = AsyncMock(side_effect=[_rate_limit(), _rate_limit(), _rate_limit(),

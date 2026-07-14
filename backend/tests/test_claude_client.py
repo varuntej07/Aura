@@ -2,13 +2,19 @@
 Fallback coverage for the main text-chat client (src/services/claude_client.py).
 
 The streaming chat path escalates Sonnet -> Haiku and, if the whole Anthropic chain is down
-BEFORE any token streamed, hands off to the cross-provider Gemini hop. These pin:
+BEFORE any token streamed, hands off to the cross-provider Gemini hop (which can itself
+delegate further to a GPT hop; see test_gemini_chat_fallback.py / test_openai_chat_fallback.py
+for that boundary). These pin:
   - a model that fails before any text -> escalate to the Anthropic fallback model, user
     still gets text + done, no error
   - a failure AFTER a token has streamed -> propagate as ONE error event, no fallback
   - the whole Anthropic chain exhausted before any token -> delegate to the Gemini hop
-  - both providers down -> exactly one error event
-  - the non-streaming send_text_turn escalates Sonnet -> Haiku
+  - a NON-retryable Anthropic error (e.g. a 400 for an exhausted credit balance -- the exact
+    real-world bug report this fixes) escalates IMMEDIATELY, no wasted retry/backoff sleep,
+    and never leaks the raw provider error text to the client
+  - both providers down -> exactly one error event, and it is always the friendly copy
+  - the non-streaming send_text_turn escalates Sonnet -> Haiku for both retryable and
+    non-retryable errors
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anthropic
 
+from src.services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from src.services.claude_client import ClaudeClient
 from src.config.settings import settings
 
@@ -25,6 +32,24 @@ from src.config.settings import settings
 
 def _rate_limit() -> anthropic.RateLimitError:
     return anthropic.RateLimitError("429", response=MagicMock(), body={})
+
+
+def _insufficient_credit_balance() -> anthropic.BadRequestError:
+    """Reproduces the exact real-world failure: Anthropic returns a 400
+    invalid_request_error (not one of _RETRYABLE_ERRORS) when the account's
+    credit balance is exhausted. Message shape mirrors the real SDK's
+    'Error code: 400 - {...}' formatting so the raw-leak assertions below are
+    testing against realistic text, not a toy string."""
+    body = {
+        "error": {
+            "type": "invalid_request_error",
+            "message": (
+                "Your credit balance is too low to access the Anthropic API. "
+                "Please go to Plans & Billing to upgrade or purchase credits."
+            ),
+        }
+    }
+    return anthropic.BadRequestError(f"Error code: 400 - {body}", response=MagicMock(), body=body)
 
 
 def _usage() -> MagicMock:
@@ -199,6 +224,80 @@ async def test_stream_both_providers_down_single_error(monkeypatch):
     assert len(errors) == 1
 
 
+# --- the reported bug: a non-retryable (billing) error must still fall back ------
+
+async def test_stream_insufficient_credit_balance_escalates_immediately_no_sleep(monkeypatch):
+    """The exact reported bug: a 400 for an exhausted Anthropic credit balance is
+    NOT in _RETRYABLE_ERRORS, so it must skip the backoff-retry loop entirely and
+    escalate straight to the next model -- one API call per model, not three."""
+    side_effects = [
+        _FakeStream(enter_exc=_insufficient_credit_balance()),  # Sonnet: 1 attempt, no retry
+        _FakeStream(enter_exc=_insufficient_credit_balance()),  # Haiku: 1 attempt, no retry
+    ]
+    client, inner = _client_with_streams(side_effects)
+    sleep_spy = AsyncMock()
+    monkeypatch.setattr("src.services.claude_client.asyncio.sleep", sleep_spy)
+
+    async def _fake_gemini(**_kwargs):
+        yield {"type": "text_delta", "delta": "Hi from gemini"}
+        yield {"type": "done", "metadata": {"tool_names": []}}
+
+    with patch("src.services.claude_client.stream_gemini_chat_fallback", _fake_gemini):
+        events = await _collect(
+            client.send_text_turn_stream(system_prompt="sys", user_content="hi")
+        )
+
+    # Exactly one call per model -- no retry/backoff was ever attempted.
+    assert inner.messages.stream.call_count == 2
+    sleep_spy.assert_not_called()
+    assert [e["type"] for e in events].count("error") == 0
+    assert events[-1]["type"] == "done"
+
+
+async def test_stream_all_four_tiers_down_yields_only_friendly_message(monkeypatch):
+    """Sonnet, Haiku, Gemini, AND the GPT hop are all down -> the client sees
+    EXACTLY ONE error event, and it is ALWAYS the friendly copy -- never the raw
+    'insufficient credit balance' / 'invalid_request_error' provider text that
+    caused the original bug report."""
+    side_effects = [
+        _FakeStream(enter_exc=_insufficient_credit_balance()),
+        _FakeStream(enter_exc=_insufficient_credit_balance()),
+    ]
+    client, inner = _client_with_streams(side_effects)
+    monkeypatch.setattr("src.services.claude_client.asyncio.sleep", AsyncMock())
+
+    async def _fake_gemini_exhausted(**_kwargs):
+        # Mirrors gemini_chat_fallback's real terminal contract once it (and its
+        # own GPT delegation) are also exhausted before any token.
+        yield {"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}
+
+    with patch("src.services.claude_client.stream_gemini_chat_fallback", _fake_gemini_exhausted):
+        events = await _collect(
+            client.send_text_turn_stream(system_prompt="sys", user_content="hi")
+        )
+
+    assert inner.messages.stream.call_count == 2
+    assert events == [{"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}]
+    full_payload = str(events)
+    assert "credit balance" not in full_payload
+    assert "invalid_request_error" not in full_payload
+
+
+async def test_stream_generic_bug_after_all_fallbacks_never_leaks_raw_text(monkeypatch):
+    """Even a totally unexpected, non-provider exception (e.g. a bug in our own
+    event-handling code) must never put str(exc) in the client-visible payload --
+    the outer catch-all's job is to always show the friendly copy."""
+    client, _inner = _client_with_streams([RuntimeError("stack trace with secret_key=abc123")])
+    monkeypatch.setattr("src.services.claude_client.asyncio.sleep", AsyncMock())
+
+    events = await _collect(
+        client.send_text_turn_stream(system_prompt="sys", user_content="hi")
+    )
+
+    assert events == [{"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}]
+    assert "secret_key" not in str(events)
+
+
 # --- non-streaming fallback ------------------------------------------------
 
 async def test_send_text_turn_escalates_to_fallback_model(monkeypatch):
@@ -227,3 +326,33 @@ async def test_send_text_turn_escalates_to_fallback_model(monkeypatch):
     assert result["text"] == "answer from haiku"
     assert inner.messages.create.call_count == 4
     assert inner.messages.create.call_args_list[-1].kwargs["model"] == settings.ANTHROPIC_CHAT_MODEL_FALLBACK
+
+
+async def test_send_text_turn_non_retryable_error_escalates_without_sleeping(monkeypatch):
+    """Non-streaming: a 400 credit-balance error is NOT retryable, so Sonnet gets
+    exactly one attempt (no backoff loop) before escalating straight to Haiku."""
+    tool_executor = MagicMock()
+    tool_executor.execute = AsyncMock()
+    client = ClaudeClient(tool_executor)
+
+    block = MagicMock()
+    block.type = "text"
+    block.text = "answer from haiku"
+    final = MagicMock()
+    final.stop_reason = "end_turn"
+    final.content = [block]
+    final.usage = _usage()
+
+    inner = MagicMock()
+    inner.messages.create = AsyncMock(side_effect=[_insufficient_credit_balance(), final])
+    client._client = inner
+    sleep_spy = AsyncMock()
+    monkeypatch.setattr("src.services.claude_client.asyncio.sleep", sleep_spy)
+
+    result = await client.send_text_turn(system_prompt="sys", user_content="hi")
+
+    assert result["text"] == "answer from haiku"
+    assert inner.messages.create.call_count == 2  # one Sonnet attempt, one Haiku attempt
+    sleep_spy.assert_not_called()
+    last_call_model = inner.messages.create.call_args_list[-1].kwargs["model"]
+    assert last_call_model == settings.ANTHROPIC_CHAT_MODEL_FALLBACK

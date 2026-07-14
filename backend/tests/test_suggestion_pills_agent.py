@@ -36,7 +36,7 @@ class TestSuggestionPillsAgent:
         from src.services.daily_notification.suggestion_pills_agent import SuggestionPillsAgent
 
         model = MagicMock()
-        model.cheap = AsyncMock(
+        model.balanced = AsyncMock(
             return_value='["help me prep for my interview", "hold me to the gym today", "recommend me a sci-fi book"]'
         )
         doc_ref = MagicMock()
@@ -58,7 +58,7 @@ class TestSuggestionPillsAgent:
             "hold me to the gym today",
             "recommend me a sci-fi book",
         ]
-        assert model.cheap.call_count == 1
+        assert model.balanced.call_count == 1
         db.collection.assert_called_once_with("agent_suggestion_pills")
         db.collection.return_value.document.assert_called_once_with("uid1")
         written = doc_ref.set.call_args[0][0]
@@ -73,7 +73,7 @@ class TestSuggestionPillsAgent:
         from src.services.daily_notification.suggestion_pills_agent import SuggestionPillsAgent
 
         model = MagicMock()
-        model.cheap = AsyncMock(return_value="not json")
+        model.balanced = AsyncMock(return_value="not json")
         doc_ref = MagicMock()
         db = MagicMock()
         db.collection.return_value.document.return_value = doc_ref

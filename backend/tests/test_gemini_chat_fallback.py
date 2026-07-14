@@ -2,14 +2,19 @@
 Tests for src/services/gemini_chat_fallback.py — the cross-provider chat hop.
 
 Covers: Anthropic<->Gemini message translation, a text-only turn, a tool-call turn that
-executes a tool and surfaces a reminder card, the clarification sentinel, and the error path.
-The Gemini client is faked (no network); generate_content_stream is awaited and yields chunks.
+executes a tool and surfaces a reminder card, the clarification sentinel, and the error path:
+a failure BEFORE any token streamed delegates further to the GPT hop (openai_chat_fallback);
+a failure AFTER a token streamed ends the turn with exactly one FRIENDLY error event (never
+the raw provider exception text), same safe-boundary rule claude_client uses for its own
+Sonnet/Haiku escalation. The Gemini client is faked (no network); generate_content_stream is
+awaited and yields chunks.
 """
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from src.services.gemini_chat_fallback import (
     stream_gemini_chat_fallback,
     _anthropic_messages_to_gemini_contents,
@@ -155,16 +160,87 @@ async def test_clarification_sentinel_emits_ui_and_done():
     assert events[-1]["metadata"].get("awaiting_clarification") is True
 
 
-async def test_stream_error_yields_single_error_event():
+async def test_stream_error_before_any_token_delegates_to_openai():
+    """Gemini fails before any token of its own hop streamed -> delegate to the
+    GPT hop (the third, independent provider) rather than surfacing an error."""
     provider = _provider_streaming(RuntimeError("gemini exploded"))
     te = MagicMock()
     te.execute = AsyncMock()
-    with patch("src.services.gemini_chat_fallback.get_model_provider", return_value=provider):
+
+    async def _fake_openai(**_kwargs):
+        yield {"type": "text_delta", "delta": "from gpt"}
+        yield {"type": "done", "metadata": {"tool_names": []}}
+
+    called = {}
+
+    def _spy(**kwargs):
+        called["kwargs"] = kwargs
+        return _fake_openai(**kwargs)
+
+    with patch("src.services.gemini_chat_fallback.get_model_provider", return_value=provider), \
+         patch("src.services.gemini_chat_fallback.stream_openai_chat_fallback", _spy):
         events = await _collect(
             tool_executor=te,
             system_prompt="sys",
             messages=[{"role": "user", "content": "hi"}],
             tools=[],
         )
-    assert len(events) == 1
-    assert events[0]["type"] == "error"
+
+    assert called  # the GPT hop was invoked
+    text = "".join(e["delta"] for e in events if e["type"] == "text_delta")
+    assert text == "from gpt"
+    assert events[-1]["type"] == "done"
+    assert [e["type"] for e in events].count("error") == 0
+
+
+async def test_stream_error_before_any_token_openai_also_fails_one_friendly_error():
+    """Gemini AND the GPT hop are both down before any token -> the client still
+    only ever sees the one friendly error event (openai_chat_fallback's own
+    terminal case already yields that; this proves it survives the handoff)."""
+    provider = _provider_streaming(RuntimeError("gemini exploded"))
+    te = MagicMock()
+    te.execute = AsyncMock()
+
+    async def _fake_openai_error(**_kwargs):
+        yield {"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}
+
+    with patch("src.services.gemini_chat_fallback.get_model_provider", return_value=provider), \
+         patch("src.services.gemini_chat_fallback.stream_openai_chat_fallback", _fake_openai_error):
+        events = await _collect(
+            tool_executor=te,
+            system_prompt="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+        )
+
+    assert events == [{"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}]
+
+
+async def test_stream_error_after_token_started_yields_friendly_message_no_delegation():
+    """Once Gemini has already streamed real text in this hop, a later failure
+    (e.g. on the next tool-turn's API call) must NOT delegate to GPT -- same
+    'can't replay/switch after a token reached the user' rule as claude_client.
+    The one error event shown must be the friendly copy, never raw exception text."""
+    long_text = "x" * 90  # > _NARRATION_MAX_CHARS: commits to streaming immediately
+    provider = _provider_streaming([
+        _achunks([_text_chunk(long_text), _fc_chunk("set_reminder", {"m": "x"})]),
+        RuntimeError("gemini turn 2 exploded"),
+    ])
+    te = MagicMock()
+    te.execute = AsyncMock(return_value={"id": "r1"})
+    openai_spy = MagicMock()
+
+    with patch("src.services.gemini_chat_fallback.get_model_provider", return_value=provider), \
+         patch("src.services.gemini_chat_fallback.stream_openai_chat_fallback", openai_spy):
+        events = await _collect(
+            tool_executor=te,
+            system_prompt="sys",
+            messages=[{"role": "user", "content": "remind me"}],
+            tools=claude_tool_definitions(),
+        )
+
+    openai_spy.assert_not_called()  # no delegation once text already streamed
+    errors = [e for e in events if e["type"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["message"] == CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
+    assert "gemini turn 2 exploded" not in errors[0]["message"]

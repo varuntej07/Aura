@@ -134,15 +134,21 @@ class GoogleCalendarConnector:
         doc = self._source_ref(calendar_id).get()
         return doc.to_dict() or {}
 
-    def _exchange_server_auth_code(self, auth_code: str) -> dict[str, Any]:
+    def _exchange_server_auth_code(
+        self,
+        auth_code: str,
+        *,
+        redirect_uri: str | None = None,
+    ) -> dict[str, Any]:
         form_fields: dict[str, str] = {
             "code": auth_code,
             "client_id": settings.GOOGLE_CLIENT_ID,
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
             "grant_type": "authorization_code",
         }
-        if settings.GOOGLE_REDIRECT_URI:
-            form_fields["redirect_uri"] = settings.GOOGLE_REDIRECT_URI
+        resolved_redirect_uri = redirect_uri or settings.GOOGLE_REDIRECT_URI
+        if resolved_redirect_uri:
+            form_fields["redirect_uri"] = resolved_redirect_uri
         form = urllib.parse.urlencode(form_fields).encode("utf-8")
 
         request = urllib.request.Request(
@@ -271,8 +277,14 @@ class GoogleCalendarConnector:
             "last_error": source.get("last_error") or integration.get("last_error"),
         }
 
-    def connect(self, auth_code: str, *, watch_url: str | None) -> dict[str, Any]:
-        token_data = self._exchange_server_auth_code(auth_code)
+    def connect(
+        self,
+        auth_code: str,
+        *,
+        watch_url: str | None,
+        redirect_uri: str | None = None,
+    ) -> dict[str, Any]:
+        token_data = self._exchange_server_auth_code(auth_code, redirect_uri=redirect_uri)
         expires_in = int(token_data.get("expires_in", 3600) or 3600)
         expiry_at = _utc_now() + timedelta(seconds=expires_in)
 
@@ -744,6 +756,7 @@ class GoogleCalendarConnector:
                     if isinstance(attendee, dict) and attendee.get("email")
                 ],
                 "meeting_link": data.get("hangout_link"),
+                "html_link": data.get("html_link"),
                 "calendar_name": data.get("calendar_name"),
             })
             if len(events) >= limit:
@@ -863,8 +876,11 @@ class GoogleCalendarConnector:
 
         # google_calendar_channels holds one doc per connected user (including
         # users whose channel has expired but was never replaced — they are the
-        # ones who most need a fallback sync). Dedup by user_id.
-        channel_docs = list(db.collection(CHANNELS_COLLECTION).stream())
+        # ones who most need a fallback sync). Dedup by user_id. The .limit() is a
+        # growth guard only (current connected-user counts are far below it) —
+        # this scan has no other filter, so it's the one place read cost scales
+        # with total connected-channel count rather than a bounded query.
+        channel_docs = list(db.collection(CHANNELS_COLLECTION).limit(2000).stream())
         user_ids: list[str] = list({
             uid
             for doc in channel_docs

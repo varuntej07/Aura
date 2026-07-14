@@ -41,7 +41,6 @@ class Settings(BaseSettings):
     VOICE_TOOL_TIMEOUT_S: float = 5.0      # per-tool Firestore call budget
     VOICE_CONNECT_TIMEOUT_S: float = 10.0  # LiveKit room.connect() budget
     VOICE_TOKEN_MINT_TIMEOUT_S: float = 5.0  # Firebase ID token mint budget before first audio
-
     # Chat tool timeout — longer than voice because text chat can tolerate a Google Calendar sync
     CHAT_TOOL_TIMEOUT_S: float = 20.0
 
@@ -397,10 +396,16 @@ class Settings(BaseSettings):
 
     @property
     def steering_config(self) -> dict[str, str]:
-        """Validated steering block for the /entitlement response. An invalid env
-        value falls back to SILENT (the everywhere-legal mode) rather than ever
-        shipping an unknown mode to a client, same silent-fallback shape as
-        signal_news_locales above."""
+        """Validated steering block for the /entitlement response.
+
+        Checkout stays silent until both checkout creation and signed webhook
+        processing are configured. This prevents a user from reaching Dodo
+        before the backend can apply the resulting entitlement. An invalid env
+        value also falls back to SILENT rather than reaching the client.
+        """
+        if not (self.dodo_configured and self.dodo_webhook_configured):
+            return {"android_us": "SILENT", "ios_us": "SILENT", "row": "SILENT"}
+
         config: dict[str, str] = {}
         for key, raw in (
             ("android_us", self.STEERING_ANDROID_US),

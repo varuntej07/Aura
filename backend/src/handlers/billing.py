@@ -67,6 +67,12 @@ async def handle_billing_checkout(request: Request) -> JSONResponse:
     except EntitlementUnavailableError:
         return JSONResponse({"error": "entitlement_unavailable"}, status_code=503)
 
+    # Every account gets the full 45-day trial before it can purchase. Keep
+    # this guard on the authenticated backend route as well as in the client so
+    # a stale or modified client cannot create an early checkout session.
+    if normalize_status(entitlement) == "trialing":
+        return JSONResponse({"error": "trial_active"}, status_code=409)
+
     if has_active_paid_subscription(entitlement):
         logger.info("billing: checkout blocked, subscription already live", {
             "user_id": user_id, "tier": str(entitlement.get("tier", "")),

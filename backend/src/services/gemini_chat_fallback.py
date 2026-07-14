@@ -7,10 +7,14 @@ conversation here. This runs the SAME multi-turn tool loop on Gemini Flash and e
 SAME SSE event dicts (text_delta / tool_thinking / clarification_ui / done / error), so the
 client sees a normal streamed reply from a different provider instead of a dead chat.
 
-It is a last resort, reached only when both Anthropic models are down, so it favours
-"keep the conversation alive" over feature parity: inbound image/document attachments are
-dropped (with a log line) rather than translated, since an outage is a rare moment and the
-goal here is a working text reply, not multimodal fidelity.
+It is the second-to-last resort. If Gemini itself fails BEFORE any token of this hop has
+streamed, it delegates further to openai_chat_fallback.py (a third, independent provider)
+using the exact same safe-boundary rule claude_client applies to its own Sonnet/Haiku
+escalation: once a token has reached the user, we can't silently switch providers again, so
+that case (and a failed GPT hop) ends the turn with exactly one friendly `error` event, never
+the raw provider exception text (see chat_error_copy.py). This is a rare-outage path, so it
+favours "keep the conversation alive" over feature parity: inbound image/document attachments
+are dropped (with a log line) rather than translated.
 """
 
 from __future__ import annotations
@@ -21,7 +25,10 @@ from typing import Any
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from .analytics.llm_telemetry import gemini_usage_tokens, start_llm_generation
+from .chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from .model_provider import get_model_provider
+from .openai_chat_fallback import stream_openai_chat_fallback
 from .tool_executor import ToolExecutor
 
 _MAX_TURNS = 6
@@ -162,13 +169,18 @@ async def stream_gemini_chat_fallback(
     tool_names_used: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run the chat turn on Gemini Flash and yield the same SSE events claude_client does.
-    Self-contained: owns its own multi-turn tool loop and always ends with one `done` event
-    (or one `error` event on total failure). `captured_tool_data` / `tool_names_used` carry
-    forward anything already produced by Anthropic turns before the handoff."""
+    Self-contained: owns its own multi-turn tool loop and always ends with one `done` event,
+    or delegates to the GPT hop / emits one friendly `error` event on total failure (see the
+    module docstring). `captured_tool_data` / `tool_names_used` carry forward anything already
+    produced by Anthropic turns before the handoff."""
     from google.genai import types  # type: ignore
 
     captured: list[dict[str, Any]] = list(captured_tool_data or [])
     names_used: list[str] = tool_names_used if tool_names_used is not None else []
+    text_started = False
+    # One telemetry generation per streamed Gemini turn; finish() is idempotent,
+    # so the outer error handler can safely close the latest one on failure.
+    recording: Any = None
 
     try:
         client = get_model_provider()._get_gemini_client()
@@ -196,17 +208,28 @@ async def stream_gemini_chat_fallback(
             full_text_parts: list[str] = []
             function_calls: list[Any] = []
 
+            recording = start_llm_generation(
+                model=settings.TIER_CHEAP, provider="gemini", caller="chat_gemini_fallback",
+                uid=tool_executor.user_id,
+            )
+            usage_metadata: Any = None
             stream = await client.aio.models.generate_content_stream(
                 model=settings.TIER_CHEAP,
                 contents=contents,
                 config=config,
             )
             async for chunk in stream:
+                # Gemini reports usage on the final streamed chunk; keep the
+                # last non-None one seen.
+                chunk_usage = getattr(chunk, "usage_metadata", None)
+                if chunk_usage is not None:
+                    usage_metadata = chunk_usage
                 for part in _chunk_parts(chunk):
                     txt = getattr(part, "text", None)
                     if txt:
                         full_text_parts.append(txt)
                         if committed_to_streaming:
+                            text_started = True
                             yield {"type": "text_delta", "delta": txt}
                         else:
                             turn_text_buffer.append(txt)
@@ -214,15 +237,18 @@ async def stream_gemini_chat_fallback(
                             if buffered_chars >= _NARRATION_MAX_CHARS:
                                 committed_to_streaming = True
                                 for chunk_text in turn_text_buffer:
+                                    text_started = True
                                     yield {"type": "text_delta", "delta": chunk_text}
                                 turn_text_buffer.clear()
                     fc = getattr(part, "function_call", None)
                     if fc is not None:
                         function_calls.append(fc)
+            recording.finish(tokens=gemini_usage_tokens(usage_metadata))
 
             if not function_calls:
                 # Final turn — flush any still-buffered narration as the answer.
                 for chunk_text in turn_text_buffer:
+                    text_started = True
                     yield {"type": "text_delta", "delta": chunk_text}
                 turn_text_buffer.clear()
                 break
@@ -301,8 +327,27 @@ async def stream_gemini_chat_fallback(
         yield {"type": "done", "metadata": metadata}
 
     except Exception as exc:
+        if recording is not None:
+            recording.finish(success=False, error_type=type(exc).__name__)
         logger.exception("Gemini fallback: failed", {
             "error": str(exc),
             "error_type": type(exc).__name__,
         })
-        yield {"type": "error", "message": str(exc)}
+        if text_started:
+            # Once a token has reached the user we can't silently switch providers
+            # again -- same safe-boundary rule claude_client applies to its own
+            # Sonnet/Haiku escalation.
+            yield {"type": "error", "message": CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE}
+            return
+        logger.warn("Gemini fallback: exhausted before any token, delegating to GPT", {
+            "error_type": type(exc).__name__,
+        })
+        async for openai_event in stream_openai_chat_fallback(
+            tool_executor=tool_executor,
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=tools,
+            captured_tool_data=captured,
+            tool_names_used=names_used,
+        ):
+            yield openai_event

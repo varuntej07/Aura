@@ -53,6 +53,16 @@ def _python_contract_values() -> set[str]:
         funnel_events.EVENT_BRIEFING_CHAT_STARTED,
         funnel_events.NOTIFICATION_ORIGIN_BRIEFING,
         funnel_events.EVENT_WORLD_BRIEFING_FETCHED,
+        funnel_events.EVENT_KEYBOARD_ENABLED,
+        funnel_events.EVENT_KEYBOARD_FULL_ACCESS_GRANTED,
+        funnel_events.EVENT_KEYBOARD_DRAFT_REQUESTED,
+        funnel_events.EVENT_KEYBOARD_SUGGESTION_INSERTED,
+        funnel_events.EVENT_KEYBOARD_LIMIT_HIT,
+        funnel_events.PROP_KEYBOARD_ACTION,
+        funnel_events.PROP_KEYBOARD_HOST_APP,
+        funnel_events.PROP_KEYBOARD_FIELD_TYPE,
+        funnel_events.EVENT_KEYBOARD_PASSWORD_GENERATED,
+        funnel_events.EVENT_KEYBOARD_VOICE_STARTED,
     }
 
 

@@ -44,6 +44,10 @@ class UserEntitlement {
 
   bool get isPaid => tier != SubscriptionTier.free;
 
+  /// Checkout becomes available only after the free trial has ended. Paid
+  /// accounts manage their existing subscription instead of buying again.
+  bool get canPurchaseSubscription => !isTrialActive && !isPaid;
+
   /// Returns 0 when the trial has expired or the user is on a paid plan.
   int get daysLeftInTrial {
     if (!isTrialActive) return 0;
@@ -76,21 +80,17 @@ class UserEntitlement {
       UserEntitlement.fromBackend(json);
 
   Map<String, dynamic> toCacheJson() => {
-        'tier': tier.name,
-        'status': status.name,
-        'effective_tier': serverEffectiveTier.name,
-        if (expiresAt != null) 'expires_at': expiresAt!.toIso8601String(),
-        if (trialEndDate != null)
-          'trial_end_date': trialEndDate!.toIso8601String(),
-        'cancel_at_period_end': cancelAtPeriodEnd,
-      };
+    'tier': tier.name,
+    'status': status.name,
+    'effective_tier': serverEffectiveTier.name,
+    if (expiresAt != null) 'expires_at': expiresAt!.toIso8601String(),
+    if (trialEndDate != null) 'trial_end_date': trialEndDate!.toIso8601String(),
+    'cancel_at_period_end': cancelAtPeriodEnd,
+  };
 
   // Private parsers
-  static SubscriptionTier _parseTier(String? value) =>
-      SubscriptionTier.values.firstWhere(
-        (t) => t.name == value,
-        orElse: () => SubscriptionTier.free,
-      );
+  static SubscriptionTier _parseTier(String? value) => SubscriptionTier.values
+      .firstWhere((t) => t.name == value, orElse: () => SubscriptionTier.free);
 
   static SubscriptionStatus _parseStatus(String? value) {
     // Backend values (trialing, active, gracePeriod, expired) match the enum
@@ -138,10 +138,10 @@ class SteeringConfig {
   }
 
   Map<String, dynamic> toCacheJson() => {
-        'android_us': androidUs == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
-        'ios_us': iosUs == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
-        'row': restOfWorld == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
-      };
+    'android_us': androidUs == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
+    'ios_us': iosUs == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
+    'row': restOfWorld == SteeringMode.linkOut ? 'LINK_OUT' : 'SILENT',
+  };
 
   static SteeringMode _parseMode(dynamic value) =>
       value == 'LINK_OUT' ? SteeringMode.linkOut : SteeringMode.silent;

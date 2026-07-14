@@ -52,9 +52,9 @@ class SubscriptionService extends ChangeNotifier {
     required FirebaseAuthService authService,
     required PostHogAnalyticsService postHogAnalyticsService,
     required ApiClient apiClient,
-  })  : _authService = authService,
-        _postHogAnalyticsService = postHogAnalyticsService,
-        _apiClient = apiClient;
+  }) : _authService = authService,
+       _postHogAnalyticsService = postHogAnalyticsService,
+       _apiClient = apiClient;
 
   // ── Getters ────────────────────────────────────────────────────────────────
 
@@ -69,6 +69,9 @@ class SubscriptionService extends ChangeNotifier {
   int get daysLeftInTrial => _entitlement?.daysLeftInTrial ?? 0;
 
   bool get hasFeatureAccess => _entitlement?.hasFeatureAccess ?? false;
+
+  bool get canPurchaseSubscription =>
+      _entitlement?.canPurchaseSubscription ?? false;
 
   /// What the paywall may do on THIS device: web-checkout link-out or plan
   /// status only. Picks the storefront key by platform and the country the
@@ -107,7 +110,10 @@ class SubscriptionService extends ChangeNotifier {
   Future<void> refreshEntitlement() async {
     if (Environment.isDev) {
       _entitlement = _devProEntitlement();
-      AppLogger.info('Dev mode: subscription bypassed with Pro entitlement', tag: _tag);
+      AppLogger.info(
+        'Dev mode: subscription bypassed with Pro entitlement',
+        tag: _tag,
+      );
       notifyListeners();
       return;
     }
@@ -131,14 +137,21 @@ class SubscriptionService extends ChangeNotifier {
         _serverCountry = json['country'] as String?;
         _errorMessage = null;
         await _writeCache(uid, json);
-        AppLogger.info('Entitlement loaded', tag: _tag, metadata: {
-          'tier': _entitlement!.tier.name,
-          'status': _entitlement!.status.name,
-        });
+        AppLogger.info(
+          'Entitlement loaded',
+          tag: _tag,
+          metadata: {
+            'tier': _entitlement!.tier.name,
+            'status': _entitlement!.status.name,
+          },
+        );
       },
       failure: (error) async {
-        AppLogger.warning('Entitlement fetch failed, trying cache', tag: _tag,
-            metadata: {'error': error.message});
+        AppLogger.warning(
+          'Entitlement fetch failed, trying cache',
+          tag: _tag,
+          metadata: {'error': error.message},
+        );
         await _loadFromCache(uid);
       },
     );
@@ -157,10 +170,16 @@ class SubscriptionService extends ChangeNotifier {
       await prefs.reload();
       if (!(prefs.getBool(kEntitlementRefreshPendingKey) ?? false)) return;
       await prefs.remove(kEntitlementRefreshPendingKey);
-      AppLogger.info('Background entitlement push pending, refetching', tag: _tag);
+      AppLogger.info(
+        'Background entitlement push pending, refetching',
+        tag: _tag,
+      );
     } catch (e) {
-      AppLogger.warning('Background refresh marker check failed', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Background refresh marker check failed',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
       return;
     }
     await refreshEntitlement();
@@ -175,26 +194,37 @@ class SubscriptionService extends ChangeNotifier {
     required SubscriptionTier tier,
     required bool annual,
   }) async {
-    if (tier == SubscriptionTier.free) return false;
+    if (tier == SubscriptionTier.free ||
+        !canPurchaseSubscription ||
+        steeringMode != SteeringMode.linkOut) {
+      return false;
+    }
     _clearError();
     final period = annual ? 'yearly' : 'monthly';
 
-    unawaited(_postHogAnalyticsService.trackEvent(
-      'checkout_opened',
-      properties: {'tier': tier.name, 'billing_period': period},
-    ));
-
-    final result = await _apiClient.post<String>(
-      ApiEndpoints.billingCheckout,
-      {'tier': tier.name, 'period': period},
-      (json) => json['checkout_url'] as String? ?? '',
+    unawaited(
+      _postHogAnalyticsService.trackEvent(
+        'checkout_opened',
+        properties: {'tier': tier.name, 'billing_period': period},
+      ),
     );
+
+    final result = await _apiClient.post<String>(ApiEndpoints.billingCheckout, {
+      'tier': tier.name,
+      'period': period,
+    }, (json) => json['checkout_url'] as String? ?? '');
 
     final url = result.dataOrNull;
     if (url == null || url.isEmpty) {
-      AppLogger.error('Checkout session creation failed', tag: _tag,
-          metadata: {'error': result.errorOrNull?.message ?? 'empty checkout_url'});
-      _errorMessage = "Couldn't reach checkout right now. Give it another try in a bit.";
+      AppLogger.error(
+        'Checkout session creation failed',
+        tag: _tag,
+        metadata: {
+          'error': result.errorOrNull?.message ?? 'empty checkout_url',
+        },
+      );
+      _errorMessage =
+          "Couldn't reach checkout right now. Give it another try in a bit.";
       notifyListeners();
       return false;
     }
@@ -210,7 +240,12 @@ class SubscriptionService extends ChangeNotifier {
       }
       return opened;
     } catch (e, st) {
-      AppLogger.error('Checkout launch failed', error: e, stackTrace: st, tag: _tag);
+      AppLogger.error(
+        'Checkout launch failed',
+        error: e,
+        stackTrace: st,
+        tag: _tag,
+      );
       _errorMessage = "Couldn't open your browser. Try again from Settings.";
       notifyListeners();
       return false;
@@ -230,18 +265,24 @@ class SubscriptionService extends ChangeNotifier {
   Future<void> _writeCache(String uid, Map<String, dynamic> json) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_cacheKey, jsonEncode({
-        'uid': uid,
-        'fetched_at': DateTime.now().toIso8601String(),
-        'entitlement': UserEntitlement.fromBackend(json).toCacheJson(),
-        'steering': SteeringConfig.fromBackend(
-          json['steering'] as Map<String, dynamic>?,
-        ).toCacheJson(),
-        'country': json['country'] as String?,
-      }));
+      await prefs.setString(
+        _cacheKey,
+        jsonEncode({
+          'uid': uid,
+          'fetched_at': DateTime.now().toIso8601String(),
+          'entitlement': UserEntitlement.fromBackend(json).toCacheJson(),
+          'steering': SteeringConfig.fromBackend(
+            json['steering'] as Map<String, dynamic>?,
+          ).toCacheJson(),
+          'country': json['country'] as String?,
+        }),
+      );
     } catch (e) {
-      AppLogger.warning('Entitlement cache write failed', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Entitlement cache write failed',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
     }
   }
 
@@ -253,7 +294,9 @@ class SubscriptionService extends ChangeNotifier {
       final raw = prefs.getString(_cacheKey);
       if (raw != null) {
         final cached = jsonDecode(raw) as Map<String, dynamic>;
-        final fetchedAt = DateTime.tryParse(cached['fetched_at'] as String? ?? '');
+        final fetchedAt = DateTime.tryParse(
+          cached['fetched_at'] as String? ?? '',
+        );
         final cachedUid = cached['uid'] as String?;
         if (cachedUid == uid &&
             fetchedAt != null &&
@@ -265,14 +308,20 @@ class SubscriptionService extends ChangeNotifier {
             (cached['steering'] as Map?)?.cast<String, dynamic>(),
           );
           _serverCountry = cached['country'] as String?;
-          AppLogger.info('Serving cached entitlement (offline grace)', tag: _tag);
+          AppLogger.info(
+            'Serving cached entitlement (offline grace)',
+            tag: _tag,
+          );
           notifyListeners();
           return;
         }
       }
     } catch (e) {
-      AppLogger.warning('Entitlement cache read failed', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Entitlement cache read failed',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
     }
 
     // No usable cache: degrade to free (never crash, never lock out UI, and

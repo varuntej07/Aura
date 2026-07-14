@@ -19,6 +19,7 @@ from ..services.request_auth import resolve_user_id_from_request
 
 class GoogleCalendarConnectBody(BaseModel):
     server_auth_code: str
+    redirect_uri: str | None = None
 
 
 class GmailConnectBody(BaseModel):
@@ -40,6 +41,25 @@ def _resolve_watch_url(request: Request) -> str | None:
     host = request.headers.get("x-forwarded-host") or request.headers.get("host")
     if proto == "https" and host:
         return f"https://{host}/integrations/google-calendar/webhook"
+
+    return None
+
+
+def _validate_web_oauth_request(request: Request, redirect_uri: str | None) -> str | None:
+    """Validate the popup code flow without changing native mobile callers."""
+    if not redirect_uri:
+        return None
+
+    allowed_redirects = {origin.rstrip("/") for origin in settings.cors_allowed_origins}
+    if redirect_uri not in allowed_redirects:
+        return "redirect_uri is not allowed."
+
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if origin != redirect_uri:
+        return "OAuth request origin does not match redirect_uri."
+
+    if request.headers.get("x-requested-with") != "XMLHttpRequest":
+        return "X-Requested-With is required for web OAuth."
 
     return None
 
@@ -69,12 +89,18 @@ async def connect_google_calendar(request: Request) -> JSONResponse:
     except (ValidationError, ValueError):
         return JSONResponse(status_code=400, content={"error": "server_auth_code is required."})
 
+    redirect_uri = body.redirect_uri.rstrip("/") if body.redirect_uri else None
+    validation_error = _validate_web_oauth_request(request, redirect_uri)
+    if validation_error:
+        return JSONResponse(status_code=400, content={"error": validation_error})
+
     watch_url = _resolve_watch_url(request)
 
     def _connect() -> dict:
         return GoogleCalendarConnector(user_id).connect(
             body.server_auth_code,
             watch_url=watch_url,
+            redirect_uri=redirect_uri,
         )
 
     try:

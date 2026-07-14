@@ -31,10 +31,14 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 import anthropic
-from langfuse import observe
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from .analytics.llm_telemetry import (
+    anthropic_usage_tokens,
+    gemini_usage_tokens,
+    start_llm_generation,
+)
 
 T = TypeVar("T")
 
@@ -86,12 +90,19 @@ def is_quota_exhausted(exc: BaseException) -> bool:
     depleted-billing outage in plain terms instead of letting it look healthy.
 
     Mirrors the inline 429 / RESOURCE_EXHAUSTED checks in _call_gemini and the
-    embedder; centralised here so the notification pipeline has one definition."""
+    embedder; centralised here so the notification pipeline has one definition.
+
+    Anthropic reports depleted PREPAID credits as a 400 invalid_request_error
+    ("Your credit balance is too low..."), not a 429 - same outage, different
+    status code, so the message match below is load-bearing: without it a
+    credit-empty account reads as a malformed request and the cross-provider
+    fallback chain never engages (found live 2026-07-08, Buddy Drafts)."""
     if getattr(exc, "code", None) == 429:
         return True
     if isinstance(exc, anthropic.RateLimitError):
         return True
-    return "RESOURCE_EXHAUSTED" in str(exc).upper()
+    message = str(exc).upper()
+    return "RESOURCE_EXHAUSTED" in message or "CREDIT BALANCE IS TOO LOW" in message
 
 
 @dataclass(frozen=True)
@@ -181,14 +192,25 @@ class ModelProvider:
         system: str | None = None,
         response_model: type[T] | None = None,
         temperature: float = 0.7,
+        model: str | None = None,
     ) -> str | T:
         """Cheap and fast. Use for: notification copy, summaries, classification.
-        Currently routes to Gemini Flash via TIER_CHEAP setting."""
-        model_id = settings.TIER_CHEAP
+        Defaults to Gemini Flash (TIER_CHEAP); pass ``model`` to pin a specific fast model
+        for a latency-sensitive caller (e.g. the keyboard uses the lite tier). The same
+        cheap-tier fallbacks still apply, minus whichever model is the chosen primary."""
+        model_id = model or settings.TIER_CHEAP
+        # Don't list the chosen primary in its own fallback chain (it would just retry the same
+        # model before crossing providers); keep the remaining cheap-tier fallbacks in order.
+        fallback_chain = [
+            candidate
+            for candidate in (settings.TIER_CHEAP_FALLBACK, settings.TIER_CHEAP_LAST_RESORT)
+            if candidate != model_id
+        ]
         logger.debug("ModelProvider.cheap", {"model": model_id, "prompt_len": len(prompt)})
         return await self._call(
             model_id=model_id,
-            fallback_chain=[settings.TIER_CHEAP_FALLBACK, settings.TIER_CHEAP_LAST_RESORT],
+            fallback_chain=fallback_chain,
+            caller="cheap",
             prompt=prompt,
             system=system,
             response_model=response_model,
@@ -201,19 +223,28 @@ class ModelProvider:
         *,
         system: str | None = None,
         tools: list[dict] | None = None,
+        images: list[dict] | None = None,
         response_model: type[T] | None = None,
         temperature: float = 0.5,
     ) -> str | T:
         """Mid-tier reasoning. Use for: tool-calling background tasks, structured
-        output that needs mild reasoning. Currently routes to Claude Haiku."""
+        output that needs mild reasoning. Currently routes to Claude Haiku.
+
+        ``images`` is a list of ``{"media_type": "image/jpeg", "data": "<base64>"}``
+        attached before the prompt (both Haiku and the Gemini fallback are
+        vision-capable, so images survive the whole chain)."""
         model_id = settings.TIER_BALANCED
-        logger.debug("ModelProvider.balanced", {"model": model_id, "prompt_len": len(prompt)})
+        logger.debug("ModelProvider.balanced", {
+            "model": model_id, "prompt_len": len(prompt), "images": len(images or []),
+        })
         return await self._call(
             model_id=model_id,
             fallback_chain=[settings.TIER_BALANCED_FALLBACK],
+            caller="balanced",
             prompt=prompt,
             system=system,
             tools=tools,
+            images=images,
             response_model=response_model,
             temperature=temperature,
         )
@@ -225,20 +256,30 @@ class ModelProvider:
         system: str | None = None,
         tools: list[dict] | None = None,
         history: list[dict] | None = None,
+        images: list[dict] | None = None,
         response_model: type[T] | None = None,
         temperature: float = 0.7,
     ) -> str | T:
         """Full reasoning. Use for: main chat, complex multi-turn, high-stakes output.
-        Most expensive — only use where quality matters. Currently Claude Sonnet."""
+        Most expensive — only use where quality matters. Currently Claude Sonnet.
+
+        ``images`` follows the same shape as :meth:`balanced` (Sonnet and every hop
+        in the fallback chain are vision-capable). The outbound drafter is the
+        first caller: reading a dense email thread off a screen frame is exactly
+        the high-stakes case this tier exists for."""
         model_id = settings.TIER_EXPERT
-        logger.debug("ModelProvider.expert", {"model": model_id, "prompt_len": len(prompt)})
+        logger.debug("ModelProvider.expert", {
+            "model": model_id, "prompt_len": len(prompt), "images": len(images or []),
+        })
         return await self._call(
             model_id=model_id,
             fallback_chain=[settings.TIER_EXPERT_FALLBACK, settings.TIER_CHEAP],
+            caller="expert",
             prompt=prompt,
             system=system,
             tools=tools,
             history=history,
+            images=images,
             response_model=response_model,
             temperature=temperature,
         )
@@ -249,6 +290,7 @@ class ModelProvider:
         *,
         system: str | None = None,
         temperature: float = 0.7,
+        thinking_budget: int = 0,
     ) -> GroundedResult:
         """Gemini with Google Search grounding: ONE call does live web search +
         synthesis. Returns a :class:`GroundedResult` (text + grounded ``sources``,
@@ -262,6 +304,13 @@ class ModelProvider:
         on-demand world briefing). Grounding and a forced JSON ``response_model`` are
         mutually exclusive in the google-genai SDK, so this returns free text plus
         metadata, never a parsed model — the caller parses the text itself.
+
+        ``thinking_budget`` defaults to 0 (thinking DISABLED): the live search results
+        already carry the facts, and these callers (tracker fetches, world briefing) want
+        a concise factual report, not deep reasoning. Thinking tokens bill as output
+        tokens on top of the per-call grounding fee, so disabling them is a direct cost
+        cut on the most expensive Gemini path. Raise it for a caller that genuinely needs
+        multi-source synthesis reasoning.
         """
         model_id = settings.TIER_GROUNDED
         logger.debug("ModelProvider.grounded", {"model": model_id, "prompt_len": len(prompt)})
@@ -270,9 +319,9 @@ class ModelProvider:
             prompt=prompt,
             system=system,
             temperature=temperature,
+            thinking_budget=thinking_budget,
         )
 
-    @observe(name="anthropic_reason_turn")
     async def reason_turn(
         self,
         messages: list[dict],
@@ -304,8 +353,18 @@ class ModelProvider:
             logger.debug("ModelProvider.reason_turn", {"model": model_id, "turns": len(messages)})
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
-                    async with client.messages.stream(model=model_id, **kwargs) as stream:
-                        message = await stream.get_final_message()
+                    # One telemetry generation per actual API attempt; the inner
+                    # try re-raises into the existing retry/fallback handling.
+                    recording = start_llm_generation(
+                        model=model_id, provider="anthropic", caller="reason_turn"
+                    )
+                    try:
+                        async with client.messages.stream(model=model_id, **kwargs) as stream:
+                            message = await stream.get_final_message()
+                    except BaseException as exc:
+                        recording.finish(success=False, error_type=type(exc).__name__)
+                        raise
+                    recording.finish(tokens=anthropic_usage_tokens(getattr(message, "usage", None)))
                     if model_idx > 0:
                         logger.warn("ModelProvider: reason_turn() recovered on fallback model", {
                             "model": model_id,
@@ -368,9 +427,11 @@ class ModelProvider:
         *,
         model_id: str,
         fallback_chain: list[str] | None = None,
+        caller: str = "unknown",
         prompt: str,
         system: str | None,
         tools: list[dict] | None = None,
+        images: list[dict] | None = None,
         history: list[dict] | None = None,
         response_model: type[T] | None,
         temperature: float,
@@ -382,17 +443,21 @@ class ModelProvider:
             raw = await self._call_gemini(
                 model_id=model_id,
                 fallback_chain=chain,
+                caller=caller,
                 prompt=prompt,
                 system=system,
+                images=images,
                 temperature=temperature,
             )
         elif provider == "anthropic":
             raw = await self._call_anthropic(
                 model_id=model_id,
                 fallback_chain=chain,
+                caller=caller,
                 prompt=prompt,
                 system=system,
                 tools=tools,
+                images=images,
                 history=history,
                 temperature=temperature,
             )
@@ -406,42 +471,53 @@ class ModelProvider:
             return self._parse_response(raw, response_model)
         return raw
 
-    @observe(name="gemini_call")
     async def _call_gemini(
         self,
         *,
         model_id: str,
         fallback_chain: list[str],
+        caller: str = "unknown",
         prompt: str,
         system: str | None,
+        images: list[dict] | None = None,
         temperature: float,
     ) -> str:
         client = self._get_gemini_client()
         from google.genai import types  # type: ignore
 
         contents: list = []
+        # The cheap/fast tier must never "think": Gemini 2.5 Flash runs hidden reasoning
+        # before answering by default, which adds seconds of latency. This path serves the
+        # latency-sensitive fast work (keyboard drafts, notification copy, summaries), so we
+        # disable thinking outright (thinking_budget=0). The grounded path is separate
+        # (_call_gemini_grounded) and keeps its own config.
+        config_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_output_tokens": 4096,
+            "thinking_config": types.ThinkingConfig(thinking_budget=0),
+        }
         if system:
             # Gemini: system instruction goes in GenerateContentConfig, not contents
-            config = types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=temperature,
-                max_output_tokens=4096,
-            )
-        else:
-            config = types.GenerateContentConfig(
-                temperature=temperature,
-                max_output_tokens=4096,
-            )
+            config_kwargs["system_instruction"] = system
+        config = types.GenerateContentConfig(**config_kwargs)
 
+        # Images ride before the prompt as inline parts (mirrors the Anthropic
+        # block order) so a balanced() vision call survives the Gemini hop.
+        import base64 as _b64
+        for image in images or []:
+            contents.append(types.Part.from_bytes(
+                data=_b64.b64decode(image["data"]),
+                mime_type=image.get("media_type", "image/jpeg"),
+            ))
         contents.append(prompt)
 
-        def _sync() -> str:
+        def _sync() -> tuple[str, Any]:
             resp = client.models.generate_content(
                 model=model_id,
                 contents=contents,
                 config=config,
             )
-            return resp.text or ""
+            return resp.text or "", getattr(resp, "usage_metadata", None)
 
         async def _use_next_in_chain(reason: str, log_extra: dict) -> str:
             next_model = fallback_chain[0]
@@ -453,8 +529,10 @@ class ModelProvider:
             return await self._call(
                 model_id=next_model,
                 fallback_chain=fallback_chain[1:],
+                caller=caller,
                 prompt=prompt,
                 system=system,
+                images=images,
                 response_model=None,
                 temperature=temperature,
             )
@@ -462,7 +540,17 @@ class ModelProvider:
         last_exc: BaseException | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                result = await asyncio.wait_for(asyncio.to_thread(_sync), timeout=_TIMEOUT_S)
+                # One telemetry generation per actual API attempt; the inner
+                # try re-raises into the existing retry/fallback handling.
+                recording = start_llm_generation(model=model_id, provider="gemini", caller=caller)
+                try:
+                    result, usage_metadata = await asyncio.wait_for(
+                        asyncio.to_thread(_sync), timeout=_TIMEOUT_S
+                    )
+                except BaseException as exc:
+                    recording.finish(success=False, error_type=type(exc).__name__)
+                    raise
+                recording.finish(tokens=gemini_usage_tokens(usage_metadata))
                 if attempt > 1:
                     # One visible line per call when retries eventually succeeded, so a
                     # recovered-after-transient-error call isn't completely silent.
@@ -572,7 +660,6 @@ class ModelProvider:
         # retry loop always returns or raises; this line is unreachable
         raise RuntimeError("ModelProvider: Gemini retry loop exited unexpectedly")
 
-    @observe(name="gemini_grounded_call")
     async def _call_gemini_grounded(
         self,
         *,
@@ -580,6 +667,7 @@ class ModelProvider:
         prompt: str,
         system: str | None,
         temperature: float,
+        thinking_budget: int = 0,
     ) -> GroundedResult:
         client = self._get_gemini_client()
         from google.genai import types  # type: ignore
@@ -592,29 +680,44 @@ class ModelProvider:
             "temperature": temperature,
             "max_output_tokens": 4096,
             "tools": [search_tool],
+            # Thinking tokens bill as output tokens on top of the premium grounding fee.
+            # Default budget=0 disables them — the search results carry the facts and the
+            # grounded callers want a concise report, not extended reasoning. A caller that
+            # needs synthesis reasoning passes a non-zero budget through grounded().
+            "thinking_config": types.ThinkingConfig(thinking_budget=thinking_budget),
         }
         if system:
             config_kwargs["system_instruction"] = system
         config = types.GenerateContentConfig(**config_kwargs)
 
-        def _sync() -> GroundedResult:
+        def _sync() -> tuple[GroundedResult, Any]:
             resp = client.models.generate_content(
                 model=model_id,
                 contents=[prompt],
                 config=config,
             )
-            return GroundedResult(
+            grounded_result = GroundedResult(
                 text=(resp.text or ""),
                 sources=_extract_grounding_sources(resp),
                 supports=_extract_grounding_supports(resp),
             )
+            return grounded_result, getattr(resp, "usage_metadata", None)
 
         last_exc: BaseException | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(_sync), timeout=_GROUNDED_TIMEOUT_S
-                )
+                # One telemetry generation per actual API attempt; the inner
+                # try re-raises into the existing retry handling.
+                recording = start_llm_generation(model=model_id, provider="gemini", caller="grounded")
+                try:
+                    grounded_result, usage_metadata = await asyncio.wait_for(
+                        asyncio.to_thread(_sync), timeout=_GROUNDED_TIMEOUT_S
+                    )
+                except BaseException as exc:
+                    recording.finish(success=False, error_type=type(exc).__name__)
+                    raise
+                recording.finish(tokens=gemini_usage_tokens(usage_metadata))
+                return grounded_result
             except TimeoutError as exc:
                 last_exc = exc
                 if attempt == _MAX_RETRIES:
@@ -663,15 +766,16 @@ class ModelProvider:
         # retry loop always returns or raises; this line is unreachable
         raise RuntimeError("ModelProvider: grounded() retry loop exited unexpectedly")
 
-    @observe(name="anthropic_call")
     async def _call_anthropic(
         self,
         *,
         model_id: str,
         fallback_chain: list[str],
+        caller: str = "unknown",
         prompt: str,
         system: str | None,
         tools: list[dict] | None,
+        images: list[dict] | None = None,
         history: list[dict] | None,
         temperature: float,
     ) -> str:
@@ -680,7 +784,24 @@ class ModelProvider:
         messages: list[dict] = []
         if history:
             messages.extend(history)
-        messages.append({"role": "user", "content": prompt})
+        if images:
+            # Anthropic vision: base64 image blocks before the text block
+            # (same shape chat.py builds for user-attached photos).
+            user_content: list[dict] = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.get("media_type", "image/jpeg"),
+                        "data": image["data"],
+                    },
+                }
+                for image in images
+            ]
+            user_content.append({"type": "text", "text": prompt})
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         kwargs: dict[str, Any] = {
             "model": model_id,
@@ -708,9 +829,11 @@ class ModelProvider:
             return await self._call(
                 model_id=next_model,
                 fallback_chain=fallback_chain[1:],
+                caller=caller,
                 prompt=prompt,
                 system=system,
                 tools=tools,
+                images=images,
                 history=history,
                 response_model=None,
                 temperature=temperature,
@@ -718,10 +841,18 @@ class ModelProvider:
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                response = await asyncio.wait_for(
-                    client.messages.create(**kwargs),
-                    timeout=_TIMEOUT_S,
-                )
+                # One telemetry generation per actual API attempt; the inner
+                # try re-raises into the existing retry/fallback handling.
+                recording = start_llm_generation(model=model_id, provider="anthropic", caller=caller)
+                try:
+                    response = await asyncio.wait_for(
+                        client.messages.create(**kwargs),
+                        timeout=_TIMEOUT_S,
+                    )
+                except BaseException as exc:
+                    recording.finish(success=False, error_type=type(exc).__name__)
+                    raise
+                recording.finish(tokens=anthropic_usage_tokens(getattr(response, "usage", None)))
                 text_blocks = [b.text for b in response.content if b.type == "text"]
                 if attempt > 1:
                     logger.warn("ModelProvider: Anthropic recovered after retries", {
@@ -741,9 +872,25 @@ class ModelProvider:
                     "error": str(exc),
                 })
                 raise
-            except anthropic.BadRequestError:
-                # 400 — a malformed request fails identically on every model, so falling
-                # back would only multiply cost. Raise immediately, never fall back.
+            except anthropic.BadRequestError as exc:
+                # Depleted prepaid credits ALSO arrive as a 400 (invalid_request_error,
+                # "credit balance is too low") - that's a billing outage, not a bad
+                # request, and the next Anthropic hop fails identically, but the
+                # terminal Gemini hop runs on separate billing and still serves.
+                if is_quota_exhausted(exc):
+                    logger.error(
+                        "ModelProvider: Anthropic credits EXHAUSTED (400 credit "
+                        "balance), degrading to fallbacks. Check ANTHROPIC_API_KEY "
+                        "billing.",
+                        {"model": model_id, "error": str(exc)[:300]},
+                    )
+                    if fallback_chain:
+                        return await _use_next_in_chain(
+                            "credits exhausted (400)", {"error": str(exc)[:120]}
+                        )
+                    raise
+                # A genuinely malformed request fails identically on every model, so
+                # falling back would only multiply cost. Raise immediately.
                 logger.exception("ModelProvider: Anthropic bad request (400), not falling back", {
                     "model": model_id,
                     "prompt_len": len(prompt),

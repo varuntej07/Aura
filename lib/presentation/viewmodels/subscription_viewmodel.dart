@@ -15,7 +15,7 @@ class SubscriptionViewModel extends SafeChangeNotifier {
   String? _feedbackMessage;
 
   SubscriptionViewModel({required SubscriptionService subscriptionService})
-      : _subscriptionService = subscriptionService {
+    : _subscriptionService = subscriptionService {
     _subscriptionService.addListener(_onServiceChanged);
   }
 
@@ -33,8 +33,12 @@ class SubscriptionViewModel extends SafeChangeNotifier {
   /// Convenience getters for the paywall screen, so tier logic is not repeated in UI.
   bool get isOnCompanionPlan => currentTier == SubscriptionTier.companion;
   bool get isOnProPlan => currentTier == SubscriptionTier.pro;
-  bool get isOnFreePlan => currentTier == SubscriptionTier.free && !isTrialActive;
+  bool get isOnFreePlan =>
+      currentTier == SubscriptionTier.free && !isTrialActive;
   bool get isPaid => _subscriptionService.entitlement?.isPaid ?? false;
+  bool get canPurchaseSubscription =>
+      steeringMode == SteeringMode.linkOut &&
+      _subscriptionService.canPurchaseSubscription;
 
   // Actions
 
@@ -61,7 +65,8 @@ class SubscriptionViewModel extends SafeChangeNotifier {
 
   /// Refetches entitlement from the backend (e.g. when the app resumes after
   /// the user paid in the browser).
-  Future<void> refreshEntitlement() => _subscriptionService.refreshEntitlement();
+  Future<void> refreshEntitlement() =>
+      _subscriptionService.refreshEntitlement();
 
   Future<bool> redeemPromoCode(String code) async {
     _feedbackMessage = null;

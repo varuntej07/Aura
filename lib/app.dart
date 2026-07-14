@@ -21,13 +21,21 @@ class _AuraAppState extends State<AuraApp> {
   @override
   void initState() {
     super.initState();
-    // Cream theme: dark status-bar icons globally. The AppBar theme covers
-    // screens with an AppBar; this default covers the ones that don't 
+    // Keep edge-to-edge explicit for older Android versions as well as the
+    // SDK 35+ default. Screen content handles system insets with SafeArea or
+    // MediaQuery padding, while backgrounds can continue behind the bars.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
+    // Cream theme: dark system-bar icons globally. The AppBar theme covers
+    // screens with an AppBar; this default covers the ones that don't.
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
         statusBarIconBrightness: Brightness.dark,
         statusBarBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.dark,
+        systemNavigationBarDividerColor: Colors.transparent,
       ),
     );
     // context.read is safe in initState — widget is already in the tree.

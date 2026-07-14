@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
 from ..services.fcm_token_registry import register_token
+from ..services.notifications.welcome import maybe_send_welcome_notification
 from ..services.request_auth import resolve_user_id_from_request
 
 VALID_PLATFORMS = frozenset({"android", "ios", "web"})
@@ -56,5 +57,16 @@ async def register_device(request: Request) -> JSONResponse:
         "platform": platform,
         "token_preview": token[:20],
     })
+
+    # Best-effort: the one-time claim inside already no-ops on every call after
+    # the first, but a failure here (Firestore blip, FCM outage) must never turn
+    # a successful token registration into a 500.
+    try:
+        await maybe_send_welcome_notification(user_id)
+    except Exception as exc:
+        logger.exception("register_device: welcome notification failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
 
     return JSONResponse({"ok": True, "platform": platform}, status_code=200)
