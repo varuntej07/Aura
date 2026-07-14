@@ -60,29 +60,39 @@ void main() {
     when(firebaseUser.email).thenReturn('test@example.com');
     when(firebaseUser.photoURL).thenReturn(null);
 
-    when(firestore.updateDocument(any, any, any))
-        .thenAnswer((_) async => const Result.success(null));
+    when(
+      firestore.updateDocument(any, any, any),
+    ).thenAnswer((_) async => const Result.success(null));
 
-    repo = AuthRepository(authService: authService, firestoreService: firestore);
+    repo = AuthRepository(
+      authService: authService,
+      firestoreService: firestore,
+    );
   });
 
   group('signInWithGoogle', () {
-    test('existing user → success, refreshes last_active_at + timezone', () async {
-      when(authService.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+    test(
+      'existing user → success, refreshes last_active_at + timezone',
+      () async {
+        when(
+          authService.signInWithGoogle(),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(
+          firestore.getDocument<UserModel>(any, any, any),
+        ).thenAnswer((_) async => Result.success(_user()));
 
-      final result = await repo.signInWithGoogle();
+        final result = await repo.signInWithGoogle();
 
-      expect(result.isSuccess, isTrue);
-      expect(result.dataOrNull?.uid, 'uid-1');
-      verify(firestore.updateDocument(any, any, any)).called(1);
-    });
+        expect(result.isSuccess, isTrue);
+        expect(result.dataOrNull?.uid, 'uid-1');
+        verify(firestore.updateDocument(any, any, any)).called(1);
+      },
+    );
 
     test('auth failure propagates', () async {
-      when(authService.signInWithGoogle())
-          .thenAnswer((_) async => Result.failure(AppException.authCancelled()));
+      when(
+        authService.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.failure(AppException.authCancelled()));
 
       final result = await repo.signInWithGoogle();
 
@@ -91,42 +101,84 @@ void main() {
     });
   });
 
-  group('get-or-create', () {
-    test('documentNotFound → creates user with onboarding incomplete', () async {
-      when(authService.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
-        (_) async => Result.failure(
-          const AppException(
-            code: ErrorCode.documentNotFound,
-            message: 'not found',
-          ),
-        ),
-      );
-      when(firestore.setDocument<UserModel>(any, any, any, any))
-          .thenAnswer((_) async => Result.success(_user(onboardingComplete: false)));
+  group('signInWithApple', () {
+    test(
+      'existing user -> success and records apple as sign-in method',
+      () async {
+        when(
+          authService.signInWithApple(),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(
+          firestore.getDocument<UserModel>(any, any, any),
+        ).thenAnswer((_) async => Result.success(_user()));
 
-      final result = await repo.signInWithGoogle();
+        final result = await repo.signInWithApple();
 
-      expect(result.isSuccess, isTrue);
-      expect(result.dataOrNull?.onboardingComplete, isFalse);
+        expect(result.isSuccess, isTrue);
+        final data =
+            verify(
+                  firestore.updateDocument(any, any, captureAny),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data[UserModel.fieldSignInMethod], 'apple');
+      },
+    );
 
-      final data = verify(firestore.setDocument<UserModel>(
-        any,
-        any,
-        captureAny,
-        any,
-      )).captured.single as Map<String, dynamic>;
-      expect(data['onboarding_complete'], isFalse);
+    test('auth cancellation propagates without touching Firestore', () async {
+      when(
+        authService.signInWithApple(),
+      ).thenAnswer((_) async => Result.failure(AppException.authCancelled()));
+
+      final result = await repo.signInWithApple();
+
+      expect(result.isFailure, isTrue);
+      expect(result.errorOrNull?.code, ErrorCode.authCancelled);
+      verifyNever(firestore.getDocument<UserModel>(any, any, any));
     });
+  });
+
+  group('get-or-create', () {
+    test(
+      'documentNotFound → creates user with onboarding incomplete',
+      () async {
+        when(
+          authService.signInWithGoogle(),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+          (_) async => Result.failure(
+            const AppException(
+              code: ErrorCode.documentNotFound,
+              message: 'not found',
+            ),
+          ),
+        );
+        when(firestore.setDocument<UserModel>(any, any, any, any)).thenAnswer(
+          (_) async => Result.success(_user(onboardingComplete: false)),
+        );
+
+        final result = await repo.signInWithGoogle();
+
+        expect(result.isSuccess, isTrue);
+        expect(result.dataOrNull?.onboardingComplete, isFalse);
+
+        final data =
+            verify(
+                  firestore.setDocument<UserModel>(any, any, captureAny, any),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data['onboarding_complete'], isFalse);
+      },
+    );
   });
 
   group('signInWithEmail', () {
     test('existing user -> success, does not create Firestore doc', () async {
-      when(authService.signInWithEmailAndPassword(any, any))
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+      when(
+        authService.signInWithEmailAndPassword(any, any),
+      ).thenAnswer((_) async => Result.success(firebaseUser));
+      when(
+        firestore.getDocument<UserModel>(any, any, any),
+      ).thenAnswer((_) async => Result.success(_user()));
 
       final result = await repo.signInWithEmail('test@example.com', 'pw');
 
@@ -136,8 +188,9 @@ void main() {
     });
 
     test('failure propagates', () async {
-      when(authService.signInWithEmailAndPassword(any, any))
-          .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
+      when(authService.signInWithEmailAndPassword(any, any)).thenAnswer(
+        (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+      );
 
       final result = await repo.signInWithEmail('test@example.com', 'pw');
 
@@ -147,30 +200,43 @@ void main() {
 
   group('createAccountWithEmail', () {
     test('new user → Firestore doc contains provided name', () async {
-      when(authService.createUserWithEmailAndPassword(any, any, any))
-          .thenAnswer((_) async => Result.success(firebaseUser));
+      when(
+        authService.createUserWithEmailAndPassword(any, any, any),
+      ).thenAnswer((_) async => Result.success(firebaseUser));
       when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
         (_) async => Result.failure(
-          const AppException(code: ErrorCode.documentNotFound, message: 'not found'),
+          const AppException(
+            code: ErrorCode.documentNotFound,
+            message: 'not found',
+          ),
         ),
       );
-      when(firestore.setDocument<UserModel>(any, any, any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+      when(
+        firestore.setDocument<UserModel>(any, any, any, any),
+      ).thenAnswer((_) async => Result.success(_user()));
 
       await repo.createAccountWithEmail('test@example.com', 'pw', 'Alice');
 
-      final data = verify(firestore.setDocument<UserModel>(
-        any, any, captureAny, any,
-      )).captured.single as Map<String, dynamic>;
+      final data =
+          verify(
+                firestore.setDocument<UserModel>(any, any, captureAny, any),
+              ).captured.single
+              as Map<String, dynamic>;
       expect(data['display_name'], 'Alice');
     });
 
     test('failure propagates', () async {
-      when(authService.createUserWithEmailAndPassword(any, any, any))
-          .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
+      when(
+        authService.createUserWithEmailAndPassword(any, any, any),
+      ).thenAnswer(
+        (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+      );
 
-      final result =
-          await repo.createAccountWithEmail('test@example.com', 'pw', 'Alice');
+      final result = await repo.createAccountWithEmail(
+        'test@example.com',
+        'pw',
+        'Alice',
+      );
 
       expect(result.isFailure, isTrue);
     });
@@ -181,98 +247,134 @@ void main() {
     // auth-state stream (name: null, before updateDisplayName has propagated)
     // writes the 'User' placeholder, and that placeholder used to stick forever.
     // The reconciler must repair it from the best real name available.
-    test('placeholder display_name is repaired from the Firebase Auth profile on sign-in',
-        () async {
-      when(firebaseUser.displayName).thenReturn('Varun');
-      when(authService.signInWithEmailAndPassword(any, any))
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
-          (_) async => Result.success(_user(displayName: 'User')));
+    test(
+      'placeholder display_name is repaired from the Firebase Auth profile on sign-in',
+      () async {
+        when(firebaseUser.displayName).thenReturn('Varun');
+        when(
+          authService.signInWithEmailAndPassword(any, any),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(
+          firestore.getDocument<UserModel>(any, any, any),
+        ).thenAnswer((_) async => Result.success(_user(displayName: 'User')));
 
-      final result = await repo.signInWithEmail('test@example.com', 'pw');
+        final result = await repo.signInWithEmail('test@example.com', 'pw');
 
-      expect(result.dataOrNull?.displayName, 'Varun');
-      final data =
-          verify(firestore.updateDocument(any, any, captureAny)).captured.single
-              as Map<String, dynamic>;
-      expect(data['display_name'], 'Varun');
-    });
+        expect(result.dataOrNull?.displayName, 'Varun');
+        final data =
+            verify(
+                  firestore.updateDocument(any, any, captureAny),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data['display_name'], 'Varun');
+      },
+    );
 
-    test('blank display_name is repaired from the Firebase Auth profile on sign-in',
-        () async {
-      when(firebaseUser.displayName).thenReturn('Varun');
-      when(authService.signInWithEmailAndPassword(any, any))
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any))
-          .thenAnswer((_) async => Result.success(_user(displayName: '')));
+    test(
+      'blank display_name is repaired from the Firebase Auth profile on sign-in',
+      () async {
+        when(firebaseUser.displayName).thenReturn('Varun');
+        when(
+          authService.signInWithEmailAndPassword(any, any),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(
+          firestore.getDocument<UserModel>(any, any, any),
+        ).thenAnswer((_) async => Result.success(_user(displayName: '')));
 
-      final result = await repo.signInWithEmail('test@example.com', 'pw');
+        final result = await repo.signInWithEmail('test@example.com', 'pw');
 
-      expect(result.dataOrNull?.displayName, 'Varun');
-      final data =
-          verify(firestore.updateDocument(any, any, captureAny)).captured.single
-              as Map<String, dynamic>;
-      expect(data['display_name'], 'Varun');
-    });
+        expect(result.dataOrNull?.displayName, 'Varun');
+        final data =
+            verify(
+                  firestore.updateDocument(any, any, captureAny),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data['display_name'], 'Varun');
+      },
+    );
 
-    test('a real stored display_name is never overwritten (no display_name write)',
-        () async {
-      when(firebaseUser.displayName).thenReturn('Profile Name');
-      when(authService.signInWithEmailAndPassword(any, any))
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any))
-          .thenAnswer((_) async => Result.success(_user(displayName: 'Real Name')));
+    test(
+      'a real stored display_name is never overwritten (no display_name write)',
+      () async {
+        when(firebaseUser.displayName).thenReturn('Profile Name');
+        when(
+          authService.signInWithEmailAndPassword(any, any),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+          (_) async => Result.success(_user(displayName: 'Real Name')),
+        );
 
-      final result = await repo.signInWithEmail('test@example.com', 'pw');
+        final result = await repo.signInWithEmail('test@example.com', 'pw');
 
-      expect(result.dataOrNull?.displayName, 'Real Name');
-      final data =
-          verify(firestore.updateDocument(any, any, captureAny)).captured.single
-              as Map<String, dynamic>;
-      expect(data.containsKey('display_name'), isFalse);
-    });
+        expect(result.dataOrNull?.displayName, 'Real Name');
+        final data =
+            verify(
+                  firestore.updateDocument(any, any, captureAny),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data.containsKey('display_name'), isFalse);
+      },
+    );
 
-    test('create with a blank typed name falls back to the Firebase Auth profile name',
-        () async {
-      when(firebaseUser.displayName).thenReturn('Varun');
-      when(authService.createUserWithEmailAndPassword(any, any, any))
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
-        (_) async => Result.failure(
-          const AppException(code: ErrorCode.documentNotFound, message: 'not found'),
-        ),
-      );
-      when(firestore.setDocument<UserModel>(any, any, any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+    test(
+      'create with a blank typed name falls back to the Firebase Auth profile name',
+      () async {
+        when(firebaseUser.displayName).thenReturn('Varun');
+        when(
+          authService.createUserWithEmailAndPassword(any, any, any),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+          (_) async => Result.failure(
+            const AppException(
+              code: ErrorCode.documentNotFound,
+              message: 'not found',
+            ),
+          ),
+        );
+        when(
+          firestore.setDocument<UserModel>(any, any, any, any),
+        ).thenAnswer((_) async => Result.success(_user()));
 
-      await repo.createAccountWithEmail('test@example.com', 'pw', '   ');
+        await repo.createAccountWithEmail('test@example.com', 'pw', '   ');
 
-      final data = verify(firestore.setDocument<UserModel>(any, any, captureAny, any))
-          .captured
-          .single as Map<String, dynamic>;
-      expect(data['display_name'], 'Varun');
-    });
+        final data =
+            verify(
+                  firestore.setDocument<UserModel>(any, any, captureAny, any),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data['display_name'], 'Varun');
+      },
+    );
 
-    test('create with no name anywhere writes the placeholder, never an empty string',
-        () async {
-      when(firebaseUser.displayName).thenReturn(null);
-      when(authService.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(firebaseUser));
-      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
-        (_) async => Result.failure(
-          const AppException(code: ErrorCode.documentNotFound, message: 'not found'),
-        ),
-      );
-      when(firestore.setDocument<UserModel>(any, any, any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+    test(
+      'create with no name anywhere writes the placeholder, never an empty string',
+      () async {
+        when(firebaseUser.displayName).thenReturn(null);
+        when(
+          authService.signInWithGoogle(),
+        ).thenAnswer((_) async => Result.success(firebaseUser));
+        when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+          (_) async => Result.failure(
+            const AppException(
+              code: ErrorCode.documentNotFound,
+              message: 'not found',
+            ),
+          ),
+        );
+        when(
+          firestore.setDocument<UserModel>(any, any, any, any),
+        ).thenAnswer((_) async => Result.success(_user()));
 
-      await repo.signInWithGoogle();
+        await repo.signInWithGoogle();
 
-      final data = verify(firestore.setDocument<UserModel>(any, any, captureAny, any))
-          .captured
-          .single as Map<String, dynamic>;
-      expect(data['display_name'], 'User');
-    });
+        final data =
+            verify(
+                  firestore.setDocument<UserModel>(any, any, captureAny, any),
+                ).captured.single
+                as Map<String, dynamic>;
+        expect(data['display_name'], 'User');
+      },
+    );
   });
 
   group('getCurrentUser', () {
@@ -304,8 +406,9 @@ void main() {
   });
 
   test('signOut delegates to auth service', () async {
-    when(authService.signOut())
-        .thenAnswer((_) async => const Result.success(null));
+    when(
+      authService.signOut(),
+    ).thenAnswer((_) async => const Result.success(null));
 
     await repo.signOut();
 

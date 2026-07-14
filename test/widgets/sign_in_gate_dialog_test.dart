@@ -57,7 +57,9 @@ void main() {
     );
   });
 
-  tearDown(() => vm.dispose());
+  tearDown(() {
+    vm.dispose();
+  });
 
   // A minimal app that mirrors the real bug surface: the gate dialog is shown
   // from a route that stays VALID for a logged-in user (like /chat or
@@ -96,50 +98,78 @@ void main() {
 
     return ChangeNotifierProvider<AuthViewModel>.value(
       value: vm,
-      child: MaterialApp.router(routerConfig: router),
+      child: MaterialApp.router(
+        theme: ThemeData(platform: TargetPlatform.iOS),
+        routerConfig: router,
+      ),
     );
   }
 
   testWidgets(
-      'Continue with Google: on success, leaves the gated screen and lands on /home',
-      (tester) async {
-    when(authRepository.signInWithGoogle())
-        .thenAnswer((_) async => Result.success(_user()));
+    'Continue with Google: on success, leaves the gated screen and lands on /home',
+    (tester) async {
+      when(
+        authRepository.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.success(_user()));
 
-    await tester.pumpWidget(buildApp());
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(buildApp());
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.text('open gate'));
-    await tester.pumpAndSettle();
-    expect(find.text('Continue with Google'), findsOneWidget);
+      await tester.tap(find.text('open gate'));
+      await tester.pumpAndSettle();
+      expect(find.text('Continue with Google'), findsOneWidget);
 
-    await tester.tap(find.text('Continue with Google'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue with Google'));
+      await tester.pumpAndSettle();
 
-    // The regression: before the fix the user stayed on the gated screen with
-    // the dialog dismissed and nothing else changed.
-    expect(find.text('HOME SCREEN'), findsOneWidget);
-    expect(find.text('open gate'), findsNothing);
-    verify(authRepository.signInWithGoogle()).called(1);
-  });
+      // The regression: before the fix the user stayed on the gated screen with
+      // the dialog dismissed and nothing else changed.
+      expect(find.text('HOME SCREEN'), findsOneWidget);
+      expect(find.text('open gate'), findsNothing);
+      verify(authRepository.signInWithGoogle()).called(1);
+    },
+  );
 
   testWidgets(
-      'Continue with Google: cancelled sign-in stays put (no navigation)',
-      (tester) async {
-    when(authRepository.signInWithGoogle()).thenAnswer(
-      (_) async => Result.failure(AppException.authCancelled()),
-    );
+    'Continue with Google: cancelled sign-in stays put (no navigation)',
+    (tester) async {
+      when(
+        authRepository.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.failure(AppException.authCancelled()));
 
-    await tester.pumpWidget(buildApp());
-    await tester.pumpAndSettle();
+      await tester.pumpWidget(buildApp());
+      await tester.pumpAndSettle();
 
-    await tester.tap(find.text('open gate'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Continue with Google'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('open gate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue with Google'));
+      await tester.pumpAndSettle();
 
-    // Backed out of the Google picker: not authenticated, so we do not navigate.
-    expect(find.text('HOME SCREEN'), findsNothing);
-    expect(find.text('open gate'), findsOneWidget);
-  });
+      // Backed out of the Google picker: not authenticated, so we do not navigate.
+      expect(find.text('HOME SCREEN'), findsNothing);
+      expect(find.text('open gate'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Continue with Apple: on success, leaves the gated screen and lands on /home',
+    (tester) async {
+      when(
+        authRepository.signInWithApple(),
+      ).thenAnswer((_) async => Result.success(_user()));
+
+      await tester.pumpWidget(buildApp());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('open gate'));
+      await tester.pumpAndSettle();
+      expect(find.text('Continue with Apple'), findsOneWidget);
+
+      await tester.tap(find.text('Continue with Apple'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('HOME SCREEN'), findsOneWidget);
+      verify(authRepository.signInWithApple()).called(1);
+    },
+  );
 }

@@ -17,8 +17,8 @@ class AuthRepository {
   AuthRepository({
     required FirebaseAuthService authService,
     required FirestoreService firestoreService,
-  })  : _authService = authService,
-        _firestoreService = firestoreService;
+  }) : _authService = authService,
+       _firestoreService = firestoreService;
 
   Stream<User?> get authStateStream => _authService.authStateStream;
 
@@ -30,10 +30,7 @@ class AuthRepository {
       _authService.authStateStream.asyncMap((firebaseUser) async {
         if (firebaseUser == null) return null;
         final result = await _getOrCreateUser(firebaseUser, name: null);
-        return result.when(
-          success: (user) => user,
-          failure: (_) => null,
-        );
+        return result.when(success: (user) => user, failure: (_) => null);
       });
 
   User? get currentFirebaseUser => _authService.currentUser;
@@ -47,9 +44,18 @@ class AuthRepository {
     );
   }
 
+  Future<Result<UserModel>> signInWithApple() async {
+    final authResult = await _authService.signInWithApple();
+    return authResult.when(
+      success: (user) =>
+          _completeSignIn(user, name: null, signInMethod: 'apple'),
+      failure: (error) => Future.value(Result.failure(error)),
+    );
+  }
+
   /// Runs only after a real, user-initiated sign-in (not a silent session
   /// restore through [userModelStream]): ensures the user doc exists and folds
-  /// the login metadata into that same doc write, so one sign-in is one Firestore write. 
+  /// the login metadata into that same doc write, so one sign-in is one Firestore write.
   /// The silent-restore path calls [_getOrCreateUser] with no metadata and only refreshes activity.
   Future<Result<UserModel>> _completeSignIn(
     User firebaseUser, {
@@ -69,26 +75,23 @@ class AuthRepository {
   /// written on its own, so a sign-in touches the doc once. [FieldValue.increment]
   /// keeps the counter atomic and starts from 0 on docs written by older clients.
   Map<String, dynamic> _loginMetadataFields(String signInMethod) => {
-        UserModel.fieldLastLoginAt: DateTime.now().toUtc().toIso8601String(),
-        UserModel.fieldLoginCount: FieldValue.increment(1),
-        UserModel.fieldIsActive: true,
-        UserModel.fieldSignInMethod: signInMethod,
-        UserModel.fieldPlatform: _platformName(),
-      };
+    UserModel.fieldLastLoginAt: DateTime.now().toUtc().toIso8601String(),
+    UserModel.fieldLoginCount: FieldValue.increment(1),
+    UserModel.fieldIsActive: true,
+    UserModel.fieldSignInMethod: signInMethod,
+    UserModel.fieldPlatform: _platformName(),
+  };
 
   /// Stamps last_logout_at, increments logout_count, and clears the active flag.
   /// Must run while Firebase auth is still valid — Firestore rules reject the
   /// write once the session is cleared.
   Future<void> _recordLogoutMetadata(String uid) async {
-    final result = await _firestoreService.updateDocument(
-      AppConstants.usersCollection,
-      uid,
-      {
-        UserModel.fieldLastLogoutAt: DateTime.now().toUtc().toIso8601String(),
-        UserModel.fieldLogoutCount: FieldValue.increment(1),
-        UserModel.fieldIsActive: false,
-      },
-    );
+    final result = await _firestoreService
+        .updateDocument(AppConstants.usersCollection, uid, {
+          UserModel.fieldLastLogoutAt: DateTime.now().toUtc().toIso8601String(),
+          UserModel.fieldLogoutCount: FieldValue.increment(1),
+          UserModel.fieldIsActive: false,
+        });
     result.when(
       success: (_) {},
       failure: (error) => AppLogger.warning(
@@ -148,9 +151,10 @@ class AuthRepository {
   /// restore); when present it is merged into the same doc write so the sign-in
   /// touches Firestore once instead of twice.
   Future<Result<UserModel>> _getOrCreateUser(
-      User firebaseUser, {
-      required String? name,
-      Map<String, dynamic>? loginMetadata}) async {
+    User firebaseUser, {
+    required String? name,
+    Map<String, dynamic>? loginMetadata,
+  }) async {
     final existingResult = await _firestoreService.getDocument(
       AppConstants.usersCollection,
       firebaseUser.uid,
@@ -179,16 +183,13 @@ class AuthRepository {
           timezone: timezone,
           displayName: repairedName,
         );
-        final writeResult = await _firestoreService.updateDocument(
-          AppConstants.usersCollection,
-          firebaseUser.uid,
-          {
-            'last_active_at': now.toUtc().toIso8601String(),
-            'timezone': timezone,
-            'display_name': ?repairedName,
-            ...?loginMetadata,
-          },
-        );
+        final writeResult = await _firestoreService
+            .updateDocument(AppConstants.usersCollection, firebaseUser.uid, {
+              'last_active_at': now.toUtc().toIso8601String(),
+              'timezone': timezone,
+              'display_name': ?repairedName,
+              ...?loginMetadata,
+            });
         writeResult.when(
           success: (_) {},
           failure: (error) => AppLogger.warning(
@@ -201,7 +202,11 @@ class AuthRepository {
       },
       failure: (error) async {
         if (error.code == ErrorCode.documentNotFound) {
-          return _createUser(firebaseUser, name: name, loginMetadata: loginMetadata);
+          return _createUser(
+            firebaseUser,
+            name: name,
+            loginMetadata: loginMetadata,
+          );
         }
         return Result.failure(error);
       },
@@ -209,13 +214,15 @@ class AuthRepository {
   }
 
   Future<Result<UserModel>> _createUser(
-      User firebaseUser, {
-      required String? name,
-      Map<String, dynamic>? loginMetadata}) async {
+    User firebaseUser, {
+    required String? name,
+    Map<String, dynamic>? loginMetadata,
+  }) async {
     final now = DateTime.now();
     final timezone = await _detectTimezone();
     final resolvedName =
-        _firstRealName([name, firebaseUser.displayName]) ?? placeholderDisplayName;
+        _firstRealName([name, firebaseUser.displayName]) ??
+        placeholderDisplayName;
     final user = UserModel(
       uid: firebaseUser.uid,
       displayName: resolvedName,
@@ -287,9 +294,13 @@ class AuthRepository {
   }
 
   Future<Result<UserModel>> signInWithEmail(
-      String email, String password) async {
-    final authResult =
-        await _authService.signInWithEmailAndPassword(email, password);
+    String email,
+    String password,
+  ) async {
+    final authResult = await _authService.signInWithEmailAndPassword(
+      email,
+      password,
+    );
     return authResult.when(
       success: (user) =>
           _completeSignIn(user, name: null, signInMethod: 'password'),
@@ -298,9 +309,15 @@ class AuthRepository {
   }
 
   Future<Result<UserModel>> createAccountWithEmail(
-      String email, String password, String name) async {
-    final authResult =
-        await _authService.createUserWithEmailAndPassword(email, password, name);
+    String email,
+    String password,
+    String name,
+  ) async {
+    final authResult = await _authService.createUserWithEmailAndPassword(
+      email,
+      password,
+      name,
+    );
     return authResult.when(
       success: (user) =>
           _completeSignIn(user, name: name, signInMethod: 'password'),
@@ -323,14 +340,10 @@ class AuthRepository {
   /// withdraw consent (`granted: false`). Granting flows through the age-gated
   /// consent screen instead, which writes the same field via OnboardingRepository.
   Future<Result<void>> setAuraConsentGranted(String uid, bool granted) {
-    return _firestoreService.updateDocument(
-      AppConstants.usersCollection,
-      uid,
-      {
-        'aura_consent_granted': granted,
-        'aura_consent_timestamp': DateTime.now().toUtc().toIso8601String(),
-      },
-    );
+    return _firestoreService.updateDocument(AppConstants.usersCollection, uid, {
+      'aura_consent_granted': granted,
+      'aura_consent_timestamp': DateTime.now().toUtc().toIso8601String(),
+    });
   }
 
   Future<String?> getIdToken() => _authService.getIdToken();

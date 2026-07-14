@@ -1,4 +1,5 @@
 import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -188,6 +189,16 @@ class _LoginScreenState extends State<LoginScreen>
 
                               // ── No email form open ─────────────────────────────
                               if (_formMode == _EmailFormMode.none) ...[
+                                if (!kIsWeb &&
+                                    Theme.of(context).platform ==
+                                        TargetPlatform.iOS) ...[
+                                  _AppleSignInButton(
+                                    onTap: () => context
+                                        .read<AuthViewModel>()
+                                        .signInWithApple(),
+                                  ),
+                                  const SizedBox(height: 12),
+                                ],
                                 _GoogleSignInButton(
                                   onTap: () => context
                                       .read<AuthViewModel>()
@@ -210,8 +221,10 @@ class _LoginScreenState extends State<LoginScreen>
                                       child: _EmailActionButton(
                                         label: 'Sign in',
                                         filled: false,
-                                        onTap: () => setState(() =>
-                                            _formMode = _EmailFormMode.signIn),
+                                        onTap: () => setState(
+                                          () =>
+                                              _formMode = _EmailFormMode.signIn,
+                                        ),
                                       ),
                                     ),
                                     const SizedBox(width: 10),
@@ -219,14 +232,16 @@ class _LoginScreenState extends State<LoginScreen>
                                       child: _EmailActionButton(
                                         label: 'Create account',
                                         filled: true,
-                                        onTap: () => setState(() =>
-                                            _formMode = _EmailFormMode.signUp),
+                                        onTap: () => setState(
+                                          () =>
+                                              _formMode = _EmailFormMode.signUp,
+                                        ),
                                       ),
                                     ),
                                   ],
                                 ),
 
-                              // ── Sign in form ───────────────────────────────────
+                                // ── Sign in form ───────────────────────────────────
                               ] else if (_formMode ==
                                   _EmailFormMode.signIn) ...[
                                 _BackLink(
@@ -256,7 +271,7 @@ class _LoginScreenState extends State<LoginScreen>
                                   onTap: () => _submitSignIn(context),
                                 ),
 
-                              // ── Create account form ────────────────────────────
+                                // ── Create account form ────────────────────────────
                               ] else ...[
                                 _BackLink(
                                   onTap: () => _goBackToOptions(context),
@@ -308,6 +323,43 @@ class _LoginScreenState extends State<LoginScreen>
           ),
         );
       },
+    );
+  }
+}
+
+// Apple sign-in button. Kept iOS-only at the call site so other platforms do
+// not start a provider flow that has not been configured for them.
+
+class _AppleSignInButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _AppleSignInButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 52,
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(26),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.apple, color: Colors.white, size: 22),
+            SizedBox(width: 10),
+            Text(
+              'Continue with Apple',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -418,18 +470,11 @@ class _BackLink extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.arrow_back_ios,
-              size: 12,
-              color: AppColors.textTertiary,
-            ),
+            Icon(Icons.arrow_back_ios, size: 12, color: AppColors.textTertiary),
             SizedBox(width: 4),
             Text(
               'Back',
-              style: TextStyle(
-                color: AppColors.textTertiary,
-                fontSize: 13,
-              ),
+              style: TextStyle(color: AppColors.textTertiary, fontSize: 13),
             ),
           ],
         ),
@@ -495,17 +540,15 @@ class _LoginTextField extends StatelessWidget {
 
 class _LegalFooter extends StatelessWidget {
   static final _tosUri = Uri.parse('https://auravoiceapp.com/terms-of-service');
-  static final _privacyUri =
-      Uri.parse('https://auravoiceapp.com/privacy-policy');
+  static final _privacyUri = Uri.parse(
+    'https://auravoiceapp.com/privacy-policy',
+  );
 
   @override
   Widget build(BuildContext context) {
     return Text.rich(
       TextSpan(
-        style: const TextStyle(
-          color: AppColors.textTertiary,
-          fontSize: 11,
-        ),
+        style: const TextStyle(color: AppColors.textTertiary, fontSize: 11),
         children: [
           const TextSpan(text: 'By continuing you agree to our '),
           TextSpan(

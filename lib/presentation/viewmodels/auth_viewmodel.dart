@@ -31,11 +31,11 @@ class AuthViewModel extends SafeChangeNotifier {
     required BackendApiService backendApiService,
     SubscriptionService? subscriptionService,
     required AnalyticsClient postHogAnalyticsService,
-  })  : _authRepository = authRepository,
-        _notificationService = notificationService,
-        _backendApiService = backendApiService,
-        _subscriptionService = subscriptionService,
-        _postHogAnalyticsService = postHogAnalyticsService {
+  }) : _authRepository = authRepository,
+       _notificationService = notificationService,
+       _backendApiService = backendApiService,
+       _subscriptionService = subscriptionService,
+       _postHogAnalyticsService = postHogAnalyticsService {
     // The billing webhook's sync push: refetch entitlement so this device
     // unlocks (or downgrades) within seconds of the payment event landing.
     _entitlementUpdatedSub = _notificationService.entitlementUpdatedStream
@@ -96,15 +96,15 @@ class AuthViewModel extends SafeChangeNotifier {
           unawaited(_postHogAnalyticsService.identifyUser(user.uid));
         }
         final nextState = user != null ? ViewState.loaded : ViewState.idle;
-        AppLogger.info(
-          'Auth state -> $nextState',
-          tag: 'AuthVM',
-        );
+        AppLogger.info('Auth state -> $nextState', tag: 'AuthVM');
         _setState(nextState);
       },
       onError: (Object e, StackTrace st) {
         ErrorHandler.handle(e, st);
-        _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
+        _error = AppException.unexpected(
+          "Something went wrong. Try again in a moment.",
+          error: e,
+        );
         _setState(ViewState.error);
         AppLogger.error('Auth stream error', error: e, tag: 'AuthVM');
       },
@@ -118,11 +118,16 @@ class AuthViewModel extends SafeChangeNotifier {
       final result = await _authRepository.signInWithGoogle();
       result.when(
         success: (user) {
-          AppLogger.info('signInWithGoogle: success uid=${user.uid}', tag: 'AuthVM');
+          AppLogger.info(
+            'signInWithGoogle: success uid=${user.uid}',
+            tag: 'AuthVM',
+          );
           _user = user;
           _error = null;
-          ErrorHandler.logBreadcrumb('user_signed_in',
-              metadata: {'uid': user.uid});
+          ErrorHandler.logBreadcrumb(
+            'user_signed_in',
+            metadata: {'uid': user.uid},
+          );
           _setState(ViewState.loaded);
         },
         failure: (error) {
@@ -130,19 +135,74 @@ class AuthViewModel extends SafeChangeNotifier {
           // choice, not an error. Quietly return to the login screen instead of
           // flashing a red error banner at them.
           if (error.code == ErrorCode.authCancelled) {
-            AppLogger.info('signInWithGoogle: cancelled by user', tag: 'AuthVM');
+            AppLogger.info(
+              'signInWithGoogle: cancelled by user',
+              tag: 'AuthVM',
+            );
             _error = null;
             _setState(ViewState.idle);
             return;
           }
-          AppLogger.error('signInWithGoogle: failed', error: error, tag: 'AuthVM');
+          AppLogger.error(
+            'signInWithGoogle: failed',
+            error: error,
+            tag: 'AuthVM',
+          );
           _error = error;
           _setState(ViewState.error);
         },
       );
     } catch (e, st) {
       ErrorHandler.handle(e, st);
-      _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
+      _error = AppException.unexpected(
+        "Something went wrong. Try again in a moment.",
+        error: e,
+      );
+      _setState(ViewState.error);
+    }
+  }
+
+  Future<void> signInWithApple() async {
+    AppLogger.info('signInWithApple: starting', tag: 'AuthVM');
+    _setState(ViewState.loading);
+    try {
+      final result = await _authRepository.signInWithApple();
+      result.when(
+        success: (user) {
+          AppLogger.info(
+            'signInWithApple: success uid=${user.uid}',
+            tag: 'AuthVM',
+          );
+          _user = user;
+          _error = null;
+          ErrorHandler.logBreadcrumb(
+            'user_signed_in_apple',
+            metadata: {'uid': user.uid},
+          );
+          _setState(ViewState.loaded);
+        },
+        failure: (error) {
+          if (error.code == ErrorCode.authCancelled) {
+            AppLogger.info('signInWithApple: cancelled by user', tag: 'AuthVM');
+            _error = null;
+            _setState(ViewState.idle);
+            return;
+          }
+          AppLogger.error(
+            'signInWithApple: failed',
+            error: error,
+            tag: 'AuthVM',
+          );
+          _error = error;
+          _setState(ViewState.error);
+        },
+      );
+    } catch (e, st) {
+      ErrorHandler.handle(e, st);
+      _error = AppException.unexpected(
+        "Something went wrong. Try again in a moment.",
+        error: e,
+      );
       _setState(ViewState.error);
     }
   }
@@ -154,46 +214,24 @@ class AuthViewModel extends SafeChangeNotifier {
       final result = await _authRepository.signInWithEmail(email, password);
       result.when(
         success: (user) {
-          AppLogger.info('signInWithEmail: success uid=${user.uid}', tag: 'AuthVM');
+          AppLogger.info(
+            'signInWithEmail: success uid=${user.uid}',
+            tag: 'AuthVM',
+          );
           _user = user;
           _error = null;
-          ErrorHandler.logBreadcrumb('user_signed_in_email',
-              metadata: {'uid': user.uid});
+          ErrorHandler.logBreadcrumb(
+            'user_signed_in_email',
+            metadata: {'uid': user.uid},
+          );
           _setState(ViewState.loaded);
         },
         failure: (error) {
-          AppLogger.error('signInWithEmail: failed', error: error, tag: 'AuthVM');
-          _error = error;
-          _setState(ViewState.error);
-        },
-      );
-    } catch (e, st) {
-      ErrorHandler.handle(e, st);
-      _error = AppException.unexpected("Something went wrong. Try again in a moment.", error: e);
-      _setState(ViewState.error);
-    }
-  }
-
-  Future<void> createAccountWithEmail(
-      String email, String password, String name) async {
-    AppLogger.info('createAccountWithEmail: starting', tag: 'AuthVM');
-    _setState(ViewState.loading);
-    try {
-      final result =
-          await _authRepository.createAccountWithEmail(email, password, name);
-      result.when(
-        success: (user) {
-          AppLogger.info('createAccountWithEmail: success uid=${user.uid}',
-              tag: 'AuthVM');
-          _user = user;
-          _error = null;
-          ErrorHandler.logBreadcrumb('user_created_email',
-              metadata: {'uid': user.uid});
-          _setState(ViewState.loaded);
-        },
-        failure: (error) {
-          AppLogger.error('createAccountWithEmail: failed',
-              error: error, tag: 'AuthVM');
+          AppLogger.error(
+            'signInWithEmail: failed',
+            error: error,
+            tag: 'AuthVM',
+          );
           _error = error;
           _setState(ViewState.error);
         },
@@ -201,7 +239,56 @@ class AuthViewModel extends SafeChangeNotifier {
     } catch (e, st) {
       ErrorHandler.handle(e, st);
       _error = AppException.unexpected(
-          "Something went wrong. Try again in a moment.", error: e);
+        "Something went wrong. Try again in a moment.",
+        error: e,
+      );
+      _setState(ViewState.error);
+    }
+  }
+
+  Future<void> createAccountWithEmail(
+    String email,
+    String password,
+    String name,
+  ) async {
+    AppLogger.info('createAccountWithEmail: starting', tag: 'AuthVM');
+    _setState(ViewState.loading);
+    try {
+      final result = await _authRepository.createAccountWithEmail(
+        email,
+        password,
+        name,
+      );
+      result.when(
+        success: (user) {
+          AppLogger.info(
+            'createAccountWithEmail: success uid=${user.uid}',
+            tag: 'AuthVM',
+          );
+          _user = user;
+          _error = null;
+          ErrorHandler.logBreadcrumb(
+            'user_created_email',
+            metadata: {'uid': user.uid},
+          );
+          _setState(ViewState.loaded);
+        },
+        failure: (error) {
+          AppLogger.error(
+            'createAccountWithEmail: failed',
+            error: error,
+            tag: 'AuthVM',
+          );
+          _error = error;
+          _setState(ViewState.error);
+        },
+      );
+    } catch (e, st) {
+      ErrorHandler.handle(e, st);
+      _error = AppException.unexpected(
+        "Something went wrong. Try again in a moment.",
+        error: e,
+      );
       _setState(ViewState.error);
     }
   }

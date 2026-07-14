@@ -12,11 +12,9 @@ class FirebaseAuthService {
   final GoogleSignIn _googleSignIn;
   Future<void>? _initialization;
 
-  FirebaseAuthService({
-    FirebaseAuth? auth,
-    GoogleSignIn? googleSignIn,
-  }) : _auth = auth ?? _resolveAuth(),
-       _googleSignIn = googleSignIn ?? GoogleSignIn.instance;
+  FirebaseAuthService({FirebaseAuth? auth, GoogleSignIn? googleSignIn})
+    : _auth = auth ?? _resolveAuth(),
+      _googleSignIn = googleSignIn ?? GoogleSignIn.instance;
 
   static FirebaseAuth? _resolveAuth() {
     try {
@@ -43,7 +41,8 @@ class FirebaseAuthService {
             'Google Sign-In initialized',
             tag: 'FirebaseAuthService',
           );
-        }).catchError((Object error, StackTrace stackTrace) {
+        })
+        .catchError((Object error, StackTrace stackTrace) {
           AppLogger.error(
             'Google Sign-In initialization failed',
             error: error,
@@ -112,7 +111,8 @@ class FirebaseAuthService {
         stackTrace: st,
         tag: 'FirebaseAuthService',
       );
-      final isUserCancellation = e.code == GoogleSignInExceptionCode.canceled &&
+      final isUserCancellation =
+          e.code == GoogleSignInExceptionCode.canceled &&
           (e.description == null ||
               e.description!.isEmpty ||
               e.description!.toLowerCase().contains('cancel'));
@@ -130,17 +130,96 @@ class FirebaseAuthService {
         tag: 'FirebaseAuthService',
       );
       if (e.code == 'network-request-failed') {
-        return Result.failure(AppException(
-          code: ErrorCode.authFailed,
-          message: "Looks like you're offline. Check your connection and try again.",
-          originalError: e,
-          stackTrace: st,
-        ));
+        return Result.failure(
+          AppException(
+            code: ErrorCode.authFailed,
+            message:
+                "Looks like you're offline. Check your connection and try again.",
+            originalError: e,
+            stackTrace: st,
+          ),
+        );
       }
       return Result.failure(AppException.authFailed(e, st));
     } catch (e, st) {
       AppLogger.error(
         'Google sign-in failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
+      return Result.failure(AppException.authFailed(e, st));
+    }
+  }
+
+  /// Uses Firebase's native Apple provider flow. The provider asks only for
+  /// name and email, and Apple may return the name only on first approval.
+  Future<Result<User>> signInWithApple() async {
+    final auth = _auth;
+    if (auth == null) {
+      return Result.failure(
+        AppException.unexpected(
+          'Firebase authentication is not configured for this build.',
+        ),
+      );
+    }
+
+    try {
+      final provider = AppleAuthProvider()
+        ..addScope('email')
+        ..addScope('name');
+      final userCredential = await auth.signInWithProvider(provider);
+      final user = userCredential.user;
+      if (user == null) {
+        return Result.failure(
+          AppException.authFailed(Exception('No user after Apple sign-in')),
+        );
+      }
+
+      AppLogger.info(
+        'Apple sign-in successful',
+        tag: 'FirebaseAuthService',
+        metadata: {'uid': user.uid},
+      );
+      return Result.success(user);
+    } on FirebaseAuthException catch (e, st) {
+      final code = e.code.toLowerCase();
+      const cancellationCodes = {
+        'canceled',
+        'cancelled',
+        'popup-closed-by-user',
+        'web-context-canceled',
+        'web-context-cancelled',
+      };
+      if (cancellationCodes.contains(code)) {
+        AppLogger.info(
+          'Apple sign-in cancelled by user',
+          tag: 'FirebaseAuthService',
+        );
+        return Result.failure(AppException.authCancelled());
+      }
+
+      AppLogger.error(
+        'Apple sign-in failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
+      if (code == 'network-request-failed') {
+        return Result.failure(
+          AppException(
+            code: ErrorCode.authFailed,
+            message:
+                "Looks like you're offline. Check your connection and try again.",
+            originalError: e,
+            stackTrace: st,
+          ),
+        );
+      }
+      return Result.failure(AppException.authFailed(e, st));
+    } catch (e, st) {
+      AppLogger.error(
+        'Apple sign-in failed',
         error: e,
         stackTrace: st,
         tag: 'FirebaseAuthService',
@@ -174,7 +253,8 @@ class FirebaseAuthService {
 
       return Result.success(serverAuthCode);
     } on GoogleSignInException catch (e, st) {
-      final isUserCancellation = e.code == GoogleSignInExceptionCode.canceled &&
+      final isUserCancellation =
+          e.code == GoogleSignInExceptionCode.canceled &&
           (e.description == null ||
               e.description!.isEmpty ||
               e.description!.toLowerCase().contains('cancel'));
@@ -213,26 +293,39 @@ class FirebaseAuthService {
   }
 
   Future<Result<User>> signInWithEmailAndPassword(
-      String email, String password) async {
+    String email,
+    String password,
+  ) async {
     final auth = _auth;
     if (auth == null) {
       return Result.failure(
-          AppException.unexpected('Firebase not configured.'));
+        AppException.unexpected('Firebase not configured.'),
+      );
     }
     try {
       final credential = await auth.signInWithEmailAndPassword(
-          email: email, password: password);
+        email: email,
+        password: password,
+      );
       final user = credential.user;
       if (user == null) {
         return Result.failure(
-            AppException.authFailed(Exception('No user returned.')));
+          AppException.authFailed(Exception('No user returned.')),
+        );
       }
-      AppLogger.info('Email sign-in successful',
-          tag: 'FirebaseAuthService', metadata: {'uid': user.uid});
+      AppLogger.info(
+        'Email sign-in successful',
+        tag: 'FirebaseAuthService',
+        metadata: {'uid': user.uid},
+      );
       return Result.success(user);
     } on FirebaseAuthException catch (e, st) {
-      AppLogger.error('Email sign-in failed',
-          error: e, stackTrace: st, tag: 'FirebaseAuthService');
+      AppLogger.error(
+        'Email sign-in failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
       return Result.failure(_mapSignInError(e, st));
     } catch (e, st) {
       return Result.failure(AppException.authFailed(e, st));
@@ -240,29 +333,43 @@ class FirebaseAuthService {
   }
 
   Future<Result<User>> createUserWithEmailAndPassword(
-      String email, String password, String name) async {
+    String email,
+    String password,
+    String name,
+  ) async {
     final auth = _auth;
     if (auth == null) {
       return Result.failure(
-          AppException.unexpected('Firebase not configured.'));
+        AppException.unexpected('Firebase not configured.'),
+      );
     }
     try {
       final credential = await auth.createUserWithEmailAndPassword(
-          email: email, password: password);
+        email: email,
+        password: password,
+      );
       final user = credential.user;
       if (user == null) {
         return Result.failure(
-            AppException.authFailed(Exception('No user returned.')));
+          AppException.authFailed(Exception('No user returned.')),
+        );
       }
       if (name.isNotEmpty) {
         await user.updateDisplayName(name);
       }
-      AppLogger.info('Email account created',
-          tag: 'FirebaseAuthService', metadata: {'uid': user.uid});
+      AppLogger.info(
+        'Email account created',
+        tag: 'FirebaseAuthService',
+        metadata: {'uid': user.uid},
+      );
       return Result.success(user);
     } on FirebaseAuthException catch (e, st) {
-      AppLogger.error('Email sign-up failed',
-          error: e, stackTrace: st, tag: 'FirebaseAuthService');
+      AppLogger.error(
+        'Email sign-up failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
       return Result.failure(_mapSignUpError(e, st));
     } catch (e, st) {
       return Result.failure(AppException.authFailed(e, st));
@@ -307,14 +414,16 @@ class FirebaseAuthService {
         // user isn't told their password is wrong when they're really offline.
         return AppException(
           code: ErrorCode.authFailed,
-          message: "Looks like you're offline. Check your connection and try again.",
+          message:
+              "Looks like you're offline. Check your connection and try again.",
           originalError: e,
           stackTrace: st,
         );
       case 'operation-not-allowed':
         return AppException(
           code: ErrorCode.authFailed,
-          message: 'Email sign-in is unavailable right now. Try continuing with Google.',
+          message:
+              'Email sign-in is unavailable right now. Try continuing with Google.',
           originalError: e,
           stackTrace: st,
         );
@@ -333,7 +442,8 @@ class FirebaseAuthService {
       case 'email-already-in-use':
         return AppException(
           code: ErrorCode.authFailed,
-          message: 'An account already exists with this email. Sign in instead.',
+          message:
+              'An account already exists with this email. Sign in instead.',
           originalError: e,
           stackTrace: st,
         );
@@ -362,14 +472,16 @@ class FirebaseAuthService {
       case 'network-request-failed':
         return AppException(
           code: ErrorCode.authFailed,
-          message: "Looks like you're offline. Check your connection and try again.",
+          message:
+              "Looks like you're offline. Check your connection and try again.",
           originalError: e,
           stackTrace: st,
         );
       case 'operation-not-allowed':
         return AppException(
           code: ErrorCode.authFailed,
-          message: 'Email sign-up is unavailable right now. Try continuing with Google.',
+          message:
+              'Email sign-up is unavailable right now. Try continuing with Google.',
           originalError: e,
           stackTrace: st,
         );

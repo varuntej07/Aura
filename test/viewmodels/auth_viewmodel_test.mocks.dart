@@ -75,6 +75,26 @@ class MockAuthRepository extends _i1.Mock implements _i2.AuthRepository {
           as _i3.Future<_i6.Result<_i5.UserModel>>);
 
   @override
+  _i3.Future<_i6.Result<_i5.UserModel>> signInWithApple() =>
+      (super.noSuchMethod(
+            Invocation.method(#signInWithApple, []),
+            returnValue: _i3.Future<_i6.Result<_i5.UserModel>>.value(
+              _i7.dummyValue<_i6.Result<_i5.UserModel>>(
+                this,
+                Invocation.method(#signInWithApple, []),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i6.Result<_i5.UserModel>>.value(
+                  _i7.dummyValue<_i6.Result<_i5.UserModel>>(
+                    this,
+                    Invocation.method(#signInWithApple, []),
+                  ),
+                ),
+          )
+          as _i3.Future<_i6.Result<_i5.UserModel>>);
+
+  @override
   _i3.Future<_i6.Result<_i5.UserModel?>> getCurrentUser() =>
       (super.noSuchMethod(
             Invocation.method(#getCurrentUser, []),

@@ -64,12 +64,14 @@ void main() {
     authStream = StreamController<UserModel?>.broadcast();
 
     when(authRepository.userModelStream).thenAnswer((_) => authStream.stream);
-    when(authRepository.signOut())
-        .thenAnswer((_) async => const Result.success(null));
+    when(
+      authRepository.signOut(),
+    ).thenAnswer((_) async => const Result.success(null));
     when(notificationService.initialize(any)).thenAnswer((_) async {});
     // The VM subscribes to this in its constructor (entitlement sync push).
-    when(notificationService.entitlementUpdatedStream)
-        .thenAnswer((_) => const Stream<EntitlementUpdatedPayload>.empty());
+    when(
+      notificationService.entitlementUpdatedStream,
+    ).thenAnswer((_) => const Stream<EntitlementUpdatedPayload>.empty());
     when(postHog.identifyUser(any)).thenAnswer((_) async {});
     when(postHog.reset()).thenAnswer((_) async {});
 
@@ -87,18 +89,20 @@ void main() {
   });
 
   group('initialize — auth stream', () {
-    test('onboarded user → loaded, authenticated, no onboarding needed',
-        () async {
-      await vm.initialize();
-      authStream.add(_user(onboardingComplete: true));
-      await pumpEventQueue();
+    test(
+      'onboarded user → loaded, authenticated, no onboarding needed',
+      () async {
+        await vm.initialize();
+        authStream.add(_user(onboardingComplete: true));
+        await pumpEventQueue();
 
-      expect(vm.state, ViewState.loaded);
-      expect(vm.isAuthenticated, isTrue);
-      expect(vm.needsOnboarding, isFalse);
-      verify(notificationService.initialize('uid-1')).called(1);
-      verify(postHog.identifyUser('uid-1')).called(1);
-    });
+        expect(vm.state, ViewState.loaded);
+        expect(vm.isAuthenticated, isTrue);
+        expect(vm.needsOnboarding, isFalse);
+        verify(notificationService.initialize('uid-1')).called(1);
+        verify(postHog.identifyUser('uid-1')).called(1);
+      },
+    );
 
     test('user with onboarding incomplete → needsOnboarding', () async {
       await vm.initialize();
@@ -143,12 +147,15 @@ void main() {
       expect(vm.auraMemoryEnabled, isFalse);
     });
 
-    test('consent explicitly false (declined / withdrawn) → disabled', () async {
-      await vm.initialize();
-      authStream.add(_user(auraConsentGranted: false));
-      await pumpEventQueue();
-      expect(vm.auraMemoryEnabled, isFalse);
-    });
+    test(
+      'consent explicitly false (declined / withdrawn) → disabled',
+      () async {
+        await vm.initialize();
+        authStream.add(_user(auraConsentGranted: false));
+        await pumpEventQueue();
+        expect(vm.auraMemoryEnabled, isFalse);
+      },
+    );
 
     test('no user → disabled', () async {
       await vm.initialize();
@@ -160,13 +167,15 @@ void main() {
 
   group('revokeAuraMemory', () {
     test('success → writes false and flips in-memory consent off', () async {
-      when(authRepository.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(_user(auraConsentGranted: true)));
+      when(authRepository.signInWithGoogle()).thenAnswer(
+        (_) async => Result.success(_user(auraConsentGranted: true)),
+      );
       await vm.signInWithGoogle();
       expect(vm.auraMemoryEnabled, isTrue);
 
-      when(authRepository.setAuraConsentGranted('uid-1', false))
-          .thenAnswer((_) async => const Result.success(null));
+      when(
+        authRepository.setAuraConsentGranted('uid-1', false),
+      ).thenAnswer((_) async => const Result.success(null));
 
       final ok = await vm.revokeAuraMemory();
 
@@ -177,12 +186,14 @@ void main() {
     });
 
     test('write failure → returns false, consent unchanged', () async {
-      when(authRepository.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(_user(auraConsentGranted: true)));
+      when(authRepository.signInWithGoogle()).thenAnswer(
+        (_) async => Result.success(_user(auraConsentGranted: true)),
+      );
       await vm.signInWithGoogle();
 
-      when(authRepository.setAuraConsentGranted(any, any))
-          .thenAnswer((_) async => Result.failure(AppException.unexpected('nope')));
+      when(authRepository.setAuraConsentGranted(any, any)).thenAnswer(
+        (_) async => Result.failure(AppException.unexpected('nope')),
+      );
 
       final ok = await vm.revokeAuraMemory();
 
@@ -199,8 +210,9 @@ void main() {
 
   group('signInWithGoogle', () {
     test('success → loaded + user set', () async {
-      when(authRepository.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(_user()));
+      when(
+        authRepository.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.success(_user()));
 
       await vm.signInWithGoogle();
 
@@ -210,8 +222,9 @@ void main() {
     });
 
     test('failure → error state', () async {
-      when(authRepository.signInWithGoogle())
-          .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
+      when(authRepository.signInWithGoogle()).thenAnswer(
+        (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+      );
 
       await vm.signInWithGoogle();
 
@@ -221,10 +234,49 @@ void main() {
     });
   });
 
+  group('signInWithApple', () {
+    test('success -> loaded + user set', () async {
+      when(
+        authRepository.signInWithApple(),
+      ).thenAnswer((_) async => Result.success(_user()));
+
+      await vm.signInWithApple();
+
+      expect(vm.state, ViewState.loaded);
+      expect(vm.user?.uid, 'uid-1');
+      expect(vm.error, isNull);
+    });
+
+    test('cancellation -> idle without an error banner', () async {
+      when(
+        authRepository.signInWithApple(),
+      ).thenAnswer((_) async => Result.failure(AppException.authCancelled()));
+
+      await vm.signInWithApple();
+
+      expect(vm.state, ViewState.idle);
+      expect(vm.error, isNull);
+      expect(vm.user, isNull);
+    });
+
+    test('failure -> error state', () async {
+      when(authRepository.signInWithApple()).thenAnswer(
+        (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+      );
+
+      await vm.signInWithApple();
+
+      expect(vm.state, ViewState.error);
+      expect(vm.error, isNotNull);
+      expect(vm.user, isNull);
+    });
+  });
+
   group('signInWithEmail', () {
     test('success → loaded + user set', () async {
-      when(authRepository.signInWithEmail(any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+      when(
+        authRepository.signInWithEmail(any, any),
+      ).thenAnswer((_) async => Result.success(_user()));
 
       await vm.signInWithEmail('test@example.com', 'pw');
 
@@ -233,8 +285,9 @@ void main() {
     });
 
     test('failure → error state', () async {
-      when(authRepository.signInWithEmail(any, any))
-          .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
+      when(authRepository.signInWithEmail(any, any)).thenAnswer(
+        (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+      );
 
       await vm.signInWithEmail('test@example.com', 'pw');
 
@@ -245,8 +298,9 @@ void main() {
 
   group('createAccountWithEmail', () {
     test('success → loaded + user set', () async {
-      when(authRepository.createAccountWithEmail(any, any, any))
-          .thenAnswer((_) async => Result.success(_user()));
+      when(
+        authRepository.createAccountWithEmail(any, any, any),
+      ).thenAnswer((_) async => Result.success(_user()));
 
       await vm.createAccountWithEmail('test@example.com', 'pw', 'Alice');
 
@@ -256,9 +310,9 @@ void main() {
     });
 
     test('failure → error state', () async {
-      when(authRepository.createAccountWithEmail(any, any, any))
-          .thenAnswer((_) async =>
-              Result.failure(AppException.authFailed(Exception('x'))));
+      when(authRepository.createAccountWithEmail(any, any, any)).thenAnswer(
+        (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+      );
 
       await vm.createAccountWithEmail('test@example.com', 'pw', 'Alice');
 
@@ -269,8 +323,9 @@ void main() {
 
   group('markOnboardingComplete', () {
     test('flips onboarding flags and sets justCompletedOnboarding', () async {
-      when(authRepository.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(_user(onboardingComplete: false)));
+      when(authRepository.signInWithGoogle()).thenAnswer(
+        (_) async => Result.success(_user(onboardingComplete: false)),
+      );
       await vm.signInWithGoogle();
 
       vm.markOnboardingComplete(auraConsentGranted: true);
@@ -292,8 +347,9 @@ void main() {
 
   group('signOut', () {
     test('clears user, goes idle, delegates to repo + posthog reset', () async {
-      when(authRepository.signInWithGoogle())
-          .thenAnswer((_) async => Result.success(_user()));
+      when(
+        authRepository.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.success(_user()));
       await vm.signInWithGoogle();
 
       await vm.signOut();
@@ -307,8 +363,9 @@ void main() {
 
   group('deleteAccount', () {
     test('success → returns null, clears user, signs out', () async {
-      when(backendApiService.deleteAccount())
-          .thenAnswer((_) async => const Result.success(null));
+      when(
+        backendApiService.deleteAccount(),
+      ).thenAnswer((_) async => const Result.success(null));
 
       final result = await vm.deleteAccount();
 
@@ -318,8 +375,9 @@ void main() {
     });
 
     test('failure → returns error string, state loaded', () async {
-      when(backendApiService.deleteAccount())
-          .thenAnswer((_) async => Result.failure(AppException.unexpected('nope')));
+      when(backendApiService.deleteAccount()).thenAnswer(
+        (_) async => Result.failure(AppException.unexpected('nope')),
+      );
 
       final result = await vm.deleteAccount();
 
@@ -329,8 +387,9 @@ void main() {
   });
 
   test('clearError clears the error', () async {
-    when(authRepository.signInWithGoogle())
-        .thenAnswer((_) async => Result.failure(AppException.authFailed(Exception('x'))));
+    when(authRepository.signInWithGoogle()).thenAnswer(
+      (_) async => Result.failure(AppException.authFailed(Exception('x'))),
+    );
     await vm.signInWithGoogle();
     expect(vm.error, isNotNull);
 

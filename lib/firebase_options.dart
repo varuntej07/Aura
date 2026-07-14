@@ -58,24 +58,27 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyBufZ9tH_xygLbDSGzmWbC9rlZAZNOH9vE',
-    appId: '1:620715294422:ios:0be8c53452ad36376e1377',
+    appId: '1:620715294422:ios:958693caa47842606e1377',
     messagingSenderId: '620715294422',
     projectId: 'juno-2ea45',
     storageBucket: 'juno-2ea45.firebasestorage.app',
-    androidClientId: '620715294422-hbaqdmqiji1b2trn80rh22dvsjfniuf5.apps.googleusercontent.com',
-    iosClientId: '620715294422-8eardf337q20amjabr9ht8c762g2too5.apps.googleusercontent.com',
-    iosBundleId: 'com.varundevs.aura',
+    androidClientId:
+        '620715294422-hbaqdmqiji1b2trn80rh22dvsjfniuf5.apps.googleusercontent.com',
+    iosClientId:
+        '620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0.apps.googleusercontent.com',
+    iosBundleId: 'dev.varuntej.aura',
   );
 
   static const FirebaseOptions macos = FirebaseOptions(
     apiKey: 'AIzaSyBufZ9tH_xygLbDSGzmWbC9rlZAZNOH9vE',
-    appId: '1:620715294422:ios:0be8c53452ad36376e1377',
+    appId: '1:620715294422:ios:958693caa47842606e1377',
     messagingSenderId: '620715294422',
     projectId: 'juno-2ea45',
     storageBucket: 'juno-2ea45.firebasestorage.app',
-    androidClientId: '620715294422-hbaqdmqiji1b2trn80rh22dvsjfniuf5.apps.googleusercontent.com',
-    iosClientId: '620715294422-8eardf337q20amjabr9ht8c762g2too5.apps.googleusercontent.com',
-    iosBundleId: 'com.varundevs.aura',
+    androidClientId:
+        '620715294422-hbaqdmqiji1b2trn80rh22dvsjfniuf5.apps.googleusercontent.com',
+    iosClientId:
+        '620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0.apps.googleusercontent.com',
+    iosBundleId: 'dev.varuntej.aura',
   );
-
 }

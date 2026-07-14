@@ -118,6 +118,15 @@ class MockAuthViewModel extends _i1.Mock implements _i2.AuthViewModel {
           as _i4.Future<void>);
 
   @override
+  _i4.Future<void> signInWithApple() =>
+      (super.noSuchMethod(
+            Invocation.method(#signInWithApple, []),
+            returnValue: _i4.Future<void>.value(),
+            returnValueForMissingStub: _i4.Future<void>.value(),
+          )
+          as _i4.Future<void>);
+
+  @override
   _i4.Future<void> signInWithEmail(String? email, String? password) =>
       (super.noSuchMethod(
             Invocation.method(#signInWithEmail, [email, password]),

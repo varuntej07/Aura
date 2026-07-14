@@ -1,8 +1,8 @@
 name: aura
-description: "Aura - Voice-first personal AI assistant"
+description: "Aura - Voice-first personal AI companion"
 publish_to: 'none'
 
-version: 2.0.0+5
+version: 2.2.0+11
 
 environment:
   sdk: ^3.10.7
@@ -37,10 +37,10 @@ dependencies:
   drift_flutter:
   sqlite3_flutter_libs:
   go_router:
-  in_app_purchase:
   posthog_flutter:
   wakelock_plus:
   package_info_plus: 9.0.1  # runtime app version/build for feedback docs
+  app_links:  # aura://voice deep link (Voice Launcher: Siri / widgets / external links)
 
 dev_dependencies:
   flutter_test:
@@ -62,22 +62,29 @@ dependency_overrides:
   livekit_client: 2.7.0
   device_info_plus: 12.3.0
   shared_preferences_android: 2.4.25
+  # 1.4.1 ships the UTF-8 device-name sanitize fix (flutter-webrtc#2021); 1.4.0
+  # crashes getUserMedia on non-ASCII device names. Remove once livekit_client
+  # resolves >=1.4.1 on its own.
+  flutter_webrtc: 1.4.1
 
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "branding/fire_aura.png"
-  adaptive_icon_background: "#000000"
-  adaptive_icon_foreground: "branding/fire_aura.png"
+  image_path: "assets/icons/Aura-Icon.png"
+  # Aura-Icon.png is a transparent "a". iOS forbids alpha (renders it black),
+  # so flatten onto white; Android adaptive icon gets white behind the foreground.
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icons/Aura-Icon.png"
+  remove_alpha_ios: true
+  background_color_ios: "#FFFFFF"
   web:
     generate: true
-    image_path: "branding/fire_aura.png"
-  windows:
-    generate: true
-    image_path: "branding/fire_aura.png"
+    image_path: "assets/icons/Aura-Icon.png"
+    background_color: "#FFFFFF"
+    theme_color: "#FFFFFF"
   macos:
     generate: true
-    image_path: "branding/fire_aura.png"
+    image_path: "assets/icons/Aura-Icon.png"
 
 flutter:
   uses-material-design: true

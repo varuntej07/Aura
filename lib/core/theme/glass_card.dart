@@ -50,7 +50,8 @@ class GlassCard extends StatelessWidget {
                   color: borderColor ?? AppColors.glassBorderLight,
                   width: 1,
                 ),
-                boxShadow: shadows ??
+                boxShadow:
+                    shadows ??
                     const [
                       BoxShadow(
                         color: Color(0x1A3A3228),
@@ -97,56 +98,46 @@ class FauxGlassCard extends StatelessWidget {
     this.gradient,
   });
 
-  const FauxGlassCard.pill({
-    super.key,
-    required this.child,
-  })  : borderRadius = 20,
-        padding = const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        margin = null,
-        borderColor = null,
-        gradient = null;
+  const FauxGlassCard.pill({super.key, required this.child})
+    : borderRadius = 20,
+      padding = const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      margin = null,
+      borderColor = null,
+      gradient = null;
 
-  const FauxGlassCard.navTile({
-    super.key,
-    required this.child,
-  })  : borderRadius = 16,
-        padding = const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        margin = null,
-        borderColor = null,
-        gradient = null;
+  const FauxGlassCard.navTile({super.key, required this.child})
+    : borderRadius = 16,
+      padding = const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      margin = null,
+      borderColor = null,
+      gradient = null;
 
-  const FauxGlassCard.section({
-    super.key,
-    required this.child,
-  })  : borderRadius = 16,
-        padding = const EdgeInsets.all(16),
-        margin = null,
-        borderColor = null,
-        gradient = null;
+  const FauxGlassCard.section({super.key, required this.child})
+    : borderRadius = 16,
+      padding = const EdgeInsets.all(16),
+      margin = null,
+      borderColor = null,
+      gradient = null;
 
-  const FauxGlassCard.toggleTile({
-    super.key,
-    required this.child,
-  })  : borderRadius = 16,
-        padding = const EdgeInsets.symmetric(horizontal: 4),
-        margin = null,
-        borderColor = null,
-        gradient = null;
+  const FauxGlassCard.toggleTile({super.key, required this.child})
+    : borderRadius = 16,
+      padding = const EdgeInsets.symmetric(horizontal: 4),
+      margin = null,
+      borderColor = null,
+      gradient = null;
 
   // borderColor = AppColors.error.withValues(alpha: 0.3) = 0x4DD64545
   // gradient colors = alpha 0.10 (0x1A) / 0.04 (0x0A) of error 0xD64545
-  const FauxGlassCard.destructiveButton({
-    super.key,
-    required this.child,
-  })  : borderRadius = 16,
-        padding = const EdgeInsets.symmetric(vertical: 16),
-        margin = null,
-        borderColor = const Color(0x4DD64545),
-        gradient = const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0x1AD64545), Color(0x0AD64545)],
-        );
+  const FauxGlassCard.destructiveButton({super.key, required this.child})
+    : borderRadius = 30,
+      padding = const EdgeInsets.symmetric(vertical: 16),
+      margin = null,
+      borderColor = const Color(0x4DD64545),
+      gradient = const LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [Color(0x1AD64545), Color(0x0AD64545)],
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -154,7 +145,8 @@ class FauxGlassCard extends StatelessWidget {
       margin: margin,
       padding: padding,
       decoration: BoxDecoration(
-        gradient: gradient ??
+        gradient:
+            gradient ??
             const LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
@@ -207,8 +199,7 @@ class GlassIconButton extends StatelessWidget {
                   end: Alignment.bottomRight,
                   colors: [AppColors.glassWhiteFill, AppColors.glassHighlight],
                 ),
-                border:
-                    Border.all(color: AppColors.glassBorderLight, width: 1),
+                border: Border.all(color: AppColors.glassBorderLight, width: 1),
               ),
               child: Icon(
                 icon,

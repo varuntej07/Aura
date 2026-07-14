@@ -112,6 +112,25 @@ class MockFirebaseAuthService extends _i1.Mock
           as _i4.Future<_i5.Result<_i2.User>>);
 
   @override
+  _i4.Future<_i5.Result<_i2.User>> signInWithApple() =>
+      (super.noSuchMethod(
+            Invocation.method(#signInWithApple, []),
+            returnValue: _i4.Future<_i5.Result<_i2.User>>.value(
+              _i6.dummyValue<_i5.Result<_i2.User>>(
+                this,
+                Invocation.method(#signInWithApple, []),
+              ),
+            ),
+            returnValueForMissingStub: _i4.Future<_i5.Result<_i2.User>>.value(
+              _i6.dummyValue<_i5.Result<_i2.User>>(
+                this,
+                Invocation.method(#signInWithApple, []),
+              ),
+            ),
+          )
+          as _i4.Future<_i5.Result<_i2.User>>);
+
+  @override
   _i4.Future<_i5.Result<String>> requestServerAuthCode(List<String>? scopes) =>
       (super.noSuchMethod(
             Invocation.method(#requestServerAuthCode, [scopes]),

@@ -711,6 +711,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     // turn it can finish in the background. A transport drop after this is recoverable
     // (pending), not a dead-end error.
     var streamStarted = false;
+    // End-to-end turn latency: ttft is stamped on the first stream event (the
+    // streamStarted flip), total on DoneEvent. Analytics only; the streaming
+    // render path is untouched.
+    final turnStopwatch = Stopwatch()..start();
+    int? firstEventElapsedMs;
 
     _streamSub = _backendService
         .sendMessageStream(
@@ -725,7 +730,10 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         )
         .listen(
       (event) {
-        streamStarted = true;
+        if (!streamStarted) {
+          streamStarted = true;
+          firstEventElapsedMs = turnStopwatch.elapsedMilliseconds;
+        }
         switch (event) {
           case TextDeltaEvent(:final delta):
             // Per-token update on the notifier only — repaints the streaming
@@ -791,6 +799,14 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             unawaited(postHogAnalytics.trackEvent(
               'chat_message_sent',
               properties: {'agent_type': agentId ?? 'general'},
+            ));
+            unawaited(postHogAnalytics.trackEvent(
+              'chat_e2e_latency',
+              properties: {
+                'ttft_ms': firstEventElapsedMs ?? turnStopwatch.elapsedMilliseconds,
+                'total_ms': turnStopwatch.elapsedMilliseconds,
+                'agent_type': agentId ?? 'general',
+              },
             ));
 
           case ChatLimitReachedEvent():
