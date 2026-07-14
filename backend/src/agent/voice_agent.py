@@ -39,18 +39,9 @@ from ..lib.logger import logger
 from ..services.entitlement import add_free_voice_seconds
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
-from .voice_prompt import render_screen_sight_note, render_surface_note
 from .voice.auth import mint_firebase_id_token
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
-from .voice.screen_context import (
-    OCR_CONTEXT_TYPE,
-    SCREEN_CONTEXT_TYPE,
-    TEXT_INPUT_TYPE,
-    deliver_screen_context,
-    deliver_typed_message,
-)
-from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -60,8 +51,18 @@ from .voice.pipelines import (
     build_turn_detector,
 )
 from .voice.recorder import VoiceSessionRecorder
+from .voice.revision import worker_revision_fields
+from .voice.screen_context import (
+    OCR_CONTEXT_TYPE,
+    SCREEN_CONTEXT_TYPE,
+    TEXT_INPUT_TYPE,
+    deliver_screen_context,
+    deliver_typed_message,
+)
+from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.telemetry import log_voice_failure, voice_session_logger
 from .voice.voice_controls import derive_voice_controls
+from .voice_prompt import render_screen_sight_note, render_surface_note
 
 # Firebase auto-issued UIDs are 28 alphanumeric chars.
 # We refuse anything else so a malformed room name can't drive a session.
@@ -275,6 +276,7 @@ async def entrypoint(ctx: JobContext) -> None:
             session_id=session_id,
             user_tier=session_context.user_tier,
             display_name=draft_display_name,
+            launch_surface=surface,
         )
 
         recorder = VoiceSessionRecorder(
@@ -283,6 +285,7 @@ async def entrypoint(ctx: JobContext) -> None:
             session_id=session_id,
             user_id=user_id,
             user_tier=session_context.user_tier,
+            tool_observer=buddy,
         )
         recorder.attach()
 
@@ -465,6 +468,7 @@ if __name__ == "__main__":
         "anthropic_configured": bool(settings.ANTHROPIC_API_KEY),
         "firebase_web_api_key_configured": bool(settings.FIREBASE_WEB_API_KEY),
         "backend_internal_url": settings.BACKEND_INTERNAL_URL,
+        **worker_revision_fields(),
     })
     cli.run_app(
         WorkerOptions(

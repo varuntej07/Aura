@@ -51,6 +51,11 @@ RUN mkdir -p $HF_HOME && python -m livekit.agents download-files
 
 COPY src/ ./src/
 
+# Build identity is generated inside the managed build. Source identity is
+# computed at runtime from the packaged agent files, so neither field needs a
+# deployment secret or a manually maintained environment variable.
+RUN date -u +"%Y-%m-%dT%H:%M:%SZ" > /app/.voice_build_time
+
 RUN chown -R juno:juno /app
 
 USER juno

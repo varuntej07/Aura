@@ -15,6 +15,7 @@ from livekit.agents import AgentSession, JobContext
 
 from ...lib.logger import logger
 from ...services.analytics.llm_telemetry import start_llm_generation
+from .action_policy import tool_output_succeeded
 from .errors import classify_pipeline_error, publish_client_error
 from .telemetry import log_turn_metrics, log_voice_failure
 from .text_sanitizer import strip_nonverbal_cues
@@ -46,12 +47,14 @@ class VoiceSessionRecorder:
         session_id: str,
         user_id: str,
         user_tier: str,
+        tool_observer: object | None = None,
     ) -> None:
         self._session = session
         self._ctx = ctx
         self._session_id = session_id
         self._user_id = user_id
         self._user_tier = user_tier
+        self._tool_observer = tool_observer
         self.turns: list[dict] = []
         self.tool_calls: list[str] = []
         self.done = asyncio.Event()
@@ -155,6 +158,10 @@ class VoiceSessionRecorder:
                 "text": str(content)[:500],
                 "timestamp": datetime.now(UTC).isoformat(),
             })
+            observer = self._tool_observer
+            record_item = getattr(observer, "record_voice_conversation_item", None)
+            if callable(record_item):
+                record_item(item)
 
         # Tool-call CAPTURE lives in _on_tools_executed (the function_tools_executed
         # event), the only session event that actually carries tool names on this stack
@@ -169,10 +176,17 @@ class VoiceSessionRecorder:
         # the old conversation_item_added/item.tool_calls path, which never populated anything
         # because ChatMessage items carry no tool data on the gpt-4.1-mini path.
         function_calls = getattr(ev, "function_calls", None) or []
-        for fnc_call in function_calls:
+        outputs = getattr(ev, "function_call_outputs", None) or []
+        for index, fnc_call in enumerate(function_calls):
             name = getattr(fnc_call, "name", "") or ""
             if name:
                 self.tool_calls.append(name)
+                output = outputs[index] if index < len(outputs) else None
+                success = output is not None and tool_output_succeeded(output)
+                observer = self._tool_observer
+                record = getattr(observer, "record_voice_tool_execution", None)
+                if callable(record):
+                    record(name, success=success)
                 logger.info("VoiceSession: tool executed", {
                     "session_id": self._session_id, "user_id": self._user_id,
                     "tool": name,
@@ -246,6 +260,9 @@ class VoiceSessionRecorder:
                 name=f"voice-client-error-close-{self._session_id[:8]}",
             )
         self._record_session_llm_usage()
+        close_context = getattr(self._tool_observer, "close_voice_context", None)
+        if callable(close_context):
+            close_context()
         self.done.set()
 
     def _record_session_llm_usage(self) -> None:

@@ -79,6 +79,14 @@ from .handlers.drafts import (
     handle_delete_draft,
     handle_list_drafts,
 )
+from .handlers.meetings import (
+    handle_claim as handle_meeting_claim,
+    handle_complete as handle_meeting_complete,
+    handle_get_meeting,
+    handle_internal_synthesize as handle_meeting_synthesize,
+    handle_list_recent as handle_meetings_recent,
+    handle_upload_segment as handle_meeting_upload_segment,
+)
 from .handlers.memories import (
     handle_callback_card,
     handle_delete_memory,
@@ -188,7 +196,7 @@ app.add_middleware(
     allow_origins=settings.cors_allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 
@@ -691,6 +699,44 @@ async def billing_webhook_endpoint(request: Request) -> JSONResponse:
 @app.get("/billing/portal")
 async def billing_portal_endpoint(request: Request) -> JSONResponse:
     return await handle_billing_portal(request)
+
+
+# Meeting notes (desktop capture -> synthesis; MEETING_NOTES_PLAN.md).
+# /meetings/recent is registered before /meetings/{meeting_id} so "recent"
+# can never be captured as a meeting id (same rule as /memories/callback).
+@app.post("/meetings/claim")
+async def meetings_claim_endpoint(request: Request) -> JSONResponse:
+    return await handle_meeting_claim(request)
+
+
+@app.get("/meetings/recent")
+async def meetings_recent_endpoint(request: Request) -> JSONResponse:
+    return await handle_meetings_recent(request)
+
+
+@app.post("/meetings/{meeting_id}/segments/{seq}")
+async def meetings_upload_segment_endpoint(
+    request: Request, meeting_id: str, seq: int,
+) -> JSONResponse:
+    return await handle_meeting_upload_segment(request, meeting_id, seq)
+
+
+@app.post("/meetings/{meeting_id}/complete")
+async def meetings_complete_endpoint(request: Request, meeting_id: str) -> JSONResponse:
+    return await handle_meeting_complete(request, meeting_id)
+
+
+@app.get("/meetings/{meeting_id}")
+async def meetings_get_endpoint(request: Request, meeting_id: str) -> JSONResponse:
+    return await handle_get_meeting(request, meeting_id)
+
+
+@app.post("/internal/meetings/synthesize")
+async def meetings_synthesize_endpoint(
+    request: Request,
+    _: None = Depends(_verify_scheduler_token),
+) -> JSONResponse:
+    return await handle_meeting_synthesize(request)
 
 
 def _check_env() -> None:

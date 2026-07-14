@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from ...lib.logger import logger
+from .revision import worker_revision_fields
 
 # Region tag for per-turn voice telemetry. LiveKit Cloud picks the edge region
 # per connection and does not expose it cheaply, so we tag the deployment region
@@ -111,6 +112,7 @@ async def voice_session_logger(user_id: str, room_name: str) -> AsyncIterator[st
     start = time.monotonic()
     logger.info("VoiceSession: started", {
         "session_id": session_id, "user_id": user_id, "room": room_name,
+        **worker_revision_fields(),
     })
     error: Exception | None = None
     try:
