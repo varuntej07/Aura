@@ -30,9 +30,11 @@ not users).
 from __future__ import annotations
 
 import asyncio
+import calendar
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Awaitable, Callable
 from urllib.parse import quote_plus
 
@@ -135,6 +137,11 @@ class FetchResult:
     tier: str = TIER_NONE
     latency_ms: int = 0
     cached: bool = False
+    # Freshest article publish time seen in this result, in UTC. The cheap tiers
+    # (rss/newsdata) carry real publish dates; brave/grounded synthesize and don't,
+    # so this is None there. Drives the orchestrator's hard freshness gate so a fetch
+    # that surfaced only day-old material is dropped instead of pushed as "live".
+    latest_published: datetime | None = None
 
     @property
     def ok(self) -> bool:
@@ -143,6 +150,39 @@ class FetchResult:
 
 def _clean(text: str) -> str:
     return _HTML_TAG.sub("", text or "").strip()
+
+
+def _struct_to_utc(struct_time) -> datetime | None:
+    """feedparser ``*_parsed`` fields are UTC ``time.struct_time``; convert to an
+    aware UTC datetime. Returns None on anything malformed (a bad date must never
+    break a fetch)."""
+    if not struct_time:
+        return None
+    try:
+        return datetime.fromtimestamp(calendar.timegm(struct_time), tz=UTC)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _parse_newsdata_date(value: str) -> datetime | None:
+    """newsdata.io ``pubDate`` is 'YYYY-MM-DD HH:MM:SS' in UTC. Returns None on any
+    parse failure so a missing/odd date is simply treated as 'no date' (never stale)."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_published(current: datetime | None, candidate: datetime | None) -> datetime | None:
+    """Keep the freshest of two optional publish dates."""
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return max(current, candidate)
 
 
 def _normalize_query(query: str) -> str:
@@ -168,18 +208,19 @@ def _cache_put(key: str, value: FetchResult) -> None:
 
 
 # ── Tier 1: Google News RSS search (free, no key) ────────────────────────────
-def _fetch_rss_sync(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
+def _fetch_rss_sync(query: str, locale: Locale) -> tuple[str, list[dict[str, str]], datetime | None]:
     """Blocking RSS search fetch + parse. Run via asyncio.to_thread. Kept local to
     this module (not the signal-engine google_news fetcher) so a change here can
     never regress the content-pool ingest. Bounded timeout + small retry for a
-    transient 503/blip; returns ("", []) on persistent failure (the chain falls on).
-    The Google News edition (hl/gl/ceid) follows ``locale`` so a local topic is
-    searched in its own region, not the US-English default."""
+    transient 503/blip; returns ("", [], None) on persistent failure (the chain falls
+    on). The Google News edition (hl/gl/ceid) follows ``locale`` so a local topic is
+    searched in its own region, not the US-English default. The third return value is
+    the freshest article ``published`` date (UTC) seen, or None when unavailable."""
     try:
         import feedparser  # type: ignore
     except ImportError:
         logger.warn("topic_fetcher.rss: feedparser not installed, skipping tier")
-        return "", []
+        return "", [], None
 
     url = _google_news_url(query, locale)
     resp = None
@@ -198,20 +239,21 @@ def _fetch_rss_sync(query: str, locale: Locale) -> tuple[str, list[dict[str, str
                 logger.warn("topic_fetcher.rss: fetch failed", {
                     "query": query, "attempts": attempt, "error": str(exc),
                 })
-                return "", []
+                return "", [], None
             time.sleep(_RSS_RETRY_BASE_SLEEP_S * attempt)
 
     if resp is None:
-        return "", []
+        return "", [], None
     try:
         feed = feedparser.parse(resp.content)
     except Exception as exc:
         logger.warn("topic_fetcher.rss: parse failed", {"query": query, "error": str(exc)})
-        return "", []
+        return "", [], None
 
     blocks: list[str] = []
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
+    latest: datetime | None = None
     for entry in (feed.entries or [])[:_RSS_RESULT_COUNT]:
         title = _clean(getattr(entry, "title", ""))
         summary = _clean(getattr(entry, "summary", ""))
@@ -221,15 +263,19 @@ def _fetch_rss_sync(query: str, locale: Locale) -> tuple[str, list[dict[str, str
         if link and link not in seen:
             seen.add(link)
             sources.append({"title": title or link, "url": link})
-    return "\n\n".join(blocks), sources
+        # feedparser normalizes RSS pubDate into the UTC struct_time published_parsed.
+        latest = _max_published(
+            latest, _struct_to_utc(getattr(entry, "published_parsed", None))
+        )
+    return "\n\n".join(blocks), sources, latest
 
 
-async def _fetch_rss(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_rss(query: str, locale: Locale) -> tuple[str, list[dict[str, str]], datetime | None]:
     return await asyncio.to_thread(_fetch_rss_sync, query, locale)
 
 
 # ── Tier 2: newsdata.io query search (free tier, direct publisher URLs) ───────
-async def _fetch_newsdata(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_newsdata(query: str, locale: Locale) -> tuple[str, list[dict[str, str]], datetime | None]:
     """newsdata.io 'latest' endpoint with a free-text ``q``. A minimal, query-shaped
     call kept local here — the signal-engine newsdata fetcher is category-shaped and
     must not be reshaped for this. A 429 (free-tier quota) returns empty so the chain
@@ -237,9 +283,10 @@ async def _fetch_newsdata(query: str, locale: Locale) -> tuple[str, list[dict[st
 
     Language follows ``locale``; the country filter is applied only for a NON-default
     (non-US) locale, so a global/US topic keeps the broad search it had before while a
-    local topic narrows to its region's sources."""
+    local topic narrows to its region's sources. The third return value is the freshest
+    article ``pubDate`` (UTC) seen, or None when unavailable."""
     if not settings.newsdata_configured:
-        return "", []
+        return "", [], None
     params = {
         "apikey": settings.NEWSDATA_API_KEY.strip(),
         "q": query,
@@ -252,25 +299,26 @@ async def _fetch_newsdata(query: str, locale: Locale) -> tuple[str, list[dict[st
             resp = await client.get(settings.NEWSDATA_BASE_URL, params=params)
     except Exception as exc:
         logger.warn("topic_fetcher.newsdata: request failed", {"query": query, "error": str(exc)})
-        return "", []
+        return "", [], None
 
     if resp.status_code == 429:
         logger.warn(
             "topic_fetcher.newsdata: 429 quota/rate-limited, falling through to next tier",
             {"query": query},
         )
-        return "", []
+        return "", [], None
     if resp.status_code != 200:
         logger.warn("topic_fetcher.newsdata: non-200", {"query": query, "status": resp.status_code})
-        return "", []
+        return "", [], None
 
     payload = resp.json() if resp.content else {}
     if not isinstance(payload, dict) or payload.get("status") != "success":
-        return "", []
+        return "", [], None
 
     blocks: list[str] = []
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
+    latest: datetime | None = None
     for item in (payload.get("results") or [])[:_NEWSDATA_RESULT_COUNT]:
         if not isinstance(item, dict):
             continue
@@ -282,11 +330,12 @@ async def _fetch_newsdata(query: str, locale: Locale) -> tuple[str, list[dict[st
         if link and link not in seen:
             seen.add(link)
             sources.append({"title": title or link, "url": link})
-    return "\n\n".join(blocks), sources
+        latest = _max_published(latest, _parse_newsdata_date(str(item.get("pubDate", ""))))
+    return "\n\n".join(blocks), sources, latest
 
 
 # ── Tier 3: Brave Search (fast, raw snippets) ────────────────────────────────
-async def _fetch_brave(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_brave(query: str, locale: Locale) -> tuple[str, list[dict[str, str]], datetime | None]:
     """Reuse the existing Brave primitive. recency='fresh' biases to the last 24h
     (live scores/results). A missing key raises ValueError inside brave_search; we
     treat that as 'tier unavailable' and fall through. uid is a constant so every
@@ -303,15 +352,27 @@ async def _fetch_brave(query: str, locale: Locale) -> tuple[str, list[dict[str, 
         )
     except ValueError:
         # BRAVE_API_KEY unset — tier unavailable, fall through (not an error worth raising).
-        return "", []
+        return "", [], None
     except Exception as exc:
         logger.warn("topic_fetcher.brave: failed", {"query": query, "error": str(exc)})
-        return "", []
-    return str(result.get("text", "")), list(result.get("sources", []))
+        return "", [], None
+    # Brave's Web Search API carries a per-result page_age when available (extracted
+    # in brave_search._parse_brave_response, an ISO string there since that dict is
+    # also returned as-is to the chat/voice web_surf tool). Still None when no result
+    # in this particular response had one — that's a genuine "can't judge" case, not
+    # an error, and the freshness gate already treats a None the same as before.
+    latest_raw = str(result.get("latest_published", "") or "")
+    latest_published: datetime | None = None
+    if latest_raw:
+        try:
+            latest_published = datetime.fromisoformat(latest_raw)
+        except ValueError:
+            latest_published = None
+    return str(result.get("text", "")), list(result.get("sources", [])), latest_published
 
 
 # ── Tier 4: Gemini grounded search (premium, last resort) ────────────────────
-async def _fetch_grounded(query: str, locale: Locale) -> tuple[str, list[dict[str, str]]]:
+async def _fetch_grounded(query: str, locale: Locale) -> tuple[str, list[dict[str, str]], datetime | None]:
     """Last resort: grounded search SYNTHESIZES from a live web search in one call,
     so it works even when the cheap snippet sources are empty or unhelpful. Carries
     its own 45s timeout + retries inside ModelProvider. ``locale`` is accepted for a
@@ -327,11 +388,18 @@ async def _fetch_grounded(query: str, locale: Locale) -> tuple[str, list[dict[st
         result = await get_model_provider().grounded(prompt)
     except Exception as exc:
         logger.warn("topic_fetcher.grounded: failed", {"query": query, "error": str(exc)})
-        return "", []
-    return result.text, [{"title": s.get("title", ""), "url": s.get("url", "")} for s in result.sources]
+        return "", [], None
+    # Grounded synthesis has no per-source publish date — carries no freshness signal.
+    return (
+        result.text,
+        [{"title": s.get("title", ""), "url": s.get("url", "")} for s in result.sources],
+        None,
+    )
 
 
-_TIER_FETCHERS: dict[str, Callable[[str, Locale], Awaitable[tuple[str, list[dict[str, str]]]]]] = {
+_TIER_FETCHERS: dict[
+    str, Callable[[str, Locale], Awaitable[tuple[str, list[dict[str, str]], datetime | None]]]
+] = {
     TIER_RSS: _fetch_rss,
     TIER_NEWSDATA: _fetch_newsdata,
     TIER_BRAVE: _fetch_brave,
@@ -339,8 +407,23 @@ _TIER_FETCHERS: dict[str, Callable[[str, Locale], Awaitable[tuple[str, list[dict
 }
 
 
+def _filter_dated_blocks(
+    text: str, sources: list[dict[str, str]], latest: datetime | None, not_before: datetime | None,
+) -> tuple[str, list[dict[str, str]], datetime | None]:
+    """Drop a dated tier's result entirely when its freshest article predates
+    ``not_before``. A result-moment fetch passes the fixture's content window here so
+    a two-day-old preview ("date set for Thursday July 9", pushed July 10 in prod)
+    can never masquerade as the fixture's outcome. Undated tiers (brave/grounded)
+    never reach this — the extraction LLM's refers_to_this_fixture judgment gates
+    those instead."""
+    if not_before is None or latest is None or latest >= not_before:
+        return text, sources, latest
+    return "", [], None
+
+
 async def fetch_topic(
-    query: str, *, country: str | None = None, language: str | None = None, use_cache: bool = True,
+    query: str, *, country: str | None = None, language: str | None = None,
+    use_cache: bool = True, not_before: datetime | None = None,
 ) -> FetchResult:
     """Run the cost-ordered fetch chain for ``query`` and return the first usable
     result. Never raises — every tier failing yields a ``FetchResult`` with
@@ -348,17 +431,21 @@ async def fetch_topic(
     state this fetch' (skip the checkpoint, retry next reconcile), never a crash.
 
     ``country``/``language`` (from the topic's research) localize the cheap tiers so a
-    non-US/non-English topic is searched in its own region; both default to US/en. The
-    chain order, the cache TTL, and which tiers exist are all settings-driven.
+    non-US/non-English topic is searched in its own region; both default to US/en.
+    ``not_before`` rejects a dated tier (rss/newsdata) whose freshest article predates
+    it — the temporal gate for fixture result fetches. The chain order, the cache TTL,
+    and which tiers exist are all settings-driven.
     """
     query = (query or "").strip()
     if not query:
         return FetchResult(text="", tier=TIER_NONE)
 
     locale = _build_locale(country, language)
-    # Locale is part of the cache identity: the same query in a different region is a
-    # genuinely different fetch, so it must not collide on the shared in-process cache.
-    cache_key = f"{_normalize_query(query)}|{locale.key}"
+    # Locale AND the temporal cutoff are part of the cache identity: the same query
+    # with a different not_before is a genuinely different fetch (a pulse's unfiltered
+    # result must never serve a result-moment's filtered one).
+    cutoff_key = not_before.isoformat() if not_before else ""
+    cache_key = f"{_normalize_query(query)}|{locale.key}|{cutoff_key}"
     if use_cache:
         hit = _cache_get(cache_key)
         if hit is not None:
@@ -366,6 +453,7 @@ async def fetch_topic(
             return FetchResult(
                 text=hit.text, sources=hit.sources, tier=hit.tier,
                 latency_ms=hit.latency_ms, cached=True,
+                latest_published=hit.latest_published,
             )
 
     started = time.monotonic()
@@ -376,7 +464,10 @@ async def fetch_topic(
             continue
         tried.append(tier)
         try:
-            text, sources = await fetcher(query, locale)
+            text, sources, latest_published = await fetcher(query, locale)
+            text, sources, latest_published = _filter_dated_blocks(
+                text, sources, latest_published, not_before,
+            )
         except Exception as exc:
             # Defensive: each fetcher already swallows its own errors, but never let
             # one tier's surprise abort the whole chain — fall through to the next.
@@ -390,6 +481,7 @@ async def fetch_topic(
             result = FetchResult(
                 text=text.strip(), sources=sources, tier=tier,
                 latency_ms=latency_ms, cached=False,
+                latest_published=latest_published,
             )
             if use_cache:
                 _cache_put(cache_key, result)

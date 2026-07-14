@@ -51,3 +51,17 @@ MAX_RECENT_OPENER_TOPICS = 50
 # Client routing key in the FCM data payload. The Flutter app switches on this to
 # open chat seeded with the opener (mirrors signal_engine / thread_followup).
 NOTIFICATION_TYPE_ICEBREAKER = "icebreaker"
+
+# ── Pending-opener recovery fields ──────────────────────────────────────────
+# Written to the state doc after a successful opener generation, before the push
+# completes. If a Cloud Run instance is killed between the day-slot claim and the
+# orchestrator's mark_consumed, a re-drain reads these fields to recover the opener
+# without a second LLM call. The funnel's dedup_key (icebreaker_{local_date})
+# prevents double-send if the opener was already delivered before the re-drain.
+FIELD_PENDING_OPENER_DATE = "pending_opener_date"
+FIELD_PENDING_OPENER_TITLE = "pending_opener_title"
+FIELD_PENDING_OPENER_BODY = "pending_opener_body"
+FIELD_PENDING_OPENER_MSG = "pending_opener_opening_message"
+FIELD_PENDING_OPENER_TOPIC = "pending_opener_topic"
+FIELD_PENDING_OPENER_REASON = "pending_opener_reason"
+FIELD_PENDING_OPENER_NOTIFICATION_ID = "pending_opener_notification_id"

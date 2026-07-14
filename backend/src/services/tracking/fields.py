@@ -23,6 +23,11 @@ from __future__ import annotations
 COLLECTION_TRACKED_TOPICS = "tracked_topics"
 COLLECTION_TRACKERS = "trackers"
 COLLECTION_CHECKPOINTS = "checkpoints"
+# Subcollections under tracked_topics/{topic_key}: the stable-identity fixture docs and
+# their per-fire audit trail. Both are parent-scoped reads only (a topic has at most a
+# few dozen fixtures), so neither needs a composite index.
+COLLECTION_FIXTURES = "fixtures"
+COLLECTION_FIXTURE_FIRES = "fires"
 
 # Client-side routing key carried on the FCM payload (notification_type).
 NOTIFICATION_TYPE_TRACKER_UPDATE = "tracker_update"
@@ -64,6 +69,24 @@ TOPIC_SUBSCRIBER_COUNT = "subscriber_count"
 # topic (open_interest, no dated events) is still polled, faster when it is hot and
 # slower when it is quiet. 0 / missing means "use the engine's initial interval".
 TOPIC_PULSE_INTERVAL_SECONDS = "pulse_interval_seconds"
+# Local notify window (hours 0-23 in the topic's timezone). A routine beat whose fire
+# lands OUTSIDE [start, end) is held (an event poll skips; the pulse re-arms to the next
+# open) so a 3am match poll never buzzes — unless the checkpoint is wake_override (a
+# can't-miss final/verdict), which bypasses it. The research agent picks these; the
+# defaults below apply when it gives nothing usable.
+TOPIC_NOTIFY_START_HOUR = "notify_start_hour"
+TOPIC_NOTIFY_END_HOUR = "notify_end_hour"
+DEFAULT_NOTIFY_START_HOUR = 8
+DEFAULT_NOTIFY_END_HOUR = 23
+# True when the topic is a real future event whose DATE is not yet announced (e.g. an IPO
+# with no set date). events[] is empty and the heartbeat stays tight so the announcement
+# is caught fast; the daily reconcile flips it false and lays the schedule once a date appears.
+TOPIC_AWAITING_DATE = "awaiting_date"
+# The pulse's fact-novelty gate: short slugs of the concrete developments already
+# pushed (last ~20, newest last). A pulse compose must name a development_key; one
+# already in this list is a re-worded repeat and abstains. Replaces string-equality
+# on live_summary as the pulse's dedup.
+TOPIC_RECENT_DEVELOPMENT_KEYS = "recent_development_keys"
 # Observability / health ("what is working and what is not")
 TOPIC_STATUS = "status"                         # see TOPIC_STATUS_* below
 TOPIC_HEALTH = "health"                         # derived: healthy | degraded | stalled
@@ -92,6 +115,63 @@ TOPIC_HEALTH_DEGRADED = "degraded"              # last reconcile partial, or fel
 TOPIC_HEALTH_STALLED = "stalled"                # repeated failures / no successful fetch in a while
 
 
+# ── tracked_topics/{topic_key}/fixtures/{fixture_id} ────────────────────────
+# One doc per REAL-WORLD fixture (a match, a hearing, a launch window). The id is
+# minted ONCE from the fixture's start slot (never from its label), so a reconcile
+# that rewords the label ("Quarterfinal 3" -> "Match 98" -> "Spain vs Belgium")
+# updates the SAME doc instead of forking a parallel notification series — the
+# 2026-07-10 19-push incident was exactly that fork, multiplied by a poll grid.
+FIXTURE_ID = "id"                              # e.g. "20260710-1800" (+ "-b" on a slot collision)
+FIXTURE_TOPIC_KEY = "topic_key"
+FIXTURE_LABEL = "label"                        # display label — free to be reworded by reconcile
+FIXTURE_START_AT = "start_at"                  # updated in place when the schedule shifts
+FIXTURE_EXPECTED_END_AT = "expected_end_at"    # start + typical duration; when the result moment fires
+FIXTURE_KIND = "kind"                          # EVENT_KIND_SPAN | EVENT_KIND_POINT
+FIXTURE_LEAD_MINUTES = "lead_minutes"          # research-chosen pre heads-up lead; 0 -> moments default (30)
+FIXTURE_WAKE_OVERRIDE = "wake_override"        # can't-miss fixture: result may push outside the notify window
+# Structured FACT state — the send gate. A push happens only when these facts
+# TRANSITION (e.g. status scheduled -> finished), never because a fresh LLM
+# composition worded the same facts differently.
+FIXTURE_STATUS = "status"                      # see FIXTURE_STATUS_* below (fact state, not queue state)
+FIXTURE_FACT_SCORE = "fact_score"              # e.g. "1-0"; "" until known
+FIXTURE_FACT_WINNER = "fact_winner"            # advancing team / outcome; "" until known
+FIXTURE_FACT_NOTE = "fact_note"                # short extra fact (penalties, postponed-to, venue change)
+FIXTURE_FACTS_UPDATED_AT = "facts_updated_at"
+FIXTURE_LAST_TRANSITION = "last_transition"    # e.g. "scheduled->finished" (observability)
+FIXTURE_CREATED_AT = "created_at"
+FIXTURE_UPDATED_AT = "updated_at"
+
+FIXTURE_STATUS_SCHEDULED = "scheduled"
+FIXTURE_STATUS_LIVE = "live"
+FIXTURE_STATUS_FINISHED = "finished"
+FIXTURE_STATUS_CANCELLED = "cancelled"
+
+
+# ── tracked_topics/{topic_key}/fixtures/{fixture_id}/fires/{auto_id} ────────
+# One audit row per MOMENT FIRE, sent or abstained. The per-user notification ledger
+# already records every delivered push; this records the abstains (why nothing was
+# sent), which is where "why did/didn't I get a notification" debugging lives.
+AUDIT_MOMENT = "moment"                        # which moment fired (pre|kickoff|result|…)
+AUDIT_FIRED_AT = "fired_at"
+AUDIT_QUERY = "query"                          # the fetch query used ("" for fetchless moments)
+AUDIT_FETCH_TIER = "fetch_tier"                # which tier served it (TIER_*; "" for fetchless)
+AUDIT_PRIOR_FACTS = "prior_facts"              # fact state before this fire (map)
+AUDIT_SEEN_FACTS = "seen_facts"                # fact state the extraction saw (map; empty on abstain-before-extract)
+AUDIT_TRANSITION = "transition"                # the committed transition ("" when none)
+AUDIT_DECISION = "decision"                    # see AUDIT_DECISION_* below
+AUDIT_SENT_COUNT = "sent_count"                # subscribers actually delivered to
+AUDIT_TITLE = "title"                          # the push title ("" when nothing sent)
+
+AUDIT_DECISION_SENT = "sent"
+AUDIT_DECISION_ABSTAIN_NO_TRANSITION = "abstain_no_transition"
+AUDIT_DECISION_ABSTAIN_WRONG_FIXTURE = "abstain_wrong_fixture"
+AUDIT_DECISION_ABSTAIN_STALE_CONTENT = "abstain_stale_content"
+AUDIT_DECISION_ABSTAIN_TOO_LATE = "abstain_too_late"       # pre/kickoff fired past its usefulness window
+AUDIT_DECISION_ABSTAIN_RACE_LOST = "abstain_race_lost"     # another moment committed this transition first
+AUDIT_DECISION_REARMED = "rearmed"                          # result not determinable yet; re-check scheduled
+AUDIT_DECISION_FAILED_FETCH = "failed_fetch"
+
+
 # ── trackers/{tracker_id} ────────────────────────────────────────────────────
 TRACKER_ID = "id"
 TRACKER_USER_ID = "user_id"
@@ -104,9 +184,15 @@ TRACKER_MUTE_UNTIL = "mute_until"               # ISO UTC; user said "pause"
 # Per-user delivery observability
 TRACKER_UPDATES_SENT = "updates_sent"
 TRACKER_LAST_UPDATE_AT = "last_update_at"
-# Per-user dedup: the last summary actually delivered to THIS user, so two users on
-# the same topic don't have to share a send cursor.
+# Last summary actually delivered to THIS user. Display/observability only since the
+# fixture fact-transition gate replaced string-equality dedup (a transition key can
+# never repeat, so no per-user text cursor is needed to prevent re-sends).
 TRACKER_LAST_SENT_SUMMARY = "last_sent_summary"
+# Per-user-per-topic daily ceiling (founder decision 2026-07-10: 8/day). The date is a
+# UTC "YYYY-MM-DD" string; a fire on a new date resets the counter in the same claim
+# transaction (reset-on-read, mirroring notification_budget's day rollover).
+TRACKER_SENT_TODAY = "sent_today"
+TRACKER_SENT_TODAY_DATE = "sent_today_date"
 
 TRACKER_STATUS_ACTIVE = "active"
 TRACKER_STATUS_PAUSED = "paused"
@@ -117,7 +203,7 @@ TRACKER_STATUS_CANCELLED = "cancelled"
 # ── checkpoints/{checkpoint_id} ──────────────────────────────────────────────
 CHECKPOINT_ID = "id"
 CHECKPOINT_TOPIC_KEY = "topic_key"             # -> tracked_topics/{topic_key} (shared, fans out)
-CHECKPOINT_EVENT_LABEL = "event_label"         # "USA vs Australia"
+CHECKPOINT_EVENT_LABEL = "event_label"         # "USA vs Australia" — free-text DISPLAY label
 CHECKPOINT_PHASE = "phase"                      # see CHECKPOINT_PHASE_* below
 CHECKPOINT_FIRE_AT = "fire_at"                  # ISO UTC — the due-queue key (status,fire_at index)
 CHECKPOINT_STATUS = "status"                    # see CHECKPOINT_STATUS_* below
@@ -129,16 +215,29 @@ CHECKPOINT_LAST_FETCH_TIER = "last_fetch_tier"
 CHECKPOINT_LAST_FETCH_AT = "last_fetch_at"
 CHECKPOINT_LAST_ERROR = "last_error"
 CHECKPOINT_CREATED_AT = "created_at"
+CHECKPOINT_WAKE_OVERRIDE = "wake_override"     # may fire/push outside the notify window (a can't-miss moment)
+# The fixture this moment belongs to. Empty on a pulse and on legacy poll-grid docs —
+# the fire path uses empty+non-pulse as the "legacy, expire on sight" discriminator.
+CHECKPOINT_FIXTURE_ID = "fixture_id"
+# How many times the RESULT moment has re-armed waiting for the outcome to become
+# determinable. Distinct from CHECKPOINT_ATTEMPTS (claim count): a re-arm is a healthy
+# "not over yet", not a failure retry.
+CHECKPOINT_RESULT_CHECKS = "result_checks"
 
-CHECKPOINT_PHASE_PRE = "pre"                    # before the event ("kicks off in 2h")
-CHECKPOINT_PHASE_LIVE = "live"                  # during ("underway, 0-0")
-CHECKPOINT_PHASE_POST = "post"                  # after ("USA win 2-1")
-CHECKPOINT_PHASE_MILESTONE = "milestone"        # the single moment a POINT event happens (verdict, launch, release)
-CHECKPOINT_PHASE_PULSE = "pulse"                # recurring heartbeat for an ongoing topic with no dated events
+CHECKPOINT_PHASE_PRE = "pre"                    # heads-up before the fixture ("kicks off in 30 min")
+CHECKPOINT_PHASE_KICKOFF = "kickoff"            # the moment the fixture starts ("underway now")
+CHECKPOINT_PHASE_RESULT = "result"              # outcome check at expected end (bounded re-arm loop)
+CHECKPOINT_PHASE_PULSE = "pulse"                # recurring heartbeat for developments between fixtures
+# LEGACY poll-grid phases. Never written anymore; kept PERMANENTLY because
+# moments.is_legacy_poll_phase and the migration script discriminate on them to
+# expire stray pre-redesign docs on sight.
+CHECKPOINT_PHASE_LIVE = "live"
+CHECKPOINT_PHASE_POST = "post"
+CHECKPOINT_PHASE_MILESTONE = "milestone"
 
-# Event shape — drives which phases an event materializes (see models.ScheduledEvent).
-# A span has duration (a match: pre/live/post); a point is instantaneous (a verdict,
-# a launch, a release: a heads-up pre + a single milestone at the moment).
+# Fixture shape (see models.ResearchedFixture / Fixture). A span has duration (a
+# match: its result is checked at the expected end); a point is instantaneous (a
+# verdict, a launch: its result is checked shortly after the moment).
 EVENT_KIND_SPAN = "span"
 EVENT_KIND_POINT = "point"
 

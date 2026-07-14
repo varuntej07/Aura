@@ -1,4 +1,4 @@
-"""The Daily Briefing engine — one synthesized morning digest per user.
+"""The Daily Briefing engine — one synthesized end-of-day digest per user.
 
 Rides the existing per-minute scheduler tick on a 15-minute gate; no new Cloud
 Scheduler job. For each active user, on the gated tick:
@@ -33,10 +33,14 @@ from ..analytics.funnel_events import (
     PROP_NOTIFICATION_ORIGIN,
 )
 from ..model_provider import ModelProvider, get_model_provider
-from ..notification_budget import try_claim_proactive_slot
-from ..notification_service import send_notification
+from ..notifications import orchestrator
+from ..notifications.proposal import (
+    SOURCE_BRIEFING,
+    Disposition,
+    NotificationProposal,
+    ProposalKind,
+)
 from ..signal_engine.feature_store import list_active_user_ids
-from ..tracking import tracking_store
 from . import briefing_agent
 from . import briefing_store as store
 from .fields import (
@@ -72,13 +76,6 @@ def _local_now(timezone_name: str) -> datetime:
         return datetime.now(ZoneInfo(timezone_name))
     except (ZoneInfoNotFoundError, Exception):
         return datetime.now(UTC)
-
-
-def _tracker_fired_today(latest_update_at: datetime | None, local_now: datetime) -> bool:
-    """True when a tracker already delivered to this user on their local date today."""
-    if latest_update_at is None:
-        return False
-    return latest_update_at.astimezone(local_now.tzinfo).date() == local_now.date()
 
 
 async def run_briefing_tick(
@@ -153,7 +150,8 @@ async def _process_one_user(
 
     local_now = _local_now(targeting.timezone)
 
-    # 2. Only generate during the user's local morning hour. The 15-min fan-out runs
+    # 2. Only generate during the user's local evening hour (BRIEFING_LOCAL_HOUR, 8pm).
+    #    The 15-min fan-out runs
     #    ~4 times in that hour; the claim ensures exactly one of them generates.
     #    A forced manual run bypasses this so it works at any time of day.
     if not force and local_now.hour != settings.BRIEFING_LOCAL_HOUR:
@@ -198,49 +196,38 @@ async def _process_one_user(
         items=result.items,
     )
 
-    # 6. Suppress the PUSH (not the briefing) when a topic tracker already notified this
-    #    user today — they're getting proactive news from the tracker, so the briefing
-    #    push would stack a second notification on the same day. Still fully viewable.
-    latest_tracker = await tracking_store.latest_tracker_update_at(user_id)
-    if _tracker_fired_today(latest_tracker, local_now):
-        summary.skipped_tracker_today += 1
-        logger.info("briefing.engine: tracker fired today, skipping push (briefing viewable)", {
-            "user_id": user_id,
-        })
-        return
-
-    # 7. Unified daily budget — priority claim so a morning briefing the user expects
-    #    is not starved by the content engine. No-op while the budget flag is off.
-    budget = await try_claim_proactive_slot(
-        user_id, source="daily_briefing", user_local_date=local_date, priority=True,
-    )
-    if not budget.allowed:
-        summary.skipped_budget += 1
-        logger.info("briefing.engine: budget denied the briefing push (briefing still viewable)", {
-            "user_id": user_id, "reason": budget.reason,
-        })
-        return
-
-    # 8. Send the single morning push. Tapping it deep-links to the briefing screen.
+    # 6. Hand the single daily push to the orchestrator's committed lane. The briefing
+    #    is guaranteed — the user's end-of-day recap goes out every evening regardless of
+    #    other deciders (no tracker-collision suppression). It is persisted above, so even
+    #    a dropped or undelivered push leaves the briefing fully viewable in-app. The
+    #    orchestrator records the committed send to the shared budget itself. Tapping the
+    #    push deep-links to the briefing screen.
     notification_id = str(uuid.uuid4())
-    result_send = await send_notification(
-        user_id,
-        title=result.push_title,
-        body=result.push_body,
-        data={
-            PROP_NOTIFICATION_ID: notification_id,
-            PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_BRIEFING,
-            "deep_link": "briefing",
-            "briefing_date": local_date,
-        },
-        notification_type=NOTIFICATION_TYPE_BRIEFING,
-        collapse_key=f"briefing_{local_date}",
+    decision = await orchestrator.submit(
+        NotificationProposal(
+            user_id=user_id,
+            source=SOURCE_BRIEFING,
+            kind=ProposalKind.COMMITTED,
+            dedup_key=f"briefing_{local_date}",
+            title=result.push_title,
+            body=result.push_body,
+            data={
+                PROP_NOTIFICATION_ID: notification_id,
+                PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_BRIEFING,
+                "deep_link": "briefing",
+                "briefing_date": local_date,
+            },
+            notification_type=NOTIFICATION_TYPE_BRIEFING,
+            collapse_key=f"briefing_{local_date}",
+        )
     )
 
-    if not result_send.delivered:
+    if decision.disposition != Disposition.SEND or not decision.delivered:
         summary.skipped_no_tokens += 1
-        logger.info("briefing.engine: send returned no delivery (briefing still viewable)", {
-            "user_id": user_id, "tokens_targeted": result_send.tokens_targeted,
+        logger.info("briefing.engine: push not delivered (briefing still viewable)", {
+            "user_id": user_id,
+            "disposition": decision.disposition.value,
+            "reason": decision.reason,
         })
         return
 
@@ -268,7 +255,7 @@ async def generate_on_demand(user_id: str, *, force: bool = False) -> store.Stor
     """Generate and PERSIST today's briefing for one user, on demand from the screen.
 
     This is what makes the briefing show news straight away (and survive a reopen) even
-    before the morning scheduled tick has run: it writes the same `daily_briefing/{date}`
+    before the evening scheduled tick has run: it writes the same `daily_briefing/{date}`
     doc the tick does, so `GET /briefing/today` reads it back. No push (the user is already
     looking at it).
 

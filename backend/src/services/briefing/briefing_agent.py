@@ -25,7 +25,11 @@ from ...lib.logger import logger
 from ..buddy_voice import BUDDY_VOICE_CORE
 from ..firebase import admin_firestore
 from ..model_provider import ModelProvider
-from ..signal_engine.notification_framer import derive_local_time_band
+from ..signal_engine.notification_framer import (
+    derive_local_time_band,
+    strip_long_dashes,
+    truncate_at_word_boundary,
+)
 from ..user_aura_schema import (
     active_category_slugs,
     category_label,
@@ -81,45 +85,53 @@ class BriefingDraft(BaseModel):
 
 
 _BRIEFING_SYSTEM_PROMPT = f"""\
-{BUDDY_VOICE_CORE}
+        {BUDDY_VOICE_CORE}
 
-THE TASK
-You are writing this person's daily news briefing: a quick scan of what is buzzing in
-the world today, in your own voice, like a friend catching them up over coffee. You are
-GIVEN a numbered list of real, current items across several categories. Write up the
-ones worth knowing as short separate blurbs.
+        THE TASK
+        You are writing this person's daily news briefing: a quick scan of what is buzzing in
+        the world today, in your own voice, like a friend catching them up over coffee. You are
+        GIVEN a numbered list of real, current items across several categories. Write up the
+        ones worth knowing as short separate blurbs.
 
-HARD GROUNDING RULES (these stop you making things up):
-- Use ONLY facts present in the given item. Never invent a score, number, quote, name,
-  date, or outcome that is not in the item text.
-- Write one blurb per item you include, each keyed to that item's number.
-- Drop any item with no real substance (e.g. only engagement counts, no article text)
-  and any you cannot write honestly from its text. Keep the strong ones.
+        HARD GROUNDING RULES (these stop you making things up):
+        - Use ONLY facts present in the given item. Never invent a score, number, quote, name,
+        date, or outcome that is not in the item text.
+        - Write one blurb per item you include, each keyed to that item's number.
+        - Drop any item with no real substance (e.g. only engagement counts, no article text)
+        and any you cannot write honestly from its text. Keep the strong ones.
 
-VOICE AND FORMAT (per blurb):
-- 2 to 3 short lines. React like a friend who finds it interesting, do not relay a raw
-  headline. Do NOT start with a dash, bullet, number, or the source name.
-- Never name the source or platform (no "Hacker News", "Google News", "arXiv").
-- No em-dashes, en-dashes, or double hyphens. No exclamation marks. No emoji pile-ons.
+        VOICE AND FORMAT (per blurb):
+        - 2 to 3 short lines. React like a friend who finds it interesting, do not relay a raw
+        headline. Do NOT start with a dash, bullet, number, or the source name.
+        - Never name the source or platform (no "Hacker News", "Google News", "arXiv").
+        - No em-dashes, en-dashes, or double hyphens. No exclamation marks. No emoji pile-ons.
 
-chat_seed_message: one or two sentences (<=250 chars) naming a few items concretely
-("the Verstappen win, that small-model paper, and the cricket chase") and inviting them
-to go deeper. Do NOT end with "thoughts?" or "what do you think?".
+        chat_seed_message: one or two sentences (<=250 chars) naming a few items concretely
+        ("the Verstappen win, that small-model paper, and the cricket chase") and inviting them
+        to go deeper. Do NOT end with "thoughts?" or "what do you think?".
 
-push_title (<=50 chars) and push_body (<=100 chars): warm, in your voice, opening a
-curiosity loop without giving it away. Same NEVER rules (no source names, no exclamation
-marks, no em-dashes).
+        push_title (<=50 chars) and push_body (<=100 chars): DO NOT bundle or list items ("a look
+        at X and Y" names nothing and kills the tap). Pick the SINGLE most striking item and build
+        the push on that ONE concrete hook, a name, a number, a turn. Tease it; never resolve it.
+        Same NEVER rules (no source names, no exclamation marks, no em-dashes).
 
-Output ONLY valid JSON matching the schema. No markdown fences, no prose.
+        GOOD (items include India chasing 320 in the final over + a small AI medical model):
+            push_title: India did NOT make that easy
+            push_body:  woahh!! it came down to the very last over and the finish is a little ridiculous. seen that?
+        BAD (never do this, it names nothing specific):
+            push_title: AI in medicine and a big win
+            push_body:  a quick look at AI's latest use and a country's historic sports moment
 
-Schema:
-{{
-  "items": [{{"source_index": 1, "blurb": "string"}}],
-  "chat_seed_message": "string",
-  "push_title": "string",
-  "push_body": "string"
-}}
-"""
+        Output ONLY valid JSON matching the schema. No markdown fences, no prose.
+
+        Schema:
+        {{
+        "items": [{{"source_index": 1, "blurb": "string"}}],
+        "chat_seed_message": "string",
+        "push_title": "string",
+        "push_body": "string"
+        }}
+    """
 
 
 def _build_user_context(
@@ -249,9 +261,15 @@ async def generate(
         return None
 
     narrative = "\n\n".join(item["text"] for item in items)
-    chat_seed = (draft.chat_seed_message or "").strip()[:CHAT_SEED_MAX_CHARS]
-    push_title = (draft.push_title or "").strip()[:PUSH_TITLE_MAX_CHARS] or DEFAULT_PUSH_TITLE
-    push_body = (draft.push_body or "").strip()[:PUSH_BODY_MAX_CHARS] or DEFAULT_PUSH_BODY
+    chat_seed = truncate_at_word_boundary(
+        strip_long_dashes((draft.chat_seed_message or "").strip()), CHAT_SEED_MAX_CHARS
+    )
+    push_title = truncate_at_word_boundary(
+        strip_long_dashes((draft.push_title or "").strip()), PUSH_TITLE_MAX_CHARS
+    ) or DEFAULT_PUSH_TITLE
+    push_body = truncate_at_word_boundary(
+        strip_long_dashes((draft.push_body or "").strip()), PUSH_BODY_MAX_CHARS
+    ) or DEFAULT_PUSH_BODY
 
     logger.info("briefing.agent: briefing generated", {
         "user_id": user_id,
