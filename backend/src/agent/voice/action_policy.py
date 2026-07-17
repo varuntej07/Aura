@@ -20,7 +20,7 @@ from .capabilities import (
 )
 from .tool_skills import instructions_for_skill_names
 
-ACTION_POLICY_VERSION = "2026-07-13.1"
+ACTION_POLICY_VERSION = "2026-07-14.1"
 
 
 class ActionMode(StrEnum):
@@ -182,6 +182,12 @@ _CORRECTION_OR_TOPIC_CHANGE = re.compile(
     r"i asked (?:for|you to)|forget (?:that|it)|cancel (?:that|it)|never mind|nevermind)\b",
     re.IGNORECASE,
 )
+_TIMEZONE_NAME = re.compile(
+    r"\b(?:eastern|central|mountain|pacific|atlantic|alaska|hawaii|"
+    r"est|edt|cst|cdt|mst|mdt|pst|pdt|utc|gmt)\b(?:\s+time)?|"
+    r"\b(?:America|Europe|Asia|Australia|Africa)/[A-Za-z_]+(?:/[A-Za-z_]+)?\b",
+    re.IGNORECASE,
+)
 
 
 def _has_any(text: str, patterns: tuple[str, ...]) -> bool:
@@ -198,7 +204,10 @@ def _classify_capabilities(text: str) -> tuple[set[Capability], list[str]]:
         reasons.append("remind_memory_retrieval")
     elif _has_any(
         text,
-        (r"\bremind me\b", r"\b(?:set|create|add) (?:a )?reminder\b"),
+        # "schedule" belongs here for parity with the chat gate and the write-auth
+        # verbs below; without it "schedule a reminder" got no reminder capability
+        # at all, so the tool was never exposed.
+        (r"\bremind me\b", r"\b(?:set|create|schedule|add) (?:a )?reminder\b"),
     ):
         capabilities.add(Capability.REMINDER_WRITE)
         reasons.append("reminder_request")
@@ -285,12 +294,26 @@ def _missing_slots(text: str, capabilities: set[Capability]) -> list[str]:
     missing: list[str] = []
     if Capability.REMINDER_WRITE in capabilities and not _EXACT_TIME.search(text):
         missing.append("reminder_exact_time")
+    if Capability.REMINDER_WRITE in capabilities and len(_timezone_values(text)) > 1:
+        missing.append("reminder_timezone")
     if Capability.CALENDAR_WRITE in capabilities:
         if not _DATE.search(text):
             missing.append("calendar_date")
         if not _EXACT_TIME.search(text):
             missing.append("calendar_time")
     return missing
+
+
+def _timezone_values(text: str) -> tuple[str, ...]:
+    """Return distinct timezone mentions in spoken order, normalized for comparison."""
+    values: list[str] = []
+    for match in _TIMEZONE_NAME.finditer(text):
+        value = re.sub(
+            r"\s+time$", "", match.group(0).strip(), flags=re.IGNORECASE,
+        ).casefold()
+        if value not in values:
+            values.append(value)
+    return tuple(values)
 
 
 def _merge_unresolved_missing(
@@ -307,6 +330,8 @@ def _merge_unresolved_missing(
             continue
         resolved = (slot == "calendar_date" and bool(_DATE.search(text))) or (
             slot in {"calendar_time", "reminder_exact_time"} and bool(_EXACT_TIME.search(text))
+        ) or (
+            slot == "reminder_timezone" and len(_timezone_values(text)) == 1
         )
         if not resolved and slot not in missing:
             missing.append(slot)
@@ -333,14 +358,18 @@ def _unresolved_state_is_current(
 
 
 def _is_plausible_slot_answer(text: str, missing_slots: tuple[str, ...]) -> bool:
-    if _CORRECTION_OR_TOPIC_CHANGE.search(text):
-        return False
     matched = False
     for slot in missing_slots:
         if slot == "calendar_date" and _DATE.search(text):
             matched = True
         elif slot in {"calendar_time", "reminder_exact_time"} and _EXACT_TIME.search(text):
             matched = True
+        elif slot == "reminder_timezone" and len(_timezone_values(text)) == 1:
+            matched = True
+    if matched:
+        return True
+    if _CORRECTION_OR_TOPIC_CHANGE.search(text):
+        return False
     return matched
 
 
@@ -358,8 +387,6 @@ def _continuing_unresolved_action(
         turn_index=turn_index,
     ):
         return False
-    if _CORRECTION_OR_TOPIC_CHANGE.search(text):
-        return False
     if current_capabilities:
         return False
     return _is_plausible_slot_answer(text, unresolved.missing_slots)
@@ -374,6 +401,12 @@ def _has_explicit_write_authorization(text: str) -> bool:
         text,
         (
             r"\bremind me\b",
+            # "set" grants a write ONLY next to "reminder" - bare "set" is too common
+            # ("set that aside") to treat as authorization like the verbs below. Parity
+            # with the chat gate (action_intent_policy._EXPLICIT_REMINDER_CREATE, which
+            # already accepts "set a reminder"): the voice gate omitting it withheld
+            # set_reminder and let Buddy narrate a reminder it never wrote (2026-07-16).
+            r"\bset\b.{0,15}\breminder\b",
             r"\b(?:schedule|book|create|add|cancel|save|store|draft|write|compose)\b",
             r"\bkeep me posted\b",
             r"\bfollow .{1,50} for me\b",
@@ -390,6 +423,7 @@ def _clarification_for(missing: list[str]) -> str | None:
         "calendar_date": "which date",
         "calendar_time": "what exact time",
         "reminder_exact_time": "what exact time the reminder should fire",
+        "reminder_timezone": "which timezone the reminder time should use",
     }
     return ", and ".join(labels[item] for item in missing)
 
@@ -398,7 +432,7 @@ def _clarification_owner(missing: list[str]) -> str | None:
     owners: list[str] = []
     if any(slot.startswith("calendar_") for slot in missing):
         owners.append(Capability.CALENDAR_WRITE.value)
-    if "reminder_exact_time" in missing:
+    if {"reminder_exact_time", "reminder_timezone"} & set(missing):
         owners.append(Capability.REMINDER_WRITE.value)
     return ",".join(owners) or None
 
@@ -508,11 +542,12 @@ def derive_turn_policy(
     elif unresolved.capabilities and not continuing_unresolved:
         reasons.append("unresolved_action_cleared")
 
+    # A slot-only continuation is evaluated against the slots the prior turn owned.
+    # Re-running every required-field detector on the fragment "Central time" would
+    # incorrectly invent a new missing clock-time slot even though the owner turn had 5 pm.
+    current_missing = [] if continuing_unresolved else _missing_slots(text, capabilities)
     missing = _merge_unresolved_missing(
-        text,
-        _missing_slots(text, capabilities),
-        active_unresolved,
-        capabilities,
+        text, current_missing, active_unresolved, capabilities,
     )
     explicitly_authorized = (
         _has_explicit_write_authorization(text) or active_unresolved.write_authorized
@@ -534,7 +569,10 @@ def derive_turn_policy(
         if registration.requires_fresh_desktop_frame and not fresh_frame_available:
             reasons.append(f"fresh_frame_required:{name}")
             continue
-        capability_missing = (name == "set_reminder" and "reminder_exact_time" in missing) or (
+        capability_missing = (
+            name == "set_reminder"
+            and bool({"reminder_exact_time", "reminder_timezone"} & set(missing))
+        ) or (
             registration.capability is Capability.CALENDAR_WRITE
             and any(slot.startswith("calendar_") for slot in missing)
         )
@@ -649,7 +687,9 @@ def next_complex_tool(policy: TurnCapabilityPolicy, chat_ctx: lk_llm.ChatContext
         if step.tool in results and results[step.tool] is False:
             return None
         if policy.plan.clarification_required:
-            reminder_only_missing = set(policy.missing_slots) == {"reminder_exact_time"}
+            reminder_only_missing = set(policy.missing_slots).issubset(
+                {"reminder_exact_time", "reminder_timezone"}
+            )
             if not (reminder_only_missing and step.tool == "draft_outbound_message"):
                 return None
         if all(dependency in completed_ids for dependency in step.depends_on):

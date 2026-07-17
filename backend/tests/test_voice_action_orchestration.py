@@ -22,7 +22,10 @@ from src.agent.voice.capabilities import (
     Capability,
     VoiceSurface,
 )
-from src.agent.voice.spoken_action_guard import guard_spoken_action_stream
+from src.agent.voice.spoken_action_guard import (
+    guard_spoken_action_stream,
+    has_unauthorized_spoken_action,
+)
 from src.agent.voice_prompt import VOICE_PROMPT
 
 
@@ -364,6 +367,40 @@ def test_clarification_turn_preserves_prior_authorization_and_missing_slots():
     assert policy.write_authorization is WriteAuthorization.AUTHORIZED
     assert policy.missing_slots == ()
     assert policy.allowed_tools == {"set_reminder"}
+
+
+def test_timezone_correction_keeps_reminder_owned_for_exactly_next_turn():
+    first = derive_turn_policy(
+        "Remind me tomorrow at 5 pm Eastern, no, Central time to call Mom",
+        lk_llm.ChatContext(),
+        VoiceSurface.APP,
+        False,
+        source_message_id="turn-1",
+        turn_index=1,
+    )
+    assert first.missing_slots == ("reminder_timezone",)
+    assert "set_reminder" not in first.allowed_tools
+
+    unresolved = UnresolvedActionState(
+        source_message_id="turn-1",
+        source_turn_index=1,
+        capabilities=first.capabilities,
+        missing_slots=first.missing_slots,
+        created_at_turn=1,
+        write_authorized=True,
+    )
+    corrected = derive_turn_policy(
+        "No. Central time.",
+        lk_llm.ChatContext(),
+        VoiceSurface.APP,
+        False,
+        unresolved,
+        source_message_id="turn-2",
+        turn_index=2,
+    )
+    assert corrected.missing_slots == ()
+    assert corrected.allowed_tools == {"set_reminder"}
+    assert "continued_unresolved_action" in corrected.reason_codes
 
 
 def test_stale_reminder_state_cannot_latch_for_twenty_turns():
@@ -759,6 +796,170 @@ async def test_spoken_guard_fails_closed_when_retry_repeats_reminder_language():
         )
     ]
     assert output == ["Let's stick with the prompt."]
+
+
+def test_reverse_order_reminder_success_claim_blocked_without_receipt():
+    """The exact reported bug: 'reminder set' / 'locked in' with no set_reminder receipt.
+    The old verb-first regex missed these reverse-order phrases."""
+    caps = frozenset({Capability.REMINDER_WRITE})
+    assert has_unauthorized_spoken_action("Your reminder is set for 5pm.", caps)
+    assert has_unauthorized_spoken_action("All set, I locked that in for you.", caps)
+    assert has_unauthorized_spoken_action("Okay, I'll remind you at 5.", caps)
+
+
+def test_reminder_success_language_allowed_once_receipt_exists():
+    """With a real set_reminder receipt, success language is honest and must pass."""
+    caps = frozenset({Capability.REMINDER_WRITE})
+    assert not has_unauthorized_spoken_action(
+        "Your reminder is set for 5pm.", caps, reminder_committed=True
+    )
+    assert not has_unauthorized_spoken_action(
+        "All set, locked that in.", caps, reminder_committed=True
+    )
+
+
+def test_reminder_clarification_language_is_never_blocked():
+    """Withheld-slot clarification (capability present, tool not run) must still speak,
+    even when it contains 'set ... reminder' phrasing inside a question."""
+    caps = frozenset({Capability.REMINDER_WRITE})
+    assert not has_unauthorized_spoken_action("What exact time should the reminder fire?", caps)
+    assert not has_unauthorized_spoken_action("Which day should I set that reminder for?", caps)
+
+
+def test_declarative_claim_before_trailing_question_is_still_blocked():
+    """A false claim isn't laundered by appending a question to the same utterance."""
+    caps = frozenset({Capability.REMINDER_WRITE})
+    assert has_unauthorized_spoken_action(
+        "Your reminder is set for 5pm. Want me to add a note?", caps
+    )
+
+
+def test_scheduled_inflection_blocked_when_no_reminder_capability():
+    """'scheduled'/'scheduling' evaded the old \\bschedule\\b verb group."""
+    caps: frozenset[Capability] = frozenset()
+    assert has_unauthorized_spoken_action("I scheduled a reminder for you.", caps)
+    assert has_unauthorized_spoken_action("I'm scheduling that reminder now.", caps)
+
+
+def test_bare_completion_not_over_blocked_off_reminder_turn():
+    """'all set' / 'locked it in' after a non-reminder action must not be blocked."""
+    caps = frozenset({Capability.VISIBLE_ARTIFACT})
+    assert not has_unauthorized_spoken_action("All set, I pulled that up on your screen.", caps)
+    assert not has_unauthorized_spoken_action("Locked it in, here's the command.", caps)
+
+
+def test_reported_2026_07_16_delivery_claim_blocked_without_receipt():
+    """The exact line Buddy spoke (chat_history 01:50:00Z) with no set_reminder receipt.
+    'Locked in for ...' + 'you'll get the reminder ... right on time' named no
+    set/scheduled/created verb, so the old regexes let a fabricated confirmation
+    reach TTS. Both halves must now block."""
+    caps = frozenset({Capability.REMINDER_WRITE})
+    real_line = (
+        "Locked in for 10 PM tonight, babe. "
+        "You’ll get the reminder for that to-do task right on time."
+    )
+    assert has_unauthorized_spoken_action(real_line, caps)
+    # Each half independently, so neither sentence alone can slip.
+    assert has_unauthorized_spoken_action("Locked in for 10 PM tonight, babe.", caps)
+    assert has_unauthorized_spoken_action(
+        "You’ll get the reminder for that to-do task right on time.", caps
+    )
+    # Delivery-across-devices phrasing (no "reminder" word) must also block on a
+    # reminder turn.
+    assert has_unauthorized_spoken_action(
+        "Done, it’ll notify you on your phone and your Windows desktop at 10.", caps
+    )
+
+
+def test_delivery_claim_allowed_once_receipt_exists():
+    """With a real receipt the same delivery language is honest and must pass."""
+    caps = frozenset({Capability.REMINDER_WRITE})
+    assert not has_unauthorized_spoken_action(
+        "You’ll get the reminder right on time.", caps, reminder_committed=True
+    )
+
+
+def test_notification_promise_not_blocked_off_reminder_turn():
+    """A genuine non-reminder notification promise (e.g. meeting notes) must not be
+    caught by the reminder-turn-only delivery guard."""
+    caps = frozenset({Capability.VISIBLE_ARTIFACT})
+    assert not has_unauthorized_spoken_action(
+        "You’ll get a notification when your notes are ready.", caps
+    )
+
+
+def test_set_a_reminder_is_authorized_and_exposes_tool():
+    """The 2026-07-16 root cause: 'set a reminder ...' classified as a reminder write
+    but the voice auth gate omitted 'set', so set_reminder was withheld and nothing
+    was written. It must now be a complete, authorized write."""
+    policy = _policy("set a reminder for tonight at 10pm")
+    assert policy.capabilities == {Capability.REMINDER_WRITE}
+    assert "set_reminder" in policy.allowed_tools
+    assert policy.write_authorization is WriteAuthorization.AUTHORIZED
+
+
+def test_bare_set_without_reminder_does_not_authorize():
+    """'set' authorizes only next to 'reminder'; a bare 'set' must not grant a write."""
+    policy = _policy("set that aside for now")
+    assert Capability.REMINDER_WRITE not in policy.capabilities
+    assert policy.write_authorization is not WriteAuthorization.AUTHORIZED
+
+
+def test_voice_and_chat_gates_agree_on_reminder_create_verbs():
+    """Anti-drift: every create verb the chat gate accepts must also authorize AND
+    expose set_reminder on the voice gate. This is the parity that silently broke for
+    'set' (auth) and 'schedule' (classification)."""
+    from src.services.action_intent_policy import explicitly_requests_reminder_create
+
+    for verb in ("set", "create", "schedule", "add"):
+        text = f"{verb} a reminder for 10pm"
+        assert explicitly_requests_reminder_create(text), f"chat gate rejects {verb!r}"
+        policy = _policy(text)
+        assert Capability.REMINDER_WRITE in policy.capabilities, f"voice misclassifies {verb!r}"
+        assert "set_reminder" in policy.allowed_tools, f"voice gate withholds {verb!r}"
+        assert policy.write_authorization is WriteAuthorization.AUTHORIZED, (
+            f"voice gate does not authorize {verb!r}"
+        )
+
+
+async def test_stream_allows_success_language_once_receipt_commits_mid_generation():
+    """The receipt callable is polled at flush, so a claim clears the moment the tool
+    commits partway through the reply."""
+    committed = {"done": False}
+
+    async def _primary():
+        yield "All set, "
+        committed["done"] = True  # set_reminder commits between chunks
+        yield "your reminder is locked in for 5pm."
+
+    output = [
+        item
+        async for item in guard_spoken_action_stream(
+            _primary(),
+            capabilities=frozenset({Capability.REMINDER_WRITE}),
+            regenerate=None,
+            neutral_recovery="Let me double-check that.",
+            reminder_committed=lambda: committed["done"],
+        )
+    ]
+    assert "".join(str(item) for item in output) == "All set, your reminder is locked in for 5pm."
+
+
+async def test_stream_fails_closed_on_success_claim_without_receipt():
+    async def _primary():
+        yield "All set, your reminder is locked in for 5pm."
+
+    output = [
+        item
+        async for item in guard_spoken_action_stream(
+            _primary(),
+            capabilities=frozenset({Capability.REMINDER_WRITE}),
+            regenerate=None,
+            neutral_recovery="Let me make sure I've got that right.",
+            reminder_committed=lambda: False,
+        )
+    ]
+    assert output == ["Let me make sure I've got that right."]
 
 
 def test_genuine_reminder_clarification_is_not_blocked_by_policy_guard():
