@@ -46,6 +46,14 @@ from .handlers.connectors import (
     sync_google_calendar,
 )
 from .handlers.daily_notification import handle_send_nudge
+from .handlers.desktop_dashboard import (
+    handle_desktop_activity,
+    handle_desktop_conversations,
+    handle_desktop_home_stats,
+    handle_desktop_saved,
+    handle_desktop_usage,
+)
+from .handlers.desktop_profile import handle_desktop_profile
 from .handlers.devices import register_device
 from .handlers.engagement import (
     handle_engagement_notify,
@@ -280,6 +288,36 @@ async def account_delete_endpoint(request: Request) -> JSONResponse:
 @app.post("/devices/register")
 async def devices_register_endpoint(request: Request) -> JSONResponse:
     return await register_device(request)
+
+
+@app.post("/devices/profile")
+async def devices_profile_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_profile(request)
+
+
+@app.get("/desktop/home/stats")
+async def desktop_home_stats_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_home_stats(request)
+
+
+@app.get("/desktop/activity")
+async def desktop_activity_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_activity(request)
+
+
+@app.get("/desktop/conversations")
+async def desktop_conversations_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_conversations(request)
+
+
+@app.get("/desktop/saved")
+async def desktop_saved_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_saved(request)
+
+
+@app.get("/desktop/usage")
+async def desktop_usage_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_usage(request)
 
 
 # Desktop pairing: the signed-in phone app requests a short-lived one-time code.
