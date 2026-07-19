@@ -27,8 +27,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ...lib.logger import logger
 from .. import notification_budget, notification_ledger
 from ..firebase import admin_firestore
-from ..notification_service import NotificationResult, send_notification
-from . import post_send, queue_store, tap_gate
+from ..notification_service import NotificationResult
+from . import delivery_router, post_send, queue_store, tap_gate
 from .proposal import (
     REASON_ACTIVE_TRACKER,
     REASON_BUDGET,
@@ -41,6 +41,7 @@ from .proposal import (
     REASON_SUPERSEDED,
     REASON_TAP_GATE,
     SOURCE_ICEBREAKER,
+    SOURCE_MEMORY_GRAPH,
     Disposition,
     NotificationProposal,
     OrchestratorDecision,
@@ -115,10 +116,16 @@ async def drain_user_queue(
         if is_stale(proposal, now):
             await queue_store.mark(user_id, pid, queue_store.STATUS_DROPPED, now=now)
             _log_drop(proposal, REASON_STALE)
+            await _dispatch_candidate_outcome(
+                proposal, OrchestratorDecision(Disposition.DROP, REASON_STALE), now
+            )
             continue
         if proposal.dedup_key and proposal.dedup_key in recent_keys:
             await queue_store.mark(user_id, pid, queue_store.STATUS_DROPPED, now=now)
             _log_drop(proposal, REASON_DUPLICATE)
+            await _dispatch_candidate_outcome(
+                proposal, OrchestratorDecision(Disposition.DROP, REASON_DUPLICATE), now
+            )
             continue
         survivors.append((pid, proposal))
 
@@ -188,8 +195,10 @@ async def drain_user_queue(
     if not worthy:
         await queue_store.mark(user_id, winner_pid, queue_store.STATUS_DROPPED, now=now)
         _log_drop(winner, f"{REASON_TAP_GATE}:{tap_reason}")
-        for pid, _ in losers:
-            await queue_store.mark(user_id, pid, queue_store.STATUS_HELD, now=now)
+        await _dispatch_candidate_outcome(
+            winner, OrchestratorDecision(Disposition.DROP, REASON_TAP_GATE), now
+        )
+        await _hold_all(user_id, losers, now)
         logger.info("orchestrator: proactive dropped (tap gate)", {
             "user_id": user_id, "source": winner.source, "reason": tap_reason,
             "held_losers": len(losers),
@@ -217,6 +226,9 @@ async def drain_user_queue(
     if winner.dedup_key and not await _claim_dedup(winner.dedup_key, user_id):
         await queue_store.mark(user_id, winner_pid, queue_store.STATUS_DROPPED, now=now)
         _log_drop(winner, REASON_DUPLICATE)
+        await _dispatch_candidate_outcome(
+            winner, OrchestratorDecision(Disposition.DROP, REASON_DUPLICATE), now
+        )
         await _hold_all(user_id, losers, now)
         logger.info("orchestrator: proactive dropped (duplicate)", {
             "user_id": user_id, "source": winner.source, "held_losers": len(losers),
@@ -228,6 +240,17 @@ async def drain_user_queue(
     except Exception:
         if winner.dedup_key:
             await _release_dedup(winner.dedup_key, user_id)
+        if winner.source == SOURCE_MEMORY_GRAPH:
+            await queue_store.mark(
+                user_id, winner_pid, queue_store.STATUS_DROPPED, now=now
+            )
+            await _dispatch_candidate_outcome(
+                winner,
+                OrchestratorDecision(Disposition.HOLD, "delivery_error"),
+                now,
+            )
+            await _hold_all(user_id, losers, now)
+            return OrchestratorDecision(Disposition.HOLD, "delivery_error")
         raise
     if not result.delivered and winner.dedup_key:
         await _release_dedup(winner.dedup_key, user_id)
@@ -236,8 +259,8 @@ async def drain_user_queue(
     # learning outcome + funnel) runs HERE, on the real delivery — not in the producer
     # tick, which only enqueued. Never raises into the drain.
     await post_send.dispatch_post_send(winner, result)
-    for pid, proposal in losers:
-        await queue_store.mark(user_id, pid, queue_store.STATUS_HELD, now=now)
+    await _hold_all(user_id, losers, now)
+    for _, proposal in losers:
         _log_hold(proposal, REASON_SUPERSEDED)
 
     logger.info("orchestrator: proactive sent", {
@@ -298,27 +321,42 @@ async def _send_committed(
 
 # ── The single send choke point ──────────────────────────────────────────────
 async def _deliver(proposal: NotificationProposal) -> NotificationResult:
-    """The ONLY call to ``send_notification`` in the whole system."""
-    return await send_notification(
-        proposal.user_id,
-        title=proposal.title,
-        body=proposal.body,
-        data=proposal.data,
-        notification_type=proposal.notification_type,
-        collapse_key=proposal.collapse_key,
-        data_only=proposal.data_only,
-        apns_category=proposal.apns_category,
-        dedup_key=proposal.dedup_key,
-        decision=proposal.decision,
-    )
+    """The orchestrator's single channel-aware delivery choke point."""
+    return await delivery_router.deliver(proposal)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 async def _hold_all(
     user_id: str, pairs: list[tuple[str, NotificationProposal]], now: datetime
 ) -> None:
-    for pid, _ in pairs:
-        await queue_store.mark(user_id, pid, queue_store.STATUS_HELD, now=now)
+    for pid, proposal in pairs:
+        if proposal.source == SOURCE_MEMORY_GRAPH:
+            await queue_store.mark(user_id, pid, queue_store.STATUS_DROPPED, now=now)
+            await _dispatch_candidate_outcome(
+                proposal, OrchestratorDecision(Disposition.HOLD, "retryable_hold"), now
+            )
+        else:
+            await queue_store.mark(user_id, pid, queue_store.STATUS_HELD, now=now)
+
+
+async def _dispatch_candidate_outcome(
+    proposal: NotificationProposal,
+    decision: OrchestratorDecision,
+    now: datetime,
+) -> None:
+    """Best-effort lifecycle bridge used only by the memory-graph source."""
+    if proposal.source != SOURCE_MEMORY_GRAPH:
+        return
+    try:
+        from .memory_graph_notifications import on_orchestrator_outcome
+
+        await on_orchestrator_outcome(proposal, decision, now=now)
+    except Exception as exc:
+        logger.warn("orchestrator: candidate outcome bridge failed", {
+            "user_id": proposal.user_id,
+            "candidate_id": proposal.data.get("candidate_id", ""),
+            "error": str(exc),
+        })
 
 
 async def _has_active_tracker(user_id: str, now: datetime) -> bool:

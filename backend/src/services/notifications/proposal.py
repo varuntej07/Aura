@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # avoid importing the ledger at module load (keeps this pure)
@@ -36,6 +36,8 @@ SOURCE_DEVICE_LINK = "device_link"  # security alert: a new device paired to the
 SOURCE_TRIAL = "trial"  # trial-ending / trial-ended account lifecycle notice
 SOURCE_WELCOME = "welcome"  # one-time day-0 welcome, fired once off first device registration
 SOURCE_BILLING = "billing"  # entitlement-updated sync push after a payment webhook write
+SOURCE_MEETING = "meeting"  # durable desktop lifecycle updates for captured meetings
+SOURCE_MEMORY_GRAPH = "memory_graph"  # inferred graph sources A/B, gated by NOTIF_GRAPH
 
 ALL_SOURCES = (
     SOURCE_REMINDER,
@@ -52,10 +54,19 @@ ALL_SOURCES = (
     SOURCE_TRIAL,
     SOURCE_WELCOME,
     SOURCE_BILLING,
+    SOURCE_MEETING,
+    SOURCE_MEMORY_GRAPH,
 )
 
 
-class ProposalKind(str, Enum):
+class DeliveryChannel(StrEnum):
+    """Approved delivery surfaces for one logical notification."""
+
+    MOBILE = "mobile"
+    DESKTOP = "desktop"
+
+
+class ProposalKind(StrEnum):
     """How a proposal is allowed to travel through the orchestrator.
 
     COMMITTED = the user asked for it (reminder, tracking subscription, calendar,
@@ -92,6 +103,7 @@ PRIORITY: dict[str, int] = {
     # the rank only matters if it ever has to compete. A purchase the user just made
     # sits right under their awaited chat reply, above calendar.
     SOURCE_BILLING: 92,
+    SOURCE_MEETING: 97,
     SOURCE_CALENDAR: 90,
     # Trial ending/ended is important account info the user must see, akin to the
     # security alert above. COMMITTED, so it sends inline and bypasses arbitration;
@@ -109,6 +121,7 @@ PRIORITY: dict[str, int] = {
     SOURCE_BRIEFING: 60,
     SOURCE_ICEBREAKER: 20,
     SOURCE_NEWS: 10,
+    SOURCE_MEMORY_GRAPH: 65,
     # The first thing Buddy ever says to a new account. COMMITTED, so it sends
     # inline and bypasses arbitration; the rank only matters if it ever has to
     # compete. Sits just under chat_reply, above calendar.
@@ -140,11 +153,13 @@ FRESHNESS_MAX_AGE: dict[str, timedelta | None] = {
     SOURCE_TRIAL: None,       # account lifecycle notice; not content, never stale
     SOURCE_WELCOME: None,     # a scripted greeting; not content, never stale
     SOURCE_BILLING: None,     # a plan-state sync nudge; not content, never stale
+    SOURCE_MEETING: None,     # lifecycle state, not time-sensitive content
+    SOURCE_MEMORY_GRAPH: None,
 }
 
 
 # ── Dispositions the pipeline can reach ─────────────────────────────────────
-class Disposition(str, Enum):
+class Disposition(StrEnum):
     SEND = "send"    # deliver now
     HOLD = "hold"    # keep in the queue, reconsider next window (proactive only)
     DROP = "drop"    # terminal; never deliver this proposal
@@ -200,6 +215,11 @@ class NotificationProposal:
     notification_type: str = ""      # client routing key; defaults to ``source``
     data_only: bool = False
     apns_category: str | None = None
+    # Backward-compatible default: every existing producer remains mobile-only
+    # until it explicitly opts into desktop delivery.
+    channels: frozenset[DeliveryChannel] = field(
+        default_factory=lambda: frozenset({DeliveryChannel.MOBILE})
+    )
 
     # When the underlying event/article actually happened. Drives the freshness
     # gate. ``None`` for time-exact committed sends (reminder/calendar).
@@ -211,11 +231,13 @@ class NotificationProposal:
     priority: int | None = None
 
     # Optional learning-substrate metadata persisted to the ledger (signal/news).
-    decision: "NotificationDecision | None" = None
+    decision: NotificationDecision | None = None
 
     def __post_init__(self) -> None:
         if not self.notification_type:
             self.notification_type = self.source
+        if not self.channels:
+            raise ValueError("notification proposal requires at least one channel")
 
     @property
     def effective_priority(self) -> int:

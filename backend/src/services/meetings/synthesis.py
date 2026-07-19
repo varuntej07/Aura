@@ -2,16 +2,19 @@
 
 Pipeline: status compare-and-set -> sensitive-exclude check -> per-segment
 Deepgram transcription (bounded concurrency) -> merged "You"/"Others"
-transcript -> LLM note -> persist with tier-conditional TTL -> delete raw
-audio immediately.
+transcript -> LLM insights -> persist insights plus provider-derived turns with
+tier-conditional TTL -> delete raw audio immediately.
 
-Failure taxonomy, which decides what Cloud Tasks sees:
+Failure taxonomy, which decides what Cloud Tasks sees AND how the desktop can
+recover:
   - Retryable infrastructure (Deepgram after its own retries, GCS reads,
     Firestore writes): raised to the handler, which answers 5xx; the task
     retries and audio stays in GCS for the next attempt.
-  - Terminal (LLM synthesis failed after the provider's own fallbacks, or a
-    doc in a state that can never proceed): status flips to failed, audio is
-    deleted, and the handler answers 200 so the queue stops retrying.
+  - Terminal (every configured insight model failed, Deepgram rejects the
+    audio forever, or a doc cannot proceed): status flips to failed with a safe
+    failure code and retryable=false, audio is deleted, and the handler answers
+    200. Retaining transcript or audio for a later insight-only retry requires
+    a separate privacy-reviewed short-lived artifact and is not implicit here.
 Either way the monthly counter is untouched here - it was charged at claim.
 """
 
@@ -27,9 +30,8 @@ from pydantic import BaseModel, Field
 from ...lib.logger import logger
 from ..entitlement import get_user_effective_tier
 from ..model_provider import get_model_provider
-from . import deepgram, gcs_audio
+from . import deepgram, gcs_audio, notifications, store
 from . import fields as F
-from . import store
 
 # One segment is 5 minutes; 3 in flight keeps a 4-hour meeting under ~10
 # minutes of wall clock without hammering Deepgram's rate limits.
@@ -63,6 +65,15 @@ class MeetingNote(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
 
 
+class SynthesisLeaseBusyError(RuntimeError):
+    """A synthesis delivery arrived while another worker still owns the lease.
+
+    Cloud Tasks must retry this delivery instead of treating the meeting as
+    settled. The active worker may still finish successfully; if it died, the
+    existing lease timeout makes the next delivery reclaimable.
+    """
+
+
 async def run_synthesis(uid: str, meeting_id: str) -> str:
     """Synthesize one completed meeting. Returns the terminal status
     ("ready" | "excluded" | "failed", or the already-settled status of a
@@ -73,9 +84,14 @@ async def run_synthesis(uid: str, meeting_id: str) -> str:
     # redelivery re-claims it.
     claimed, status_now = await store.claim_synthesis(uid, meeting_id)
     if not claimed:
+        if status_now == F.STATUS_SYNTHESIZING:
+            raise SynthesisLeaseBusyError(
+                f"Meeting {meeting_id} synthesis lease is still active."
+            )
         logger.info("meetings.synthesis: skipped, not claimable", {
             "user_id": uid, "meeting_id": meeting_id, "status": status_now,
         })
+        await notifications.notify_settled(uid, meeting_id)
         return status_now or F.STATUS_FAILED
 
     meeting = await store.get_meeting(uid, meeting_id)
@@ -91,8 +107,10 @@ async def run_synthesis(uid: str, meeting_id: str) -> str:
             uid, meeting_id,
             from_statuses=(F.STATUS_SYNTHESIZING,),
             to_status=F.STATUS_EXCLUDED,
+            extra=store.failure_meta(code=F.FAIL_EXCLUDED_SENSITIVE, retryable=False),
         )
         await gcs_audio.delete_meeting_audio(uid, meeting_id)
+        await notifications.notify_settled(uid, meeting_id)
         logger.info("meetings.synthesis: excluded by keyword", {
             "user_id": uid, "meeting_id": meeting_id,
         })
@@ -100,7 +118,7 @@ async def run_synthesis(uid: str, meeting_id: str) -> str:
 
     cap_minutes = int(meeting.get(F.CAP_MINUTES, F.FREE_SYNTHESIS_CAP_MINUTES))
     try:
-        transcript, language, one_sided, has_gaps = await _transcribe_meeting(
+        transcript, transcript_turns, language, one_sided, has_gaps = await _transcribe_meeting(
             uid, meeting_id, meeting, cap_ms=cap_minutes * 60_000,
         )
     except deepgram.DeepgramRejectedError as exc:
@@ -109,36 +127,44 @@ async def run_synthesis(uid: str, meeting_id: str) -> str:
         logger.warn("meetings.synthesis: audio rejected by deepgram", {
             "user_id": uid, "meeting_id": meeting_id, "error": str(exc),
         })
-        await store.transition_status(
+        await store.mark_failed(
             uid, meeting_id,
             from_statuses=(F.STATUS_SYNTHESIZING,),
-            to_status=F.STATUS_FAILED,
+            code=F.FAIL_AUDIO_REJECTED, retryable=False,
         )
         await gcs_audio.delete_meeting_audio(uid, meeting_id)
+        await notifications.notify_settled(uid, meeting_id)
         return F.STATUS_FAILED
 
     try:
+        await store.set_stage(uid, meeting_id, F.STAGE_BUILDING_INSIGHTS)
         note = await _synthesize_note(
             title=title, transcript=transcript, language=language,
             one_sided=one_sided, has_gaps=has_gaps,
         )
+        # Speaker attribution comes only from the capture channels and
+        # Deepgram output. The insight model never rewrites the transcript.
+        note[F.NOTE_TRANSCRIPT] = transcript_turns
     except Exception as exc:
-        # The provider already walked its own model fallbacks; this meeting is
-        # not going to synthesize. Terminal: fail, drop audio, stop retrying.
+        # The provider already walked its complete fallback chain. Without a
+        # separately approved short-lived transcript artifact there is no
+        # privacy-safe retry input, so settle visibly and delete raw audio.
         logger.warn("meetings.synthesis: note generation failed", {
             "user_id": uid, "meeting_id": meeting_id, "error": str(exc),
         })
-        await store.transition_status(
+        await store.mark_failed(
             uid, meeting_id,
             from_statuses=(F.STATUS_SYNTHESIZING,),
-            to_status=F.STATUS_FAILED,
+            code=F.FAIL_INSIGHT_GENERATION_FAILED, retryable=False,
         )
         await gcs_audio.delete_meeting_audio(uid, meeting_id)
+        await notifications.notify_settled(uid, meeting_id)
         return F.STATUS_FAILED
 
     effective_tier = await get_user_effective_tier(uid)
     await store.save_note(uid, meeting_id, note, effective_tier=effective_tier)
     await gcs_audio.delete_meeting_audio(uid, meeting_id)
+    await notifications.notify_settled(uid, meeting_id)
     return F.STATUS_READY
 
 
@@ -148,11 +174,12 @@ async def _transcribe_meeting(
     meeting: dict[str, Any],
     *,
     cap_ms: int,
-) -> tuple[str, str | None, bool, bool]:
+) -> tuple[str, list[dict[str, str]], str | None, bool, bool]:
     """Download and transcribe every in-cap segment, then merge utterances
-    into one time-ordered labeled transcript. Returns (transcript, language,
-    one_sided, has_gaps). Raises on GCS/Deepgram infrastructure failures
-    (retryable) and DeepgramRejectedError (terminal, handled by the caller).
+    into one time-ordered labeled transcript. Returns (transcript,
+    transcript_turns, language, one_sided, has_gaps). Raises on GCS/Deepgram
+    infrastructure failures (retryable) and DeepgramRejectedError (terminal,
+    handled by the caller).
 
     The cap is enforced by CUMULATIVE claimed duration in seq order plus a
     hard segment-count ceiling, never by trusting start_ms alone - offsets
@@ -201,7 +228,7 @@ async def _transcribe_meeting(
 
     results = await asyncio.gather(*(_one(*item) for item in in_cap))
 
-    utterances: list[tuple[float, int, str]] = []  # (abs_start_s, channel, text)
+    utterances: list[tuple[float, int, str | None, str]] = []
     mic_words = 0
     loopback_words = 0
     languages: Counter[str] = Counter()
@@ -211,25 +238,47 @@ async def _transcribe_meeting(
         if segment.language:
             languages[segment.language] += 1
         for utt in segment.utterances:
-            utterances.append((start_ms / 1000.0 + utt.start_s, utt.channel, utt.text))
+            utterances.append((
+                start_ms / 1000.0 + utt.start_s,
+                utt.channel,
+                utt.speaker,
+                utt.text,
+            ))
 
     utterances.sort(key=lambda item: item[0])
-    lines: list[str] = []
-    last_channel: int | None = None
-    for _, channel, text in utterances:
-        speaker = "You" if channel == deepgram.MIC_CHANNEL else "Others"
-        if channel == last_channel and lines:
-            lines[-1] = f"{lines[-1]} {text}"
+    turns: list[dict[str, str]] = []
+    for _, channel, speaker_override, text in utterances:
+        speaker = speaker_override
+        if speaker is None:
+            if channel == deepgram.MIC_CHANNEL:
+                speaker = "You"
+            elif channel == deepgram.LOOPBACK_CHANNEL:
+                speaker = "Others"
+            else:
+                speaker = ""
+        if turns and turns[-1][F.TRANSCRIPT_SPEAKER] == speaker:
+            turns[-1][F.TRANSCRIPT_TEXT] = (
+                f"{turns[-1][F.TRANSCRIPT_TEXT]} {text}"
+            )
         else:
-            lines.append(f"{speaker}: {text}")
-            last_channel = channel
+            turns.append({
+                F.TRANSCRIPT_SPEAKER: speaker,
+                F.TRANSCRIPT_TEXT: text,
+            })
+
+    lines = [
+        f"{turn[F.TRANSCRIPT_SPEAKER]}: {turn[F.TRANSCRIPT_TEXT]}"
+        if turn[F.TRANSCRIPT_SPEAKER]
+        else turn[F.TRANSCRIPT_TEXT]
+        for turn in turns
+    ]
 
     total_words = mic_words + loopback_words
     one_sided = total_words > 0 and (
         min(mic_words, loopback_words) / total_words < _ONE_SIDED_RATIO
     )
     language = languages.most_common(1)[0][0] if languages else None
-    return "\n".join(lines), language, one_sided, has_gaps
+    return "\n".join(lines), turns, language, one_sided, has_gaps
 
 
 async def _synthesize_note(

@@ -177,10 +177,28 @@ async def delete_atom(uid: str, atom_id: str) -> bool:
     """Remove one atom (the A2 'forget this' affordance). Never raises."""
     try:
         await asyncio.to_thread(_atoms_collection(uid).document(atom_id).delete)
-        return True
     except Exception as exc:
         logger.warn("memory.atom_store: delete failed", {"user_id": uid, "error": str(exc)})
         return False
+
+    # Explicit forget cascades only after the established atom delete succeeds.
+    # Detach the additive graph write so its latency/failure cannot change the
+    # endpoint's established result.
+    asyncio.create_task(_delete_graph_node_fail_open(uid, atom_id))
+    return True
+
+
+async def _delete_graph_node_fail_open(uid: str, node_id: str) -> None:
+    from .graph_store import delete_node
+
+    try:
+        await delete_node(uid, node_id)
+    except Exception as exc:
+        logger.warn("memory.atom_store: graph delete failed open", {
+            "user_id": uid,
+            "node_id": node_id,
+            "error": str(exc),
+        })
 
 
 async def list_atoms(uid: str, *, limit: int = 200) -> list[dict[str, Any]]:

@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     # to its normal fallbacks on failure. Change this ONE line to re-tier extraction.
     TIER_EXTRACTION: str = "gemini-2.5-flash-lite"
 
+    # Additive deterministic memory graph writer. It does not enable a graph reader.
+    # Existing profile and atom writes complete first; graph failures are swallowed.
+    GRAPH_BUILD: bool = False
+    GRAPH_READ_CHAT: bool = False
+    GRAPH_READ_VOICE: bool = False
+    NOTIF_GRAPH: bool = False
+    FOLLOWUP_SHADOW: bool = False
+    PROACTIVE_FOLLOWUP_SEND: bool = False
+
     # Staged reasoning funnel (reason_step tool) — off until verified on a dark deploy.
     # Sonnet drives one step at a time: clarify -> web_surf fetch -> present -> final.
     REASON_STEP_ENABLED: bool = False

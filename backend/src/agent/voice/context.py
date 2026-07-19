@@ -13,6 +13,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any
 
+from ...config.settings import settings
 from ...lib.logger import logger
 from ...services.entitlement import (
     get_remaining_free_voice_seconds,
@@ -20,6 +21,7 @@ from ...services.entitlement import (
 )
 from .fetchers import (
     fetch_archive_context,
+    fetch_graph_digest,
     fetch_last_session_summary,
     fetch_memory_summary,
     fetch_user_aura_profile,
@@ -48,6 +50,7 @@ class SessionContext:
     dominant_emotion: str
     user_tier: str
     remaining_free_voice_seconds: int | None
+    graph_context: str = ""
 
     @property
     def prompt_context_vars(self) -> dict[str, str]:
@@ -59,6 +62,7 @@ class SessionContext:
             "local_time": local_time_in_zone(timezone),
             "local_date": local_date_in_zone(timezone),
             "memory_summary": self.memory_summary or "(nothing yet — first conversation)",
+            "graph_context": self.graph_context,
             "last_session_context": self.last_session_summary,
             "last_session_at": self.last_session_at,
             "archive_context": self.archive_context,
@@ -94,6 +98,12 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
         "archive_context", "user_aura_profile", "user_tier",
         "remaining_free_voice_seconds",
     ]
+    if settings.GRAPH_READ_VOICE:
+        graph_source = (fetch_graph_digest(user_id), "")
+        sources.append(graph_source)
+        coroutines.append(graph_source[0])
+        defaults.append(graph_source[1])
+        names.append("graph_context")
 
     try:
         raw_results = await asyncio.wait_for(
@@ -117,10 +127,9 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
         else:
             resolved.append(value)
 
-    (
-        profile, memory_summary, last_session, archive_data, aura_profile,
-        user_tier, remaining_free_voice_seconds,
-    ) = resolved
+    profile, memory_summary, last_session, archive_data, aura_profile = resolved[:5]
+    user_tier, remaining_free_voice_seconds = resolved[5:7]
+    graph_digest = resolved[7] if settings.GRAPH_READ_VOICE else ""
 
     return SessionContext(
         profile=profile,
@@ -133,4 +142,10 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
         dominant_emotion=aura_profile.get("dominant_emotion", ""),
         user_tier=user_tier,
         remaining_free_voice_seconds=remaining_free_voice_seconds,
+        graph_context=(
+            "\n\n            Related long-term memory:\n            "
+            + graph_digest.replace("\n", "\n            ")
+            if graph_digest
+            else ""
+        ),
     )

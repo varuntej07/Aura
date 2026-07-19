@@ -660,6 +660,108 @@ async def _user_has_granted_aura_consent(
         return False
 
 
+def _insight_entity_keys(insight: MessageInsight) -> list[str]:
+    """Entity keys captured from the already-paid extraction result."""
+    keys: list[str] = []
+    for signal in insight.interests or []:
+        if signal.subject and signal.subject.strip():
+            keys.append(signal.subject.strip())
+    for fact in insight.life_facts or []:
+        if fact.value and fact.value.strip() and not fact.negated:
+            keys.append(fact.value.strip())
+    return keys
+
+
+async def _write_graph_turn_provenance(
+    uid: str,
+    insight: MessageInsight,
+    message: str,
+    session_id: str | None,
+    turn_id: str | None,
+    turn_index: int | None,
+    surface: str,
+) -> None:
+    if not session_id or not (
+        settings.GRAPH_BUILD
+        or settings.FOLLOWUP_SHADOW
+        or settings.PROACTIVE_FOLLOWUP_SEND
+    ):
+        return
+    resolved_turn_id = turn_id or str(uuid.uuid4())
+    if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
+        from .session_followup.lifecycle import session_lifecycle_service
+
+        await session_lifecycle_service.note_user_turn(
+            uid,
+            session_id,
+            surface=surface,
+            turn_id=resolved_turn_id,
+            turn_index=max(0, int(turn_index or 0)),
+            text=message,
+            entity_keys=_insight_entity_keys(insight),
+        )
+    if settings.GRAPH_BUILD:
+        from .memory.graph_store import write_turn_provenance
+
+        await write_turn_provenance(
+            uid,
+            session_id,
+            resolved_turn_id,
+            turn_index=max(0, int(turn_index or 0)),
+            role="user",
+            text=message,
+            entity_keys=_insight_entity_keys(insight),
+            surface=surface,
+        )
+
+
+async def _upsert_graph_from_insight(uid: str, insight: MessageInsight) -> None:
+    if not settings.GRAPH_BUILD:
+        return
+    try:
+        from .memory.graph_store import (
+            GraphEdgeInput,
+            atom_node,
+            entity_node,
+            upsert_graph,
+        )
+
+        nodes = []
+        edges = []
+        for fact in insight.explicit_facts or []:
+            if isinstance(fact, str) and fact.strip():
+                nodes.append(atom_node(ATOM_TYPE_FACT, fact.strip(), weight=0.6))
+        for signal in insight.interests or []:
+            subject = (signal.subject or "").strip()
+            if not subject:
+                continue
+            subject_atom = atom_node(
+                ATOM_TYPE_INTEREST_SUBJECT,
+                subject,
+                weight=0.4,
+            )
+            subject_entity = entity_node(subject)
+            nodes.extend((subject_atom, subject_entity))
+            edges.append(GraphEdgeInput(
+                subject_atom.node_id, subject_entity.node_id, "about",
+            ))
+            if signal.category:
+                category_entity = entity_node(signal.category)
+                nodes.append(category_entity)
+                edges.append(GraphEdgeInput(
+                    subject_entity.node_id,
+                    category_entity.node_id,
+                    "categorized_as",
+                ))
+        if nodes or edges:
+            await upsert_graph(uid, nodes, edges, source="extractor")
+    except Exception as exc:
+        logger.warn("UserAuraExtractor: graph build failed", {
+            "user_id": uid,
+            "error": str(exc),
+        })
+
+
 async def _upsert_memory_atoms_from_insight(uid: str, insight: MessageInsight) -> None:
     """Persist this turn's durable facts and named interest subjects into the UNBOUNDED
     long-term memory store (services/memory), so they are recallable by semantic
@@ -681,6 +783,7 @@ async def _upsert_memory_atoms_from_insight(uid: str, insight: MessageInsight) -
             ))
     if atoms:
         await upsert_atoms(uid, atoms, source="extractor")
+    await _upsert_graph_from_insight(uid, insight)
 
 
 async def extract_and_update_user_aura(
@@ -689,6 +792,9 @@ async def extract_and_update_user_aura(
     session_id: str | None = None,
     prev_buddy_response: str | None = None,
     user_doc: dict[str, Any] | None = None,
+    turn_id: str | None = None,
+    turn_index: int | None = None,
+    surface: str = "chat",
 ) -> None:
     """
     Public entry point. Called via asyncio.create_task from the chat handler.
@@ -731,6 +837,11 @@ async def extract_and_update_user_aura(
             model=settings.TIER_EXTRACTION,
         ))
 
+        # Provenance is one immutable document per turn. It is captured from the
+        # extraction result before the eventually-consistent graph write below.
+        await _write_graph_turn_provenance(
+            uid, insight, message, session_id, turn_id, turn_index, surface,
+        )
         updated = await _merge_and_write_user_aura(uid, insight, message)
 
         # Mirror the durable facts + named subjects into the unbounded long-term memory

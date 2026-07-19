@@ -25,6 +25,7 @@ from ...lib.logger import logger
 from ..memory.retrieval import (
     render_relevant_memory_block,
     retrieve_relevant_memory,
+    retrieve_relevant_subgraph,
 )
 from ..user_aura_schema import active_category_slugs, interest_prompt_lines
 
@@ -404,8 +405,15 @@ async def build_turn_system_blocks(
     )
 
     if aura_profile:
-        relevant_atoms = await retrieve_relevant_memory(
-            uid, message, active_slugs=active_category_slugs(aura_profile),
+        retrieval_fn = (
+            retrieve_relevant_subgraph
+            if settings.GRAPH_READ_CHAT
+            else retrieve_relevant_memory
+        )
+        relevant_atoms = await retrieval_fn(
+            uid,
+            message,
+            active_slugs=active_category_slugs(aura_profile),
         )
         if relevant_atoms:
             shown_subjects: set[str] = set()

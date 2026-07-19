@@ -68,6 +68,7 @@ FIELD_DEDUP_KEY = "dedup_key"
 FIELD_SENT_AT = "sent_at"
 FIELD_STATUS = "status"
 FIELD_DELIVERY = "delivery"
+FIELD_CHANNELS = "channels"
 FIELD_OUTCOME = "outcome"
 FIELD_OUTCOME_AT = "outcome_at"
 FIELD_TAPPED_AT = "tapped_at"
@@ -158,6 +159,7 @@ async def record_send(
     tokens_targeted: int,
     success_count: int,
     failure_count: int,
+    channel_results: dict[str, dict[str, Any]] | None = None,
     decision: NotificationDecision | None = None,
 ) -> None:
     """Write the per-notification ledger row at send time.
@@ -167,6 +169,15 @@ async def record_send(
     / ``record_dismiss`` (or the signal engine's 6h timeout sweep).
     """
     now = datetime.now(UTC)
+    channels = channel_results or {
+        "mobile": {
+            "status": STATUS_SENT if delivered else STATUS_FAILED,
+            "delivered": delivered,
+            "tokens_targeted": tokens_targeted,
+            "success_count": success_count,
+            "failure_count": failure_count,
+        }
+    }
     doc: dict[str, Any] = {
         FIELD_NOTIFICATION_ID: notification_id,
         FIELD_TYPE: notification_type,
@@ -186,6 +197,7 @@ async def record_send(
             "success_count": success_count,
             "failure_count": failure_count,
             "delivered": delivered,
+            FIELD_CHANNELS: channels,
         },
         FIELD_OUTCOME: OUTCOME_PENDING,
         FIELD_OUTCOME_AT: None,
@@ -212,6 +224,21 @@ async def record_send(
             "type": notification_type,
             "error": str(exc),
         })
+
+
+def delivery_channels(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return per-channel delivery data for both current and legacy rows."""
+    delivery = doc.get(FIELD_DELIVERY)
+    if not isinstance(delivery, dict):
+        return {}
+    channels = delivery.get(FIELD_CHANNELS)
+    if isinstance(channels, dict):
+        return {
+            str(channel): value
+            for channel, value in channels.items()
+            if isinstance(value, dict)
+        }
+    return {"mobile": dict(delivery)}
 
 
 async def recent_dedup_keys(user_id: str, *, since: datetime) -> set[str]:

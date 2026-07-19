@@ -59,10 +59,19 @@ class NotificationResult:
     invalid_tokens: list[str] = field(default_factory=list)
     """Tokens that were permanently invalid and have been auto-deleted."""
 
+    notification_id: str = ""
+    """Stable identity shared by all delivery channels for this notification."""
+
+    desktop_queued_count: int = 0
+    """Desktop outbox rows accepted for delivery."""
+
+    channel_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Per-channel outcomes used by the unified notification ledger."""
+
     @property
     def delivered(self) -> bool:
-        """True if at least one token received the notification."""
-        return self.success_count > 0
+        """True if at least one selected channel accepted the notification."""
+        return self.success_count > 0 or self.desktop_queued_count > 0
 
 
 async def send_notification(
@@ -79,7 +88,9 @@ async def send_notification(
     apns_category: str | None = None,
     data_only: bool = False,
     dedup_key: str = "",
-    decision: "notification_ledger.NotificationDecision | None" = None,
+    decision: notification_ledger.NotificationDecision | None = None,
+    notification_id: str | None = None,
+    record_ledger: bool = True,
 ) -> NotificationResult:
     """Send an FCM push notification to all registered devices for a user.
 
@@ -124,6 +135,10 @@ async def send_notification(
         tokens that were auto-deleted from Firestore.
     """
 
+    # One logical id can be supplied by the channel router so mobile and desktop
+    # share the same audit identity. Direct mobile callers keep UUID behavior.
+    notification_id = notification_id or str(uuid.uuid4())
+
     # 1. Fetch registered tokens
     token_docs: list[dict[str, Any]] = await asyncio.to_thread(
         get_user_tokens, user_id
@@ -139,6 +154,7 @@ async def send_notification(
             tokens_targeted=0,
             success_count=0,
             failure_count=0,
+            notification_id=notification_id,
         )
 
     token_strings: list[str] = [doc["token"] for doc in token_docs]
@@ -154,7 +170,7 @@ async def send_notification(
     # Every notification gets a stable id, carried in the payload so the client
     # can report taps/dismissals against it (the signal engine already supplies
     # one; generate it for the other paths). Also the ledger doc id.
-    notification_id = payload.get("notification_id") or str(uuid.uuid4())
+    notification_id = payload.get("notification_id") or notification_id
     payload["notification_id"] = notification_id
 
     # 3. Build platform-specific message
@@ -216,6 +232,8 @@ async def send_notification(
     async def _record_to_ledger(
         *, delivered: bool, tokens_targeted: int, success_count: int, failure_count: int
     ) -> None:
+        if not record_ledger:
+            return
         await notification_ledger.record_send(
             user_id,
             notification_id=notification_id,
@@ -259,6 +277,7 @@ async def send_notification(
             tokens_targeted=len(token_strings),
             success_count=0,
             failure_count=len(token_strings),
+            notification_id=notification_id,
         )
 
     # 5. Collect invalid tokens from FCM response
@@ -301,6 +320,7 @@ async def send_notification(
         success_count=batch_response.success_count,
         failure_count=batch_response.failure_count,
         invalid_tokens=invalid,
+        notification_id=notification_id,
     )
 
     logger.info("send_notification: complete", {

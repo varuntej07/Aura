@@ -42,6 +42,7 @@ from pydantic import BaseModel
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
+from ..services.memory.graph_store import delete_node
 from ..services.model_provider import ModelProvider
 from ..services.request_auth import resolve_user_id_from_request
 
@@ -241,8 +242,20 @@ async def handle_delete_memory(request: Request, memory_id: str) -> JSONResponse
         _invalidate_line(user_id, date)
 
     await asyncio.to_thread(_delete)
+    asyncio.create_task(_delete_graph_node_fail_open(user_id, memory_id))
     logger.info("Memories: deleted", {"user_id": user_id, "memory_id": memory_id})
     return JSONResponse({"ok": True})
+
+
+async def _delete_graph_node_fail_open(uid: str, node_id: str) -> None:
+    try:
+        await delete_node(uid, node_id)
+    except Exception as exc:
+        logger.warn("Memories: graph delete failed open", {
+            "user_id": uid,
+            "node_id": node_id,
+            "error": str(exc),
+        })
 
 
 async def handle_patch_memory(request: Request, memory_id: str) -> JSONResponse:

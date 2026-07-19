@@ -15,6 +15,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from ..config.settings import settings
 from ..lib.logger import logger
 from ..services.notification_rewriter import rewrite_reminder_notification
 from ..services.notifications import orchestrator
@@ -250,6 +251,68 @@ async def _run_proactive_drain() -> None:
     await posthog_client.flush()
 
 
+async def _run_memory_graph_sweep(
+    *, dry_run: bool = False, now: datetime | None = None
+) -> list[tuple[str, Any]]:
+    """Hourly Phase 4 source A/B sweep. Source C remains evidence only."""
+    if not settings.NOTIF_GRAPH:
+        return []
+    try:
+        from ..services.notifications.memory_graph_notifications import (
+            run_memory_graph_sweep,
+        )
+
+        return await run_memory_graph_sweep(now=now, dry_run=dry_run)
+    except Exception as exc:
+        logger.error("scheduler: memory graph sweep failed open", {"error": str(exc)})
+        return []
+
+
+async def _run_memory_graph_candidate_drain(*, now: datetime | None = None) -> int:
+    """Process due graph candidates through revalidation and the shared funnel."""
+    if not settings.NOTIF_GRAPH:
+        return 0
+
+
+async def _run_session_followup_lifecycle_sweep(*, now: datetime | None = None) -> int:
+    """Finalize due sessions through the sole lifecycle owner."""
+    if not (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
+        return 0
+    try:
+        from ..services.session_followup.lifecycle import session_lifecycle_service
+
+        return await session_lifecycle_service.sweep_idle_sessions(now=now)
+    except Exception as exc:
+        logger.error("scheduler: session followup lifecycle sweep failed open", {
+            "error": str(exc),
+        })
+        return 0
+
+
+async def _run_session_followup_shadow_drain(*, now: datetime | None = None) -> int:
+    """Revalidate due source-D candidates; shadow records and never sends."""
+    if not (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
+        return 0
+    try:
+        from ..services.session_followup.revalidator import run_due_shadow_followups
+
+        return await run_due_shadow_followups(now=now)
+    except Exception as exc:
+        logger.error("scheduler: session followup shadow drain failed open", {
+            "error": str(exc),
+        })
+        return 0
+    try:
+        from ..services.notifications.memory_graph_notifications import run_due_candidates
+
+        return await run_due_candidates(now=now)
+    except Exception as exc:
+        logger.error("scheduler: memory graph candidate drain failed open", {
+            "error": str(exc),
+        })
+        return 0
+
+
 async def _run_intent_sweep() -> None:
     """Reactive pending-intent supervisor, EVERY minute. Atomically claims due intents
     (a scheduled follow-up whose fire_at has passed) and emits one ``intent_due`` event
@@ -460,6 +523,19 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # arbitrated by priority, deduped cross-agent, tap-gated, and at most ONE is sent
         # per user per window (the rest wait). Fire-and-forget and per-user isolated.
         asyncio.create_task(_run_proactive_drain())
+
+        # Phase 4 is fully additive. With NOTIF_GRAPH off, neither task is created,
+        # so the scheduler performs no graph reads and writes no candidate state.
+        if settings.NOTIF_GRAPH:
+            if now_minute == 25:
+                asyncio.create_task(_run_memory_graph_sweep(now=now_utc))
+            asyncio.create_task(_run_memory_graph_candidate_drain(now=now_utc))
+
+        # Source D remains completely absent from the scheduler when both flags
+        # are off. Shadow runs lifecycle, evaluation, and fire-time policy only.
+        if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
+            asyncio.create_task(_run_session_followup_lifecycle_sweep(now=now_utc))
+            asyncio.create_task(_run_session_followup_shadow_drain(now=now_utc))
 
         delivered = 0
 

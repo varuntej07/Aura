@@ -67,6 +67,7 @@ EVENT_INTENT_DUE = "intent_due"   # a scheduled reactive action came due
 EVENT_USER_IDLE = "user_idle"
 EVENT_USER_DORMANT = "user_dormant"
 EVENT_USER_REACTIVATED = "user_reactivated"
+EVENT_SESSION_FINALIZED = "session_finalized"
 
 
 BEHAVIORAL_EVENTS = frozenset({
@@ -97,6 +98,7 @@ LIFECYCLE_EVENTS = frozenset({
     EVENT_USER_IDLE,
     EVENT_USER_DORMANT,
     EVENT_USER_REACTIVATED,
+    EVENT_SESSION_FINALIZED,
 })
 
 # Presence/behavioral events want the low-latency inline dispatch (§4.1); domain,

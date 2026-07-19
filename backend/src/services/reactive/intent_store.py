@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 
 from google.cloud import firestore as fs  # type: ignore
 
+from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from .fields import (
@@ -42,6 +43,7 @@ from .fields import (
     FIELD_KIND,
     FIELD_QUESTION,
     FIELD_RESOLUTION_REASON,
+    FIELD_SESSION_ID,
     FIELD_SOURCE,
     FIELD_STATUS,
     FIELD_SUBJECT,
@@ -125,6 +127,7 @@ async def schedule_intent(
     question: str,
     fire_at: datetime,
     source: str = "",
+    session_id: str = "",
     now: datetime | None = None,
 ) -> str | None:
     """Create a pending intent for ``subject``, or return ``None`` if it should not
@@ -163,7 +166,7 @@ async def schedule_intent(
                 return None
 
             intent_id = subject_id(subject)
-            txn.set(intent_ref, {
+            intent_data = {
                 FIELD_INTENT_ID: intent_id,
                 FIELD_UID: uid,
                 FIELD_KIND: kind,
@@ -176,7 +179,12 @@ async def schedule_intent(
                 FIELD_DEDUP_ID: intent_id,
                 # A never-fired intent still gets reaped: its TTL is well past its fire time.
                 FIELD_EXPIRES_AT: fire_at + INTENT_TTL,
-            })
+            }
+            if session_id and (
+                settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND
+            ):
+                intent_data[FIELD_SESSION_ID] = session_id
+            txn.set(intent_ref, intent_data)
             return intent_id
 
         return _apply(transaction)

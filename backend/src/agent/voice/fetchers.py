@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import asyncio
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+from ...lib.logger import logger
 from ...services.firebase import admin_firestore
+from ...services.memory import graph_fields as GF
+from ...services.memory.salience import normalized_graph_salience
 from ...services.user_aura_schema import interest_prompt_lines
 from .text_sanitizer import sanitize_for_speech
 
@@ -18,6 +23,8 @@ from .text_sanitizer import sanitize_for_speech
 # a past store_memory call) goes stale and contradicts the live {timezone} slot, which
 # is sourced fresh from the user profile every session. Compared case-insensitively.
 _PROFILE_OWNED_MEMORY_KEYS = {"timezone"}
+
+GRAPH_DIGEST_LIMIT = 8
 
 
 async def fetch_user_profile(user_id: str) -> dict[str, str]:
@@ -55,6 +62,52 @@ async def fetch_memory_summary(user_id: str) -> str:
     return await asyncio.to_thread(_read)
 
 
+async def fetch_graph_digest(user_id: str) -> str:
+    """Read and rank a compact graph digest with no embedding call. Fail-open."""
+    try:
+        def _read() -> str:
+            nodes = (
+                admin_firestore()
+                .collection(GF.PARENT_COLLECTION)
+                .document(user_id)
+                .collection(GF.NODE_SUBCOLLECTION)
+            )
+            query = (
+                nodes.where(filter=FieldFilter(
+                    GF.STATUS,
+                    "in",
+                    [GF.NODE_STATUS_ACTIVE, GF.NODE_STATUS_DORMANT],
+                ))
+                .order_by(GF.WEIGHT, direction="DESCENDING")
+                .limit(GRAPH_DIGEST_LIMIT)
+            )
+            ranked: list[tuple[float, str]] = []
+            for snap in query.stream():
+                data = snap.to_dict() or {}
+                salience = normalized_graph_salience(data)
+                if salience <= 0.0:
+                    continue
+                display = sanitize_for_speech(
+                    str(data.get(GF.DISPLAY) or data.get(GF.ENTITY) or "").strip()
+                )
+                if display:
+                    ranked.append((salience, display))
+            ranked.sort(key=lambda row: row[0], reverse=True)
+            return "\n".join(f"- {display}" for _, display in ranked[:GRAPH_DIGEST_LIMIT])
+
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn(
+            "VoiceSession: graph digest failed open",
+            {
+                "user_id": user_id,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            },
+        )
+        return ""
+
+
 async def fetch_last_session_summary(user_id: str) -> dict[str, str]:
     """Read users/{uid}/voice_session_state/latest. Returns {summary, last_session_at} or empty."""
     def _read() -> dict[str, str]:
@@ -66,9 +119,11 @@ async def fetch_last_session_summary(user_id: str) -> dict[str, str]:
         )
         data = doc.to_dict() or {}
         return {
-            # Strip markdown from the stored summary at read time so existing `latest`
-            # docs (written before the prose-only summary prompt) inject cleanly too.
-            "summary": sanitize_for_speech(str(data.get("summary", ""))),
+            # Schema-v2 carries compact structured memory separately from the friendly
+            # history recap. Legacy docs fall back to the old summary field.
+            "summary": sanitize_for_speech(
+                str(data.get("memory_context") or data.get("summary", ""))
+            ),
             "last_session_at": str(data.get("last_session_at", "")),
         }
     return await asyncio.to_thread(_read)

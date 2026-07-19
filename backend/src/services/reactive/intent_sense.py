@@ -105,6 +105,7 @@ async def reconcile_and_schedule(
     *,
     now: datetime | None = None,
     user_doc: dict[str, Any] | None = None,
+    session_id: str = "",
 ) -> None:
     """Public entry point — called via asyncio.create_task from the chat handler.
     Never raises; never blocks the stream. ``user_doc`` lets the chat handler pass
@@ -167,5 +168,6 @@ async def reconcile_and_schedule(
                 question=nf.question.strip()[:_QUESTION_MAX_CHARS],
                 fire_at=fire_at,
                 source="intent_sense",
+                session_id=session_id,
                 now=when,
             )

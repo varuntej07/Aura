@@ -29,7 +29,7 @@ from google.cloud import firestore as fs
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..notification_ledger import NotificationDecision
-from .proposal import NotificationProposal, ProposalKind
+from .proposal import DeliveryChannel, NotificationProposal, ProposalKind
 
 QUEUE_SUBCOLLECTION = "notification_queue"
 
@@ -50,6 +50,7 @@ FIELD_COLLAPSE_KEY = "collapse_key"
 FIELD_NOTIFICATION_TYPE = "notification_type"
 FIELD_DATA_ONLY = "data_only"
 FIELD_APNS_CATEGORY = "apns_category"
+FIELD_CHANNELS = "channels"
 FIELD_CONTENT_TIMESTAMP = "content_timestamp"
 FIELD_FRESHNESS_MAX_AGE_S = "freshness_max_age_seconds"
 FIELD_PRIORITY = "priority"
@@ -101,6 +102,7 @@ def _proposal_to_doc(proposal: NotificationProposal, now: datetime) -> dict[str,
         FIELD_NOTIFICATION_TYPE: proposal.notification_type,
         FIELD_DATA_ONLY: proposal.data_only,
         FIELD_APNS_CATEGORY: proposal.apns_category,
+        FIELD_CHANNELS: sorted(channel.value for channel in proposal.channels),
         FIELD_CONTENT_TIMESTAMP: proposal.content_timestamp,
         FIELD_FRESHNESS_MAX_AGE_S: max_age.total_seconds() if max_age else None,
         FIELD_PRIORITY: proposal.effective_priority,
@@ -129,6 +131,10 @@ def _doc_to_proposal(data: dict[str, Any]) -> NotificationProposal:
         notification_type=str(data.get(FIELD_NOTIFICATION_TYPE, "")),
         data_only=bool(data.get(FIELD_DATA_ONLY, False)),
         apns_category=data.get(FIELD_APNS_CATEGORY),
+        channels=frozenset(
+            DeliveryChannel(value)
+            for value in data.get(FIELD_CHANNELS, [DeliveryChannel.MOBILE.value])
+        ),
         content_timestamp=data.get(FIELD_CONTENT_TIMESTAMP),
         freshness_max_age=timedelta(seconds=max_age_s) if max_age_s is not None else None,
         priority=int(data[FIELD_PRIORITY]) if data.get(FIELD_PRIORITY) is not None else None,

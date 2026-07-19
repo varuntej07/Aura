@@ -18,6 +18,7 @@ from ...lib.logger import logger
 from ..notification_service import NotificationResult
 from .proposal import (
     SOURCE_ICEBREAKER,
+    SOURCE_MEMORY_GRAPH,
     SOURCE_NEWS,
     SOURCE_REENGAGE,
     SOURCE_THREAD,
@@ -44,6 +45,21 @@ async def dispatch_post_send(
             # Wired when the dormancy re-engagement producer lands (Increment 2c).
             from ..reengagement.reengagement_engine import on_reengage_delivered
             await on_reengage_delivered(proposal, result)
+        elif proposal.source == SOURCE_MEMORY_GRAPH:
+            from .memory_graph_notifications import on_orchestrator_outcome
+            from .proposal import REASON_OK, Disposition, OrchestratorDecision
+
+            await on_orchestrator_outcome(
+                proposal,
+                OrchestratorDecision(
+                    Disposition.SEND,
+                    REASON_OK,
+                    delivered=result.delivered,
+                    tokens_targeted=result.tokens_targeted,
+                    success_count=result.success_count,
+                    failure_count=result.failure_count,
+                ),
+            )
     except ImportError:
         # A source whose handler isn't built yet (news/reengage pre-cutover) simply
         # has no post-send bookkeeping — that's expected, not an error.
