@@ -59,6 +59,53 @@ async def create_thread(user_id: str, thread: Thread) -> None:
         })
 
 
+async def list_threads_for_subject_dedup(user_id: str) -> list[Thread]:
+    """All of a user's threads, ANY status, for subject-level dedup at creation.
+
+    Unlike ``list_open_threads`` this ignores status on purpose: a DORMANT or
+    RESOLVED thread about the same subject means Buddy already explored (or was
+    ignored on) that loop, so a fresh reminder on the SAME subject must NOT open a
+    parallel thread and re-arm its follow-up budget. Collection-scope read, no
+    filter, so no composite index is needed. Capped like ``list_open_threads``
+    (a user holds few loops) and fails open to ``[]`` — a read error must never
+    block a legitimate new thread from being created.
+    """
+
+    def _fetch() -> list[Thread]:
+        snaps = _threads_ref(user_id).limit(MAX_OPEN_THREADS_READ).stream()
+        return [Thread.from_dict(s.to_dict() or {}) for s in snaps]
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        logger.warn("threads.thread_store: list_threads_for_subject_dedup failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return []
+
+
+async def touch_thread(user_id: str, thread_id: str, when: datetime) -> None:
+    """Stamp ``last_touched_at`` when the user re-mentions an existing open loop.
+
+    A fresh mention makes the loop the most natural one to ask about next, so
+    reusing a thread (instead of forking a new one) bumps its recency for
+    ``select_thread_to_follow_up``. Never raises.
+    """
+
+    def _update() -> None:
+        _threads_ref(user_id).document(thread_id).update({f.FIELD_LAST_TOUCHED_AT: when})
+
+    try:
+        await asyncio.to_thread(_update)
+    except Exception as exc:
+        logger.warn("threads.thread_store: touch_thread failed", {
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "error": str(exc),
+        })
+
+
 async def list_open_threads(user_id: str) -> list[Thread]:
     """All threads still in the OPEN state for a user.
 
