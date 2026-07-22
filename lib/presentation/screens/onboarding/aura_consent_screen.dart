@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -9,6 +10,7 @@ import 'package:provider/provider.dart';
 import '../../../core/onboarding/onboardable_interests.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
+import '../../../data/repositories/auth_repository.dart';
 import '../../../data/repositories/onboarding_repository.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 
@@ -43,8 +45,19 @@ class AuraConsentScreen extends StatefulWidget {
 }
 
 class _AuraConsentScreenState extends State<AuraConsentScreen> {
-  // 3 internal steps: 0 = age gate, 1 = profile (gender + interests), 2 = Aura consent.
+  // 4 internal steps: 0 = name, 1 = age gate, 2 = profile (gender + interests),
+  // 3 = Aura consent.
   int _step = 0;
+
+  // Name state - what the user wants Buddy to call them. Pre-filled with a
+  // friendly form of the provider (Google/Apple) name so most users one-tap
+  // through; fully editable so "LENCY C D" can become "Lency".
+  final TextEditingController _nameController = TextEditingController();
+  String? _nameError;
+
+  // Longest name Buddy will store. Generous enough for real names, tight enough
+  // to keep greetings and prompt injections sane.
+  static const int _maxNameLength = 40;
 
   // Age gate state — pre-set to the max allowed date so the picker opens
   // at 2013 and the user can continue without scrolling if that's their year.
@@ -76,6 +89,56 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
     // Open the picker at the max allowed date (e.g. 2013) so the year limit
     // is immediately visible and youngest users don't have to scroll.
     _selectedDate = _maxBirthDate;
+    // Pre-fill the name field. Deferred to didChangeDependencies so the
+    // AuthViewModel provider is available; see below.
+  }
+
+  bool _namePrefilled = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_namePrefilled) return;
+    _namePrefilled = true;
+    // Seed the field with a friendly form of the provider name so most users
+    // just confirm. If we only have the "User" placeholder (a known sign-up
+    // race) or nothing, leave it blank and let them type.
+    final stored = context.read<AuthViewModel>().user?.displayName;
+    _nameController.text = _friendlyDefaultName(stored);
+  }
+
+  /// Turns a raw provider display name into a friendly default: the first
+  /// whitespace-delimited token, Title-cased ("LENCY C D" -> "Lency"). Returns
+  /// empty for a missing name or the "User" placeholder, so the field starts
+  /// blank rather than seeding a non-name.
+  static String _friendlyDefaultName(String? providerName) {
+    final trimmed = providerName?.trim() ?? '';
+    if (trimmed.isEmpty ||
+        trimmed == AuthRepository.placeholderDisplayName) {
+      return '';
+    }
+    final firstToken = trimmed.split(RegExp(r'\s+')).first;
+    if (firstToken.isEmpty) return '';
+    return firstToken[0].toUpperCase() + firstToken.substring(1).toLowerCase();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  void _confirmName() {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _nameError = 'Buddy needs something to call you.');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _nameError = null;
+      _step = 1;
+    });
   }
 
   int get _selectedAge {
@@ -102,7 +165,7 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
       setState(() => _ageError = 'Aura isn\'t available for users under 13.');
       return;
     }
-    setState(() => _step = 1);
+    setState(() => _step = 2);
   }
 
   void _toggleInterest(String slug) {
@@ -122,7 +185,7 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
           'Pick at least ${OnboardableInterests.minSelection} so Buddy knows what to send you.');
       return;
     }
-    setState(() => _step = 2);
+    setState(() => _step = 3);
   }
 
   /// Device locale ("en-US") + readable language name ("English") captured for
@@ -154,9 +217,15 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
     final dob = _selectedDate.toIso8601String().split('T').first;
     final device = _deviceLocaleAndLanguage();
     final gender = _gender ?? 'LGBTQ+';
+    // The name step guarantees a non-empty trimmed value before we reach here;
+    // fall back to the stored name only as a defensive belt-and-braces.
+    final displayName = _nameController.text.trim().isNotEmpty
+        ? _nameController.text.trim()
+        : (authVm.user?.displayName ?? '');
 
     final success = await repo.saveOnboardingResult(
       uid: uid,
+      displayName: displayName,
       dateOfBirth: dob,
       auraConsentGranted: effectiveConsent,
       gender: gender,
@@ -171,8 +240,11 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
       // Update in-memory model first, then navigate explicitly.
       // AuraConsentScreen was pushed via Navigator (not GoRouter), so we cannot
       // rely on the refreshListenable redirect to clear the mixed stack cleanly.
-      authVm.markOnboardingComplete(auraConsentGranted: effectiveConsent);
-      
+      authVm.markOnboardingComplete(
+        auraConsentGranted: effectiveConsent,
+        displayName: displayName,
+      );
+
       if (mounted) context.go('/home');
     } else {
       setState(() => _saving = false);
@@ -208,37 +280,162 @@ class _AuraConsentScreenState extends State<AuraConsentScreen> {
               );
             },
             child: _step == 0
-                ? _AgeGateStep(
-                    key: const ValueKey('age'),
-                    selectedDate: _selectedDate,
-                    maxDate: _maxBirthDate,
-                    minDate: _minBirthDate,
-                    error: _ageError,
-                    onDateChanged: _onDateChanged,
-                    onConfirm: _confirmAgeGate,
+                ? _NameStep(
+                    key: const ValueKey('name'),
+                    controller: _nameController,
+                    error: _nameError,
+                    maxLength: _maxNameLength,
+                    onConfirm: _confirmName,
                     bottomPadding: bottomPadding,
                   )
                 : _step == 1
-                    ? _ProfileStep(
-                        key: const ValueKey('profile'),
-                        gender: _gender,
-                        selectedInterests: _selectedInterests,
-                        interestError: _interestError,
-                        onGenderChanged: (g) => setState(() => _gender = g),
-                        onToggleInterest: _toggleInterest,
-                        onConfirm: _confirmProfile,
+                    ? _AgeGateStep(
+                        key: const ValueKey('age'),
+                        selectedDate: _selectedDate,
+                        maxDate: _maxBirthDate,
+                        minDate: _minBirthDate,
+                        error: _ageError,
+                        onDateChanged: _onDateChanged,
+                        onConfirm: _confirmAgeGate,
                         bottomPadding: bottomPadding,
                       )
-                    : _ConsentStep(
-                        key: const ValueKey('consent'),
-                        auraConsentGranted: _auraConsentGranted,
-                        isMinor: _selectedAge < 18,
-                        saving: _saving,
-                        onToggle: (v) => setState(() => _auraConsentGranted = v),
-                        onConfirm: _finalize,
-                        bottomPadding: bottomPadding,
-                      ),
+                    : _step == 2
+                        ? _ProfileStep(
+                            key: const ValueKey('profile'),
+                            gender: _gender,
+                            selectedInterests: _selectedInterests,
+                            interestError: _interestError,
+                            onGenderChanged: (g) =>
+                                setState(() => _gender = g),
+                            onToggleInterest: _toggleInterest,
+                            onConfirm: _confirmProfile,
+                            bottomPadding: bottomPadding,
+                          )
+                        : _ConsentStep(
+                            key: const ValueKey('consent'),
+                            auraConsentGranted: _auraConsentGranted,
+                            isMinor: _selectedAge < 18,
+                            saving: _saving,
+                            onToggle: (v) =>
+                                setState(() => _auraConsentGranted = v),
+                            onConfirm: _finalize,
+                            bottomPadding: bottomPadding,
+                          ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// Name step - what should Buddy call you
+class _NameStep extends StatelessWidget {
+  final TextEditingController controller;
+  final String? error;
+  final int maxLength;
+  final VoidCallback onConfirm;
+  final double bottomPadding;
+
+  const _NameStep({
+    super.key,
+    required this.controller,
+    required this.error,
+    required this.maxLength,
+    required this.onConfirm,
+    required this.bottomPadding,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Scaffold resizes its body above the keyboard, so the Spacer keeps the
+    // button just above the keyboard without any manual inset math.
+    return GestureDetector(
+      onTap: () => FocusScope.of(context).unfocus(),
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(24, 24, 24, bottomPadding + 32),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _StepIndicator(current: 0),
+            const SizedBox(height: 28),
+
+            const Text(
+              'What should Buddy call you?',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 28,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.8,
+                height: 1.1,
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              'This is the name Buddy will use in chats, voice, and notifications. Change it anytime in Settings.',
+              style: TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 15,
+                height: 1.5,
+              ),
+            ),
+
+            const SizedBox(height: 32),
+
+            FauxGlassCard(
+              borderRadius: 16,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              borderColor: error != null
+                  ? AppColors.error.withValues(alpha: 0.35)
+                  : AppColors.accent.withValues(alpha: 0.3),
+              child: TextField(
+                controller: controller,
+                autofocus: false,
+                textCapitalization: TextCapitalization.words,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => onConfirm(),
+                maxLines: 1,
+                inputFormatters: [
+                  LengthLimitingTextInputFormatter(maxLength),
+                ],
+                cursorColor: AppColors.accent,
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  hintText: 'Your name',
+                  hintStyle: TextStyle(
+                    color: AppColors.textTertiary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+
+            AnimatedSize(
+              duration: const Duration(milliseconds: 200),
+              child: error != null
+                  ? Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(
+                        error!,
+                        style: const TextStyle(
+                          color: AppColors.error,
+                          fontSize: 13,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+
+            const Spacer(),
+
+            _ConsentButton(label: 'Continue', onTap: onConfirm, isFinal: false),
+          ],
         ),
       ),
     );
@@ -275,7 +472,7 @@ class _AgeGateStep extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Step indicator
-          _StepIndicator(current: 0),
+          _StepIndicator(current: 1),
           const SizedBox(height: 28),
 
           // Heading
@@ -412,7 +609,7 @@ class _ProfileStep extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _StepIndicator(current: 1),
+          _StepIndicator(current: 2),
           const SizedBox(height: 28),
 
           const Text(
@@ -587,7 +784,7 @@ class _ConsentStep extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _StepIndicator(current: 2),
+          _StepIndicator(current: 3),
           const SizedBox(height: 28),
 
           const Text(
@@ -796,8 +993,8 @@ class _WhatAuraTracksCard extends StatelessWidget {
 class _StepIndicator extends StatelessWidget {
   final int current;
 
-  // Three onboarding steps: age gate, profile, consent.
-  static const int _total = 3;
+  // Four onboarding steps: name, age gate, profile, consent.
+  static const int _total = 4;
 
   const _StepIndicator({required this.current});
 

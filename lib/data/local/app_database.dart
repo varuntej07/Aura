@@ -43,6 +43,9 @@ class ChatMessages extends Table {
   TextColumn get clarificationJson => text().nullable()();
   // v9: attachment metadata + thumbnails — JSON array, in-memory bytes not stored
   TextColumn get attachmentJson => text().nullable()();
+  // v10: how the user entered this message — 'typed' | 'pasted'. Null for
+  // assistant messages and legacy rows written before capture existed.
+  TextColumn get inputMethod => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -69,7 +72,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -179,6 +182,11 @@ class AppDatabase extends _$AppDatabase {
           if (from < 9) {
             await customStatement(
               'ALTER TABLE "chat_messages" ADD COLUMN "attachment_json" TEXT',
+            );
+          }
+          if (from < 10) {
+            await customStatement(
+              'ALTER TABLE "chat_messages" ADD COLUMN "input_method" TEXT',
             );
           }
         },

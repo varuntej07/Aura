@@ -22,10 +22,6 @@
 -keep class ** extends androidx.room.RoomDatabase { *; }
 -dontwarn androidx.room.**
 
-# In-app purchase — billing client uses reflection for purchase verification
--keep class com.android.billingclient.** { *; }
--dontwarn com.android.billingclient.**
-
 # Kotlin metadata — required for kotlin-reflect and coroutines
 -keep class kotlin.Metadata { *; }
 -dontwarn kotlin.**

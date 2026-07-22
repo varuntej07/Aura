@@ -78,8 +78,15 @@ Widget _harness({
   );
 }
 
-/// Step 0 -> 1. The default DOB is exactly 13 years ago (the picker's maximum), so
-/// the age check passes without touching the wheel.
+/// Step 0 (name) -> 1. Types a name so the non-empty gate passes, then advances.
+Future<void> _passNameStep(WidgetTester tester, {String name = 'Lency'}) async {
+  await tester.enterText(find.byType(TextField), name);
+  await tester.tap(find.text('Continue'));
+  await tester.pumpAndSettle();
+}
+
+/// Step 1 (age) -> 2. The default DOB is exactly 13 years ago (the picker's
+/// maximum), so the age check passes without touching the wheel.
 Future<void> _passAgeGate(WidgetTester tester) async {
   await tester.tap(find.text('Continue'));
   await tester.pumpAndSettle();
@@ -96,6 +103,7 @@ Future<void> _tapChips(WidgetTester tester, List<String> labels) async {
 void _stubSave(MockOnboardingRepository repo, {required bool success}) {
   when(repo.saveOnboardingResult(
     uid: anyNamed('uid'),
+    displayName: anyNamed('displayName'),
     dateOfBirth: anyNamed('dateOfBirth'),
     auraConsentGranted: anyNamed('auraConsentGranted'),
     gender: anyNamed('gender'),
@@ -106,7 +114,9 @@ void _stubSave(MockOnboardingRepository repo, {required bool success}) {
 }
 
 /// Captured args of the single saveOnboardingResult call, in declared order:
-/// [uid, dateOfBirth, auraConsentGranted, gender, interestSlugs, locale, language].
+/// [uid, dateOfBirth, auraConsentGranted, gender, interestSlugs, locale,
+/// language, displayName]. displayName is captured last so the existing
+/// positional expectations stay stable.
 List<dynamic> _capturedSave(MockOnboardingRepository repo) => verify(
       repo.saveOnboardingResult(
         uid: captureAnyNamed('uid'),
@@ -116,6 +126,7 @@ List<dynamic> _capturedSave(MockOnboardingRepository repo) => verify(
         interestSlugs: captureAnyNamed('interestSlugs'),
         locale: captureAnyNamed('locale'),
         language: captureAnyNamed('language'),
+        displayName: captureAnyNamed('displayName'),
       ),
     ).captured;
 
@@ -126,6 +137,7 @@ void main() {
       _harness(authVm: MockAuthViewModel(), repo: MockOnboardingRepository()),
     );
     await tester.pumpAndSettle();
+    await _passNameStep(tester);
     await _passAgeGate(tester);
 
     // Only 2 of the required 3.
@@ -145,6 +157,7 @@ void main() {
       _harness(authVm: MockAuthViewModel(), repo: MockOnboardingRepository()),
     );
     await tester.pumpAndSettle();
+    await _passNameStep(tester);
     await _passAgeGate(tester);
 
     await _tapChips(tester, ['Sports', 'Technology', 'News']);
@@ -171,6 +184,7 @@ void main() {
 
     await tester.pumpWidget(_harness(authVm: authVm, repo: repo));
     await tester.pumpAndSettle();
+    await _passNameStep(tester, name: 'Lency');
     await _passAgeGate(tester);
 
     await _tapChips(tester, ['Male', 'Sports', 'Technology', 'News']);
@@ -190,11 +204,15 @@ void main() {
     expect((captured[4] as List).length, 3);
     expect(captured[5], 'te-IN'); // locale
     expect(captured[6], 'Telugu'); // language
+    expect(captured[7], 'Lency'); // displayName (captured last)
     // Default picker DOB is exactly 13 years ago => a minor => consent forced off
     // regardless of the toggle (GDPR safeguard).
     expect(captured[2], isFalse); // auraConsentGranted
 
-    verify(authVm.markOnboardingComplete(auraConsentGranted: false)).called(1);
+    verify(authVm.markOnboardingComplete(
+      auraConsentGranted: false,
+      displayName: 'Lency',
+    )).called(1);
     expect(find.text('HOME'), findsOneWidget);
   });
 
@@ -208,6 +226,7 @@ void main() {
 
     await tester.pumpWidget(_harness(authVm: authVm, repo: repo));
     await tester.pumpAndSettle();
+    await _passNameStep(tester);
     await _passAgeGate(tester);
 
     await _tapChips(
@@ -233,6 +252,7 @@ void main() {
 
     await tester.pumpWidget(_harness(authVm: authVm, repo: repo));
     await tester.pumpAndSettle();
+    await _passNameStep(tester);
     await _passAgeGate(tester);
 
     await _tapChips(tester, ['Sports', 'Technology', 'News']);
@@ -244,7 +264,45 @@ void main() {
     expect(find.text('Something went wrong. Please try again.'), findsOneWidget);
     expect(find.text('HOME'), findsNothing);
     verifyNever(
-      authVm.markOnboardingComplete(auraConsentGranted: anyNamed('auraConsentGranted')),
+      authVm.markOnboardingComplete(
+        auraConsentGranted: anyNamed('auraConsentGranted'),
+        displayName: anyNamed('displayName'),
+      ),
     );
+  });
+
+  testWidgets('blocks advancing past the name step when the field is empty',
+      (tester) async {
+    _useTallSurface(tester);
+    await tester.pumpWidget(
+      _harness(authVm: MockAuthViewModel(), repo: MockOnboardingRepository()),
+    );
+    await tester.pumpAndSettle();
+
+    // Field starts blank (no provider name on the nice mock). Clear it to be
+    // explicit, then try to advance.
+    await tester.enterText(find.byType(TextField), '   ');
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('needs something to call you'), findsOneWidget);
+    // Still on the name step — the age heading never appeared.
+    expect(find.text('Quick age check'), findsNothing);
+  });
+
+  testWidgets('pre-fills the name field with a friendly form of the provider name',
+      (tester) async {
+    _useTallSurface(tester);
+    final authVm = MockAuthViewModel();
+    // Raw Google name: full, upper-cased, multi-token.
+    when(authVm.user).thenReturn(_user().copyWith(displayName: 'LENCY C D'));
+    final repo = MockOnboardingRepository();
+    _stubSave(repo, success: true);
+
+    await tester.pumpWidget(_harness(authVm: authVm, repo: repo));
+    await tester.pumpAndSettle();
+
+    // "LENCY C D" -> "Lency": first token, Title-cased.
+    expect(find.widgetWithText(TextField, 'Lency'), findsOneWidget);
   });
 }

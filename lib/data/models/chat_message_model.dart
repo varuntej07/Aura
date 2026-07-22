@@ -7,6 +7,13 @@ import 'clarification_payload.dart';
 
 enum ChatMessageChannel { text, voice }
 
+/// How the text of a user message entered the composer. `typed` is the default;
+/// `pasted` is set when a bulk insert (a single edit that adds a large contiguous
+/// block, see MessageInput) happened while composing the message. It is a best-
+/// effort signal: small pastes and system-dictation are indistinguishable from
+/// typing and read as `typed`. Always null for assistant messages.
+enum ChatMessageInputMethod { typed, pasted }
+
 enum MessageFeedback { liked, disliked }
 
 /// pending = the live stream dropped (usually the app was backgrounded) but the turn is
@@ -23,6 +30,10 @@ class ChatMessageModel {
   final MessageStatus status;
   final MessageFeedback? feedback;
   final String? errorReason;
+
+  /// How the user entered this message (typed vs pasted). Null for assistant
+  /// messages and for legacy rows written before this was captured.
+  final ChatMessageInputMethod? inputMethod;
 
   /// Null until the message is persisted to a SQLite session.
   final String? sessionId;
@@ -53,6 +64,7 @@ class ChatMessageModel {
     this.status = MessageStatus.sent,
     this.feedback,
     this.errorReason,
+    this.inputMethod,
     this.sessionId,
     this.engagementId,
     this.engagementAgent,
@@ -84,6 +96,12 @@ class ChatMessageModel {
               orElse: () => MessageFeedback.liked,
             ),
       errorReason: map['error_reason'] as String?,
+      inputMethod: map['input_method'] == null
+          ? null
+          : ChatMessageInputMethod.values.firstWhere(
+              (m) => m.name == map['input_method'],
+              orElse: () => ChatMessageInputMethod.typed,
+            ),
       sessionId: map['session_id'] as String?,
       engagementId: map['engagement_id'] as String?,
       engagementAgent: map['engagement_agent'] as String?,
@@ -106,6 +124,7 @@ class ChatMessageModel {
         'status': status.name,
         if (feedback != null) 'feedback': feedback!.name,
         if (errorReason != null) 'error_reason': errorReason,
+        if (inputMethod != null) 'input_method': inputMethod!.name,
         if (sessionId != null) 'session_id': sessionId,
         if (engagementId != null) 'engagement_id': engagementId,
         if (engagementAgent != null) 'engagement_agent': engagementAgent,
@@ -177,6 +196,7 @@ class ChatMessageModel {
     MessageStatus? status,
     MessageFeedback? Function()? feedback,
     String? Function()? errorReason,
+    ChatMessageInputMethod? inputMethod,
     String? sessionId,
     String? engagementId,
     String? engagementAgent,
@@ -193,6 +213,7 @@ class ChatMessageModel {
       status: status ?? this.status,
       feedback: feedback != null ? feedback() : this.feedback,
       errorReason: errorReason != null ? errorReason() : this.errorReason,
+      inputMethod: inputMethod ?? this.inputMethod,
       sessionId: sessionId ?? this.sessionId,
       engagementId: engagementId ?? this.engagementId,
       engagementAgent: engagementAgent ?? this.engagementAgent,
