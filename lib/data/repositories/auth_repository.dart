@@ -2,23 +2,29 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+
+import '../../core/utils/timezone_utils.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_response.dart';
 import '../models/user_model.dart';
+import '../services/device_metadata_service.dart';
 import '../services/firebase_auth_service.dart';
 import '../services/firestore_service.dart';
 
 class AuthRepository {
   final FirebaseAuthService _authService;
   final FirestoreService _firestoreService;
+  final DeviceMetadataService _deviceMetadataService;
 
   AuthRepository({
     required FirebaseAuthService authService,
     required FirestoreService firestoreService,
+    DeviceMetadataService? deviceMetadataService,
   }) : _authService = authService,
-       _firestoreService = firestoreService;
+       _firestoreService = firestoreService,
+       _deviceMetadataService = deviceMetadataService ?? DeviceMetadataService();
 
   Stream<User?> get authStateStream => _authService.authStateStream;
 
@@ -81,6 +87,15 @@ class AuthRepository {
     UserModel.fieldSignInMethod: signInMethod,
     UserModel.fieldPlatform: _platformName(),
   };
+
+  /// Device, install, and region metadata (app version, install store, device
+  /// hardware/OS, device locale/country) merged into the same user-doc write.
+  /// Collected on every activity refresh — not just real sign-ins — so accounts
+  /// created before these fields existed backfill on their next app open, and
+  /// the values stay current across app updates and OS upgrades. Never throws;
+  /// on failure it degrades to whatever the device could report.
+  Future<Map<String, dynamic>> _deviceMetadataFields() =>
+      _deviceMetadataService.collect();
 
   /// Stamps last_logout_at, increments logout_count, and clears the active flag.
   /// Must run while Firebase auth is still valid — Firestore rules reject the
@@ -188,6 +203,10 @@ class AuthRepository {
               'last_active_at': now.toUtc().toIso8601String(),
               'timezone': timezone,
               'display_name': ?repairedName,
+              UserModel.fieldLinkedPlatforms: FieldValue.arrayUnion([
+                _platformName(),
+              ]),
+              ...await _deviceMetadataFields(),
               ...?loginMetadata,
             });
         writeResult.when(
@@ -243,8 +262,13 @@ class AuthRepository {
 
     final json = user.toJson();
     json.remove('id'); // Firestore uses doc ID separately
-    // Fold login metadata (when this is a real sign-in) into the create write so
-    // a new user is stamped in one write instead of a create + follow-up update.
+    // Fold device and login metadata (the latter only on a real sign-in) into
+    // the create write so a new user is stamped in one write instead of a
+    // create + follow-up update.
+    json.addAll(await _deviceMetadataFields());
+    json[UserModel.fieldLinkedPlatforms] = FieldValue.arrayUnion([
+      _platformName(),
+    ]);
     if (loginMetadata != null) json.addAll(loginMetadata);
 
     final result = await _firestoreService.setDocument(
@@ -262,7 +286,7 @@ class AuthRepository {
   Future<String> _detectTimezone() async {
     try {
       final tz = await FlutterTimezone.getLocalTimezone();
-      return tz.identifier;
+      return canonicalizeTimezoneIdentifier(tz.identifier);
     } catch (e) {
       AppLogger.warning(
         'Timezone detection failed, defaulting to UTC',

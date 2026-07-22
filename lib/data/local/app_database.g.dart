@@ -753,6 +753,17 @@ class $ChatMessagesTable extends ChatMessages
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _inputMethodMeta = const VerificationMeta(
+    'inputMethod',
+  );
+  @override
+  late final GeneratedColumn<String> inputMethod = GeneratedColumn<String>(
+    'input_method',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -770,6 +781,7 @@ class $ChatMessagesTable extends ChatMessages
     reminderJson,
     clarificationJson,
     attachmentJson,
+    inputMethod,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -900,6 +912,15 @@ class $ChatMessagesTable extends ChatMessages
         ),
       );
     }
+    if (data.containsKey('input_method')) {
+      context.handle(
+        _inputMethodMeta,
+        inputMethod.isAcceptableOrUnknown(
+          data['input_method']!,
+          _inputMethodMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -969,6 +990,10 @@ class $ChatMessagesTable extends ChatMessages
         DriftSqlType.string,
         data['${effectivePrefix}attachment_json'],
       ),
+      inputMethod: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}input_method'],
+      ),
     );
   }
 
@@ -994,6 +1019,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
   final String? reminderJson;
   final String? clarificationJson;
   final String? attachmentJson;
+  final String? inputMethod;
   const ChatMessage({
     required this.id,
     required this.sessionId,
@@ -1010,6 +1036,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     this.reminderJson,
     this.clarificationJson,
     this.attachmentJson,
+    this.inputMethod,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1044,6 +1071,9 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     }
     if (!nullToAbsent || attachmentJson != null) {
       map['attachment_json'] = Variable<String>(attachmentJson);
+    }
+    if (!nullToAbsent || inputMethod != null) {
+      map['input_method'] = Variable<String>(inputMethod);
     }
     return map;
   }
@@ -1081,6 +1111,9 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       attachmentJson: attachmentJson == null && nullToAbsent
           ? const Value.absent()
           : Value(attachmentJson),
+      inputMethod: inputMethod == null && nullToAbsent
+          ? const Value.absent()
+          : Value(inputMethod),
     );
   }
 
@@ -1107,6 +1140,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
         json['clarificationJson'],
       ),
       attachmentJson: serializer.fromJson<String?>(json['attachmentJson']),
+      inputMethod: serializer.fromJson<String?>(json['inputMethod']),
     );
   }
   @override
@@ -1128,6 +1162,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       'reminderJson': serializer.toJson<String?>(reminderJson),
       'clarificationJson': serializer.toJson<String?>(clarificationJson),
       'attachmentJson': serializer.toJson<String?>(attachmentJson),
+      'inputMethod': serializer.toJson<String?>(inputMethod),
     };
   }
 
@@ -1147,6 +1182,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     Value<String?> reminderJson = const Value.absent(),
     Value<String?> clarificationJson = const Value.absent(),
     Value<String?> attachmentJson = const Value.absent(),
+    Value<String?> inputMethod = const Value.absent(),
   }) => ChatMessage(
     id: id ?? this.id,
     sessionId: sessionId ?? this.sessionId,
@@ -1169,6 +1205,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     attachmentJson: attachmentJson.present
         ? attachmentJson.value
         : this.attachmentJson,
+    inputMethod: inputMethod.present ? inputMethod.value : this.inputMethod,
   );
   ChatMessage copyWithCompanion(ChatMessagesCompanion data) {
     return ChatMessage(
@@ -1199,6 +1236,9 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       attachmentJson: data.attachmentJson.present
           ? data.attachmentJson.value
           : this.attachmentJson,
+      inputMethod: data.inputMethod.present
+          ? data.inputMethod.value
+          : this.inputMethod,
     );
   }
 
@@ -1219,7 +1259,8 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
           ..write('engagementAgent: $engagementAgent, ')
           ..write('reminderJson: $reminderJson, ')
           ..write('clarificationJson: $clarificationJson, ')
-          ..write('attachmentJson: $attachmentJson')
+          ..write('attachmentJson: $attachmentJson, ')
+          ..write('inputMethod: $inputMethod')
           ..write(')'))
         .toString();
   }
@@ -1241,6 +1282,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     reminderJson,
     clarificationJson,
     attachmentJson,
+    inputMethod,
   );
   @override
   bool operator ==(Object other) =>
@@ -1260,7 +1302,8 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
           other.engagementAgent == this.engagementAgent &&
           other.reminderJson == this.reminderJson &&
           other.clarificationJson == this.clarificationJson &&
-          other.attachmentJson == this.attachmentJson);
+          other.attachmentJson == this.attachmentJson &&
+          other.inputMethod == this.inputMethod);
 }
 
 class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
@@ -1279,6 +1322,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
   final Value<String?> reminderJson;
   final Value<String?> clarificationJson;
   final Value<String?> attachmentJson;
+  final Value<String?> inputMethod;
   final Value<int> rowid;
   const ChatMessagesCompanion({
     this.id = const Value.absent(),
@@ -1296,6 +1340,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     this.reminderJson = const Value.absent(),
     this.clarificationJson = const Value.absent(),
     this.attachmentJson = const Value.absent(),
+    this.inputMethod = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ChatMessagesCompanion.insert({
@@ -1314,6 +1359,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     this.reminderJson = const Value.absent(),
     this.clarificationJson = const Value.absent(),
     this.attachmentJson = const Value.absent(),
+    this.inputMethod = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        sessionId = Value(sessionId),
@@ -1337,6 +1383,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     Expression<String>? reminderJson,
     Expression<String>? clarificationJson,
     Expression<String>? attachmentJson,
+    Expression<String>? inputMethod,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1355,6 +1402,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
       if (reminderJson != null) 'reminder_json': reminderJson,
       if (clarificationJson != null) 'clarification_json': clarificationJson,
       if (attachmentJson != null) 'attachment_json': attachmentJson,
+      if (inputMethod != null) 'input_method': inputMethod,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1375,6 +1423,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     Value<String?>? reminderJson,
     Value<String?>? clarificationJson,
     Value<String?>? attachmentJson,
+    Value<String?>? inputMethod,
     Value<int>? rowid,
   }) {
     return ChatMessagesCompanion(
@@ -1393,6 +1442,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
       reminderJson: reminderJson ?? this.reminderJson,
       clarificationJson: clarificationJson ?? this.clarificationJson,
       attachmentJson: attachmentJson ?? this.attachmentJson,
+      inputMethod: inputMethod ?? this.inputMethod,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1445,6 +1495,9 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     if (attachmentJson.present) {
       map['attachment_json'] = Variable<String>(attachmentJson.value);
     }
+    if (inputMethod.present) {
+      map['input_method'] = Variable<String>(inputMethod.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1469,6 +1522,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
           ..write('reminderJson: $reminderJson, ')
           ..write('clarificationJson: $clarificationJson, ')
           ..write('attachmentJson: $attachmentJson, ')
+          ..write('inputMethod: $inputMethod, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2457,6 +2511,7 @@ typedef $$ChatMessagesTableCreateCompanionBuilder =
       Value<String?> reminderJson,
       Value<String?> clarificationJson,
       Value<String?> attachmentJson,
+      Value<String?> inputMethod,
       Value<int> rowid,
     });
 typedef $$ChatMessagesTableUpdateCompanionBuilder =
@@ -2476,6 +2531,7 @@ typedef $$ChatMessagesTableUpdateCompanionBuilder =
       Value<String?> reminderJson,
       Value<String?> clarificationJson,
       Value<String?> attachmentJson,
+      Value<String?> inputMethod,
       Value<int> rowid,
     });
 
@@ -2577,6 +2633,11 @@ class $$ChatMessagesTableFilterComposer
 
   ColumnFilters<String> get attachmentJson => $composableBuilder(
     column: $table.attachmentJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get inputMethod => $composableBuilder(
+    column: $table.inputMethod,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2683,6 +2744,11 @@ class $$ChatMessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get inputMethod => $composableBuilder(
+    column: $table.inputMethod,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$ChatSessionsTableOrderingComposer get sessionId {
     final $$ChatSessionsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -2770,6 +2836,11 @@ class $$ChatMessagesTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get inputMethod => $composableBuilder(
+    column: $table.inputMethod,
+    builder: (column) => column,
+  );
+
   $$ChatSessionsTableAnnotationComposer get sessionId {
     final $$ChatSessionsTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -2837,6 +2908,7 @@ class $$ChatMessagesTableTableManager
                 Value<String?> reminderJson = const Value.absent(),
                 Value<String?> clarificationJson = const Value.absent(),
                 Value<String?> attachmentJson = const Value.absent(),
+                Value<String?> inputMethod = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ChatMessagesCompanion(
                 id: id,
@@ -2854,6 +2926,7 @@ class $$ChatMessagesTableTableManager
                 reminderJson: reminderJson,
                 clarificationJson: clarificationJson,
                 attachmentJson: attachmentJson,
+                inputMethod: inputMethod,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -2873,6 +2946,7 @@ class $$ChatMessagesTableTableManager
                 Value<String?> reminderJson = const Value.absent(),
                 Value<String?> clarificationJson = const Value.absent(),
                 Value<String?> attachmentJson = const Value.absent(),
+                Value<String?> inputMethod = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ChatMessagesCompanion.insert(
                 id: id,
@@ -2890,6 +2964,7 @@ class $$ChatMessagesTableTableManager
                 reminderJson: reminderJson,
                 clarificationJson: clarificationJson,
                 attachmentJson: attachmentJson,
+                inputMethod: inputMethod,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

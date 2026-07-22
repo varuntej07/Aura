@@ -216,12 +216,17 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
               isLoading: vm.state == ViewState.loading,
               hint: 'Ask Buddy anything...',
               allowAttachments: context.read<AuthViewModel>().user != null,
-              onSend: (text, attachments) {
+              onSend: (text, attachments, inputMethod) {
                 if (context.read<AuthViewModel>().user == null) {
                   showSignInGateDialog(context, authViewModel: context.read<AuthViewModel>());
                   return;
                 }
-                vm.sendMessage(text, _uid, attachments: attachments);
+                vm.sendMessage(
+                  text,
+                  _uid,
+                  attachments: attachments,
+                  inputMethod: inputMethod,
+                );
                 _scrollToBottom();
               },
               onStop: vm.stopGeneration,

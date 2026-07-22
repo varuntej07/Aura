@@ -295,12 +295,19 @@ class AuthViewModel extends SafeChangeNotifier {
 
   /// Called after `OnboardingRepository.saveOnboardingResult` succeeds.
   /// Updates the in-memory user so the router redirect fires immediately
-  /// without waiting for the Firestore stream to re-emit.
-  void markOnboardingComplete({required bool auraConsentGranted}) {
+  /// without waiting for the Firestore stream to re-emit. [displayName] carries
+  /// the name the user chose during onboarding so Buddy greets them with it from
+  /// the very first message, rather than the stale provider name (the auth stream
+  /// only re-emits on auth changes, not doc writes).
+  void markOnboardingComplete({
+    required bool auraConsentGranted,
+    String? displayName,
+  }) {
     if (_user == null) return;
     _user = _user!.copyWith(
       onboardingComplete: true,
       auraConsentGranted: auraConsentGranted,
+      displayName: displayName,
     );
     _justCompletedOnboarding = true;
     safeNotifyListeners();
@@ -315,7 +322,7 @@ class AuthViewModel extends SafeChangeNotifier {
   Future<bool> revokeAuraMemory() async {
     final uid = _user?.uid;
     if (uid == null) return false;
-    final result = await _authRepository.setAuraConsentGranted(uid, false);
+    final result = await _backendApiService.revokeAuraMemory();
     return result.when(
       success: (_) {
         _user = _user!.copyWith(auraConsentGranted: false);

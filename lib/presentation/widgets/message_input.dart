@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../data/models/chat_attachment.dart';
+import '../../data/models/chat_message_model.dart';
 import '../../data/services/attachment_processor.dart';
 import 'attachment_thumbnail_strip.dart';
 import 'aura_text_field.dart';
@@ -13,7 +14,11 @@ import 'aura_text_field.dart';
 class MessageInput extends StatefulWidget {
   final bool isLoading;
   final String hint;
-  final void Function(String text, List<ChatAttachment> attachments) onSend;
+  final void Function(
+    String text,
+    List<ChatAttachment> attachments,
+    ChatMessageInputMethod inputMethod,
+  ) onSend;
   final VoidCallback? onStop;
   final TextEditingController? controller;
   final FocusNode? focusNode;
@@ -43,6 +48,15 @@ class _MessageInputState extends State<MessageInput> {
   final _pendingAttachments = <ChatAttachment>[];
   bool _isProcessingAttachment = false;
 
+  // Paste detection. Nobody types, glide-types, or autocorrects a contiguous
+  // block this large in one edit, so a single change that grows the text by at
+  // least this many characters is treated as a paste. Small pastes and system
+  // dictation are indistinguishable from typing and stay 'typed' — this is a
+  // best-effort provenance signal, not forensics.
+  static const int _bulkInsertThreshold = 30;
+  String _lastText = '';
+  bool _sawBulkInsert = false;
+
   @override
   void initState() {
     super.initState();
@@ -53,12 +67,29 @@ class _MessageInputState extends State<MessageInput> {
       _controller = TextEditingController();
       _ownsController = true;
     }
+    _lastText = _controller.text;
+    _controller.addListener(_trackBulkInsert);
   }
 
   @override
   void dispose() {
+    _controller.removeListener(_trackBulkInsert);
     if (_ownsController) _controller.dispose();
     super.dispose();
+  }
+
+  /// Watches the field for a single large insertion (a paste). Runs on every
+  /// change; O(1) length comparison, no string scanning.
+  void _trackBulkInsert() {
+    final current = _controller.text;
+    if (current.isEmpty) {
+      // Field cleared (sent, or the user wiped it to start over): reset so a
+      // later hand-typed message isn't tainted by an earlier paste.
+      _sawBulkInsert = false;
+    } else if (current.length - _lastText.length >= _bulkInsertThreshold) {
+      _sawBulkInsert = true;
+    }
+    _lastText = current;
   }
 
   void _send() {
@@ -66,9 +97,12 @@ class _MessageInputState extends State<MessageInput> {
     if (widget.isLoading) return;
     if (text.isEmpty && _pendingAttachments.isEmpty) return;
     final attachments = List<ChatAttachment>.from(_pendingAttachments);
-    _controller.clear();
+    final inputMethod = _sawBulkInsert
+        ? ChatMessageInputMethod.pasted
+        : ChatMessageInputMethod.typed;
+    _controller.clear(); // fires _trackBulkInsert -> resets _sawBulkInsert
     setState(() => _pendingAttachments.clear());
-    widget.onSend(text, attachments);
+    widget.onSend(text, attachments, inputMethod);
   }
 
   void _removeAttachment(String id) {

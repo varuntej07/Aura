@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../core/logging/app_logger.dart';
 import '../../data/models/chat_attachment.dart';
+import '../../data/models/chat_message_model.dart';
 import '../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../data/services/buddy_pills_refresher.dart';
 import '../../data/services/session_consolidator.dart';
@@ -80,6 +81,7 @@ class TextChatViewModel extends ChatViewModel {
     String text,
     String userId, {
     List<ChatAttachment>? attachments,
+    ChatMessageInputMethod inputMethod = ChatMessageInputMethod.typed,
   }) {
     // A real text turn, ground the next pill regeneration on it.
     _buddyPillsRefresher.markActivity();
@@ -87,6 +89,7 @@ class TextChatViewModel extends ChatViewModel {
       text,
       userId,
       attachments: attachments,
+      inputMethod: inputMethod,
     );
   }
 

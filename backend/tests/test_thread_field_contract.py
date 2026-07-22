@@ -76,6 +76,8 @@ def test_from_dict_tolerates_iso_string_timestamps():
 async def test_writer_produces_a_readable_document(monkeypatch):
     # The reminder writer must emit a document the reader can rebuild — the real
     # writer -> reader contract, end to end.
+    from unittest.mock import AsyncMock
+
     from src.services.threads import thread_store, thread_writer
 
     captured: dict[str, Thread] = {}
@@ -83,6 +85,12 @@ async def test_writer_produces_a_readable_document(monkeypatch):
     async def _capture(user_id: str, thread: Thread) -> None:
         captured["thread"] = thread
 
+    # Approve the worthiness judge and start from no existing threads so the write
+    # path runs (the judge now fails CLOSED, so an unmocked judge would skip).
+    monkeypatch.setattr(thread_writer, "_judge_worth_a_thread", AsyncMock(return_value=(True, "")))
+    monkeypatch.setattr(
+        thread_store, "list_threads_for_subject_dedup", AsyncMock(return_value=[])
+    )
     monkeypatch.setattr(thread_store, "create_thread", _capture)
 
     await thread_writer.record_reminder_thread(

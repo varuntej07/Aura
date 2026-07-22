@@ -230,6 +230,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     String text,
     String userId, {
     List<ChatAttachment>? attachments,
+    ChatMessageInputMethod inputMethod = ChatMessageInputMethod.typed,
   }) async {
     final trimmed = text.trim();
     final hasAttachments = attachments != null && attachments.isNotEmpty;
@@ -248,6 +249,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       isUser: true,
       timestamp: DateTime.now(),
       channel: ChatMessageChannel.text,
+      inputMethod: inputMethod,
       sessionId: _currentSessionId,
       attachments: attachments,
     );
@@ -745,6 +747,15 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             );
 
           case ToolThinkingEvent(:final message):
+            _streamingOutput.value = StreamingSnapshot(
+              text: _streamingOutput.value.text,
+              thinkingMessage: message,
+            );
+
+          case ToolStatusEvent(:final message):
+            // Reliable per-tool status: renders through the same thinkingMessage
+            // bubble as ToolThinkingEvent, but fires even when Buddy wrote no
+            // preamble, so a bare web_surf no longer shows blank typing dots.
             _streamingOutput.value = StreamingSnapshot(
               text: _streamingOutput.value.text,
               thinkingMessage: message,

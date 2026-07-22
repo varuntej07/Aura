@@ -31,6 +31,7 @@ class OnboardingRepository {
   /// onboarding_interests off the user doc directly.
   Future<bool> saveOnboardingResult({
     required String uid,
+    required String displayName,
     required String dateOfBirth,
     required bool auraConsentGranted,
     required String gender,
@@ -43,6 +44,10 @@ class OnboardingRepository {
       uid,
       {
         'onboarding_complete': true,
+        // The name the user chose for Buddy to call them (pre-filled from the
+        // Google/Apple profile, then editable). Overwrites the raw provider name
+        // so every greeting surface reads the friendly form.
+        'display_name': displayName,
         'date_of_birth': dateOfBirth,
         'aura_consent_granted': auraConsentGranted,
         'aura_consent_timestamp': DateTime.now().toUtc().toIso8601String(),

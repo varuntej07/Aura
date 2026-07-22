@@ -80,13 +80,29 @@ class ChatBackupService {
     required String userId,
     required String sessionId,
   }) async {
-    await _db.into(_db.chatSyncJobs).insert(
-          ChatSyncJobsCompanion.insert(
-            userId: userId,
-            sessionId: sessionId,
-            jobType: ChatSyncJobType.sessionUpsert.name,
-          ),
-        );
+    // Coalesce: keep at most one pending session-metadata job per session. Session
+    // metadata is a merge write of the CURRENT row, so a burst of message saves that
+    // each request a parent sync only needs the latest to run. Delete-then-insert in
+    // one transaction is the coalescing key; this app writes Drift from a single
+    // isolate, so a unique-index schema migration would be unjustified risk for the
+    // same result. Revisit with a unique index if multi-isolate DB writes are added.
+    await _db.transaction(() async {
+      await (_db.delete(_db.chatSyncJobs)
+            ..where(
+              (t) =>
+                  t.userId.equals(userId) &
+                  t.sessionId.equals(sessionId) &
+                  t.jobType.equals(ChatSyncJobType.sessionUpsert.name),
+            ))
+          .go();
+      await _db.into(_db.chatSyncJobs).insert(
+            ChatSyncJobsCompanion.insert(
+              userId: userId,
+              sessionId: sessionId,
+              jobType: ChatSyncJobType.sessionUpsert.name,
+            ),
+          );
+    });
     unawaited(processPendingJobs(userId: userId));
   }
 
@@ -172,6 +188,7 @@ class ChatBackupService {
               reminderJson: Value(_encodeJsonField(d['reminder'])),
               clarificationJson: Value(_encodeJsonField(d['clarification'])),
               attachmentJson: Value(_encodeJsonField(d['attachments'])),
+              inputMethod: Value(d['input_method'] as String?),
             ),
           );
         }
@@ -403,6 +420,8 @@ class ChatBackupService {
     try {
       final session = await _sessionById(job.sessionId);
       if (session == null) {
+        // The session was deleted locally; drop its backup work rather than
+        // resurrecting a parent/child for a thread the user removed.
         return true;
       }
 
@@ -412,9 +431,10 @@ class ChatBackupService {
           .collection('chat_sessions')
           .doc(job.sessionId);
 
-      final batch = firestore.batch();
-      batch.set(sessionRef, _sessionDoc(session), SetOptions(merge: true));
-
+      // A message job writes ONLY the child. Parent session metadata syncs through
+      // its own coalesced sessionUpsert job, so a message no longer rewrites its
+      // parent every time. This decouples message durability from session-metadata
+      // freshness and drops a 12-message voice transcript from ~25 writes to ~13.
       if (job.jobType == ChatSyncJobType.messageUpsert.name) {
         final messageId = job.messageId;
         if (messageId == null) {
@@ -427,10 +447,12 @@ class ChatBackupService {
         }
 
         final messageRef = sessionRef.collection('messages').doc(message.id);
-        batch.set(messageRef, _messageDoc(message), SetOptions(merge: true));
+        await messageRef.set(_messageDoc(message), SetOptions(merge: true));
+        return true;
       }
 
-      await batch.commit();
+      // A session job writes ONLY the parent metadata doc.
+      await sessionRef.set(_sessionDoc(session), SetOptions(merge: true));
       return true;
     } catch (e, st) {
       await _markJobFailed(job, e);
@@ -489,6 +511,7 @@ class ChatBackupService {
       if (message.engagementId != null) 'engagement_id': message.engagementId,
       if (message.engagementAgent != null)
         'engagement_agent': message.engagementAgent,
+      if (message.inputMethod != null) 'input_method': message.inputMethod,
       'reminder': ?reminder,
       'clarification': ?clarification,
       'attachments': ?attachments,

@@ -45,6 +45,12 @@ class UserModel {
   static const String fieldIsActive = 'is_active';
   static const String fieldSignInMethod = 'sign_in_method';
   static const String fieldPlatform = 'platform';
+  // Denormalized surface footprint. `platform` above is the single signup device;
+  // this array accumulates every surface the account touches (this phone plus any
+  // linked desktop/web), written with an atomic array-union by each surface so it
+  // converges to e.g. ["android", "windows"]. The backend writers own the desktop
+  // entries (handlers/pairing.py, handlers/web_auth.py).
+  static const String fieldLinkedPlatforms = 'linked_platforms';
 
   final String uid;
   final String displayName;

@@ -187,6 +187,7 @@ class ChatRepository {
                 reminderJson: Value(msg.reminderPayload?.toJsonString()),
                 clarificationJson:
                     Value(msg.clarificationPayload?.toJsonString()),
+                inputMethod: Value(msg.inputMethod?.name),
               ),
             );
 
@@ -201,11 +202,21 @@ class ChatRepository {
       });
 
       if (userId != null && userId.isNotEmpty) {
+        // Child message backs up immediately (durability), while the parent session
+        // metadata syncs through its own coalesced job. The message job no longer
+        // rewrites the parent, so a burst of turns stops re-uploading session metadata
+        // once per message. The session enqueue coalesces to one pending job.
         unawaited(
           _chatBackupService.enqueueMessageUpsert(
             userId: userId,
             sessionId: sessionId,
             messageId: msg.id,
+          ),
+        );
+        unawaited(
+          _chatBackupService.enqueueSessionUpsert(
+            userId: userId,
+            sessionId: sessionId,
           ),
         );
       }
@@ -434,6 +445,12 @@ class ChatRepository {
               orElse: () => MessageFeedback.liked,
             ),
       errorReason: row.errorReason,
+      inputMethod: row.inputMethod == null
+          ? null
+          : ChatMessageInputMethod.values.firstWhere(
+              (m) => m.name == row.inputMethod,
+              orElse: () => ChatMessageInputMethod.typed,
+            ),
       sessionId: row.sessionId,
       engagementId: row.engagementId,
       engagementAgent: row.engagementAgent,

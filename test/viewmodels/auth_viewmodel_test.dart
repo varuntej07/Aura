@@ -174,7 +174,7 @@ void main() {
       expect(vm.auraMemoryEnabled, isTrue);
 
       when(
-        authRepository.setAuraConsentGranted('uid-1', false),
+        backendApiService.revokeAuraMemory(),
       ).thenAnswer((_) async => const Result.success(null));
 
       final ok = await vm.revokeAuraMemory();
@@ -182,7 +182,7 @@ void main() {
       expect(ok, isTrue);
       expect(vm.auraMemoryEnabled, isFalse);
       expect(vm.user?.auraConsentGranted, isFalse);
-      verify(authRepository.setAuraConsentGranted('uid-1', false)).called(1);
+      verify(backendApiService.revokeAuraMemory()).called(1);
     });
 
     test('write failure → returns false, consent unchanged', () async {
@@ -191,7 +191,7 @@ void main() {
       );
       await vm.signInWithGoogle();
 
-      when(authRepository.setAuraConsentGranted(any, any)).thenAnswer(
+      when(backendApiService.revokeAuraMemory()).thenAnswer(
         (_) async => Result.failure(AppException.unexpected('nope')),
       );
 
@@ -204,7 +204,7 @@ void main() {
     test('no user → returns false without writing', () async {
       final ok = await vm.revokeAuraMemory();
       expect(ok, isFalse);
-      verifyNever(authRepository.setAuraConsentGranted(any, any));
+      verifyNever(backendApiService.revokeAuraMemory());
     });
   });
 
