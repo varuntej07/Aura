@@ -26,8 +26,9 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from ..services.analytics import funnel_events
+from ..services.analytics.llm_telemetry import start_tool_span
 from ..services.analytics.posthog_client import capture_event
-from ..services.keyboard.drafter import DraftRequest, draft
+from ..services.keyboard.drafter import REASON_OK, DraftRequest, draft
 from ..services.keyboard.vocab import build_vocab_hints
 from ..services.request_auth import resolve_user_id_from_request
 
@@ -62,7 +63,17 @@ async def handle_keyboard_draft(request: Request) -> JSONResponse:
         )
 
     request_id = uuid.uuid4().hex
-    result = await draft(user_id, req)
+    # One telemetry span per draft (ops dashboard tool analytics). Carries only
+    # the action label, never the typed content (privacy contract above); the
+    # underlying LLM call is traced separately inside ModelProvider.
+    span = start_tool_span(tool_name="keyboard_draft", source="keyboard", uid=user_id)
+    try:
+        result = await draft(user_id, req)
+    except Exception as exc:
+        span.finish(success=False, error_type=type(exc).__name__)
+        raise
+    drafted_ok = result.reason == REASON_OK
+    span.finish(success=drafted_ok, error_type=None if drafted_ok else result.reason)
 
     # Funnel: a draft was served. Fire-and-forget server-side mirror of the client's
     # keyboard_draft_requested step, so the count survives a dropped client capture.

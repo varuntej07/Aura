@@ -15,6 +15,7 @@ import anthropic
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..shared.tool_thinking_phrases import pick_tool_thinking_phrase
 from ..shared.tools import claude_tool_definitions
 from .analytics.llm_telemetry import anthropic_usage_tokens, start_llm_generation
 from .chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
@@ -64,6 +65,7 @@ class ClaudeClient:
         history: list[dict[str, Any]] | None = None,
         is_agent: bool = False,
         user_tier: str = "pro",
+        extra_excluded_tools: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """
         Run a full multi-turn Claude conversation until a text response
@@ -77,12 +79,18 @@ class ClaudeClient:
                      across HTTP requests. Must alternate user/assistant roles
                      and end before the current user turn.
             is_agent: When True, includes agent-only tools (e.g. web_surf).
+            extra_excluded_tools: Per-request tool exclusions on top of the static
+                     lists, so a caller's intent gate (e.g. hiding set_reminder from a
+                     status question) is honoured here too, not only in the stream path.
 
         Returns:
             {"text": str, "tool_names": list[str]}
         """
         excluded = EXCLUDED_TOOLS_FOR_AGENT_CHAT if is_agent else EXCLUDED_TOOLS_FOR_GENERAL_CHAT
-        tools = [t for t in claude_tool_definitions() if t["name"] not in excluded]
+        tools = [
+            t for t in claude_tool_definitions()
+            if t["name"] not in excluded and t["name"] not in extra_excluded_tools
+        ]
         if user_tier == "free":
             tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
         if tools:
@@ -286,6 +294,7 @@ class ClaudeClient:
         Streaming version of send_text_turn. Yields SSE-compatible event dicts:
           {"type": "text_delta",      "delta": str}
           {"type": "tool_thinking",   "message": str}
+          {"type": "tool_status",     "tool": str, "message": str}
           {"type": "clarification_ui","clarification_id": str, "question": str,
                                        "options": list[str], "multi_select": bool}
           {"type": "done",            "metadata": {...}}
@@ -321,6 +330,10 @@ class ClaudeClient:
             for turn in range(_MAX_TURNS):
                 response = None
 
+                # One tool_status phrase per assistant turn: parallel tool_use blocks
+                # in the same turn would otherwise stack "one sec" on "one sec".
+                tool_status_emitted = False
+
                 attempt = 0
                 while response is None:
                     attempt += 1
@@ -355,6 +368,24 @@ class ClaudeClient:
                                             yield {"type": "tool_thinking", "message": narration}
                                         turn_text_buffer.clear()
                                         buffered_chars = 0
+                                        # Reliable, tool-named status so the chat bubble shows
+                                        # "one sec, looking that up" even when the model wrote
+                                        # no preamble. Only slow tools resolve a phrase (fast
+                                        # tools return None -> stay silent), and only the first
+                                        # slow tool in the turn speaks. Seeded by the tool_use
+                                        # block id so the phrase is stable, not random.
+                                        if not tool_status_emitted:
+                                            tool_name = event.content_block.name
+                                            phrase = pick_tool_thinking_phrase(
+                                                tool_name, seed=event.content_block.id
+                                            )
+                                            if phrase:
+                                                tool_status_emitted = True
+                                                yield {
+                                                    "type": "tool_status",
+                                                    "tool": tool_name,
+                                                    "message": phrase,
+                                                }
 
                                 elif event.type == "content_block_delta":
                                     if event.delta.type == "text_delta":

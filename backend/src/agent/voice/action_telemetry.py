@@ -33,7 +33,6 @@ class VoiceActionTelemetry:
         exposed: list[str],
         *,
         final_stt_message_id: str,
-        unresolved_state_age: int | None,
     ) -> None:
         logger.info(
             "VoiceAction: turn policy",
@@ -43,13 +42,8 @@ class VoiceActionTelemetry:
                 "final_stt_message_id": final_stt_message_id,
                 "surface": self._surface,
                 "capabilities": sorted(value.value for value in policy.capabilities),
-                "unresolved_state_age": unresolved_state_age,
-                "missing_slots": list(policy.missing_slots),
                 "exposed_tools": sorted(exposed),
-                "action_mode": policy.action_mode.value,
                 "reason_codes": list(policy.reason_codes),
-                "clarification": bool(policy.clarification_question),
-                "clarification_owner": policy.clarification_owner,
                 "action_policy_version": ACTION_POLICY_VERSION,
             },
         )

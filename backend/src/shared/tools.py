@@ -69,6 +69,14 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "end_time": {"type": "string", "description": "ISO 8601 datetime string. Defaults to 30 min after start."},
                 "description": {"type": "string"},
                 "location": {"type": "string"},
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Guest email addresses to invite. Google emails each one a calendar "
+                        "invitation. Include only when the user names people to invite."
+                    ),
+                },
             },
             "required": ["title", "start_time"],
         },
@@ -114,46 +122,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
-    {
-        "name": "list_emails",
-        "description": (
-            "List the user's recent Gmail messages (sender, subject, date, snippet). "
-            "Use when the user asks about their inbox, recent emails, or wants to find a "
-            "specific message. Returns message ids to pass to read_email for full content."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "Optional Gmail search query (same syntax as the Gmail search box, "
-                        "e.g. 'from:sam is:unread newer_than:7d'). Omit for the most recent messages."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 10,
-                    "minimum": 1,
-                    "maximum": 25,
-                },
-            },
-        },
-    },
-    {
-        "name": "read_email",
-        "description": (
-            "Read the full body of one Gmail message by its id. "
-            "Call list_emails first to get the message id."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "message_id": {"type": "string", "description": "Gmail message id from list_emails."},
-            },
-            "required": ["message_id"],
-        },
-    },
+    # list_emails / read_email are disabled: they require the gmail.readonly restricted
+    # scope, which would force the OAuth app into an annual paid CASA security assessment.
+    # Only send_email (gmail.send, a free "sensitive" scope) is exposed. Restore these two
+    # definitions together with GMAIL_READONLY_SCOPE in gmail_connector.py if you take on CASA.
     {
         "name": "send_email",
         "description": (

@@ -4,6 +4,7 @@ POST /chat: text-based conversation via Claude with SSE streaming.
 SSE event format (each line: "data: <json>\n\n"):
   {"type": "text_delta",      "delta": str}
   {"type": "tool_thinking",   "message": str}
+  {"type": "tool_status",     "tool": str, "message": str}
   {"type": "clarification_ui","clarification_id": str, "question": str,
                                "options": list[str], "multi_select": bool}
   {"type": "done",            "metadata": {"tool_names": list, "reminder"?: dict,
@@ -46,13 +47,20 @@ async def _reconcile_and_schedule_intents(
     message: str,
     prev_buddy_response: str | None,
     user_doc: dict[str, Any] | None = None,
+    session_id: str = "",
 ) -> None:
     """Lazy-imported wrapper for the reactive intent sensor, so chat.py stays
     decoupled from the reactive package at module load. Never raises."""
     try:
         from ..services.reactive.intent_sense import reconcile_and_schedule
 
-        await reconcile_and_schedule(user_id, message, prev_buddy_response, user_doc=user_doc)
+        await reconcile_and_schedule(
+            user_id,
+            message,
+            prev_buddy_response,
+            user_doc=user_doc,
+            session_id=session_id,
+        )
     except Exception as exc:
         logger.warn("chat: intent sense task failed (swallowed)", {
             "user_id": user_id, "error": str(exc),
@@ -354,6 +362,23 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         if isinstance(raw_session_id, str) and raw_session_id.strip()
         else None
     )
+    if session_id and (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
+        from ..services.session_followup.lifecycle import session_lifecycle_service
+
+        raw_lineage = body.get("lineage_chain")
+        asyncio.create_task(
+            session_lifecycle_service.start_session(
+                user_id,
+                session_id,
+                surface="chat",
+                origin=str(body.get("origin") or "organic"),
+                origin_candidate_id=(
+                    str(body.get("origin_candidate_id") or "").strip() or None
+                ),
+                lineage_chain=raw_lineage if isinstance(raw_lineage, list) else [],
+            ),
+            name=f"followup-chat-session-{session_id[:8]}",
+        )
 
     raw_history: list[Any] = (body.get("history") or [])[-settings.CHAT_HISTORY_WINDOW * 2 :]
     history: list[dict[str, Any]] = []
@@ -415,17 +440,38 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     )
     asyncio.create_task(
         extract_and_update_user_aura(
-            user_id, message, session_id, prev_buddy_response, user_doc=user_doc,
+            user_id,
+            message,
+            session_id,
+            prev_buddy_response,
+            user_doc=user_doc,
+            turn_id=client_message_id or None,
+            turn_index=len(history),
+            surface="chat",
         )
     )
     # Reactive layer: detect resolutions ("mom is fine" -> cancel the queued surgery
     # follow-up) and future concerns ("mom has surgery tomorrow" -> schedule one).
     # Fire-and-forget, consent-gated + cost-capped, never touches the stream.
     asyncio.create_task(
-        _reconcile_and_schedule_intents(user_id, message, prev_buddy_response, user_doc)
+        _reconcile_and_schedule_intents(
+            user_id,
+            message,
+            prev_buddy_response,
+            user_doc,
+            session_id or "",
+        )
     )
 
     user_content = _build_user_content(message, validated_attachments)
+    from ..services.action_intent_policy import (
+        excluded_tools_for_text_turn,
+        explicitly_requests_reminder_create,
+        has_unreceipted_reminder_success_claim,
+    )
+
+    action_tool_exclusions = excluded_tools_for_text_turn(message)
+    reminder_create_requested = explicitly_requests_reminder_create(message)
 
     logger.info(
         "Chat: stream request received",
@@ -470,16 +516,52 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     async def _generate() -> AsyncGenerator[str, None]:
         try:
             tool_executor = ToolExecutor(
-                user_id, created_via="text", client_message_id=client_message_id or "",
+                user_id,
+                created_via="text",
+                client_message_id=client_message_id or "",
+                session_id=session_id or "",
             )
             claude = ClaudeClient(tool_executor)
+            buffered_text_events: list[dict[str, Any]] = []
             async for sse_event in claude.send_text_turn_stream(
                 system_prompt=system_prompt_blocks,
                 user_content=user_content,
                 history=history,
                 is_agent=False,
                 user_tier=effective_tier,
+                extra_excluded_tools=action_tool_exclusions,
             ):
+                if reminder_create_requested and sse_event.get("type") == "text_delta":
+                    buffered_text_events.append(sse_event)
+                    continue
+                if reminder_create_requested and sse_event.get("type") == "done":
+                    metadata = sse_event.get("metadata") or {}
+                    reminder_receipt = metadata.get("reminder")
+                    buffered_text = "".join(
+                        str(event.get("delta", "")) for event in buffered_text_events
+                    )
+                    if (
+                        not reminder_receipt
+                        and has_unreceipted_reminder_success_claim(buffered_text)
+                    ):
+                        logger.warn(
+                            "text_action_success_claim_without_receipt",
+                            {
+                                "user_id": user_id,
+                                "session_id": session_id,
+                                "tool": "set_reminder",
+                            },
+                        )
+                        buffered_text_events = [{
+                            "type": "text_delta",
+                            "delta": (
+                                "I couldn't verify that reminder, so I won't say it's set. "
+                                "Want me to try again?"
+                            ),
+                        }]
+                    for buffered_event in buffered_text_events:
+                        yield f"data: {json.dumps(buffered_event)}\n\n"
+                    buffered_text_events = []
                 yield f"data: {json.dumps(sse_event)}\n\n"
             duration_ms = int((time.monotonic() - start_ts) * 1000)
             logger.info(

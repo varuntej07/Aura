@@ -166,6 +166,9 @@ async def claim_meeting(
                 F.SEGMENTS: [],
                 F.CREATED_AT: now.isoformat(),
                 F.UPDATED_AT: now.isoformat(),
+                F.PROCESSING_STAGE: F.STAGE_CAPTURING,
+                F.STATUS_REVISION: 0,
+                F.ATTEMPT_COUNT: 0,
             })
             txn.set(lock_ref, {
                 F.CLAIM_EVENT_ID: event_id,
@@ -226,6 +229,10 @@ async def append_segment_meta(
                 },
             ]),
             F.UPDATED_AT: datetime.now(UTC).isoformat(),
+            F.PROCESSING_STAGE: F.STAGE_UPLOADING,
+            F.RETRYABLE: False,
+            F.FAILURE_CODE: gcloud_firestore.DELETE_FIELD,
+            F.FAILURE_MESSAGE: gcloud_firestore.DELETE_FIELD,
         })
 
     await asyncio.to_thread(_update)
@@ -237,12 +244,15 @@ async def transition_status(
     *,
     from_statuses: tuple[str, ...],
     to_status: str,
+    stage: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Transactional compare-and-set on ``status`` - the worker's idempotency
     primitive. Returns (transitioned, status_now); a doc already past the
     transition reports its current status so callers can treat re-runs as
-    settled instead of failed. Raises on Firestore failure."""
+    settled instead of failed. Every successful transition bumps
+    ``status_revision`` and, when given, ``processing_stage``. Raises on
+    Firestore failure."""
     def _run() -> tuple[bool, str]:
         db = admin_firestore()
         doc_ref = _meetings_ref(uid).document(meeting_id)
@@ -259,7 +269,10 @@ async def transition_status(
             update: dict[str, Any] = {
                 F.STATUS: to_status,
                 F.UPDATED_AT: datetime.now(UTC).isoformat(),
+                F.STATUS_REVISION: gcloud_firestore.Increment(1),
             }
+            if stage is not None:
+                update[F.PROCESSING_STAGE] = stage
             if extra:
                 update.update(extra)
             txn.update(doc_ref, update)
@@ -273,6 +286,88 @@ async def transition_status(
         "transitioned": transitioned, "status_now": status_now,
     })
     return transitioned, status_now
+
+
+def failure_meta(*, code: str, retryable: bool, message: str = "") -> dict[str, Any]:
+    """The failure fields to stamp alongside a transition into a terminal or
+    recoverable-failed state. ``code`` is a safe FAIL_* enum, never a raw
+    provider exception string."""
+    return {
+        F.FAILURE_CODE: code,
+        F.FAILURE_MESSAGE: message,
+        F.RETRYABLE: retryable,
+        F.LAST_ERROR_AT: datetime.now(UTC).isoformat(),
+    }
+
+
+def clear_failure_meta() -> dict[str, Any]:
+    """The inverse of failure_meta: drop the failure signal when a meeting is
+    re-driven from a recoverable state (POST /meetings/{id}/retry)."""
+    return {
+        F.RETRYABLE: False,
+        F.FAILURE_CODE: gcloud_firestore.DELETE_FIELD,
+        F.FAILURE_MESSAGE: gcloud_firestore.DELETE_FIELD,
+    }
+
+
+async def record_upload_failure(uid: str, meeting_id: str, *, code: str) -> None:
+    """Persist a safe upload problem without changing the coarse status.
+
+    The encrypted desktop queue remains authoritative until /complete, so the
+    meeting must continue accepting segment retries while the backend exposes a
+    durable reason to newer clients.
+    """
+    update = {
+        F.PROCESSING_STAGE: F.STAGE_UPLOADING,
+        F.UPDATED_AT: datetime.now(UTC).isoformat(),
+        **failure_meta(code=code, retryable=True),
+    }
+    await asyncio.to_thread(_meetings_ref(uid).document(meeting_id).update, update)
+
+
+async def mark_failed(
+    uid: str,
+    meeting_id: str,
+    *,
+    from_statuses: tuple[str, ...],
+    code: str,
+    retryable: bool,
+    message: str = "",
+) -> tuple[bool, str]:
+    """Transition to ``failed`` and stamp the safe failure metadata in one CAS."""
+    return await transition_status(
+        uid, meeting_id,
+        from_statuses=from_statuses,
+        to_status=F.STATUS_FAILED,
+        extra=failure_meta(code=code, retryable=retryable, message=message),
+    )
+
+
+async def set_stage(uid: str, meeting_id: str, stage: str) -> None:
+    """Mark a finer processing_stage WITHOUT a status change (e.g. transcribing
+    -> building_insights inside one synthesizing lease). Best-effort: a failed
+    stage marker must not abort the run it annotates."""
+    def _update() -> None:
+        _meetings_ref(uid).document(meeting_id).update({
+            F.PROCESSING_STAGE: stage,
+            F.UPDATED_AT: datetime.now(UTC).isoformat(),
+        })
+
+    try:
+        await asyncio.to_thread(_update)
+    except Exception as exc:
+        logger.warn("meetings.store: set_stage failed", {
+            "user_id": uid, "meeting_id": meeting_id, "stage": stage, "error": str(exc),
+        })
+
+
+def synthesis_lease_is_fresh(meeting: dict[str, Any], *, now_ms: int | None = None) -> bool:
+    """Whether a synthesizing meeting is still owned by a live worker."""
+    if meeting.get(F.STATUS) != F.STATUS_SYNTHESIZING:
+        return False
+    current_ms = now_ms if now_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
+    started_ms = int(meeting.get(F.SYNTHESIS_STARTED_AT_MS, 0))
+    return current_ms - started_ms < F.SYNTHESIS_LEASE_MS
 
 
 async def claim_synthesis(uid: str, meeting_id: str) -> tuple[bool, str]:
@@ -295,10 +390,7 @@ async def claim_synthesis(uid: str, meeting_id: str) -> tuple[bool, str]:
                 return False, ""
             data = snap.to_dict() or {}
             current = data.get(F.STATUS, "")
-            lease_fresh = (
-                now_ms - int(data.get(F.SYNTHESIS_STARTED_AT_MS, 0))
-                < F.SYNTHESIS_LEASE_MS
-            )
+            lease_fresh = synthesis_lease_is_fresh(data, now_ms=now_ms)
             if current == F.STATUS_SYNTHESIZING and lease_fresh:
                 return False, current
             if current not in (F.STATUS_UPLOADED, F.STATUS_SYNTHESIZING):
@@ -307,6 +399,9 @@ async def claim_synthesis(uid: str, meeting_id: str) -> tuple[bool, str]:
                 F.STATUS: F.STATUS_SYNTHESIZING,
                 F.SYNTHESIS_STARTED_AT_MS: now_ms,
                 F.UPDATED_AT: datetime.now(UTC).isoformat(),
+                F.PROCESSING_STAGE: F.STAGE_TRANSCRIBING,
+                F.ATTEMPT_COUNT: gcloud_firestore.Increment(1),
+                F.STATUS_REVISION: gcloud_firestore.Increment(1),
             })
             return True, F.STATUS_SYNTHESIZING
 
@@ -336,6 +431,12 @@ async def save_note(
         F.NOTE: note,
         F.STATUS: F.STATUS_READY,
         F.UPDATED_AT: now.isoformat(),
+        F.PROCESSING_STAGE: F.STAGE_READY,
+        F.STATUS_REVISION: gcloud_firestore.Increment(1),
+        # A successful (re)run clears any earlier failure signal.
+        F.RETRYABLE: False,
+        F.FAILURE_CODE: gcloud_firestore.DELETE_FIELD,
+        F.FAILURE_MESSAGE: gcloud_firestore.DELETE_FIELD,
     }
     if effective_tier != "pro":
         update[F.EXPIRES_AT] = now + timedelta(days=F.RETENTION_DAYS)
@@ -345,6 +446,12 @@ async def save_note(
         "user_id": uid, "meeting_id": meeting_id, "tier": effective_tier,
         "summary_chars": len(note.get("summary", "")),
         "action_items": len(note.get("action_items", [])),
+        "transcript_turns": len(note.get(F.NOTE_TRANSCRIPT, [])),
+        "transcript_chars": sum(
+            len(turn.get(F.TRANSCRIPT_TEXT, ""))
+            for turn in note.get(F.NOTE_TRANSCRIPT, [])
+            if isinstance(turn, dict)
+        ),
     })
 
 

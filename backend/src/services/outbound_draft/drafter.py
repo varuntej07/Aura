@@ -29,16 +29,34 @@ from ..chat_completion.prompt_builder import _TONE_DESCRIPTIONS
 from ..model_provider import get_model_provider
 from ..user_aura_schema import interest_prompt_lines
 
-Channel = Literal["email_reply", "cold_dm", "snippet"]
+Channel = Literal["on_screen", "email_reply", "cold_dm", "snippet"]
 Length = Literal["short", "medium", "detailed"]
 
+# "on_screen" is the general, adaptive default: the vision model reads the
+# screenshot to see what's being written and where it goes (a form or
+# application field, a message box, an email, a comment, a bio, a post), then
+# writes exactly that text as the user. It carries the user's writing voice
+# like the outbound channels but ignores the length ladder (length is inferred
+# from the field/intent), so there is never a "how long?" question. This is the
+# channel the voice tool falls back to whenever the model doesn't (or can't)
+# name a more specific one, which kills the old "email or new message?" loop.
+DEFAULT_CHANNEL = "on_screen"
+
 # "snippet" is the copy-exact channel: terminal commands, code, config. Unlike
-# the two outbound channels it needs no screen frame (the spoken intent is often
+# the outbound channels it needs no screen frame (the spoken intent is often
 # the whole spec) and ignores the length ladder and the user's writing voice.
 SNIPPET_CHANNEL = "snippet"
 
-CHANNELS: frozenset[str] = frozenset({"email_reply", "cold_dm", SNIPPET_CHANNEL})
+CHANNELS: frozenset[str] = frozenset(
+    {DEFAULT_CHANNEL, "email_reply", "cold_dm", SNIPPET_CHANNEL}
+)
 LENGTHS: frozenset[str] = frozenset({"short", "medium", "detailed"})
+
+# Channels that carry the user's writing voice AND infer their own length from
+# the screen/intent instead of the length ladder (so the caller never has to
+# supply or ask for a length). "snippet" also skips the ladder but carries no
+# persona; it is handled separately.
+_ADAPTIVE_LENGTH_CHANNELS: frozenset[str] = frozenset({DEFAULT_CHANNEL, SNIPPET_CHANNEL})
 
 # Coded reasons, mirroring the keyboard drafter: the caller maps every one of
 # these to graceful speech/UI copy. Loud, never silent.
@@ -126,7 +144,11 @@ async def draft_outbound(
     expert vision tier; a frameless snippet runs text-only on the balanced
     tier, which is snappier and cheaper.
     """
-    if channel not in CHANNELS or length not in LENGTHS:
+    # Adaptive-length channels (on_screen, snippet) infer length from the
+    # screen/intent, so a blank length is valid for them; the outbound channels
+    # still need one from the ladder.
+    length_ok = length in LENGTHS or channel in _ADAPTIVE_LENGTH_CHANNELS
+    if channel not in CHANNELS or not length_ok:
         return OutboundDraftResult(reason=REASON_INVALID)
     if not jpeg_base64 and channel != SNIPPET_CHANNEL:
         return OutboundDraftResult(reason=REASON_NO_FRAME)
@@ -207,7 +229,8 @@ async def refine_outbound(
     """Rework an existing draft per the instruction. Text-only, never raises."""
     prior = prior_draft.strip()[:PRIOR_DRAFT_MAX_CHARS]
     instruction = refine_instruction.strip()[:HINT_MAX_CHARS]
-    if channel not in CHANNELS or length not in LENGTHS or not prior or not instruction:
+    length_ok = length in LENGTHS or channel in _ADAPTIVE_LENGTH_CHANNELS
+    if channel not in CHANNELS or not length_ok or not prior or not instruction:
         return OutboundDraftResult(reason=REASON_INVALID)
 
     summary = context_summary.strip()[:CONTEXT_SUMMARY_MAX_CHARS]
@@ -271,6 +294,21 @@ _SCREEN_SECURITY_RULE = (
 )
 
 _CHANNEL_NORMS: dict[str, str] = {
+    DEFAULT_CHANNEL: (
+        "CHANNEL: the user wants text written for something visible in the "
+        "screenshot, and it is your job to see what that is: a form or "
+        "application field, a message or chat box, an email they're replying to, "
+        "a comment, a bio, a post, a review, anything with a place for words. "
+        "Read the screen to find exactly what is being asked for and where the "
+        "text will go, then write ONLY that text, in first person as the user, "
+        "ready to paste in as-is. A form or field or box gets just the answer to "
+        "what it asks, no greeting and no sign-off; add a greeting or sign-off "
+        "only when the surface is genuinely a personal message or email that "
+        "calls for one. Follow the user's spoken instructions on tone, length, "
+        "and content exactly, and match the length the field or context implies. "
+        "Never ask which kind it is or how long it should be: the screen tells "
+        "you."
+    ),
     "email_reply": (
         "CHANNEL: the user is replying to the email visible in the screenshot. "
         "Read the thread carefully and answer what was actually asked. Use a "
@@ -334,7 +372,7 @@ def _build_system_prompt(channel: str, length: str, voice_lines: list[str]) -> s
         return "\n\n".join(parts)
 
     parts = [
-        "You write outbound messages AS THE USER, in first person, ready to send "
+        "You write text AS THE USER, in first person, ready to paste or send "
         "as-is. Never address the user, never add commentary, labels, subject "
         "lines, or surrounding quotes. Keep it natural and human. Never use "
         "em-dashes."
@@ -347,7 +385,10 @@ def _build_system_prompt(channel: str, length: str, voice_lines: list[str]) -> s
     else:
         parts.append(_DEFAULT_VOICE)
     parts.append(_CHANNEL_NORMS[channel])
-    parts.append(_LENGTH_NORMS[length])
+    # on_screen infers its own length from the field/context, so it only gets a
+    # ladder norm when the user actually named a length.
+    if length in _LENGTH_NORMS:
+        parts.append(_LENGTH_NORMS[length])
     parts.append(_SCREEN_SECURITY_RULE)
     parts.append(
         'Output ONLY valid JSON: {"message": "...", "context_summary": "..."}. '
@@ -395,20 +436,28 @@ def _build_draft_user_prompt(
             )
         return "\n".join(lines)
 
-    lines = [f"CHANNEL: {channel}", f"LENGTH: {length}"]
+    lines = [f"CHANNEL: {channel}"]
+    if length in _LENGTH_NORMS:
+        lines.append(f"LENGTH: {length}")
     if recipient_hint:
         lines.append(f"RECIPIENT (from the user's spoken words): {recipient_hint}")
     if intent:
         lines.append(f"WHAT THE USER WANTS (their spoken words): {intent}")
     if display_name:
         lines.append(f"The user's name, for a sign-off where one fits: {display_name}")
-    if jpeg_width and jpeg_height:
-        lines.append(
-            f"The screenshot is {jpeg_width}x{jpeg_height}px and shows the "
-            "message or person to write to."
+    # on_screen writes into a field/box/surface anywhere on screen; the other
+    # channels are always a reply-to or a person, so their frame line is specific.
+    if channel == DEFAULT_CHANNEL:
+        screen_desc = (
+            "shows what the user is looking at: find what is being asked for and "
+            "where the text will go."
         )
     else:
-        lines.append("The screenshot shows the message or person to write to.")
+        screen_desc = "shows the message or person to write to."
+    if jpeg_width and jpeg_height:
+        lines.append(f"The screenshot is {jpeg_width}x{jpeg_height}px and {screen_desc}")
+    else:
+        lines.append(f"The screenshot {screen_desc}")
     return "\n".join(lines)
 
 
@@ -421,8 +470,9 @@ def _build_refine_user_prompt(
     context_summary: str,
 ) -> str:
     lines: list[str] = [f"CHANNEL: {channel}"]
-    if channel != SNIPPET_CHANNEL:
-        # A snippet is as long as it needs to be; the ladder is message-only.
+    if channel not in _ADAPTIVE_LENGTH_CHANNELS and length in LENGTHS:
+        # A snippet or on_screen draft is as long as it needs to be; the ladder
+        # only applies to the two outbound channels when a length was named.
         lines.append(f"TARGET LENGTH: {length}")
     lines += [
         f"REFINE INSTRUCTION: {refine_instruction}",

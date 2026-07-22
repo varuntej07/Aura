@@ -2,7 +2,7 @@ name: aura
 description: "Aura - Voice-first personal AI companion"
 publish_to: 'none'
 
-version: 2.2.0+11
+version: 2.2.0+12
 
 environment:
   sdk: ^3.10.7
@@ -40,6 +40,7 @@ dependencies:
   posthog_flutter:
   wakelock_plus:
   package_info_plus: 9.0.1  # runtime app version/build for feedback docs
+  device_info_plus: 12.3.0  # sign-in device metadata; must match the release-build pin in dependency_overrides below
   app_links:  # aura://voice deep link (Voice Launcher: Siri / widgets / external links)
 
 dev_dependencies:

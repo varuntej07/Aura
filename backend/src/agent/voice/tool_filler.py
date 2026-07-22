@@ -32,35 +32,11 @@ import time
 from livekit.agents import AgentSession
 
 from ...lib.logger import logger
+from ...shared.tool_thinking_phrases import SLOW_TOOL_THINKING_PHRASES
 
-# Tools whose round-trip is long enough (multi-second LLM/vision/web work, up
-# to the 8s MCP cap) that the user needs to hear Buddy acknowledge before the
-# real reply. Keep every phrase short: it must finish before the tool does.
-SLOW_TOOL_THINKING_PHRASES: dict[str, list[str]] = {
-    # draft_outbound_message is deliberately NOT listed: it is an async tool
-    # (ctx.update in draft_outbound.py speaks a contextual acknowledgment in
-    # Buddy's persona); a canned phrase here would double-speak on top of it.
-    "create_calendar_event": [
-        "cool, popping that on your calendar",
-        "alright, getting that on the calendar",
-        "on it, adding that now",
-    ],
-    "query_memory": [
-        "lemme think back for a sec",
-        "digging through what I remember",
-        "one sec, jogging my memory",
-    ],
-    "get_user_context": [
-        "lemme pull up your stuff real quick",
-        "one sec, grabbing your details",
-    ],
-    "web_surf": [
-        "ooh good question, lemme look that up",
-        "hang on, let me actually check that",
-        "one sec, looking that up real quick",
-        "lemme make sure I get this right",
-    ],
-}
+# SLOW_TOOL_THINKING_PHRASES now lives in shared/tool_thinking_phrases.py so voice
+# (which SPEAKS a phrase) and text chat (which STREAMS one as a tool_status event)
+# share one source of truth. Re-exported here so existing importers keep working.
 
 # Spoken while the draft tool's vision call is still running after the first
 # filler has landed (see draft_outbound_message in buddy_agent.py). The delay

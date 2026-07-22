@@ -50,6 +50,7 @@ FIELD_CLAIMED_AT = "claimed_at"
 FIELD_ATTEMPTS = "attempts"
 FIELD_ANSWER_TEXT = "answer_text"
 FIELD_COMPLETED_TOOLS = "completed_tools"  # side-effecting tools that already ran (for synthesize/skip)
+FIELD_TOOL_RECEIPTS = "tool_receipts"      # successful result per tool, owned by this turn
 FIELD_REMINDER = "reminder"                # reminder payload if the turn created one
 FIELD_PUSHED = "pushed"
 FIELD_EXPIRES_AT = "expires_at"
@@ -267,7 +268,13 @@ async def mark_failed(user_id: str, cmid: str) -> None:
         })
 
 
-async def record_completed_tool(user_id: str, cmid: str, *, tool: str) -> None:
+async def record_completed_tool(
+    user_id: str,
+    cmid: str,
+    *,
+    tool: str,
+    result: dict[str, Any],
+) -> None:
     """Append a side-effecting tool name to the turn doc as it commits during the live
     turn. The completion endpoint reads this to decide synthesize-vs-regenerate. Append
     is idempotent (ArrayUnion). Fail-open: this is bookkeeping, never break the turn."""
@@ -275,9 +282,10 @@ async def record_completed_tool(user_id: str, cmid: str, *, tool: str) -> None:
         return
 
     def _write() -> None:
-        _ref(user_id, cmid).set(
-            {FIELD_COMPLETED_TOOLS: fs.ArrayUnion([tool])}, merge=True
-        )
+        _ref(user_id, cmid).set({
+            FIELD_COMPLETED_TOOLS: fs.ArrayUnion([tool]),
+            FIELD_TOOL_RECEIPTS: {tool: result},
+        }, merge=True)
 
     try:
         await asyncio.to_thread(_write)

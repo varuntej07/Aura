@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from google.cloud import firestore as fs
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ...lib.logger import logger
 from ..firebase import admin_firestore
@@ -106,13 +107,21 @@ async def run_idempotent(
         logger.warn("tool_idempotency: claim failed, running tool unguarded (fail-open)", {
             "user_id": user_id, "cmid": cmid, "tool": tool_name, "error": str(exc),
         })
-        return await handler(input_data)
+        result = await handler(input_data)
+        if isinstance(result, dict) and not result.get("error"):
+            await turn_store.record_completed_tool(
+                user_id, cmid, tool=tool_name, result=result,
+            )
+        return result
 
     if not claimed:
         logger.info("tool_idempotency: duplicate side effect suppressed", {
             "user_id": user_id, "cmid": cmid, "tool": tool_name,
         })
         if isinstance(stored, dict):
+            await turn_store.record_completed_tool(
+                user_id, cmid, tool=tool_name, result=stored,
+            )
             return stored
         # Winner is still running (rare concurrent case) or the result wasn't stored:
         # return a benign confirmation rather than re-running the side effect.
@@ -130,11 +139,62 @@ async def run_idempotent(
         await _persist_result(ref, result)
         # Record on the turn doc so completion.py can synthesize a confirmation without
         # re-running the LLM (and never regenerate a turn that already did real work).
-        await turn_store.record_completed_tool(user_id, cmid, tool=tool_name)
+        await turn_store.record_completed_tool(
+            user_id, cmid, tool=tool_name, result=result,
+        )
     else:
         # A handled tool error (returned, not raised): release so it can be retried.
         await _release(ref)
     return result
+
+
+async def get_turn_receipts(user_id: str, cmid: str) -> dict[str, dict[str, Any]]:
+    """Return the stored successful result per side-effecting tool for this turn.
+
+    Reads the disposable idempotency claims (keyed by ``(cmid, tool, args)``) that
+    ``run_idempotent`` persisted with ``STATUS_DONE``. Lets completion.py ground a
+    synthesized confirmation and hydrate its reminder card from the ACTUAL tool receipt
+    rather than asserting an action from a tool name alone. Filters ``client_message_id``
+    (an equality query, so it rides the automatic single-field index — no composite index)
+    and screens status in memory. Only runs on the rare background-completion path, so the
+    extra read is negligible. Fail-open: returns ``{}`` on any read error.
+    """
+    if not cmid:
+        return {}
+
+    turn = await turn_store.get_turn(user_id, cmid)
+    owning_receipts = (turn or {}).get(turn_store.FIELD_TOOL_RECEIPTS)
+    if isinstance(owning_receipts, dict):
+        return {
+            str(tool): result
+            for tool, result in owning_receipts.items()
+            if isinstance(result, dict)
+        }
+
+    def _read() -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        query = (
+            admin_firestore()
+            .collection(COLLECTION)
+            .where(filter=FieldFilter(FIELD_CMID, "==", cmid))
+        )
+        for snap in query.stream():
+            row = snap.to_dict() or {}
+            if row.get(FIELD_STATUS) != STATUS_DONE:
+                continue
+            tool = str(row.get(FIELD_TOOL) or "")
+            result = row.get(FIELD_RESULT)
+            if tool and isinstance(result, dict) and tool not in out:
+                out[tool] = result
+        return out
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn("tool_idempotency: receipt read failed (fail-open)", {
+            "user_id": user_id, "cmid": cmid, "error": str(exc),
+        })
+        return {}
 
 
 async def _persist_result(ref: fs.DocumentReference, result: dict[str, Any]) -> None:

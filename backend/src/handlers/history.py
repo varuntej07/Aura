@@ -25,8 +25,14 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
+from ..services import voice_session_fields as vf
 from ..services.firebase import admin_firestore
 from ..services.request_auth import resolve_user_id_from_request
+from ..services.voice_history_store import (
+    delete_conversation_data,
+    delete_voice_run_data,
+    load_voice_messages,
+)
 
 _SESSIONS_COLLECTION = "voice_sessions"
 _STATE_COLLECTION = "voice_session_state"
@@ -60,12 +66,18 @@ def _session_summary_row(doc_id: str, data: dict) -> dict:
     handle_get_session_detail for the full transcript, fetched lazily per row."""
     return {
         "session_id": doc_id,
+        vf.VOICE_RUN_ID: data.get(vf.VOICE_RUN_ID, doc_id),
+        vf.CONVERSATION_ID: data.get(vf.CONVERSATION_ID, ""),
+        vf.SURFACE: data.get(vf.SURFACE, vf.SURFACE_UNKNOWN),
+        vf.SCHEMA_VERSION: data.get(vf.SCHEMA_VERSION, 1),
         "started_at": data.get("started_at", ""),
         "ended_at": data.get("ended_at", ""),
         "total_duration": data.get("total_duration", ""),
         "num_of_turns": data.get("num_of_turns", 0),
         "num_of_tool_calls": data.get("num_of_tool_calls", 0),
-        "summary": data.get("summary", ""),
+        "summary": data.get(vf.RECAP) or data.get("summary", ""),
+        vf.RECAP: data.get(vf.RECAP) or data.get("summary", ""),
+        vf.ACTIONS: data.get(vf.ACTIONS, []),
         "screen_sight_frame_count": data.get("screen_sight_frame_count", 0),
     }
 
@@ -145,23 +157,44 @@ async def handle_get_session_detail(request: Request, session_id: str) -> JSONRe
     if data is None:
         return JSONResponse({"error": "Not found."}, status_code=404)
 
+    conversation_id = str(data.get(vf.CONVERSATION_ID) or "")
+    raw_turns = data.get("raw_turns") if isinstance(data.get("raw_turns"), list) else []
+    canonical_messages = await load_voice_messages(
+        user_id,
+        conversation_id=conversation_id,
+        voice_run_id=str(data.get(vf.VOICE_RUN_ID) or session_id),
+        raw_turns=raw_turns,
+    ) if conversation_id else []
+    transcript = (
+        [
+            {
+                "role": message["role"],
+                "text": message["text"],
+                "timestamp": message["timestamp"],
+                "message_id": message["message_id"],
+                vf.VOICE_RUN_ID: message[vf.VOICE_RUN_ID],
+            }
+            for message in canonical_messages
+        ]
+        if canonical_messages
+        else raw_turns
+    )
+
     return JSONResponse({
         "session_id": session_id,
+        vf.VOICE_RUN_ID: data.get(vf.VOICE_RUN_ID, session_id),
+        vf.CONVERSATION_ID: conversation_id,
+        vf.SURFACE: data.get(vf.SURFACE, vf.SURFACE_UNKNOWN),
+        vf.SCHEMA_VERSION: data.get(vf.SCHEMA_VERSION, 1),
         "started_at": data.get("started_at", ""),
         "ended_at": data.get("ended_at", ""),
         "total_duration": data.get("total_duration", ""),
-        "summary": data.get("summary", ""),
-        "raw_turns": data.get("raw_turns", []),
+        "summary": data.get(vf.RECAP) or data.get("summary", ""),
+        vf.RECAP: data.get(vf.RECAP) or data.get("summary", ""),
+        vf.ACTIONS: data.get(vf.ACTIONS, []),
+        "raw_turns": transcript,
+        "messages": canonical_messages,
     })
-
-
-async def _delete_session(uid: str, session_id: str) -> bool:
-    try:
-        await asyncio.to_thread(_sessions_collection(uid).document(session_id).delete)
-        return True
-    except Exception as exc:
-        logger.warn("History: delete failed", {"user_id": uid, "error": str(exc)})
-        return False
 
 
 async def handle_delete_session(request: Request, session_id: str) -> JSONResponse:
@@ -175,6 +208,38 @@ async def handle_delete_session(request: Request, session_id: str) -> JSONRespon
     if not session_id:
         return JSONResponse({"error": "Missing session id."}, status_code=400)
 
-    ok = await _delete_session(user_id, session_id)
-    logger.info("History: deleted", {"user_id": user_id, "session_id": session_id, "ok": ok})
-    return JSONResponse({"ok": ok})
+    result = await delete_voice_run_data(user_id, session_id)
+    logger.info("History: voice run deleted", {
+        "user_id": user_id, "session_id": session_id,
+        "ok": result.ok, "messages": result.messages,
+    })
+    return JSONResponse({
+        "ok": result.ok,
+        "messages_deleted": result.messages,
+        "voice_runs_deleted": result.voice_runs,
+    })
+
+
+async def handle_delete_conversation(
+    request: Request, conversation_id: str,
+) -> JSONResponse:
+    """DELETE /history/conversations/{id}: delete the whole canonical thread."""
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    conversation_id = (conversation_id or "").strip()
+    if not conversation_id:
+        return JSONResponse({"error": "Missing conversation id."}, status_code=400)
+
+    result = await delete_conversation_data(user_id, conversation_id)
+    logger.info("History: conversation deleted", {
+        "user_id": user_id, "conversation_id": conversation_id,
+        "ok": result.ok, "messages": result.messages,
+        "voice_runs": result.voice_runs,
+    })
+    return JSONResponse({
+        "ok": result.ok,
+        "messages_deleted": result.messages,
+        "voice_runs_deleted": result.voice_runs,
+        "conversation_deleted": result.conversation_deleted,
+    })

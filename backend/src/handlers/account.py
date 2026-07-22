@@ -2,8 +2,9 @@
 DELETE /account permanently deletes a user's account.
 
 Deletes in order:
-1. Firestore subcollections and documents (data first)
-2. Firebase Auth user (last, so retries don't orphan data if step 1 partially fails)
+1. Raw meeting audio in Cloud Storage
+2. Firestore subcollections and documents
+3. Firebase Auth user (last, so retries don't orphan data if an earlier step fails)
 
 All Firestore deletions run via batch writes where possible to minimize round trips.
 """
@@ -16,6 +17,7 @@ from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
 from ..services.firebase import admin_auth, admin_firestore
+from ..services.meetings import gcs_audio as meeting_audio
 from ..services.request_auth import decode_firebase_claims
 from .pairing import FIELD_UID as PAIRING_FIELD_UID
 
@@ -32,6 +34,10 @@ async def handle_delete_account(request: Request) -> JSONResponse:
     logger.info("account: delete requested", {"user_id": uid})
 
     try:
+        # Raw meeting audio is outside Firestore. Delete it strictly before
+        # removing account records so a storage failure leaves Auth intact and
+        # the user can safely retry the deletion request.
+        await meeting_audio.delete_user_audio(uid)
         await asyncio.to_thread(_delete_all_user_data, uid)
         await asyncio.to_thread(_delete_firebase_auth_user, uid)
         logger.info("account: deletion complete", {"user_id": uid})
@@ -76,7 +82,7 @@ def _delete_all_user_data(uid: str) -> None:
 def _delete_document_and_subcollections(db, doc_ref) -> None:
     for sub_collection in doc_ref.collections():
         for sub_doc in sub_collection.stream():
-            sub_doc.reference.delete()
+            _delete_document_and_subcollections(db, sub_doc.reference)
     doc_ref.delete()
 
 

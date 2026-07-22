@@ -22,12 +22,12 @@ from __future__ import annotations
 import asyncio
 import statistics
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ...lib.logger import logger
 from .. import notification_budget, notification_ledger
 from ..firebase import admin_firestore
 from ..notification_service import NotificationResult
+from ..timezone_utils import TimezoneResolutionError, localize
 from . import delivery_router, post_send, queue_store, tap_gate
 from .proposal import (
     REASON_ACTIVE_TRACKER,
@@ -133,7 +133,16 @@ async def drain_user_queue(
         return None
 
     # Stage 2: quiet hours hold everything for a later window.
-    local_now, local_date = await _user_local(user_id, now)
+    try:
+        local_now, local_date = await _user_local(user_id, now)
+    except TimezoneResolutionError as exc:
+        await _hold_all(user_id, survivors, now)
+        logger.warn("orchestrator: proactive held (timezone unresolved)", {
+            "user_id": user_id,
+            "reason": str(exc),
+            "held": len(survivors),
+        })
+        return OrchestratorDecision(Disposition.HOLD, "timezone_unresolved")
     if _is_quiet_hours(local_now):
         await _hold_all(user_id, survivors, now)
         logger.info("orchestrator: proactive held (quiet hours)", {
@@ -452,18 +461,9 @@ async def _user_local(user_id: str, now: datetime) -> tuple[datetime, str]:
 
     try:
         tz_name = await asyncio.to_thread(_fetch_tz)
-        if not tz_name:
-            logger.warn("orchestrator: user has no timezone, using UTC (wrong local clock)", {
-                "user_id": user_id,
-            })
-            local = now.astimezone(UTC)
-        else:
-            local = now.astimezone(ZoneInfo(tz_name))
-    except (ZoneInfoNotFoundError, Exception) as exc:
-        logger.warn("orchestrator: timezone resolve failed, using UTC", {
-            "user_id": user_id, "error": str(exc),
-        })
-        local = now.astimezone(UTC)
+    except Exception as exc:
+        raise TimezoneResolutionError("timezone profile lookup failed") from exc
+    local = localize(now, tz_name)
     return local, local.date().isoformat()
 
 

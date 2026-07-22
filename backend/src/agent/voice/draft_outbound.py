@@ -43,6 +43,7 @@ from ...services.drafts import store as draft_store
 from ...services.entitlement import check_and_increment_daily_outbound_draft_usage
 from ...services.outbound_draft.drafter import (
     CHANNELS,
+    DEFAULT_CHANNEL,
     LENGTHS,
     REASON_OK,
     SNIPPET_CHANNEL,
@@ -66,8 +67,9 @@ _CTX_UPDATE_TIMEOUT_S = 5.0
 # What the model speaks when a call can't produce a draft. Each line is a
 # complete, natural sentence the TTS reads verbatim, mirroring the voice
 # prompt's own phrasing (the control-alt-S line matches the screen-sight note).
-SPOKEN_ASK_LENGTH = "Quick one first, should it be short, medium, or detailed?"
-SPOKEN_ASK_CHANNEL = "Is this a reply to an email, or a message to someone new?"
+# There is deliberately NO ask-channel or ask-length line: Buddy can see the
+# screen, so the drafter infers both instead of interrogating the user (the
+# old email-vs-DM question had no answer for a form field and looped forever).
 SPOKEN_NO_FRAME = (
     "I can't see your screen yet. Hit control alt S, or tap the eye on my "
     "panel, then ask me again."
@@ -130,8 +132,10 @@ async def run_draft_tool(
     ``run_ctx`` turns the slow new-draft path into an async tool: the first
     ``ctx.update`` releases the LLM to acknowledge immediately (no dead air
     while the expert vision call runs) and ``ctx.with_filler`` breaks any long
-    remaining silence. The fast paths (ask-channel, ask-length, refine) never
-    call ``ctx.update``, so they stay synchronous single-utterance turns.
+    remaining silence. The refine path never calls ``ctx.update``, so it stays a
+    synchronous single-utterance turn. With a frame present, every new-draft
+    call now reaches this async path (no clarifying-question bounce), so the
+    desktop skeleton and the spoken "still on it" filler always show.
     """
     channel = (channel or "").strip()
     length = (length or "").strip()
@@ -148,17 +152,21 @@ async def run_draft_tool(
         if refine_instruction and not intent:
             intent = refine_instruction
 
+        # No channel (or an unrecognized one) means "just write what's on my
+        # screen": fall back to the adaptive on_screen channel instead of asking
+        # which kind it is. The drafter reads the frame to decide.
         if channel not in CHANNELS:
-            return SPOKEN_ASK_CHANNEL
+            channel = DEFAULT_CHANNEL
         if channel == SNIPPET_CHANNEL:
             # Snippets have no length ladder; "short" keeps the shared
             # DraftState/store/refine contract satisfied and is ignored by the
             # snippet prompt.
             length = "short"
-        elif length not in LENGTHS:
-            # The prompt tells the model to ask BEFORE calling; this bounds a
-            # miss to one extra spoken round-trip, with no draft and no quota.
-            return SPOKEN_ASK_LENGTH
+        elif channel != DEFAULT_CHANNEL and length not in LENGTHS:
+            # email_reply / cold_dm still want a ladder length. Default rather
+            # than ask, so a missing length never bounces the draft. on_screen
+            # is skipped here: it infers its own length from the field/context.
+            length = "medium"
 
         return await _draft_new(
             state,

@@ -17,7 +17,14 @@ from google.api_core.exceptions import AlreadyExists
 from google.cloud.firestore_v1.field_path import FieldPath
 
 from ..firebase import admin_firestore
-from .proposal import NotificationProposal
+from .proposal import (
+    SOURCE_FOLLOWUP,
+    SOURCE_ICEBREAKER,
+    SOURCE_MEMORY_GRAPH,
+    SOURCE_REENGAGE,
+    SOURCE_THREAD,
+    NotificationProposal,
+)
 
 SCHEMA_VERSION = 1
 OUTBOX_RETENTION_DAYS = 30
@@ -65,6 +72,13 @@ ACTIONS = frozenset({
     "open_notifications",
     "view_meeting",
     "retry_meeting_upload",
+})
+SENSITIVE_SOURCES = frozenset({
+    SOURCE_FOLLOWUP,
+    SOURCE_ICEBREAKER,
+    SOURCE_MEMORY_GRAPH,
+    SOURCE_REENGAGE,
+    SOURCE_THREAD,
 })
 
 
@@ -114,13 +128,14 @@ def build_document(
     if not notification_id or len(notification_id) > MAX_ID_LENGTH:
         raise ValueError("invalid desktop notification id")
     notification_type = proposal.notification_type
-    if notification_type not in NOTIFICATION_TYPES:
-        raise ValueError(f"unsupported desktop notification type: {notification_type}")
+    generic = notification_type not in NOTIFICATION_TYPES
+    if generic:
+        notification_type = "generic"
 
     data = proposal.data
     severity = data.get("severity", "info")
-    toast_policy = data.get("toast_policy", "inbox_only")
-    action = data.get("action") or None
+    toast_policy = data.get("toast_policy", "when_hidden" if generic else "inbox_only")
+    action = data.get("action") or ("open_notifications" if generic else None)
     if severity not in SEVERITIES:
         raise ValueError("invalid desktop notification severity")
     if toast_policy not in TOAST_POLICIES:
@@ -147,7 +162,7 @@ def build_document(
         FIELD_ACTION: action,
         FIELD_RESOURCE_ID: resource_id,
         FIELD_TOAST_POLICY: toast_policy,
-        FIELD_SENSITIVE: data.get("sensitive") == "true",
+        FIELD_SENSITIVE: data.get("sensitive") == "true" or proposal.source in SENSITIVE_SOURCES,
         FIELD_DELIVERY_STATUS: STATUS_QUEUED,
         FIELD_RECEIVED_AT: None,
         FIELD_SEEN_AT: None,

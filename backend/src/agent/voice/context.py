@@ -13,7 +13,6 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ...services.entitlement import (
     get_remaining_free_voice_seconds,
@@ -98,12 +97,11 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
         "archive_context", "user_aura_profile", "user_tier",
         "remaining_free_voice_seconds",
     ]
-    if settings.GRAPH_READ_VOICE:
-        graph_source = (fetch_graph_digest(user_id), "")
-        sources.append(graph_source)
-        coroutines.append(graph_source[0])
-        defaults.append(graph_source[1])
-        names.append("graph_context")
+    graph_source = (fetch_graph_digest(user_id), "")
+    sources.append(graph_source)
+    coroutines.append(graph_source[0])
+    defaults.append(graph_source[1])
+    names.append("graph_context")
 
     try:
         raw_results = await asyncio.wait_for(
@@ -129,7 +127,7 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
 
     profile, memory_summary, last_session, archive_data, aura_profile = resolved[:5]
     user_tier, remaining_free_voice_seconds = resolved[5:7]
-    graph_digest = resolved[7] if settings.GRAPH_READ_VOICE else ""
+    graph_digest = resolved[7]
 
     return SessionContext(
         profile=profile,

@@ -131,14 +131,20 @@ class VoiceSessionService {
         metadata: {'userId': config.userId});
 
     try {
-      // Reuse the token prefetched at app open if it's still fresh;
-      // otherwise fetch one now. A prewarmed token was minted WITHOUT a
-      // surface (backend defaults it to "app"), so a session that declares
-      // one must always fetch fresh or the agent would miss its surface note.
-      var tokenResult = config.surface == null ? _freshPrewarmedToken() : null;
+      // Reuse the token prefetched at app open if it's still fresh; otherwise
+      // fetch one now. A prewarmed token was minted WITHOUT a surface or
+      // conversation id (it predates the session), so a session that declares
+      // either must always fetch fresh or the worker would miss that metadata.
+      final canReusePrewarm =
+          config.surface == null && config.conversationId == null;
+      var tokenResult = canReusePrewarm ? _freshPrewarmedToken() : null;
       if (tokenResult == null) {
         final idToken = await _tokenProvider();
-        tokenResult = await _fetchLiveKitToken(idToken, surface: config.surface);
+        tokenResult = await _fetchLiveKitToken(
+          idToken,
+          surface: config.surface,
+          conversationId: config.conversationId,
+        );
       }
       if (tokenResult == null) {
         return Result.failure(
@@ -592,11 +598,17 @@ class VoiceSessionService {
   Future<Map<String, dynamic>?> _fetchLiveKitToken(
     String? idToken, {
     String? surface,
+    String? conversationId,
   }) async {
     try {
+      final query = <String, String>{
+        'surface': ?surface,
+        if (conversationId != null && conversationId.isNotEmpty)
+          'conversation_id': conversationId,
+      };
       final resp = await http.get(
         Uri.parse(ApiEndpoints.voiceToken).replace(
-          queryParameters: surface != null ? {'surface': surface} : null,
+          queryParameters: query.isEmpty ? null : query,
         ),
         headers: {
           'Content-Type': 'application/json',

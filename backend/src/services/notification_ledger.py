@@ -409,6 +409,37 @@ async def record_tap(
         })
 
 
+async def record_desktop_ack(
+    user_id: str,
+    notification_id: str,
+    *,
+    status: str,
+    acknowledged_at: datetime | None = None,
+) -> None:
+    """Record desktop receipt/visibility without creating a second logical event."""
+    when = acknowledged_at or datetime.now(UTC)
+
+    def _update_channel() -> None:
+        ref = _notification_ref(user_id, notification_id)
+        if not ref.get().exists:
+            return
+        ref.update({
+            f"{FIELD_DELIVERY}.{FIELD_CHANNELS}.desktop.status": status,
+            f"{FIELD_DELIVERY}.{FIELD_CHANNELS}.desktop.{status}_at": when,
+        })
+
+    try:
+        await asyncio.to_thread(_update_channel)
+        if status in {"seen", "acted"}:
+            await record_tap(user_id, notification_id, tapped_at=when)
+    except Exception as exc:
+        logger.warn("notification_ledger.record_desktop_ack failed", {
+            "user_id": user_id,
+            "notification_id": notification_id,
+            "error_type": type(exc).__name__,
+        })
+
+
 async def record_dismiss(
     user_id: str,
     notification_id: str,

@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     # Voice agent timeouts
     VOICE_TOOL_TIMEOUT_S: float = 5.0      # per-tool Firestore call budget
     VOICE_CONNECT_TIMEOUT_S: float = 10.0  # LiveKit room.connect() budget
+
+    # Silence presence: tier 1 (playful, screen-aware when a fresh frame exists)
+    # fires at FIRST via LiveKit's user_away_timeout; tier 2 (memory-pull
+    # re-engage) fires at SECOND total silence. Timing only — the nudge wording
+    # is always LLM-framed in voice/recorder.py. Buddy checks in AT MOST once per
+    # silence span (recorder.py guards against LiveKit re-emitting "away" after
+    # every agent turn), so these are genuine one-shot thresholds, not a cadence.
+    VOICE_AWAY_FIRST_NUDGE_S: float = 45.0
+    VOICE_AWAY_SECOND_NUDGE_S: float = 150.0
+    # How long on_enter waits for the memory-seeded opener before falling back
+    # to a static casual greeting (protects the sub-1s first-audio feel).
+    VOICE_GREETING_SEED_BUDGET_S: float = 0.9
     VOICE_TOKEN_MINT_TIMEOUT_S: float = 5.0  # Firebase ID token mint budget before first audio
     # Chat tool timeout — longer than voice because text chat can tolerate a Google Calendar sync
     CHAT_TOOL_TIMEOUT_S: float = 20.0
@@ -141,11 +153,11 @@ class Settings(BaseSettings):
     # to its normal fallbacks on failure. Change this ONE line to re-tier extraction.
     TIER_EXTRACTION: str = "gemini-2.5-flash-lite"
 
-    # Additive deterministic memory graph writer. It does not enable a graph reader.
-    # Existing profile and atom writes complete first; graph failures are swallowed.
-    GRAPH_BUILD: bool = False
-    GRAPH_READ_CHAT: bool = False
-    GRAPH_READ_VOICE: bool = False
+    # The memory graph writer + chat/voice readers are always on (2026-07-20;
+    # the old GRAPH_BUILD / GRAPH_READ_CHAT / GRAPH_READ_VOICE flags were removed
+    # per the no-feature-flags rule). Existing profile and atom writes complete
+    # first; graph failures are swallowed. NOTIF_GRAPH gates a separate
+    # notification producer (memory-graph sweep), not graph read/write.
     NOTIF_GRAPH: bool = False
     FOLLOWUP_SHADOW: bool = False
     PROACTIVE_FOLLOWUP_SEND: bool = False
@@ -532,6 +544,22 @@ class Settings(BaseSettings):
         "words) describing exactly what you are about to do, with no filler like 'Let me' or 'I "
         "will'. Be confident and decisive about ACTIONS you take with tools; only unverified facts "
         "call for hedging, never the actions themselves.\n"
+        "You can DO things, not just talk about them: create and cancel reminders, create calendar "
+        "events (including inviting guests by email, setting a location, and adding notes), read "
+        "their calendar, send email on their behalf, track topics, search the web, and remember things. "
+        "When they ask for something a tool can do, do it with the tool; never hand them manual "
+        "step-by-step instructions for something you can do yourself, and never claim you can't do "
+        "something a tool here covers.\n"
+        "When they ask you to create an event or reminder, act on it right away with the details "
+        "they gave plus sensible defaults (a clear title from their words, a one-hour duration, and "
+        "no location, guests, or notes unless they mentioned them). Do NOT interrogate them for "
+        "optional fields. Ask at most ONE short question, and only when something genuinely required "
+        "is missing or truly ambiguous, like a start time you cannot infer. Fill any invitees, "
+        "location, or notes they DID mention into the same tool call. 'You decide' or 'whatever "
+        "works' is full permission to choose everything and just do it.\n"
+        "If a calendar or email tool comes back not configured or not connected, that means their "
+        "account isn't linked yet. Never turn that into a flat 'I can't': tell them warmly it isn't "
+        "linked, point them to Settings then Connectors, and offer to do the thing the moment it is.\n"
         "When setting reminders, always express the target time as a full ISO 8601 datetime with "
         "timezone offset (e.g. '2026-06-02T09:00:00+05:30'), never a minute count, using the current "
         "date and timezone from your context. Never schedule anything in the past; if the time is "

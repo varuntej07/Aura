@@ -405,16 +405,21 @@ async def build_turn_system_blocks(
     )
 
     if aura_profile:
-        retrieval_fn = (
-            retrieve_relevant_subgraph
-            if settings.GRAPH_READ_CHAT
-            else retrieve_relevant_memory
-        )
-        relevant_atoms = await retrieval_fn(
+        # Graph-first (always on; the GRAPH_READ_CHAT flag was removed 2026-07-20),
+        # falling back to flat atom retrieval when the graph has nothing for this
+        # query: the graph fills organically from new turns, so an empty subgraph
+        # must not erase recall of pre-graph memories.
+        relevant_atoms = await retrieve_relevant_subgraph(
             uid,
             message,
             active_slugs=active_category_slugs(aura_profile),
         )
+        if not relevant_atoms:
+            relevant_atoms = await retrieve_relevant_memory(
+                uid,
+                message,
+                active_slugs=active_category_slugs(aura_profile),
+            )
         if relevant_atoms:
             shown_subjects: set[str] = set()
             for line in interest_prompt_lines(aura_profile):

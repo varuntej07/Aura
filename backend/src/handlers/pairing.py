@@ -86,6 +86,18 @@ FIELD_PLATFORM = "platform"
 FIELD_LINKED_AT = "linked_at"
 FIELD_ACTIVE_CODES = "active_codes"
 
+# Denormalized surface footprint on the ROOT users/{uid} doc. The root `platform`
+# field only ever records the mobile SIGNUP device (every account is born on the
+# phone; desktop/web are always secondary links), so on its own it can't answer
+# "does this user also use desktop?". These two fields carry that answer inline so
+# one root-doc read reveals every surface, without joining the linked_devices
+# subcollection. Writer here + reader (ops/backend) reference these constants.
+FIELD_LINKED_PLATFORMS = "linked_platforms"  # array; e.g. ["android", "windows"]
+# ISO-8601 string, NOT a native Firestore Timestamp: the root users/{uid} doc is a
+# cross-repo shared shape (ECOSYSTEM.md) whose timestamps must stay ISO strings, or
+# the Flutter client's DateTime.parse() crashes on a native Timestamp.
+FIELD_LAST_DESKTOP_ACTIVE_AT = "last_desktop_active_at"
+
 PLATFORM_WINDOWS = "windows"
 
 # The one uniform claim-failure body: every failure mode (missing, used, expired,
@@ -109,6 +121,31 @@ def _as_aware(value: datetime) -> datetime:
 
 def generate_pairing_code() -> str:
     return "".join(secrets.choice(PAIRING_CODE_ALPHABET) for _ in range(PAIRING_CODE_LENGTH))
+
+
+def stamp_linked_desktop_surface_on_user(db, user_id: str, platform: str, linked_at: datetime) -> None:
+    """Denormalize a freshly linked desktop/web surface onto the root users/{uid}
+    doc so a single read shows every surface the user touches.
+
+    ``db`` is the Firestore client the caller already resolved for its
+    linked-device write — passed in (rather than re-resolved here) so the whole
+    recording runs against one client and stays honest under test patching.
+    ``ArrayUnion`` makes the platform accumulate idempotently (relinking the same
+    surface never duplicates it or grows the array), and ``merge=True`` only
+    touches these two fields — it never clobbers the rest of the user doc. Runs
+    synchronously; both call sites already invoke it inside their linked-device
+    ``asyncio.to_thread`` write and treat the whole recording step as non-fatal to
+    the sign-in, so a failure here degrades to "surface not reflected on the root
+    doc yet", never a blocked login.
+    """
+    db.collection(USERS_COLLECTION).document(user_id).set(
+        {
+            FIELD_LINKED_PLATFORMS: gcloud_firestore.ArrayUnion([platform]),
+            # ISO string (not the raw datetime) to honor the shared-doc contract.
+            FIELD_LAST_DESKTOP_ACTIVE_AT: linked_at.isoformat(),
+        },
+        merge=True,
+    )
 
 
 def normalise_pairing_code(raw: object) -> str | None:
@@ -356,9 +393,9 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
     # Record the linked device. Failure here must not fail the claim (the token is
     # already minted and valid) — log loudly and continue.
     def _write_linked_device() -> str:
+        db = admin_firestore()
         device_ref = (
-            admin_firestore()
-            .collection(USERS_COLLECTION)
+            db.collection(USERS_COLLECTION)
             .document(user_id)
             .collection(LINKED_DEVICES_SUBCOLLECTION)
             .document()
@@ -368,6 +405,8 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
             FIELD_PLATFORM: PLATFORM_WINDOWS,
             FIELD_LINKED_AT: now,
         })
+        # Reflect this surface onto the root user doc in the same thread hop.
+        stamp_linked_desktop_surface_on_user(db, user_id, PLATFORM_WINDOWS, now)
         return device_ref.id
 
     linked_device_doc_id: str | None = None

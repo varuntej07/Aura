@@ -105,12 +105,35 @@ async def _run_tool(tool_name: str, args: dict) -> dict:
         }
 
 
+# Action Truth Contract: every WRITE tool below attaches a ready-to-speak `say`
+# line to its completed result. Buddy echoes the tool's truth instead of composing
+# its own success claim, so a spoken "done, I added it" can never run ahead of (or
+# contradict) what actually happened. This is guidance, not enforcement: the line
+# only exists once the tool has genuinely returned. Add `say` to any future write
+# tool registered here.
+
+
+def _with_spoken_line(result: dict[str, Any], *, ok: str, not_linked: str = "") -> dict[str, Any]:
+    """Attach the truthful spoken confirmation to a completed write-tool result.
+
+    Timeouts already carry `user_message` from `_run_tool` and get no success line.
+    `not_linked` covers integrations the user hasn't connected yet
+    (`configured: False`), so Buddy says WHY instead of a flat "I can't".
+    """
+    if result.get("error"):
+        return result
+    if not_linked and result.get("configured") is False:
+        return {**result, "say": not_linked}
+    return {**result, "say": ok}
+
+
 # Reminders ---------------------------------------------------------------
 
 @mcp_server.tool()
 async def set_reminder(message: str, scheduled_at: str, priority: str = "normal") -> dict[str, Any]:
     """Set a reminder. scheduled_at must be ISO 8601 with timezone offset (e.g. '2026-06-02T09:00:00+05:30')."""
-    return await _run_tool("set_reminder", {"message": message, "scheduled_at": scheduled_at, "priority": priority})
+    result = await _run_tool("set_reminder", {"message": message, "scheduled_at": scheduled_at, "priority": priority})
+    return _with_spoken_line(result, ok=f"Done, I'll remind you: {message.strip()}.")
 
 
 @mcp_server.tool()
@@ -122,7 +145,8 @@ async def list_reminders(status_filter: str = "pending") -> dict[str, Any]:
 @mcp_server.tool()
 async def cancel_reminder(reminder_id: str) -> dict[str, Any]:
     """Cancel (dismiss) a reminder by its ID."""
-    return await _run_tool("cancel_reminder", {"reminder_id": reminder_id})
+    result = await _run_tool("cancel_reminder", {"reminder_id": reminder_id})
+    return _with_spoken_line(result, ok="Done, that reminder's cancelled.")
 
 
 # Calendar ----------------------------------------------------------------
@@ -134,15 +158,33 @@ async def create_calendar_event(
     end_time: str = "",
     description: str = "",
     location: str = "",
+    attendees: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Create a Google Calendar event. start_time and end_time are ISO 8601 strings."""
-    return await _run_tool("create_calendar_event", {
+    """Create a Google Calendar event. start_time and end_time are ISO 8601 strings.
+
+    attendees is a list of guest email addresses to invite; Google emails each an
+    invitation. Only pass it when the user names people to invite."""
+    guest_emails = [e for e in (attendees or []) if isinstance(e, str) and "@" in e]
+    result = await _run_tool("create_calendar_event", {
         "title": title,
         "start_time": start_time,
         "end_time": end_time or None,
         "description": description or None,
         "location": location or None,
+        "attendees": guest_emails or None,
     })
+    ok = f'Done, I added "{title.strip()}" to your calendar.'
+    if guest_emails:
+        guest_word = "guest" if len(guest_emails) == 1 else "guests"
+        ok = f'Done, I added "{title.strip()}" and invited {len(guest_emails)} {guest_word}.'
+    return _with_spoken_line(
+        result,
+        ok=ok,
+        not_linked=(
+            "Your Google Calendar isn't linked yet, so I can't drop it in. "
+            "Open Settings, then Connectors to hook it up, and I'll add it right after."
+        ),
+    )
 
 
 @mcp_server.tool()
@@ -264,7 +306,8 @@ async def track_topic(request: str) -> dict[str, Any]:
     Confirm warmly in your own words from what they said; do not wait on or read back any
     title the tool returns.
     """
-    return await _run_tool("track_topic", {"request": request})
+    result = await _run_tool("track_topic", {"request": request})
+    return _with_spoken_line(result, ok="Done, I'm on it. I'll keep you posted as it unfolds.")
 
 
 # Auth middleware ---------------------------------------------------------

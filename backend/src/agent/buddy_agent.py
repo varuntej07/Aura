@@ -34,26 +34,32 @@ from livekit import agents
 from livekit.agents import Agent, ModelSettings, RunContext, function_tool
 from livekit.agents import llm as lk_llm
 
+from ..config.settings import settings
 from ..lib.logger import logger
 from ..services.analytics.llm_telemetry import start_tool_span
+from ..services.memory.retrieval import (
+    VOICE_RETRIEVAL_BUDGET_S,
+    render_relevant_memory_block,
+    retrieve_relevant_subgraph,
+    should_retrieve_for_message,
+)
 from .voice.action_policy import (
     TurnCapabilityPolicy,
-    UnresolvedActionState,
     derive_turn_policy,
     evaluate_execution,
-    validate_plan,
 )
 from .voice.action_telemetry import VoiceActionTelemetry
-from .voice.capabilities import Capability, VoiceSurface, tool_name
+from .voice.capabilities import VOICE_TOOL_REGISTRY, ToolEffect, VoiceSurface, tool_name
 from .voice.context_compaction import VoiceContextCompactor
 from .voice.draft_outbound import DraftOutboundSession, run_draft_tool
 from .voice.emotion_tags import convert_audio_cue_stream
+from .voice.greeting import resolve_opener
 from .voice.point_tag import PointTarget, filter_point_tags, publish_element_point
 from .voice.screen_frames import ScreenFrameStore, attach_screen_frame_to_turn
 from .voice.screen_saves import save_screen_item as _save_screen_item
-from .voice.spoken_action_guard import guard_spoken_action_stream
 from .voice.text_sanitizer import sanitize_text_stream, strip_nonverbal_cue_stream
 from .voice.tool_filler import ToolFillerSpeaker
+from .voice.tool_skills import instructions_for_skill_names
 from .voice.visible_artifacts import present_visible_artifact as _present_visible_artifact
 from .voice_prompt import VOICE_PROMPT
 
@@ -91,15 +97,27 @@ class BuddyAgent(agents.Agent):
         user_tier: str = "free",
         display_name: str = "",
         launch_surface: str = "app",
+        opener_task: "asyncio.Task[str] | None" = None,
     ) -> None:
+        voice_surface = VoiceSurface(launch_surface)
+        session_skill_names = [
+            registration.skill_name
+            for registration in VOICE_TOOL_REGISTRY.values()
+            if voice_surface in registration.allowed_surfaces and registration.skill_name
+        ]
+        instructions = VOICE_PROMPT.format(**context_vars) + instructions_for_skill_names(
+            session_skill_names
+        )
         super().__init__(
-            instructions=VOICE_PROMPT.format(**context_vars),
+            instructions=instructions,
             chat_ctx=chat_ctx,
         )
         self._user_id = user_id
         self._screen_frames = screen_frames
         self._session_id = session_id
-        self._launch_surface = VoiceSurface(launch_surface)
+        self._launch_surface = voice_surface
+        # Memory-seeded opener racing the static greeting (see voice/greeting.py).
+        self._opener_task = opener_task
         # The frame injected into the current turn; element.point events carry
         # its id so the client maps coordinates against the right geometry.
         self._last_injected_frame_id = ""
@@ -121,11 +139,6 @@ class BuddyAgent(agents.Agent):
         self._finalized_transcript = ""
         self._finalized_policy: TurnCapabilityPolicy | None = None
         self._fresh_frame_for_turn = False
-        self._unresolved_action = UnresolvedActionState()
-        self._unresolved_state_age_for_turn: int | None = None
-        self._current_turn_visible_request = False
-        self._current_turn_visible_success = False
-        self._visible_output_failed_previous_turn = False
         self._action_telemetry = VoiceActionTelemetry(
             session_id=session_id, surface=self._launch_surface.value
         )
@@ -133,7 +146,13 @@ class BuddyAgent(agents.Agent):
         self._context_compaction_checks: set[asyncio.Task] = set()
 
     async def on_enter(self) -> None:
-        await self.session.say(random.choice(CASUAL_GREETINGS))
+        # Prefer the memory-seeded opener when it resolves inside the budget;
+        # otherwise the static list keeps the sub-1s hello. resolve_opener is
+        # fail-open ("" on timeout/error), so the greeting can never hang.
+        opener = await resolve_opener(
+            self._opener_task, settings.VOICE_GREETING_SEED_BUDGET_S
+        )
+        await self.session.say(opener or random.choice(CASUAL_GREETINGS))
 
     async def on_user_turn_completed(
         self, turn_ctx: lk_llm.ChatContext, new_message: lk_llm.ChatMessage
@@ -151,6 +170,7 @@ class BuddyAgent(agents.Agent):
         if compacted_context is not None:
             turn_ctx.items[:] = compacted_context.items
         finalized_transcript = new_message.text_content
+        await self._append_live_graph_context(turn_ctx, finalized_transcript)
         frame = None
         if self._screen_frames is not None:
             frame = await attach_screen_frame_to_turn(
@@ -162,52 +182,73 @@ class BuddyAgent(agents.Agent):
             )
             self._last_injected_frame_id = frame.frame_id if frame else ""
         self._action_telemetry.start_turn()
-        self._visible_output_failed_previous_turn = (
-            self._current_turn_visible_request
-            and not self._current_turn_visible_success
-        )
         self._fresh_frame_for_turn = frame is not None
         self._finalized_message_id = new_message.id
         self._finalized_transcript = finalized_transcript
         current_turn_index = self._action_telemetry.turn_index
-        prior_unresolved = self._unresolved_action
-        self._unresolved_state_age_for_turn = (
-            current_turn_index - prior_unresolved.created_at_turn
-            if prior_unresolved.source_message_id
-            else None
-        )
         policy = derive_turn_policy(
             finalized_transcript,
             turn_ctx,
             self._launch_surface,
             self._fresh_frame_for_turn,
-            self._unresolved_action,
-            previous_visible_output_failed=self._visible_output_failed_previous_turn,
             source_message_id=new_message.id,
             turn_index=current_turn_index,
         )
         self._finalized_policy = policy
-        self._current_turn_visible_request = (
-            Capability.VISIBLE_ARTIFACT in policy.capabilities
-        )
-        self._current_turn_visible_success = False
-        # A speculative generation began before final STT existed and therefore
-        # cannot authorize writes. This turn-local context edit makes LiveKit
-        # discard that stale generation and run llm_node against finalized facts.
+        # Speculative inference cannot expose side-effect tools. Always invalidate it
+        # when final STT arrives so the one Buddy model sees the complete request and
+        # the stable finalized tool set. No transcript classifier decides this boundary.
         turn_ctx.add_message(
             role="system",
             content=["<voice_action_turn>finalized transcript available</voice_action_turn>"],
         )
-        self._unresolved_action = UnresolvedActionState(
-            source_message_id=new_message.id if policy.missing_slots else "",
-            source_turn_index=current_turn_index if policy.missing_slots else 0,
-            capabilities=policy.capabilities if policy.missing_slots else frozenset(),
-            missing_slots=policy.missing_slots,
-            created_at_turn=current_turn_index if policy.missing_slots else 0,
-            write_authorized="explicit_write_request" in policy.reason_codes,
+        logger.info(
+            "VoiceLatency: preemptive generation decision",
+            {
+                "session_id": self._session_id,
+                "turn_index": current_turn_index,
+                "reusable": False,
+                "exposed_tool_count": len(policy.allowed_tools),
+                "fresh_frame": frame is not None,
+                "context_compacted": context_was_compacted,
+            },
         )
         if context_was_compacted:
             await self.update_chat_ctx(turn_ctx)
+
+    async def _append_live_graph_context(
+        self,
+        turn_ctx: lk_llm.ChatContext,
+        transcript: str,
+    ) -> bool:
+        """Attach query-relevant graph memory to this turn only. Never raises."""
+        if not should_retrieve_for_message(transcript):
+            return False
+        try:
+            memories = await asyncio.wait_for(
+                retrieve_relevant_subgraph(
+                    self._user_id,
+                    transcript,
+                    budget_s=VOICE_RETRIEVAL_BUDGET_S,
+                ),
+                timeout=VOICE_RETRIEVAL_BUDGET_S,
+            )
+            block = render_relevant_memory_block(memories)
+            if not block:
+                return False
+            turn_ctx.add_message(role="system", content=[block])
+            return True
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: live graph retrieval failed open",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return False
 
     @function_tool
     async def save_screen_item(
@@ -271,43 +312,47 @@ class BuddyAgent(agents.Agent):
     async def draft_outbound_message(
         self,
         ctx: RunContext,
-        channel: str,
+        channel: str = "",
         length: str = "",
         recipient_hint: str = "",
         intent: str = "",
         refine_instruction: str = "",
     ) -> str:
-        """Draft an email reply or a DM/message to another person from the
-        user's current screen. Never speak the message. The draft appears as a
-        card with a copy button and is never sent automatically. Commands,
-        code, config, prompts, and procedural steps belong in
-        present_visible_artifact instead.
+        """Write any text the user wants for whatever is on their screen: an
+        email reply, a DM, a form or application field, a comment, a bio, a
+        post, a review. You can SEE their screen, so read it to know what to
+        write and where it goes; do not ask which kind it is or how long it
+        should be, just write it. The draft appears as a card with a copy
+        button and is never sent automatically. Never speak the text you
+        wrote. Runnable commands, code, config, and prompts belong in
+        present_visible_artifact instead. A draft is never a substitute for a
+        real action: when the user asks to create a calendar event, a
+        reminder, or a tracker, call that action tool instead.
 
-        For email_reply and cold_dm, call it immediately even if details are
-        missing. If the user hasn't said how long it should be, leave length
-        empty; this then returns the exact one-line question to ask them, and
-        you call it again with their answer. Every return value from this tool
-        is a complete, natural sentence to say to the user.
+        Call it immediately with whatever the user gave you; every argument is
+        optional and inferred from the screen when absent. Every return value
+        from this tool is a complete, natural sentence to say to the user.
 
         When the user asks to CHANGE the draft you already made this call
-        ("make it warmer", "mention the deadline", "use setx instead"), call
-        this again with ONLY refine_instruction set; leave the other arguments
-        empty.
+        ("make it warmer", "mention the deadline", "shorter"), call this again
+        with ONLY refine_instruction set; leave the other arguments empty.
 
-        The user reads the full draft on screen, so never recite it: confirm
-        in a few words and offer to tweak it.
+        The user reads the full draft on screen, so never recite it, not even
+        a preview: confirm in a few words and offer to tweak it.
 
         Args:
-            channel: "email_reply" when they're replying to an email visible on
-                screen; "cold_dm" for a first-touch message to a person/profile
-                visible on screen.
-            length: "short", "medium", or "detailed", exactly what the user
-                chose. Leave empty if they haven't said.
+            channel: Optional hint. Leave empty and Buddy writes for whatever
+                is on screen (the usual case). Set "email_reply" only when
+                they're clearly replying to an email thread on screen, or
+                "cold_dm" for a first-touch message to a person/profile on
+                screen.
+            length: Optional hint. "short", "medium", or "detailed" only if the
+                user actually said so; leave empty to let the field or context
+                decide.
             recipient_hint: Who it's for, in the user's words, e.g. "Sarah" or
-                "this recruiter".
+                "the Clicky team".
             intent: What they want it to say or do, in their words, e.g.
-                "politely decline" or "make PowerShell always open in
-                MobileApps".
+                "say why I'm excited" or "politely decline".
             refine_instruction: ONLY when changing the existing draft: the
                 user's change request, e.g. "warmer" or "make it one line".
         """
@@ -349,6 +394,9 @@ class BuddyAgent(agents.Agent):
         copy. It is also mandatory when the user corrects you for speaking such
         content. The card is ephemeral, has a copy button, and never executes,
         sends, or persists its content. Never use it for an email reply or DM.
+        Never use it as a substitute for a real action: when the user asks to
+        create a calendar event, a reminder, or a tracker, call that action
+        tool instead of rendering a card or steps about it.
 
         Args:
             kind: One of command, code, config, prompt, steps, checklist, note.
@@ -391,6 +439,7 @@ class BuddyAgent(agents.Agent):
         desktop overlay animates. Sessions without screen sight pass through
         the same filter as a cheap no-op (no '[' in normal speech).
         """
+        generation_started_at = time.monotonic()
         fresh_frame_available = self._fresh_frame_for_turn
         if (
             self._launch_surface is VoiceSurface.DESKTOP
@@ -406,7 +455,11 @@ class BuddyAgent(agents.Agent):
             and latest_user.id == self._finalized_message_id
             and self._finalized_message_id
         )
-        transcript = self._finalized_transcript if finalized else ""
+        transcript = (
+            self._finalized_transcript
+            if finalized
+            else (latest_user.text_content if latest_user is not None else "")
+        )
         policy = self._finalized_policy if finalized else None
         if policy is None:
             policy = derive_turn_policy(
@@ -415,38 +468,18 @@ class BuddyAgent(agents.Agent):
                 self._launch_surface,
                 fresh_frame_available,
                 finalized_turn=finalized,
-                previous_visible_output_failed=self._visible_output_failed_previous_turn,
                 source_message_id=latest_user.id if latest_user is not None else "",
                 turn_index=self._action_telemetry.turn_index,
             )
-        if policy.plan is not None:
-            valid, validation_reasons = validate_plan(
-                policy.plan,
-                authorized="explicit_write_request" in policy.reason_codes,
-            )
-            if not valid:
-                logger.info(
-                    "VoiceAction: complex plan validation",
-                    {
-                        "session_id": self._session_id,
-                        "turn_index": self._action_telemetry.turn_index,
-                        "valid": False,
-                        "reason_codes": list(validation_reasons),
-                    },
-                )
         inference_tools = [
             tool for tool in tools if tool_name(tool) in policy.allowed_tools
         ]
         exposed_names = [tool_name(tool) for tool in inference_tools]
         inference_ctx = chat_ctx.copy()
-        inference_ctx.add_message(
-            role="system", content=[policy.transient_instruction()]
-        )
         self._action_telemetry.policy(
             policy,
             exposed_names,
             final_stt_message_id=self._finalized_message_id if finalized else "",
-            unresolved_state_age=self._unresolved_state_age_for_turn,
         )
 
         published = False
@@ -471,51 +504,50 @@ class BuddyAgent(agents.Agent):
         raw_stream = Agent.default.llm_node(
             self, inference_ctx, inference_tools, model_settings
         )
+        raw_first_chunk_at: float | None = None
+
+        async def _observe_raw_stream(chunks):
+            nonlocal raw_first_chunk_at
+            async for item in chunks:
+                if raw_first_chunk_at is None:
+                    raw_first_chunk_at = time.monotonic()
+                    logger.info(
+                        "VoiceLatency: raw model first chunk",
+                        {
+                            "session_id": self._session_id,
+                            "turn_index": self._action_telemetry.turn_index,
+                            "finalized": finalized,
+                            "latency_ms": round(
+                                (raw_first_chunk_at - generation_started_at) * 1000
+                            ),
+                        },
+                    )
+                yield item
+
+        raw_stream = _observe_raw_stream(raw_stream)
         raw_stream = self._apply_execution_safety(
             raw_stream, policy=policy, chat_ctx=chat_ctx
         )
-        recovery_ctx = inference_ctx.copy()
-        recovery_ctx.add_message(
-            role="system",
-            content=[
-                "The previous draft invented reminder language that is forbidden for "
-                "this turn. Answer only the finalized current request. Do not mention "
-                "reminders or ask about a reminder."
-            ],
-        )
-
-        def _regenerate():
-            retry_stream = Agent.default.llm_node(
-                self,
-                recovery_ctx,
-                inference_tools,
-                model_settings,
-            )
-            return self._apply_execution_safety(
-                retry_stream,
-                policy=policy,
-                chat_ctx=chat_ctx,
-            )
-
-        def _on_spoken_action_blocked() -> None:
-            logger.info(
-                "VoiceAction: spoken action blocked",
-                {
-                    "session_id": self._session_id,
-                    "turn_index": self._action_telemetry.turn_index,
-                    "reason": "reminder_capability_absent",
-                },
-            )
-
-        raw_stream = guard_spoken_action_stream(
-            raw_stream,
-            capabilities=policy.capabilities,
-            regenerate=_regenerate,
-            neutral_recovery="I got off track. Let's stick with what you just asked.",
-            on_blocked=_on_spoken_action_blocked,
-        )
         stream = self._speak_filler_on_tool_calls(raw_stream)
+        first_output_logged = False
         async for item in filter_point_tags(stream, on_point=_on_point):
+            if not first_output_logged:
+                first_output_logged = True
+                now = time.monotonic()
+                logger.info(
+                    "VoiceLatency: llm node first output",
+                    {
+                        "session_id": self._session_id,
+                        "turn_index": self._action_telemetry.turn_index,
+                        "finalized": finalized,
+                        "node_latency_ms": round((now - generation_started_at) * 1000),
+                        "post_model_holdback_ms": (
+                            round((now - raw_first_chunk_at) * 1000)
+                            if raw_first_chunk_at is not None
+                            else None
+                        ),
+                    },
+                )
             self._action_telemetry.first_response()
             yield item
 
@@ -530,6 +562,7 @@ class BuddyAgent(agents.Agent):
         """Gate complete model-emitted calls before LiveKit's concurrent executor."""
         rejected = False
         had_text = False
+        side_effect_emitted = False
         async for item in chunks:
             content = getattr(getattr(item, "delta", None), "content", None)
             had_text = had_text or bool(content) or isinstance(item, str)
@@ -539,12 +572,22 @@ class BuddyAgent(agents.Agent):
                 continue
             kept = []
             for call in calls:
+                registration = VOICE_TOOL_REGISTRY.get(getattr(call, "name", ""))
                 decision = evaluate_execution(
                     getattr(call, "name", ""),
                     getattr(call, "arguments", "{}"),
                     policy,
                     chat_ctx,
                 )
+                if (
+                    decision.allowed
+                    and registration is not None
+                    and registration.effect is not ToolEffect.READ
+                ):
+                    if side_effect_emitted:
+                        decision = type(decision)(False, "side_effect_already_emitted")
+                    else:
+                        side_effect_emitted = True
                 if decision.allowed:
                     kept.append(call)
                     self._action_telemetry.emitted(
@@ -558,16 +601,9 @@ class BuddyAgent(agents.Agent):
             item.delta.tool_calls = kept
             yield item
         if rejected and not had_text:
-            clarification = policy.clarification_question
-            if clarification:
-                yield f"Before I do that, {clarification}?"
-            else:
-                yield "I want to make sure I caught that right. What should I do first?"
+            yield "I couldn't safely run that action. Say what you want me to do once more."
 
     def record_voice_tool_execution(self, tool_name_value: str, *, success: bool) -> None:
-        self._unresolved_action = UnresolvedActionState()
-        if tool_name_value == "present_visible_artifact" and success:
-            self._current_turn_visible_success = True
         self._action_telemetry.execution(tool_name_value, success=success)
         self._schedule_context_compaction_check()
 

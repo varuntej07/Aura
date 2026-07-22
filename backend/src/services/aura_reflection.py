@@ -538,6 +538,60 @@ async def reflect_session(
     ))
 
 
+async def _upsert_graph_from_patch(uid: str, patch: ReflectionPatch) -> None:
+    """Build the Phase 1 graph from reflection output without another model call."""
+    try:
+        from .memory.atom_store import AtomInput
+        from .memory.fields import ATOM_TYPE_FACT, ATOM_TYPE_STORYLINE
+        from .memory.graph_store import (
+            GraphEdgeInput,
+            atom_node,
+            entity_node,
+            upsert_graph,
+        )
+
+        nodes = []
+        edges = []
+        for storyline in patch.storylines or []:
+            summary = (storyline.summary or "").strip()
+            if not summary:
+                continue
+            project = entity_node(storyline.id or summary)
+            story_atom = atom_node(
+                ATOM_TYPE_STORYLINE,
+                summary,
+                project_id=project.node_id,
+                weight=storyline.confidence,
+            )
+            nodes.extend((project, story_atom))
+            edges.append(GraphEdgeInput(story_atom.node_id, project.node_id, "about"))
+            for raw_entity in storyline.entities or []:
+                if not isinstance(raw_entity, str) or not raw_entity.strip():
+                    continue
+                entity = entity_node(raw_entity, project_id=project.node_id)
+                nodes.append(entity)
+                edges.append(GraphEdgeInput(story_atom.node_id, entity.node_id, "mentions"))
+            for category in storyline.categories or []:
+                if not isinstance(category, str) or not category.strip():
+                    continue
+                category_node = entity_node(category, project_id=project.node_id)
+                nodes.append(category_node)
+                edges.append(GraphEdgeInput(
+                    story_atom.node_id, category_node.node_id, "categorized_as",
+                ))
+        for fact in patch.facts_canonical or []:
+            if isinstance(fact, str) and fact.strip():
+                nodes.append(atom_node(ATOM_TYPE_FACT, fact.strip(), weight=0.6))
+
+        if nodes or edges:
+            await upsert_graph(uid, nodes, edges, source="reflection")
+    except Exception as exc:
+        logger.warn("AuraReflection: graph build failed", {
+            "user_id": uid,
+            "error": str(exc),
+        })
+
+
 async def _upsert_memory_atoms_from_patch(uid: str, patch: ReflectionPatch) -> None:
     """Mirror reflected storylines + canonical facts into the UNBOUNDED long-term memory
     store (services/memory) for query-relevant semantic recall. Traits are intentionally
@@ -563,6 +617,7 @@ async def _upsert_memory_atoms_from_patch(uid: str, patch: ReflectionPatch) -> N
             atoms.append(AtomInput(text=fact.strip(), atom_type=ATOM_TYPE_FACT, importance=0.6))
     if atoms:
         await upsert_atoms(uid, atoms, source="reflection")
+    await _upsert_graph_from_patch(uid, patch)
 
 
 async def consolidate_session(

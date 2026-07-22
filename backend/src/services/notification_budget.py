@@ -20,12 +20,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.cloud import firestore as fs
 
 from ..lib.logger import logger
 from .firebase import admin_auth, admin_firestore
+from .timezone_utils import TimezoneResolutionError, localize
 
 # ── Firestore layout: users/{uid}/notification_budget/state ─────────────────
 BUDGET_SUBCOLLECTION = "notification_budget"
@@ -237,8 +237,8 @@ def resolve_user_local_date(user_id: str, now: datetime | None = None) -> str:
                 "user_id": user_id,
             })
             return now.astimezone(UTC).date().isoformat()
-        return now.astimezone(ZoneInfo(tz_name)).date().isoformat()
-    except (ZoneInfoNotFoundError, Exception) as exc:
+        return localize(now, tz_name).date().isoformat()
+    except (TimezoneResolutionError, Exception) as exc:
         logger.warn("notification_budget: timezone resolve failed, using UTC", {
             "user_id": user_id, "error": str(exc),
         })

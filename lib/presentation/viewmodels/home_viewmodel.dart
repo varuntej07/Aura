@@ -55,6 +55,7 @@ class HomeViewModel extends SafeChangeNotifier {
   String _liveTranscript = ''; // assistant text streamed during a voice session
   final List<VoiceTranscriptEntry> _voiceTranscript = [];
   int _voiceTranscriptSequence = 0;
+  int _voiceMessageSequence = 0; // deterministic per-run id counter for saved voice messages
   String? _currentVoiceChatSessionId; // Drift session for persisting voice messages
   String? _currentUserId;
   DateTime? _sessionStartedAt; // for the ended-call duration
@@ -150,7 +151,13 @@ class HomeViewModel extends SafeChangeNotifier {
     }
 
     final result = await _voiceService.startSession(
-      VoiceSessionConfig(userId: userId, screenContext: screenContext),
+      VoiceSessionConfig(
+        userId: userId,
+        screenContext: screenContext,
+        // Reuse the Drift chat session id as the conversation id so the voice run
+        // links to this thread instead of forking a second permanent transcript.
+        conversationId: _currentVoiceChatSessionId,
+      ),
     );
 
     await result.when(
@@ -432,14 +439,19 @@ class HomeViewModel extends SafeChangeNotifier {
   }
 
   Future<void> _saveVoiceMessage(String text, {required bool isUser}) async {
-    if (_currentVoiceChatSessionId == null) return;
+    final conversationId = _currentVoiceChatSessionId;
+    if (conversationId == null) return;
+    // Deterministic, run-scoped id: '{conversationId}__v{n}'. Replaces the old
+    // microsecond timestamp, which could collide when two turns finalize in the
+    // same microsecond (assistant-final -> next-user boundary) and left a
+    // non-reproducible id that server-side reconciliation could never match.
     final msg = ChatMessageModel(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      id: '${conversationId}__v${_voiceMessageSequence++}',
       text: text,
       isUser: isUser,
       timestamp: DateTime.now(),
       channel: ChatMessageChannel.voice,
-      sessionId: _currentVoiceChatSessionId,
+      sessionId: conversationId,
     );
     await _chatRepository.saveMessage(msg, userId: _currentUserId);
   }
@@ -447,6 +459,7 @@ class HomeViewModel extends SafeChangeNotifier {
   void _resetVoiceState() {
     _voiceStatus = VoiceSessionStatus.disconnected;
     _micState = MicState.idle;
+    _voiceMessageSequence = 0;
     _currentVoiceChatSessionId = null;
   }
 

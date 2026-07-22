@@ -21,9 +21,10 @@ from __future__ import annotations
 from typing import Any
 
 from ...lib.logger import logger
+from ..action_intent_policy import excluded_tools_for_text_turn
 from ..claude_client import ClaudeClient
 from ..tool_executor import ToolExecutor
-from . import turn_store
+from . import tool_idempotency, turn_store
 from .prompt_builder import build_turn_system_blocks, build_user_content
 
 # Tools whose effect cannot be safely reproduced by a fresh, non-deterministic LLM run.
@@ -66,14 +67,27 @@ async def complete_turn(
 
     # The live run already did real, side-effecting work before disconnecting. Do NOT
     # re-run the LLM (it might phrase or act differently); just confirm what happened.
+    # `completed_tools` is authoritative (a tool lands there only after it commits without
+    # error), so every confirmation line is grounded in a real action, never an LLM claim.
     if completed_tools:
-        answer = _synthesize_confirmation(completed_tools)
+        receipts = await tool_idempotency.get_turn_receipts(user_id, cmid)
+        confirmed_tools = [tool for tool in completed_tools if tool in receipts]
+        answer = (
+            _synthesize_confirmation(confirmed_tools)
+            if confirmed_tools
+            else "I couldn't verify that action, so I won't pretend it went through."
+        )
+        # Hydrate the reminder card from the actual receipt so a backgrounded reminder
+        # arrives as a card, not text-only, matching the live stream's `reminder` payload.
+        reminder: dict[str, Any] | None = receipts.get("set_reminder")
         await turn_store.mark_complete(
-            user_id, cmid, answer_text=answer, completed_tools=completed_tools, pushed=True
+            user_id, cmid, answer_text=answer, completed_tools=confirmed_tools,
+            reminder=reminder, pushed=True,
         )
         await _push_reply(user_id, cmid, session_id, answer)
         logger.info("chat_completion: synthesized from completed tools", {
-            "user_id": user_id, "cmid": cmid, "tools": completed_tools,
+            "user_id": user_id, "cmid": cmid, "tools": confirmed_tools,
+            "reminder_card": reminder is not None,
         })
         return "synthesized"
 
@@ -115,7 +129,12 @@ async def _regenerate(
     system_blocks = await build_turn_system_blocks(user_id, message, notification_reason)
     user_content = build_user_content(message, [])
 
-    tool_executor = ToolExecutor(user_id, created_via="text", client_message_id=cmid)
+    tool_executor = ToolExecutor(
+        user_id,
+        created_via="text",
+        client_message_id=cmid,
+        session_id=str(turn.get(turn_store.FIELD_SESSION_ID) or ""),
+    )
     claude = ClaudeClient(tool_executor)
 
     parts: list[str] = []
@@ -128,7 +147,9 @@ async def _regenerate(
             history=history,
             is_agent=False,
             user_tier=tier,
-            extra_excluded_tools=_REGEN_EXCLUDED_TOOLS,
+            extra_excluded_tools=(
+                _REGEN_EXCLUDED_TOOLS | excluded_tools_for_text_turn(message)
+            ),
         ):
             etype = ev.get("type")
             if etype == "text_delta":
@@ -151,10 +172,21 @@ async def _regenerate(
 
 
 def _synthesize_confirmation(tools: list[str]) -> str:
+    """Confirm EVERY side effect that committed this turn, in order, deduped.
+
+    A turn can run more than one side-effecting tool (e.g. set_reminder + track_topic);
+    confirming only the first silently misrepresents the rest. Each line maps to a tool
+    already known to have succeeded, so the composite stays truthful."""
+    lines: list[str] = []
+    seen: set[str] = set()
     for tool in tools:
-        if tool in _TOOL_CONFIRMATIONS:
-            return _TOOL_CONFIRMATIONS[tool]
-    return "Done, I took care of that for you."
+        if tool in seen or tool not in _TOOL_CONFIRMATIONS:
+            continue
+        seen.add(tool)
+        lines.append(_TOOL_CONFIRMATIONS[tool])
+    if not lines:
+        return "Done, I took care of that for you."
+    return " ".join(lines)
 
 
 def _preview(text: str, limit: int = _PREVIEW_MAX_CHARS) -> str:

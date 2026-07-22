@@ -9,7 +9,7 @@ from typing import Any
 from ...lib.logger import logger
 from .. import notification_ledger
 from ..notification_service import NotificationResult, send_notification
-from . import desktop_outbox
+from . import channel_policy, desktop_outbox
 from .proposal import DeliveryChannel, NotificationProposal
 
 
@@ -22,6 +22,7 @@ def notification_id_for(proposal: NotificationProposal) -> str:
 
 
 async def deliver(proposal: NotificationProposal) -> NotificationResult:
+    proposal = await channel_policy.resolve(proposal)
     notification_id = notification_id_for(proposal)
     mobile_result: NotificationResult | None = None
     desktop_result: desktop_outbox.OutboxWriteResult | None = None

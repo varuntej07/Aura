@@ -6,7 +6,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
-from ..services.notifications import desktop_outbox
+from ..services import notification_ledger
+from ..services.notifications import desktop_outbox, desktop_preferences
 from ..services.request_auth import resolve_user_id_from_request
 
 
@@ -38,6 +39,44 @@ async def handle_list(request: Request) -> JSONResponse:
         "has_more": next_cursor is not None,
     })
     return JSONResponse({"items": items, "next_cursor": next_cursor})
+
+
+async def handle_get_preferences(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        preferences = await desktop_preferences.get(user_id, use_cache=False)
+    except Exception as exc:
+        logger.warn("desktop notifications: preference read failed", {
+            "user_id": user_id, "error_type": type(exc).__name__,
+        })
+        return JSONResponse({"error": "Temporarily unavailable."}, status_code=503)
+    return JSONResponse(desktop_preferences.serialize(preferences))
+
+
+async def handle_update_preferences(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body."}, status_code=400)
+    fields = ("enabled", "committed_enabled", "proactive_enabled", "account_enabled")
+    if not isinstance(body, dict) or any(not isinstance(body.get(key), bool) for key in fields):
+        return JSONResponse({"error": "All preference fields must be booleans."}, status_code=400)
+    preferences = desktop_preferences.DesktopPreferences(
+        **{key: body[key] for key in fields}
+    )
+    try:
+        await desktop_preferences.update(user_id, preferences)
+    except Exception as exc:
+        logger.warn("desktop notifications: preference update failed", {
+            "user_id": user_id, "error_type": type(exc).__name__,
+        })
+        return JSONResponse({"error": "Temporarily unavailable."}, status_code=503)
+    return JSONResponse(desktop_preferences.serialize(preferences))
 
 
 async def handle_acknowledge(
@@ -80,6 +119,9 @@ async def handle_acknowledge(
 
     if not found:
         return JSONResponse({"error": "Unknown notification."}, status_code=404)
+    await notification_ledger.record_desktop_ack(
+        user_id, notification_id, status=status
+    )
     logger.info("desktop notifications: acknowledged", {
         "user_id": user_id,
         "notification_id": notification_id,

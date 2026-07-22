@@ -71,6 +71,7 @@ def log_turn_metrics(
     if role == "user":
         payload["endpointing_ms"] = _to_ms(metrics.get("end_of_turn_delay"))
         payload["stt_final_ms"] = _to_ms(metrics.get("transcription_delay"))
+        payload["turn_hook_ms"] = _to_ms(metrics.get("on_user_turn_completed_delay"))
         stt_meta = metrics.get("stt_metadata") or {}
         payload["stt_model"] = stt_meta.get("model_name")
         payload["stt_provider"] = stt_meta.get("model_provider")
@@ -78,6 +79,7 @@ def log_turn_metrics(
         payload["llm_ttft_ms"] = _to_ms(metrics.get("llm_node_ttft"))
         payload["tts_ttfb_ms"] = _to_ms(metrics.get("tts_node_ttfb"))
         payload["eou_to_first_audio_ms"] = _to_ms(metrics.get("e2e_latency"))
+        payload["playback_ms"] = _to_ms(metrics.get("playback_latency"))
         llm_meta = metrics.get("llm_metadata") or {}
         tts_meta = metrics.get("tts_metadata") or {}
         payload["llm_model"] = llm_meta.get("model_name")
@@ -102,13 +104,18 @@ def log_turn_metrics(
 
 
 @asynccontextmanager
-async def voice_session_logger(user_id: str, room_name: str) -> AsyncIterator[str]:
+async def voice_session_logger(
+    user_id: str,
+    room_name: str,
+    *,
+    session_id: str | None = None,
+) -> AsyncIterator[str]:
     """Open a logged span for one voice session, yielding a fresh session_id.
 
     Logs start, unhandled error (re-raised), and close-with-duration so every
     session has a matching started/closed pair in Cloud Logging.
     """
-    session_id = str(uuid4())
+    session_id = session_id or str(uuid4())
     start = time.monotonic()
     logger.info("VoiceSession: started", {
         "session_id": session_id, "user_id": user_id, "room": room_name,

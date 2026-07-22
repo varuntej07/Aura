@@ -10,6 +10,10 @@ excluded), and the bucket carries a 7-day lifecycle delete rule as a backstop
 for the failure paths. Nothing here is ever served to a client - unlike
 screen_saves there is no signed-URL read path at all.
 
+Account deletion uses a strict user-prefix cleanup before deleting Firestore
+or Firebase Auth. Unlike post-synthesis best-effort cleanup, that path raises
+on storage failure so deletion can be retried without orphaning raw audio.
+
 Same module shape as services/gcs.py (lazy client singleton, every blocking
 call in ``asyncio.to_thread``). Bucket name comes from the MEETINGS_AUDIO_BUCKET
 env var (set in deploy.sh) rather than settings.py, keeping this feature's
@@ -45,6 +49,10 @@ def object_path_for(uid: str, meeting_id: str, seq: int) -> str:
 
 def prefix_for(uid: str, meeting_id: str) -> str:
     return f"meetings/{uid}/{meeting_id}/"
+
+
+def user_prefix_for(uid: str) -> str:
+    return f"meetings/{uid}/"
 
 
 async def upload_segment(uid: str, meeting_id: str, seq: int, data: bytes) -> str:
@@ -116,3 +124,29 @@ async def delete_meeting_audio(uid: str, meeting_id: str) -> int:
             "user_id": uid, "meeting_id": meeting_id, "error": str(exc),
         })
         return 0
+
+
+async def delete_user_audio(uid: str) -> int:
+    """Strict account-deletion cleanup for every raw meeting object owned by a user.
+
+    Unlike post-synthesis cleanup, this raises on any storage failure. The
+    account handler keeps Firebase Auth intact so the user can retry instead of
+    reporting a completed deletion while raw audio remains in the lifecycle
+    backstop window. Partial deletion is safe because object deletes are
+    idempotent and a retry lists only what remains.
+    """
+    prefix = user_prefix_for(uid)
+
+    def _delete() -> int:
+        bucket = _client().bucket(bucket_name())
+        blobs = list(_client().list_blobs(bucket_name(), prefix=prefix))
+        for blob in blobs:
+            bucket.blob(blob.name).delete()
+        return len(blobs)
+
+    count = await asyncio.to_thread(_delete)
+    logger.info("meetings.gcs: user audio deleted", {
+        "user_id": uid,
+        "deleted": count,
+    })
+    return count

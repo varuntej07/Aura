@@ -204,16 +204,48 @@ async def _get_user_timezone(uid: str) -> str:
         return "UTC"
 
 
+def _normalize_attendee_emails(raw: Any) -> list[str]:
+    """Coerce the model's attendee argument into a deduped list of email strings.
+
+    The schema asks for a list, but LLMs sometimes emit a single comma-separated
+    string; accept both. Anything without an '@' is dropped rather than sent to
+    Google as a malformed attendee, and order is preserved so the confirmation is
+    stable.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        candidates = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        candidates = [str(item) for item in raw]
+    else:
+        return []
+    seen: set[str] = set()
+    emails: list[str] = []
+    for candidate in candidates:
+        email = candidate.strip()
+        if "@" not in email:
+            continue
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        emails.append(email)
+    return emails
+
+
 class ToolExecutor:
     def __init__(
         self,
         user_id: str,
         created_via: str = "text",
         client_message_id: str = "",
+        session_id: str = "",
     ) -> None:
         self._user_id = user_id
         self._created_via = created_via     # How reminders created in this session are tagged
         self._client_message_id = client_message_id
+        self._session_id = session_id
 
     @property
     def user_id(self) -> str:
@@ -241,8 +273,11 @@ class ToolExecutor:
             "cancel_tracker": self._cancel_tracker,
             "create_calendar_event": self._create_calendar_event,
             "get_upcoming_events": self._get_upcoming_events,
-            "list_emails": self._list_emails,
-            "read_email": self._read_email,
+            # list_emails / read_email need gmail.readonly (a restricted scope that
+            # forces CASA verification), so they are disabled. Re-enable together with
+            # GMAIL_READONLY_SCOPE in gmail_connector.py if you take on CASA.
+            # "list_emails": self._list_emails,
+            # "read_email": self._read_email,
             "send_email": self._send_email,
             "store_memory": self._store_memory,
             "query_memory": self._query_memory,
@@ -377,6 +412,10 @@ class ToolExecutor:
             "snooze_count": 0,
             "created_at": now_iso,
         }
+        if self._session_id and (
+            settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND
+        ):
+            data["session_id"] = self._session_id
         ref = self._reminders_ref().document(reminder_id)
         await _run(lambda: ref.set(data))
 
@@ -575,6 +614,10 @@ class ToolExecutor:
                 body["description"] = inp["description"]
             if inp.get("location"):
                 body["location"] = inp["location"]
+            invitees = _normalize_attendee_emails(inp.get("attendees"))
+            if invitees:
+                # Google emails each attendee an invitation on insert.
+                body["attendees"] = [{"email": email} for email in invitees]
 
             cal = connector.calendar_client()
             event = cal.events().insert(calendarId="primary", body=body).execute()
@@ -680,6 +723,43 @@ class ToolExecutor:
             return memory_id
 
         memory_id = await _run(_upsert)
+        # Graph bridge (always on; the GRAPH_BUILD flag hid that this block had
+        # rotted against the graph_store API — rebuilt 2026-07-20). Best-effort:
+        # a graph failure never blocks the memory write itself.
+        try:
+            from dataclasses import replace
+
+            from .memory.graph_store import (
+                GraphEdgeInput,
+                atom_node,
+                entity_node,
+                upsert_graph,
+            )
+
+            # Store A uses the key as stable identity so editing its value refreshes
+            # one graph node instead of forking a second memory.
+            category_entity = entity_node(category)
+            memory_atom = atom_node("store_a", key, project_id=category_entity.node_id)
+            memory_atom = replace(
+                memory_atom,
+                display=f"{key}: {value}",
+                metadata={**memory_atom.metadata, "store_a_memory_id": memory_id},
+            )
+            key_entity = entity_node(key, project_id=category_entity.node_id)
+            await upsert_graph(
+                self._user_id,
+                [memory_atom, key_entity, category_entity],
+                [
+                    GraphEdgeInput(memory_atom.node_id, key_entity.node_id, "about"),
+                    GraphEdgeInput(key_entity.node_id, category_entity.node_id, "categorized_as"),
+                ],
+                source="store_a",
+            )
+        except Exception as exc:
+            logger.warn("Tool: store_memory graph bridge failed", {
+                "user_id": self._user_id,
+                "error": str(exc),
+            })
         return {"memory_id": memory_id, "key": key, "value": value, "category": category}
 
     async def _query_memory(self, inp: dict[str, Any]) -> ToolResult:
@@ -688,6 +768,39 @@ class ToolExecutor:
 
         if not query_str:
             raise ValueError("query is required")
+
+        # Graph-first (always on; the GRAPH_READ_VOICE flag was removed 2026-07-20),
+        # falling back to the legacy Store A substring search when the graph has
+        # nothing for this query. The fallback matters: the graph fills organically
+        # from new turns, so for a while legacy memories exist that the graph does
+        # not know yet, and "graph empty" must not read as "no memories".
+        from .memory import graph_fields as GF
+        from .memory.retrieval import retrieve_relevant_subgraph
+
+        memories = await retrieve_relevant_subgraph(
+            self._user_id,
+            query_str,
+            budget_s=settings.MEMORY_RETRIEVAL_BUDGET_S,
+        )
+        graph_matches = []
+        for memory in memories:
+            if memory.status in {
+                GF.NODE_STATUS_COMPLETED,
+                GF.NODE_STATUS_ABANDONED,
+            }:
+                continue
+            if category_filter != "all" and memory.atom_type != category_filter:
+                continue
+            graph_matches.append({
+                "memory_id": memory.node_id,
+                "key": memory.atom_type,
+                "value": memory.text,
+                "category": memory.atom_type,
+            })
+            if len(graph_matches) >= 10:
+                break
+        if graph_matches:
+            return {"matches": graph_matches}
 
         def _search() -> list[dict]:
             q = self._memories_ref()

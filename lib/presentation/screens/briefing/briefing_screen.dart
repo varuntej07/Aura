@@ -129,7 +129,7 @@ class _BriefingScreenState extends State<BriefingScreen> {
                       isLoading: chatVm.state == ViewState.loading,
                       hint: 'Ask Buddy about this',
                       allowAttachments: false,
-                      onSend: (text, _) => _handleSend(briefing, chatVm, text),
+                      onSend: (text, _, _) => _handleSend(briefing, chatVm, text),
                       onStop: chatVm.stopGeneration,
                       extraBottomPadding: 16,
                     ),

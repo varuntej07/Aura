@@ -127,13 +127,18 @@ def build_agent_session(
         turn_detection=turn_detector if turn_detector is not None else NOT_GIVEN,
         preemptive_generation=True,
         mcp_servers=[mcp_server], 
-        user_away_timeout=90.0,          # Flip user state to "away" after 90s of user silence (was 30s/15s: still nudged while the user was mid-thought or reading; give them real room before Buddy checks in)
+        # First silence-presence tier: LiveKit emits "away" after this much user
+        # silence, which recorder.py answers with the playful (screen-aware when
+        # a fresh frame exists) check-in; the deeper memory-pull tier fires at
+        # VOICE_AWAY_SECOND_NUDGE_S total (see voice/recorder.py).
+        user_away_timeout=settings.VOICE_AWAY_FIRST_NUDGE_S,
         turn_handling=TurnHandlingOptions(
-            # MultilingualModel already guards turn finality semantically,
-            # so we lower the endpointing floor from the 0.5s default to 0.2s (~300ms faster reply).
+            # MultilingualModel already guards turn finality semantically. Keep
+            # the low floor for confident endings and cap uncertain endings at
+            # 0.8s so a false-negative EOU prediction cannot add two seconds.
             endpointing={
                 "min_delay": 0.2,
-                "max_delay": 2.0,
+                "max_delay": 0.8,
             },
             interruption={
                 "mode": "adaptive",

@@ -25,6 +25,7 @@ Provider routing is inferred from the model ID prefix:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import re
 from dataclasses import dataclass, field
@@ -347,7 +348,6 @@ class ModelProvider:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
-
         for model_idx, model_id in enumerate(model_chain):
             is_last_model = model_idx == len(model_chain) - 1
             logger.debug("ModelProvider.reason_turn", {"model": model_id, "turns": len(messages)})
@@ -438,38 +438,57 @@ class ModelProvider:
     ) -> str | T:
         provider = _infer_provider(model_id)
         chain = list(fallback_chain or [])
+        generation_prompt = prompt
+        structured_attempts = 2 if response_model is not None else 1
 
-        if provider == "gemini":
-            raw = await self._call_gemini(
-                model_id=model_id,
-                fallback_chain=chain,
-                caller=caller,
-                prompt=prompt,
-                system=system,
-                images=images,
-                temperature=temperature,
-            )
-        elif provider == "anthropic":
-            raw = await self._call_anthropic(
-                model_id=model_id,
-                fallback_chain=chain,
-                caller=caller,
-                prompt=prompt,
-                system=system,
-                tools=tools,
-                images=images,
-                history=history,
-                temperature=temperature,
-            )
-        else:
-            raise NotImplementedError(
-                f"ModelProvider: provider '{provider}' is not yet implemented. "
-                f"Add a _call_{provider}() method to model_provider.py."
-            )
+        for structured_attempt in range(structured_attempts):
+            if provider == "gemini":
+                raw = await self._call_gemini(
+                    model_id=model_id,
+                    fallback_chain=chain,
+                    caller=caller,
+                    prompt=generation_prompt,
+                    system=system,
+                    images=images,
+                    response_model=response_model,
+                    temperature=temperature,
+                )
+            elif provider == "anthropic":
+                raw = await self._call_anthropic(
+                    model_id=model_id,
+                    fallback_chain=chain,
+                    caller=caller,
+                    prompt=generation_prompt,
+                    system=system,
+                    tools=tools,
+                    images=images,
+                    history=history,
+                    response_model=response_model,
+                    temperature=temperature,
+                )
+            else:
+                raise NotImplementedError(
+                    f"ModelProvider: provider '{provider}' is not yet implemented. "
+                    f"Add a _call_{provider}() method to model_provider.py."
+                )
 
-        if response_model is not None:
-            return self._parse_response(raw, response_model)
-        return raw
+            if response_model is None:
+                return raw
+            try:
+                return self._parse_response(raw, response_model)
+            except ValueError:
+                if structured_attempt + 1 >= structured_attempts:
+                    raise
+                logger.warn("ModelProvider: regenerating invalid structured response", {
+                    "provider": provider,
+                    "model": model_id,
+                    "schema": response_model.__name__,
+                })
+                generation_prompt = (
+                    f"{prompt}\n\nYour previous response violated the required schema. "
+                    "Regenerate the answer as valid JSON matching the supplied schema exactly."
+                )
+        raise RuntimeError("ModelProvider: structured retry loop exited unexpectedly")
 
     async def _call_gemini(
         self,
@@ -480,6 +499,7 @@ class ModelProvider:
         prompt: str,
         system: str | None,
         images: list[dict] | None = None,
+        response_model: type[T] | None = None,
         temperature: float,
     ) -> str:
         client = self._get_gemini_client()
@@ -499,6 +519,9 @@ class ModelProvider:
         if system:
             # Gemini: system instruction goes in GenerateContentConfig, not contents
             config_kwargs["system_instruction"] = system
+        if response_model is not None:
+            config_kwargs["response_mime_type"] = "application/json"
+            config_kwargs["response_schema"] = response_model
         config = types.GenerateContentConfig(**config_kwargs)
 
         # Images ride before the prompt as inline parts (mirrors the Anthropic
@@ -526,16 +549,17 @@ class ModelProvider:
                 "to_model": next_model,
                 **log_extra,
             })
-            return await self._call(
+            result = await self._call(
                 model_id=next_model,
                 fallback_chain=fallback_chain[1:],
                 caller=caller,
                 prompt=prompt,
                 system=system,
                 images=images,
-                response_model=None,
+                response_model=response_model,
                 temperature=temperature,
             )
+            return result if isinstance(result, str) else result.model_dump_json()
 
         last_exc: BaseException | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
@@ -777,6 +801,7 @@ class ModelProvider:
         tools: list[dict] | None,
         images: list[dict] | None = None,
         history: list[dict] | None,
+        response_model: type[T] | None = None,
         temperature: float,
     ) -> str:
         client = self._get_anthropic_client()
@@ -813,6 +838,13 @@ class ModelProvider:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
+        if response_model is not None:
+            kwargs["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": response_model.model_json_schema(),
+                }
+            }
 
         async def _use_next_in_chain(reason: str, log_extra: dict) -> str:
             # Recurse back through _call so the next model re-infers its provider:
@@ -826,7 +858,7 @@ class ModelProvider:
                 "to_model": next_model,
                 **log_extra,
             })
-            return await self._call(
+            result = await self._call(
                 model_id=next_model,
                 fallback_chain=fallback_chain[1:],
                 caller=caller,
@@ -835,9 +867,10 @@ class ModelProvider:
                 tools=tools,
                 images=images,
                 history=history,
-                response_model=None,
+                response_model=response_model,
                 temperature=temperature,
             )
+            return result if isinstance(result, str) else result.model_dump_json()
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -846,8 +879,7 @@ class ModelProvider:
                 recording = start_llm_generation(model=model_id, provider="anthropic", caller=caller)
                 try:
                     response = await asyncio.wait_for(
-                        client.messages.create(**kwargs),
-                        timeout=_TIMEOUT_S,
+                        client.messages.create(**kwargs), timeout=_TIMEOUT_S
                     )
                 except BaseException as exc:
                     recording.finish(success=False, error_type=type(exc).__name__)
@@ -896,7 +928,7 @@ class ModelProvider:
                     "prompt_len": len(prompt),
                 })
                 raise
-            except TimeoutError as exc:
+            except TimeoutError:
                 if attempt == _MAX_RETRIES:
                     if fallback_chain:
                         return await _use_next_in_chain(
@@ -965,13 +997,15 @@ class ModelProvider:
         try:
             return response_model.model_validate_json(cleaned)  # type: ignore[attr-defined]
         except Exception as exc:
+            digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
             logger.error("ModelProvider: failed to parse LLM response", {
                 "model": response_model.__name__,
-                "error": str(exc),
-                "raw_preview": cleaned[:200],
+                "error_type": type(exc).__name__,
+                "response_length": len(cleaned),
+                "response_digest": digest,
             })
             raise ValueError(
-                f"ModelProvider: could not parse response into {response_model.__name__}: {exc}"
+                f"ModelProvider: response did not match {response_model.__name__}"
             ) from exc
 
     def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:

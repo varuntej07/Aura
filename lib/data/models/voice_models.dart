@@ -83,10 +83,17 @@ class VoiceSessionConfig {
   /// section). Null means the backend default, "app".
   final String? surface;
 
+  /// The user-visible chat thread id this voice run belongs to, minted once by the
+  /// client (the same Drift chat session id). Stamped into the LiveKit token so the
+  /// voice worker can tie its run and canonical messages to one conversation instead
+  /// of forking a second permanent transcript. Null on legacy launches.
+  final String? conversationId;
+
   const VoiceSessionConfig({
     required this.userId,
     this.screenContext,
     this.surface,
+    this.conversationId,
   });
 }
 

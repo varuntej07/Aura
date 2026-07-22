@@ -51,15 +51,6 @@ _LIST_FIELDS = frozenset(
         "important_entities",
     }
 )
-_EXPLICIT_SCHEDULE_REQUEST = re.compile(
-    r"\b(?:remind me|(?:set|create|add) (?:a )?reminder|"
-    r"schedule(?: (?:a|an|the))? |book(?: (?:a|an|the))? |"
-    r"(?:create|add) (?:a |an |the )?(?:calendar )?"
-    r"(?:meeting|event|appointment))",
-    re.IGNORECASE,
-)
-_SCHEDULE_LANGUAGE = re.compile(r"\b(?:reminder|calendar|schedule|book)\b", re.IGNORECASE)
-
 _SUMMARY_PROMPT = """\
 Compact the supplied completed voice turns into one JSON object. Return JSON only.
 Use exactly these keys:
@@ -93,7 +84,6 @@ class CompactionSnapshot:
     prefix_item_ids: frozenset[str]
     prior_summary: str
     serialized_turns: str
-    explicit_schedule_request: bool
     compacted_turn_count: int
 
 
@@ -235,18 +225,11 @@ def build_compaction_snapshot(
     prefix_ids = frozenset(item.id for group in compacted for item in group.items)
     if not prefix_ids:
         return None
-    user_text = " ".join(
-        item.text_content
-        for group in compacted
-        for item in group.items
-        if isinstance(item, lk_llm.ChatMessage) and item.role == "user"
-    )
     return CompactionSnapshot(
         context_item_ids=tuple(item.id for item in chat_ctx.items),
         prefix_item_ids=prefix_ids,
         prior_summary=_extract_prior_summary(chat_ctx.items),
         serialized_turns=_serialize_turns(compacted),
-        explicit_schedule_request=bool(_EXPLICIT_SCHEDULE_REQUEST.search(user_text)),
         compacted_turn_count=len(compacted),
     )
 
@@ -258,7 +241,7 @@ def _empty_summary() -> dict[str, object]:
     }
 
 
-def _normalize_summary(raw: str, *, explicit_schedule_request: bool) -> str:
+def _normalize_summary(raw: str) -> str:
     cleaned = raw.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
@@ -281,10 +264,6 @@ def _normalize_summary(raw: str, *, explicit_schedule_request: bool) -> str:
                     normalized[field] = [value.strip()[:240]]
             elif isinstance(value, str):
                 normalized[field] = value.strip()[:500]
-    pending = str(normalized["pending_next_step"])
-    if not explicit_schedule_request and _SCHEDULE_LANGUAGE.search(pending):
-        normalized["pending_next_step"] = ""
-
     def _dump() -> str:
         return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
@@ -373,10 +352,7 @@ class VoiceContextCompactor:
             )
             self._ready = CompactionResult(
                 snapshot=snapshot,
-                summary_json=_normalize_summary(
-                    raw,
-                    explicit_schedule_request=snapshot.explicit_schedule_request,
-                ),
+                summary_json=_normalize_summary(raw),
             )
             self._failures = 0
             logger.info(
@@ -427,10 +403,7 @@ class VoiceContextCompactor:
         )
         result = CompactionResult(
             snapshot=snapshot,
-            summary_json=_normalize_summary(
-                prior,
-                explicit_schedule_request=snapshot.explicit_schedule_request,
-            ),
+            summary_json=_normalize_summary(prior),
         )
         compacted = _apply_result(chat_ctx, result)
         if compacted is not None:

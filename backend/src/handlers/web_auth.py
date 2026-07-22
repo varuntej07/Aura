@@ -67,7 +67,11 @@ from google.cloud import firestore as gcloud_firestore
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
 from ..services.notifications.device_link_push import send_new_device_linked_push
-from .pairing import DEFAULT_DEVICE_NAME, sanitize_device_name
+from .pairing import (
+    DEFAULT_DEVICE_NAME,
+    sanitize_device_name,
+    stamp_linked_desktop_surface_on_user,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 WEB_AUTH_CODE_NBYTES = 24  # secrets.token_urlsafe(24) -> ~192 bits, URL-safe
@@ -264,9 +268,9 @@ async def handle_web_auth_status(request: Request) -> JSONResponse:
         # claim does on success. Never fails the response (log and continue) -
         # the token is already valid regardless of whether this succeeds.
         def _write_linked_device() -> str:
+            db = admin_firestore()
             device_ref = (
-                admin_firestore()
-                .collection(USERS_COLLECTION)
+                db.collection(USERS_COLLECTION)
                 .document(user_id)
                 .collection(LINKED_DEVICES_SUBCOLLECTION)
                 .document()
@@ -276,6 +280,8 @@ async def handle_web_auth_status(request: Request) -> JSONResponse:
                 FIELD_PLATFORM: PLATFORM_WINDOWS,
                 FIELD_LINKED_AT: now,
             })
+            # Reflect this surface onto the root user doc in the same thread hop.
+            stamp_linked_desktop_surface_on_user(db, user_id, PLATFORM_WINDOWS, now)
             return device_ref.id
 
         linked_device_doc_id: str | None = None

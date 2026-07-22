@@ -15,6 +15,7 @@ Local dev:
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 
@@ -28,13 +29,24 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
 from .handlers.account import handle_delete_account
+from .handlers.aura import (
+    handle_consolidate_session,
+    handle_delete_memory,
+    handle_get_memory,
+    handle_wipe_memory,
+)
 from .handlers.billing import (
     handle_billing_checkout,
     handle_billing_portal,
     handle_billing_webhook,
 )
+from .handlers.briefing import (
+    handle_get_today_briefing,
+    handle_post_generate_briefing,
+    handle_post_world_briefing,
+)
+from .handlers.buddy_pills import handle_refresh_buddy_pills
 from .handlers.calendar import get_upcoming_calendar
-from .handlers.entitlement import handle_get_entitlement
 from .handlers.chat import handle_chat_stream
 from .handlers.connectors import (
     connect_gmail,
@@ -46,6 +58,10 @@ from .handlers.connectors import (
     sync_google_calendar,
 )
 from .handlers.daily_notification import handle_send_nudge
+from .handlers.dashboard_link import (
+    handle_dashboard_link_claim,
+    handle_dashboard_link_start,
+)
 from .handlers.desktop_dashboard import (
     handle_desktop_activity,
     handle_desktop_conversations,
@@ -53,46 +69,52 @@ from .handlers.desktop_dashboard import (
     handle_desktop_saved,
     handle_desktop_usage,
 )
+from .handlers.desktop_notifications import (
+    handle_acknowledge as handle_desktop_notification_acknowledge,
+    handle_get_preferences as handle_desktop_notification_preferences_get,
+    handle_list as handle_desktop_notifications_list,
+    handle_update_preferences as handle_desktop_notification_preferences_update,
+)
 from .handlers.desktop_profile import handle_desktop_profile
 from .handlers.devices import register_device
+from .handlers.draft_outbound import handle_draft_outbound_refine
+from .handlers.drafts import (
+    handle_delete_draft,
+    handle_list_drafts,
+)
 from .handlers.engagement import (
     handle_engagement_notify,
     handle_engagement_orchestrate,
     handle_engagement_responded,
 )
-from .handlers.mcp import register_mcp
-from .handlers.notification_reply import handle_notification_reply_request
-from .handlers.briefing import (
-    handle_get_today_briefing,
-    handle_post_generate_briefing,
-    handle_post_world_briefing,
-)
-from .handlers.buddy_pills import handle_refresh_buddy_pills
-from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
-from .handlers.aura import (
-    handle_consolidate_session,
-    handle_delete_memory,
-    handle_get_memory,
-)
+from .handlers.entitlement import handle_get_entitlement
 from .handlers.history import (
+    handle_delete_conversation,
     handle_delete_session,
     handle_get_session_detail,
     handle_list_sessions,
 )
-from .handlers.screen_saves import (
-    handle_delete_screen_save,
-    handle_list_screen_saves,
-)
-from .handlers.drafts import (
-    handle_delete_draft,
-    handle_list_drafts,
-)
+from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
+from .handlers.mcp import register_mcp
 from .handlers.meetings import (
     handle_claim as handle_meeting_claim,
+)
+from .handlers.meetings import (
     handle_complete as handle_meeting_complete,
+)
+from .handlers.meetings import (
     handle_get_meeting,
+)
+from .handlers.meetings import (
     handle_internal_synthesize as handle_meeting_synthesize,
+)
+from .handlers.meetings import (
     handle_list_recent as handle_meetings_recent,
+)
+from .handlers.meetings import (
+    handle_retry as handle_meeting_retry,
+)
+from .handlers.meetings import (
     handle_upload_segment as handle_meeting_upload_segment,
 )
 from .handlers.memories import (
@@ -101,23 +123,23 @@ from .handlers.memories import (
     handle_list_memories,
     handle_patch_memory,
 )
+from .handlers.notification_reply import handle_notification_reply_request
 from .handlers.onboarding_profile import handle_onboarding_profile
-from .handlers.draft_outbound import handle_draft_outbound_refine
-from .handlers.dashboard_link import (
-    handle_dashboard_link_claim,
-    handle_dashboard_link_start,
-)
 from .handlers.pairing import (
     handle_pair_claim,
     handle_pair_start,
     handle_unlink_device,
 )
-from .handlers.web_auth import handle_web_auth_start, handle_web_auth_status
 from .handlers.scheduler import handle_scheduler_tick
+from .handlers.screen_saves import (
+    handle_delete_screen_save,
+    handle_list_screen_saves,
+)
 from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
 from .handlers.signal_tick import handle_signal_tick
 from .handlers.threads import handle_thread_messages, handle_thread_reply
+from .handlers.web_auth import handle_web_auth_start, handle_web_auth_status
 from .lib.logger import logger
 from .services.request_auth import decode_firebase_claims
 
@@ -216,6 +238,7 @@ async def health() -> dict[str, bool]:
 # Launch surfaces the voice worker understands (voice_agent._KNOWN_SURFACES). Anything
 # else collapses to "app", the neutral default, so a bad query param never changes behavior.
 _VOICE_SURFACES = frozenset({"app", "keyboard", "desktop"})
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 @app.get("/voice/token")
@@ -236,13 +259,33 @@ async def voice_token(request: Request) -> JSONResponse:
     surface = request.query_params.get("surface", "app")
     if surface not in _VOICE_SURFACES:
         surface = "app"
+    conversation_id = request.query_params.get("conversation_id", "").strip()
+    if conversation_id and not _CONVERSATION_ID_RE.fullmatch(conversation_id):
+        raise HTTPException(status_code=400, detail="Invalid conversation_id")
+
+    participant_metadata = {"surface": surface}
+    if conversation_id:
+        participant_metadata["conversation_id"] = conversation_id
+    if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
+        origin = request.query_params.get("origin", "").strip()
+        origin_candidate_id = request.query_params.get("origin_candidate_id", "").strip()
+        if origin == "notification_tap" and origin_candidate_id:
+            participant_metadata["origin"] = origin
+            participant_metadata["origin_candidate_id"] = origin_candidate_id[:80]
+            raw_lineage = request.query_params.get("lineage_chain", "")
+            if raw_lineage:
+                participant_metadata["lineage_chain"] = [
+                    value.strip()[:80]
+                    for value in raw_lineage.split(",")
+                    if value.strip()
+                ][:20]
 
     room_name = f"voice-{user_id}"
     token = (
         AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
         .with_identity(user_id)
         .with_name(user_id)
-        .with_metadata(json.dumps({"surface": surface}))
+        .with_metadata(json.dumps(participant_metadata))
         .with_grants(VideoGrants(room_join=True, room=room_name))
         .to_jwt()
     )
@@ -404,6 +447,11 @@ async def aura_get_memory_endpoint(request: Request) -> JSONResponse:
     return await handle_get_memory(request)
 
 
+@app.delete("/aura/memory")
+async def aura_wipe_memory_endpoint(request: Request) -> JSONResponse:
+    return await handle_wipe_memory(request)
+
+
 @app.delete("/aura/memory/{atom_id}")
 async def aura_delete_memory_endpoint(request: Request, atom_id: str) -> JSONResponse:
     return await handle_delete_memory(request, atom_id)
@@ -422,6 +470,13 @@ async def history_get_session_endpoint(request: Request, session_id: str) -> JSO
 @app.delete("/history/sessions/{session_id}")
 async def history_delete_session_endpoint(request: Request, session_id: str) -> JSONResponse:
     return await handle_delete_session(request, session_id)
+
+
+@app.delete("/history/conversations/{conversation_id}")
+async def history_delete_conversation_endpoint(
+    request: Request, conversation_id: str,
+) -> JSONResponse:
+    return await handle_delete_conversation(request, conversation_id)
 
 
 @app.get("/screen-saves")
@@ -739,6 +794,29 @@ async def billing_portal_endpoint(request: Request) -> JSONResponse:
     return await handle_billing_portal(request)
 
 
+@app.get("/desktop/notifications")
+async def desktop_notifications_list_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_notifications_list(request)
+
+
+@app.get("/desktop/notifications/preferences")
+async def desktop_notification_preferences_get_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_notification_preferences_get(request)
+
+
+@app.put("/desktop/notifications/preferences")
+async def desktop_notification_preferences_update_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_notification_preferences_update(request)
+
+
+@app.post("/desktop/notifications/{notification_id}/ack")
+async def desktop_notification_acknowledge_endpoint(
+    request: Request,
+    notification_id: str,
+) -> JSONResponse:
+    return await handle_desktop_notification_acknowledge(request, notification_id)
+
+
 # Meeting notes (desktop capture -> synthesis; MEETING_NOTES_PLAN.md).
 # /meetings/recent is registered before /meetings/{meeting_id} so "recent"
 # can never be captured as a meeting id (same rule as /memories/callback).
@@ -762,6 +840,11 @@ async def meetings_upload_segment_endpoint(
 @app.post("/meetings/{meeting_id}/complete")
 async def meetings_complete_endpoint(request: Request, meeting_id: str) -> JSONResponse:
     return await handle_meeting_complete(request, meeting_id)
+
+
+@app.post("/meetings/{meeting_id}/retry")
+async def meetings_retry_endpoint(request: Request, meeting_id: str) -> JSONResponse:
+    return await handle_meeting_retry(request, meeting_id)
 
 
 @app.get("/meetings/{meeting_id}")

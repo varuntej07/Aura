@@ -23,6 +23,17 @@ class ToolThinkingEvent extends ChatStreamEvent {
   ToolThinkingEvent(this.message);
 }
 
+/// Reliable, tool-named "thinking" status emitted by the backend the instant a
+/// slow tool (web_surf, calendar, memory) starts running — even when the model
+/// wrote no preamble prose (which is the case a plain [ToolThinkingEvent] misses).
+/// [tool] is the tool name (e.g. `web_surf`) so the bubble can show a matching
+/// glyph; [message] is the in-persona phrase to display.
+class ToolStatusEvent extends ChatStreamEvent {
+  final String tool;
+  final String message;
+  ToolStatusEvent({required this.tool, required this.message});
+}
+
 class ClarificationUiEvent extends ChatStreamEvent {
   final String clarificationId;
   final String question;
@@ -227,6 +238,11 @@ class BackendApiService implements ChatServiceProvider {
         return TextDeltaEvent(json['delta'] as String? ?? '');
       case 'tool_thinking':
         return ToolThinkingEvent(json['message'] as String? ?? '');
+      case 'tool_status':
+        return ToolStatusEvent(
+          tool: json['tool'] as String? ?? '',
+          message: json['message'] as String? ?? '',
+        );
       case 'clarification_ui':
         return ClarificationUiEvent(
           clarificationId: json['clarification_id'] as String? ?? '',
@@ -278,6 +294,10 @@ class BackendApiService implements ChatServiceProvider {
 
   Future<Result<void>> deleteAccount() async {
     return _apiClient.delete('/account', (json) {});
+  }
+
+  Future<Result<void>> revokeAuraMemory() async {
+    return _apiClient.delete('/aura/memory', (json) {});
   }
 
   /// Regenerates the main Buddy chat suggestion pills from the user's latest

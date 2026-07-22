@@ -38,7 +38,7 @@ from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
@@ -56,11 +56,13 @@ _LINE_MAX_AGE_DAYS = 30
 # Lines self-scored below this are not stored - silence beats generic.
 _CALLBACK_SPECIFICITY_MIN = int(os.getenv("CALLBACK_SPECIFICITY_MIN", "60"))
 _VALUE_MAX_CHARS = 200
+_MAX_GENERATION_ATTEMPTS = 3
+_GENERATION_RETRY_DELAY = timedelta(minutes=5)
 
 
 class _CallbackLine(BaseModel):
-    line: str
-    specificity: int
+    line: str = Field(min_length=1, max_length=140)
+    specificity: int = Field(ge=0, le=100)
 
 
 def _callback_enabled() -> bool:
@@ -107,7 +109,7 @@ def _recent_rows(uid: str, limit: int) -> list[tuple[str, dict[str, Any]]]:
     return [(d.id, d.to_dict() or {}) for d in docs]
 
 
-async def _generate_line(uid: str, date: str) -> None:
+async def _generate_line(uid: str, date: str, *, retry_count: int = 0) -> None:
     """Background generation of one day's callback line. Writes either
     {line, specificity} or {empty: true} to the line doc; the desktop's next
     GET that day picks up whichever landed. Failures leave the doc in
@@ -157,12 +159,31 @@ async def _generate_line(uid: str, date: str) -> None:
             "user_id": uid, "date": date, "empty": bool(result.get("empty")),
         })
     except Exception as exc:
-        # Leave the doc as-is; a later GET the same day retries generation.
         logger.warn("Memories: callback line generation failed", {
-            "user_id": uid, "date": date, "error": type(exc).__name__, "detail": str(exc),
+            "user_id": uid,
+            "date": date,
+            "error_type": type(exc).__name__,
+            "attempt": retry_count + 1,
         })
         try:
-            await asyncio.to_thread(_line_ref(uid, date).delete)
+            next_count = retry_count + 1
+            if next_count >= _MAX_GENERATION_ATTEMPTS:
+                failure = {
+                    "empty": True,
+                    "status": "exhausted",
+                    "retry_count": next_count,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+            else:
+                failure = {
+                    "status": "retry_wait",
+                    "retry_count": next_count,
+                    "retry_after": (
+                        datetime.now(UTC) + _GENERATION_RETRY_DELAY
+                    ).isoformat(),
+                    "generated_at": datetime.now(UTC).isoformat(),
+                }
+            await asyncio.to_thread(_line_ref(uid, date).set, failure)
         except Exception:
             pass
 
@@ -190,7 +211,7 @@ async def handle_callback_card(request: Request) -> JSONResponse:
             _line_ref(user_id, date).set,
             {"status": "generating", "generated_at": datetime.now(UTC).isoformat()},
         )
-        asyncio.create_task(_generate_line(user_id, date))
+        asyncio.create_task(_generate_line(user_id, date, retry_count=0))
         return JSONResponse({})
 
     if stored.get("status") == "generating":
@@ -198,7 +219,35 @@ async def handle_callback_card(request: Request) -> JSONResponse:
         claimed_at = str(stored.get("generated_at", ""))
         stale_cutoff = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
         if claimed_at < stale_cutoff:
-            asyncio.create_task(_generate_line(user_id, date))
+            retry_count = int(stored.get("retry_count", 0) or 0)
+            await asyncio.to_thread(
+                _line_ref(user_id, date).set,
+                {
+                    "status": "generating",
+                    "retry_count": retry_count,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            asyncio.create_task(
+                _generate_line(user_id, date, retry_count=retry_count)
+            )
+        return JSONResponse({})
+
+    if stored.get("status") == "retry_wait":
+        retry_count = int(stored.get("retry_count", 0) or 0)
+        retry_after = str(stored.get("retry_after", ""))
+        if retry_count < _MAX_GENERATION_ATTEMPTS and retry_after <= datetime.now(UTC).isoformat():
+            await asyncio.to_thread(
+                _line_ref(user_id, date).set,
+                {
+                    "status": "generating",
+                    "retry_count": retry_count,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            asyncio.create_task(
+                _generate_line(user_id, date, retry_count=retry_count)
+            )
         return JSONResponse({})
 
     line = str(stored.get("line", "")).strip()

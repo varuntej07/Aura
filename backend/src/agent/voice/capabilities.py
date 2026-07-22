@@ -49,7 +49,6 @@ class VoiceToolCapability:
     effect: ToolEffect
     allowed_surfaces: frozenset[VoiceSurface]
     requires_fresh_desktop_frame: bool
-    requires_explicit_authorization: bool
     safe_concurrently: bool
     complex_lane_eligible: bool
     required_fields: frozenset[str] = frozenset()
@@ -63,7 +62,6 @@ def _tool(
     *,
     surfaces: frozenset[VoiceSurface] = ALL_SURFACES,
     frame: bool = False,
-    authorization: bool = False,
     concurrent: bool = True,
     complex_eligible: bool = False,
     required: tuple[str, ...] = (),
@@ -75,7 +73,6 @@ def _tool(
         effect=effect,
         allowed_surfaces=surfaces,
         requires_fresh_desktop_frame=frame,
-        requires_explicit_authorization=authorization,
         safe_concurrently=concurrent,
         complex_lane_eligible=complex_eligible,
         required_fields=frozenset(required),
@@ -97,7 +94,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "set_reminder",
             Capability.REMINDER_WRITE,
             ToolEffect.WRITE,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
             required=("message", "scheduled_at"),
@@ -107,7 +103,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "cancel_reminder",
             Capability.REMINDER_WRITE,
             ToolEffect.WRITE,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
             required=("reminder_id",),
@@ -124,7 +119,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "create_calendar_event",
             Capability.CALENDAR_WRITE,
             ToolEffect.WRITE,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
             required=("title", "start_time"),
@@ -140,7 +134,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "store_memory",
             Capability.MEMORY_WRITE,
             ToolEffect.WRITE,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
             required=("key", "value", "category"),
@@ -156,7 +149,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "report_feedback",
             Capability.FEEDBACK_WRITE,
             ToolEffect.WRITE,
-            authorization=False,
             concurrent=True,
             complex_eligible=True,
             required=("category", "about", "summary", "verbatim_quote"),
@@ -165,7 +157,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "track_topic",
             Capability.TRACKING_WRITE,
             ToolEffect.WRITE,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
             required=("request",),
@@ -176,7 +167,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             surfaces=DESKTOP_ONLY,
             frame=True,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
             required=("title", "collection_name"),
@@ -188,10 +178,12 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             surfaces=DESKTOP_ONLY,
             frame=True,
-            authorization=True,
             concurrent=False,
             complex_eligible=True,
-            required=("channel",),
+            # No required field: channel/length are optional hints the drafter
+            # infers from the screen, so Buddy can draft from just the intent
+            # (or nothing) without the old "email or new message?" bounce.
+            required=(),
             skill="outbound_draft",
         ),
         _tool(
@@ -199,7 +191,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             Capability.VISIBLE_ARTIFACT,
             ToolEffect.PRESENT,
             surfaces=DESKTOP_ONLY,
-            authorization=False,
             concurrent=False,
             complex_eligible=True,
             required=("kind", "title", "content"),

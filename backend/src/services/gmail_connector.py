@@ -24,12 +24,16 @@ from ..lib.logger import logger
 from .firebase import admin_firestore
 from .google_oauth import exchange_server_auth_code
 
-# Read + send. messages.send requires gmail.send (gmail.modify does NOT grant
-# sending). gmail.readonly covers list/get. Both are Google "restricted" scopes,
-# so the OAuth app must be verified (or the account added as a test user) before use.
-GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+# messages.send requires gmail.send (gmail.modify does NOT grant sending), a
+# Google "sensitive" scope that clears with brand review only (no security
+# assessment). gmail.readonly (list/get) is a "restricted" scope that would force
+# the whole OAuth app into an annual paid CASA security assessment, so it is
+# intentionally NOT requested. Re-adding it means signing up for CASA verification.
+# Because readonly is not granted, the list_emails / read_email tools are disabled
+# (see tool_executor.py); only send_email is exposed.
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"  # unused: requires CASA
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
-GMAIL_SCOPES = [GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE]
+GMAIL_SCOPES = [GMAIL_SEND_SCOPE]
 
 CONNECTOR_DOC_ID = "gmail"
 

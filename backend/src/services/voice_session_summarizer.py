@@ -13,53 +13,53 @@ atomicity: the archive doc and all archived flags are committed together.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
+
+from pydantic import BaseModel, Field
+
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
+from . import voice_session_fields as vf
 from .aura_reflection import consolidate_session
 from .user_aura_extractor import extract_and_update_user_aura
+from .voice_history_store import delete_voice_run_data
+from .voice_transcript_reconciliation import reconcile_voice_transcript
 
 _SESSION_SUMMARY_PROMPT = """\
-You are extracting structured memory from a voice conversation between a user
-and their AI friend Buddy. Extract SPECIFIC CONCRETE facts only. Never be vague.
-
-Good: "user wants to run 5km by July 15"
-Bad:  "user mentioned fitness goals"
+Extract compact conversational memory from this voice transcript. Return only the
+requested JSON object. Be specific and concrete. Do not infer that any reminder,
+calendar event, message, or other side effect happened from transcript wording. Action
+truth is added separately from runtime receipts and is not part of your output.
 
 Transcript:
 {transcript}
 
-Extract in these exact categories. Write "none" if a category has nothing.
-
-Write plain spoken prose under each category: short sentences only. Do NOT use any
-markdown: no asterisks, bullets, dashes as list markers, bold, headers, or numbered
-lists. This text is injected verbatim into a later voice prompt, so any markup gets
-read aloud literally.
-
-OPEN LOOPS
-Things the user mentioned wanting to do but did not complete this call.
-One short sentence per item. Include specifics: dates, names, numbers.
-
-DECISIONS MADE
-Things the user decided or committed to during this call.
-
-EMOTIONAL STATE
-How the user seemed. Be specific: "frustrated about sleep onset, said it takes
-2 hours to fall asleep" not "mentioned sleep issues".
-
-REMINDERS AND CALENDAR
-Tool calls made: reminders set, calendar events created. Include exact times.
-
-KEY FACTS LEARNED
-New facts about the user's life. Job, relationships, health, location, habits.
-Only include things not likely mentioned before.
-
-FOLLOW-UP HOOK
-One specific question Buddy can ask next session to show continuity.
-Example: "Ask if they started the 5km training they mentioned for July"
+recap: one or two friendly sentences suitable for a history list.
+open_loops: specific unfinished threads.
+decisions: choices or commitments the user made, not tool actions.
+emotional_context: one compact sentence, or empty.
+facts: stable facts learned about the user's life.
+follow_up: one natural question Buddy can ask next time, or empty.
 """
+
+
+class VoiceSessionMemory(BaseModel):
+    recap: str = ""
+    open_loops: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    emotional_context: str = ""
+    facts: list[str] = Field(default_factory=list)
+    follow_up: str = ""
+
+    def compact_context(self) -> str:
+        return json.dumps(
+            self.model_dump(exclude={"recap"}),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
 _ARCHIVE_SYNTHESIS_PROMPT = """\
 You are building a long-term memory profile from {n} past voice conversation
@@ -110,18 +110,26 @@ def _format_session_duration(duration_ms: int) -> str:
     return f"{seconds}s"
 
 
-async def _generate_session_summary(turns: list[dict]) -> str:
+async def _generate_session_summary(turns: list[dict]) -> VoiceSessionMemory:
     if not turns:
-        return ""
+        return VoiceSessionMemory()
     transcript_lines = [
         f"{t['role']}: {t['text']}" for t in turns if t.get("text")
     ]
     if not transcript_lines:
-        return ""
+        return VoiceSessionMemory()
     transcript = "\n".join(transcript_lines)
     prompt = _SESSION_SUMMARY_PROMPT.format(transcript=transcript)
     provider = get_model_provider()
-    return await provider.cheap(prompt, temperature=0.3)
+    result = await provider.cheap(
+        prompt,
+        response_model=VoiceSessionMemory,
+        temperature=0.2,
+    )
+    if isinstance(result, VoiceSessionMemory):
+        return result
+    # Compatibility for test doubles or a provider adapter returning plain text.
+    return VoiceSessionMemory(recap=str(result).strip())
 
 
 async def _count_active_sessions(user_id: str) -> int:
@@ -139,13 +147,17 @@ async def _count_active_sessions(user_id: str) -> int:
 async def _write_session_doc(
     user_id: str,
     session_id: str,
-    summary: str,
+    memory: VoiceSessionMemory,
     raw_turns: list[dict],
     started_at: str,
     ended_at: str,
     duration_ms: int,
     tool_calls: list[str],
     screen_sight_frame_count: int,
+    *,
+    conversation_id: str,
+    surface: str,
+    action_receipts: list[dict],
 ) -> None:
     def _write() -> None:
         ref = (
@@ -157,7 +169,22 @@ async def _write_session_doc(
         num_of_assistant_turns = sum(
             1 for t in raw_turns if t.get("role") == "assistant"
         )
+        actions = [
+            receipt
+            for receipt in action_receipts
+            if receipt.get(vf.ACTION_SUCCESS) is True
+            and receipt.get(vf.ACTION_TOOL_NAME)
+        ]
+        schema_version = (
+            vf.SCHEMA_VERSION_V2
+            if conversation_id and surface != vf.SURFACE_UNKNOWN
+            else 1
+        )
         ref.set({
+            vf.SCHEMA_VERSION: schema_version,
+            vf.VOICE_RUN_ID: session_id,
+            vf.CONVERSATION_ID: conversation_id,
+            vf.SURFACE: surface,
             "started_at": started_at,
             "ended_at": ended_at,
             "duration_ms": duration_ms,
@@ -168,7 +195,17 @@ async def _write_session_doc(
             "tool_calls_made": tool_calls,
             "num_of_tool_calls": len(tool_calls),
             "model_used": settings.ANTHROPIC_VOICE_MODEL,
-            "summary": summary,
+            # Legacy readers keep using summary. For schema v2 it is the friendly
+            # recap, while future voice context reads MEMORY_CONTEXT below.
+            "summary": memory.recap,
+            vf.RECAP: memory.recap,
+            vf.OPEN_LOOPS: memory.open_loops,
+            vf.DECISIONS: memory.decisions,
+            vf.EMOTIONAL_CONTEXT: memory.emotional_context,
+            vf.FACTS: memory.facts,
+            vf.FOLLOW_UP: memory.follow_up,
+            vf.MEMORY_CONTEXT: memory.compact_context(),
+            vf.ACTIONS: actions,
             "archived": False,
             "raw_turns": raw_turns,
             # Count only — never the frame bytes themselves, which are never
@@ -180,7 +217,7 @@ async def _write_session_doc(
 
 async def _write_latest_summary(
     user_id: str,
-    summary: str,
+    memory: VoiceSessionMemory,
     session_id: str,
     turn_count: int,
     duration_ms: int,
@@ -192,7 +229,9 @@ async def _write_latest_summary(
             .collection("voice_session_state").document("latest")
         )
         ref.set({
-            "summary": summary,
+            "summary": memory.recap,
+            vf.RECAP: memory.recap,
+            vf.MEMORY_CONTEXT: memory.compact_context(),
             "last_session_at": datetime.now(UTC).isoformat(),
             "last_session_id": session_id,
             "turn_count": turn_count,
@@ -220,8 +259,10 @@ async def _fetch_oldest_active_summaries(
             data = doc.to_dict() or {}
             results.append({
                 "doc_id": doc.id,
-                "summary": data.get("summary", ""),
+                "summary": data.get(vf.MEMORY_CONTEXT) or data.get("summary", ""),
                 "started_at": data.get("started_at", ""),
+                vf.CONVERSATION_ID: data.get(vf.CONVERSATION_ID, ""),
+                vf.VOICE_RUN_ID: data.get(vf.VOICE_RUN_ID, doc.id),
             })
         return results
     return await asyncio.to_thread(_read)
@@ -282,14 +323,30 @@ async def _archive_sessions(
             db.collection("users").document(user_id)
             .collection("voice_session_state").document("archive")
         )
+        existing_archive = archive_ref.get()
+        existing_data = existing_archive.to_dict() or {} if existing_archive.exists else {}
         doc_ids = [s["doc_id"] for s in session_summaries]
+        archived_run_ids = sorted({
+            *existing_data.get("voice_run_ids", []),
+            *(str(s.get(vf.VOICE_RUN_ID) or s["doc_id"]) for s in session_summaries),
+        })
+        archived_conversation_ids = sorted({
+            *existing_data.get("conversation_ids", []),
+            *(
+                str(s.get(vf.CONVERSATION_ID))
+                for s in session_summaries
+                if s.get(vf.CONVERSATION_ID)
+            ),
+        })
         started_ats = [
             s.get("started_at", "") for s in session_summaries
         ]
         batch.set(archive_ref, {
             "archive_summary": archive_text,
             "last_archived_at": datetime.now(UTC).isoformat(),
-            "sessions_archived_count": len(doc_ids),
+            "sessions_archived_count": len(archived_run_ids),
+            "voice_run_ids": archived_run_ids,
+            "conversation_ids": archived_conversation_ids,
             "oldest_archived_session_at": started_ats[0] if started_ats else "",
             "newest_archived_session_at": started_ats[-1] if started_ats else "",
         })
@@ -315,21 +372,19 @@ async def _archive_sessions(
 
 
 async def _cleanup_archived_docs(user_id: str, doc_ids: list[str]) -> None:
-    def _delete() -> None:
-        db = admin_firestore()
-        for doc_id in doc_ids:
-            try:
-                db.collection("users").document(user_id).collection(
-                    "voice_sessions"
-                ).document(doc_id).delete()
-            except Exception as exc:
-                logger.warn("VoiceSession: cleanup delete failed", {
-                    "user_id": user_id, "doc_id": doc_id, "error": str(exc),
-                })
     try:
-        await asyncio.to_thread(_delete)
+        results = await asyncio.gather(
+            *(delete_voice_run_data(user_id, doc_id) for doc_id in doc_ids),
+            return_exceptions=True,
+        )
+        failed = sum(
+            1 for result in results
+            if isinstance(result, BaseException) or not result.ok
+        )
         logger.info("VoiceSession: cleanup complete", {
-            "user_id": user_id, "deleted_count": len(doc_ids),
+            "user_id": user_id,
+            "deleted_count": len(doc_ids) - failed,
+            "failed_count": failed,
         })
     except Exception as exc:
         logger.warn("VoiceSession: cleanup failed (cosmetic)", {
@@ -340,11 +395,14 @@ async def _cleanup_archived_docs(user_id: str, doc_ids: list[str]) -> None:
 async def run_post_session_pipeline(
     user_id: str,
     session_id: str,
+    conversation_id: str,
+    surface: str,
     turns: list[dict],
     started_at: str,
     ended_at: str,
     duration_ms: int,
     tool_calls: list[str],
+    action_receipts: list[dict] | None = None,
     screen_sight_frame_count: int = 0,
 ) -> None:
     logger.info("VoiceSession: post-session pipeline started", {
@@ -359,15 +417,20 @@ async def run_post_session_pipeline(
         return_exceptions=True,
     )
 
-    summary: str
+    memory: VoiceSessionMemory
     if isinstance(results_a[0], BaseException):
         logger.warn("VoiceSession: summary generation failed", {
             "user_id": user_id, "session_id": session_id,
             "error": str(results_a[0]),
         })
-        summary = ""
+        memory = VoiceSessionMemory()
     else:
-        summary = str(results_a[0])
+        generated = results_a[0]
+        memory = (
+            generated
+            if isinstance(generated, VoiceSessionMemory)
+            else VoiceSessionMemory(recap=str(generated).strip())
+        )
 
     session_count: int
     if isinstance(results_a[1], BaseException):
@@ -385,17 +448,23 @@ async def run_post_session_pipeline(
     )
     results_b = await asyncio.gather(
         _write_session_doc(
-            user_id, session_id, summary, turns,
+            user_id, session_id, memory, turns,
             started_at, ended_at, duration_ms, tool_calls,
             screen_sight_frame_count,
+            conversation_id=conversation_id,
+            surface=surface,
+            action_receipts=action_receipts or [],
         ),
         _write_latest_summary(
-            user_id, summary, session_id, len(turns), duration_ms,
+            user_id, memory, session_id, len(turns), duration_ms,
         ),
         extract_and_update_user_aura(
             uid=user_id,
             message=user_turns_text,
             session_id=session_id,
+            turn_id=f"voice_summary_{session_id}",
+            turn_index=max(0, len(turns) - 1),
+            surface="voice",
         ) if user_turns_text else asyncio.sleep(0),
         # Reflection tier: the same per-session narrative pass text chat uses, so a
         # voice session also yields storylines/traits, not just flat interests.
@@ -426,6 +495,16 @@ async def run_post_session_pipeline(
             "error": str(results_b[3]),
         })
 
+    # Canonical transcript repair is safe only for schema-v2 identity. The reconciler
+    # verifies all present deterministic ids before inserting any missing child.
+    if conversation_id:
+        await reconcile_voice_transcript(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            voice_run_id=session_id,
+            turns=turns,
+        )
+
     # Step C: archive check
     if session_count > _ACTIVE_SESSION_THRESHOLD:
         try:
@@ -450,5 +529,5 @@ async def run_post_session_pipeline(
 
     logger.info("VoiceSession: post-session pipeline complete", {
         "user_id": user_id, "session_id": session_id,
-        "summary_len": len(summary), "session_count": session_count,
+        "summary_len": len(memory.recap), "session_count": session_count,
     })

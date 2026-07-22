@@ -44,6 +44,7 @@ class Utterance:
     start_s: float
     end_s: float
     text: str
+    speaker: str | None = None
 
 
 @dataclass
@@ -122,9 +123,12 @@ def _parse(body: dict[str, Any]) -> SegmentTranscript:
         ))
 
     channels = results.get("channels") or []
+    channel_fallbacks: list[Utterance] = []
     for index, channel in enumerate(channels[:2]):
         alternatives = channel.get("alternatives") or [{}]
-        words = len(alternatives[0].get("words") or [])
+        alternative = alternatives[0]
+        fallback_text = str(alternative.get("transcript") or "").strip()
+        words = len(alternative.get("words") or []) or len(fallback_text.split())
         if index == MIC_CHANNEL:
             out.mic_words = words
         else:
@@ -133,6 +137,36 @@ def _parse(body: dict[str, Any]) -> SegmentTranscript:
             detected = channel.get("detected_language")
             if detected:
                 out.language = str(detected)
+
+        # Deepgram can occasionally return a channel transcript without the
+        # requested utterance array. Keep the channel provenance rather than
+        # degrading a meeting with recognized words to an empty transcript.
+        if fallback_text:
+            channel_fallbacks.append(Utterance(
+                channel=index,
+                start_s=0.0,
+                end_s=0.0,
+                text=fallback_text,
+            ))
+
+    if not out.utterances:
+        if channel_fallbacks:
+            out.utterances.extend(channel_fallbacks)
+        else:
+            # This is not part of the current multichannel Deepgram response,
+            # but keeps a future mono or provider fallback transcript usable
+            # without inventing speaker attribution.
+            fallback_text = str(
+                results.get("transcript") or body.get("transcript") or ""
+            ).strip()
+            if fallback_text:
+                out.utterances.append(Utterance(
+                    channel=-1,
+                    start_s=0.0,
+                    end_s=0.0,
+                    text=fallback_text,
+                    speaker="",
+                ))
 
     if not out.utterances and (out.mic_words or out.loopback_words):
         logger.warn("meetings.deepgram: words without utterances", {

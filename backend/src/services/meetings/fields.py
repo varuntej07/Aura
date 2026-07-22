@@ -20,9 +20,20 @@ Stored shape (written only by this backend, read by desktop over REST):
         "updated_at":     iso8601,
         "note":           { "summary": str, "decisions": [str],
                             "action_items": [str], "open_questions": [str],
-                            "language": str, "one_sided": bool },   # ready only
+                            "transcript": [{ "speaker": str, "text": str }],
+                            "language": str, "one_sided": bool,
+                            "partial": bool },                       # ready only
         "expires_at":     timestamp,  # native datetime; set for non-pro tiers
                                       #   only, drives the Firestore TTL policy
+        # --- additive processing metadata (explains "status") ---
+        "processing_stage":  str,     # capturing|uploading|queued|transcribing
+                                      #   |building_insights|ready
+        "failure_code":      str,     # safe enum (FAIL_*), never a raw exception
+        "failure_message":   str,     # optional friendly fallback copy
+        "retryable":         bool,    # may the UI offer Retry
+        "attempt_count":     int,     # synthesis attempts (diagnostic)
+        "last_error_at":     iso8601, # for stale-processing alerts
+        "status_revision":   int,     # monotonic; used in notification dedup keys
     }
 
     users/{uid}/meeting_claims/{event_key} = {
@@ -73,8 +84,24 @@ TOTAL_DURATION_MS = "total_duration_ms"
 CREATED_AT = "created_at"
 UPDATED_AT = "updated_at"
 NOTE = "note"
+NOTE_TRANSCRIPT = "transcript"
+TRANSCRIPT_SPEAKER = "speaker"
+TRANSCRIPT_TEXT = "text"
 EXPIRES_AT = "expires_at"
 COMPLETE_REASON = "complete_reason"
+
+# --- durable processing metadata (additive; explains the coarse STATUS) --------
+# STATUS above stays the compatibility contract; these fields let the desktop
+# show a stage, a safe reason, and a Retry affordance without reading logs. A
+# client that ignores them still works off STATUS + NOTE. Every status-changing
+# write bumps STATUS_REVISION (used in notification dedup keys).
+PROCESSING_STAGE = "processing_stage"
+FAILURE_CODE = "failure_code"
+FAILURE_MESSAGE = "failure_message"
+RETRYABLE = "retryable"
+ATTEMPT_COUNT = "attempt_count"
+LAST_ERROR_AT = "last_error_at"
+STATUS_REVISION = "status_revision"
 
 # --- claim-lock fields ----------------------------------------------------------
 CLAIM_EVENT_ID = "event_id"
@@ -92,6 +119,32 @@ STATUS_FAILED = "failed"
 # Statuses during which an event's claim lock is honored and segment uploads
 # are accepted.
 ACTIVE_STATUSES = (STATUS_CAPTURING, STATUS_UPLOADED, STATUS_SYNTHESIZING)
+
+# --- processing_stage values (finer-grained than STATUS; drives the UI row) ---
+# One STATUS can span two stages: "synthesizing" is TRANSCRIBING then
+# BUILDING_INSIGHTS, so the worker sets these explicitly at each sub-step.
+STAGE_CAPTURING = "capturing"
+STAGE_UPLOADING = "uploading"
+STAGE_QUEUED = "queued"
+STAGE_TRANSCRIBING = "transcribing"
+STAGE_BUILDING_INSIGHTS = "building_insights"
+STAGE_READY = "ready"
+
+# --- safe failure codes (a stable enum, NEVER a provider exception string) -----
+# The desktop maps each to non-blaming copy + one allowed action. upload_* codes
+# marked (client) are authored on the desktop from its local queue state; the
+# rest are server-authored.
+FAIL_UPLOAD_STORAGE_UNAVAILABLE = "upload_storage_unavailable"  # bucket/IAM/outage; retryable
+FAIL_NO_AUDIO = "no_audio"                                     # nothing captured; terminal
+FAIL_AUDIO_REJECTED = "audio_rejected"                         # STT will reject forever; terminal
+FAIL_TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"   # transient STT; retryable
+FAIL_INSIGHT_GENERATION_FAILED = "insight_generation_failed"   # all LLM fallbacks failed; terminal
+FAIL_EXCLUDED_SENSITIVE = "excluded_sensitive"                 # private-meeting rule; terminal
+FAIL_PROCESSING_TIMEOUT = "processing_timeout"                 # stuck past threshold; retryable
+
+# Statuses POST /meetings/{id}/retry may re-drive. A retry NEVER touches ready,
+# excluded, an actively-leased synthesizing run, or a non-retryable failure.
+RETRYABLE_STATUSES = (STATUS_UPLOADED, STATUS_FAILED)
 
 # --- caps / retention ----------------------------------------------------------
 # Free AND companion tiers share the meeting cap; only pro is unlimited

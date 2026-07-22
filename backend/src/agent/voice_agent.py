@@ -42,6 +42,7 @@ from .buddy_agent import BuddyAgent
 from .voice.auth import mint_firebase_id_token
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
+from .voice.greeting import start_opener_task
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -71,6 +72,26 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 # Launch surfaces the client stamps into its participant metadata at /voice/token.
 # Anything else (or a missing value) collapses to "app", the neutral default.
 _KNOWN_SURFACES = frozenset({"app", "keyboard", "desktop"})
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def _resolve_participant_metadata(ctx: JobContext) -> tuple[str | None, str]:
+    """Return validated ``(surface, conversation_id)`` from the user's token metadata."""
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            surface = data.get("surface")
+            conversation_id = str(data.get("conversation_id") or "").strip()
+            return (
+                surface if surface in _KNOWN_SURFACES else None,
+                conversation_id if _CONVERSATION_ID_RE.fullmatch(conversation_id) else "",
+            )
+    except Exception:
+        pass
+    return None, ""
 
 
 def _resolve_surface(ctx: JobContext) -> str:
@@ -82,17 +103,32 @@ def _resolve_surface(ctx: JobContext) -> str:
     their join) and default to 'app' on anything unexpected, so a missing or malformed
     value never changes behavior.
     """
+    surface, _ = _resolve_participant_metadata(ctx)
+    return surface or "app"
+
+
+def _resolve_followup_metadata(ctx: JobContext) -> tuple[str, str | None, list[str]]:
+    """Read optional notification lineage stamped by the token endpoint."""
     try:
         for participant in ctx.room.remote_participants.values():
             raw = (getattr(participant, "metadata", "") or "").strip()
             if not raw:
                 continue
-            surface = json.loads(raw).get("surface")
-            if surface in _KNOWN_SURFACES:
-                return surface
+            data = json.loads(raw)
+            if data.get("origin") != "notification_tap":
+                return "organic", None, []
+            candidate_id = str(data.get("origin_candidate_id") or "").strip()[:80]
+            lineage = data.get("lineage_chain")
+            return (
+                "notification_tap",
+                candidate_id or None,
+                [str(value).strip()[:80] for value in lineage if str(value).strip()][:20]
+                if isinstance(lineage, list)
+                else [],
+            )
     except Exception:
         pass
-    return "app"
+    return "organic", None, []
 
 
 def prewarm(process: JobProcess) -> None:
@@ -170,18 +206,53 @@ async def entrypoint(ctx: JobContext) -> None:
         })
         return
 
-    async with voice_session_logger(user_id, ctx.room.name) as session_id:
+    followup_session_id: str | None = None
+    if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
+        from ..services.session_followup.lifecycle import session_lifecycle_service
+
+        origin, origin_candidate_id, lineage_chain = _resolve_followup_metadata(ctx)
+        followup_session_id = await session_lifecycle_service.start_session(
+            user_id,
+            None,
+            surface="voice",
+            origin=origin,
+            origin_candidate_id=origin_candidate_id,
+            lineage_chain=lineage_chain,
+        )
+
+    async with voice_session_logger(
+        user_id,
+        ctx.room.name,
+        session_id=followup_session_id,
+    ) as session_id:
         # Fetch profile, memory, last session, archive, aura, and tier in
         # parallel under a hard ceiling. Each source defaults independently.
         session_context = await gather_session_context(user_id, session_id)
         context_vars = session_context.prompt_context_vars
 
+        # Memory-seeded opener, raced against the static greeting: it runs in
+        # parallel with the pipeline build below, and on_enter waits at most
+        # VOICE_GREETING_SEED_BUDGET_S for it before falling back to a static
+        # casual line (sub-1s first-audio feel preserved).
+        opener_task = start_opener_task(
+            session_context, session_id=session_id, user_id=user_id
+        )
+
         # Where the call was launched from. Baked into the prompt once here (the prompt is
         # built once per session in BuddyAgent), so a keyboard tap stays short and
         # task-focused for the whole session, not just the first turn.
-        surface = _resolve_surface(ctx)
+        persisted_surface, conversation_id = _resolve_participant_metadata(ctx)
+        surface = persisted_surface or "app"
         context_vars["surface"] = render_surface_note(surface)
         context_vars["screen_sight"] = render_screen_sight_note(surface)
+        if persisted_surface is None:
+            logger.warn("voice_run_missing_surface", {
+                "session_id": session_id, "user_id": user_id,
+            })
+        if not conversation_id:
+            logger.warn("voice_run_missing_conversation_id", {
+                "session_id": session_id, "user_id": user_id,
+            })
         if surface != "app":
             logger.info("VoiceSession: launch surface", {
                 "session_id": session_id, "user_id": user_id, "surface": surface,
@@ -277,6 +348,7 @@ async def entrypoint(ctx: JobContext) -> None:
             user_tier=session_context.user_tier,
             display_name=draft_display_name,
             launch_surface=surface,
+            opener_task=opener_task,
         )
 
         recorder = VoiceSessionRecorder(
@@ -286,6 +358,7 @@ async def entrypoint(ctx: JobContext) -> None:
             user_id=user_id,
             user_tier=session_context.user_tier,
             tool_observer=buddy,
+            screen_frames=screen_frames,
         )
         recorder.attach()
 
@@ -433,15 +506,28 @@ async def entrypoint(ctx: JobContext) -> None:
                 run_post_session_pipeline(
                     user_id=user_id,
                     session_id=session_id,
+                    conversation_id=conversation_id,
+                    surface=persisted_surface or "unknown",
                     turns=recorder.turns,
                     started_at=session_start_iso,
                     ended_at=session_end_iso,
                     duration_ms=elapsed_ms,
                     tool_calls=recorder.tool_calls,
+                    action_receipts=recorder.action_receipts,
                     screen_sight_frame_count=screen_frames.frame_count,
                 ),
                 name=f"voice-post-session-{session_id[:8]}",
             )
+            if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
+                from ..services.session_followup.lifecycle import session_lifecycle_service
+
+                asyncio.create_task(
+                    session_lifecycle_service.note_voice_disconnect(
+                        user_id,
+                        session_id,
+                    ),
+                    name=f"followup-voice-grace-{session_id[:8]}",
+                )
         except Exception as exc:
             log_voice_failure(
                 code="session_start_failed",
