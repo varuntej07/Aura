@@ -17,6 +17,7 @@ ChatMessageModel _msg({
   required bool isUser,
   required String? sessionId,
   DateTime? timestamp,
+  ChatMessageInputMethod? inputMethod,
 }) {
   return ChatMessageModel(
     id: id,
@@ -24,6 +25,7 @@ ChatMessageModel _msg({
     isUser: isUser,
     timestamp: timestamp ?? DateTime(2026, 1, 1, 12),
     channel: ChatMessageChannel.text,
+    inputMethod: inputMethod,
     sessionId: sessionId,
   );
 }
@@ -157,5 +159,37 @@ void main() {
     expect(msg.status, MessageStatus.error);
     expect(msg.errorReason, 'boom');
     expect(msg.text, 'edited');
+  });
+
+  test('input_method round-trips through Drift (writer -> reader)', () async {
+    final sessionId = await repo.createSession(userId: 'u1');
+    await repo.saveMessage(_msg(
+      id: 'pasted',
+      text: 'a very long pasted block',
+      isUser: true,
+      sessionId: sessionId,
+      inputMethod: ChatMessageInputMethod.pasted,
+    ));
+    await repo.saveMessage(_msg(
+      id: 'typed',
+      text: 'hi',
+      isUser: true,
+      sessionId: sessionId,
+      inputMethod: ChatMessageInputMethod.typed,
+    ));
+    // Legacy / assistant message with no capture reads back as null, never a guess.
+    await repo.saveMessage(_msg(
+      id: 'none',
+      text: 'reply',
+      isUser: false,
+      sessionId: sessionId,
+    ));
+
+    final byId = {
+      for (final m in (await repo.loadMessages(sessionId)).dataOrNull!) m.id: m,
+    };
+    expect(byId['pasted']!.inputMethod, ChatMessageInputMethod.pasted);
+    expect(byId['typed']!.inputMethod, ChatMessageInputMethod.typed);
+    expect(byId['none']!.inputMethod, isNull);
   });
 }

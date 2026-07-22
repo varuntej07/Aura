@@ -13,6 +13,7 @@ import '../data/repositories/memory_repository.dart';
 import '../data/repositories/onboarding_repository.dart';
 import '../data/repositories/reminder_repository.dart';
 import '../data/services/app_feedback_service.dart';
+import '../data/services/device_metadata_service.dart';
 import '../data/services/chat_backup_service.dart';
 import '../data/services/chat_session_manager.dart';
 import '../data/services/feedback_service.dart';
@@ -97,6 +98,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
   final authRepository = AuthRepository(
     authService: firebaseAuthService,
     firestoreService: firestoreService,
+    deviceMetadataService: DeviceMetadataService(),
   );
   final memoryRepository = MemoryRepository(firestoreService: firestoreService);
   final reminderRepository = ReminderRepository(

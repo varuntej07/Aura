@@ -7,6 +7,7 @@ import 'package:aura/core/errors/app_exception.dart';
 import 'package:aura/core/network/api_response.dart';
 import 'package:aura/data/models/user_model.dart';
 import 'package:aura/data/repositories/auth_repository.dart';
+import 'package:aura/data/services/device_metadata_service.dart';
 import 'package:aura/data/services/firebase_auth_service.dart';
 import 'package:aura/data/services/firestore_service.dart';
 
@@ -17,6 +18,19 @@ import 'auth_repository_test.mocks.dart';
   MockSpec<FirestoreService>(),
   MockSpec<User>(),
 ])
+/// Deterministic device metadata so tests can assert the exact fields folded
+/// into the user-doc write without touching real platform channels.
+class FakeDeviceMetadataService extends DeviceMetadataService {
+  @override
+  Future<Map<String, dynamic>> collect() async => {
+        DeviceMetadataService.fieldAppVersion: '9.9.9+99',
+        DeviceMetadataService.fieldInstallStore: 'com.android.vending',
+        DeviceMetadataService.fieldDeviceLocale: 'en-IN',
+        DeviceMetadataService.fieldDeviceCountry: 'IN',
+        DeviceMetadataService.fieldDevice: {'os': 'android'},
+      };
+}
+
 UserModel _user({
   String uid = 'uid-1',
   bool onboardingComplete = true,
@@ -169,6 +183,77 @@ void main() {
         expect(data['onboarding_complete'], isFalse);
       },
     );
+  });
+
+  group('device metadata stamping', () {
+    late AuthRepository repoWithDeviceMetadata;
+
+    setUp(() {
+      repoWithDeviceMetadata = AuthRepository(
+        authService: authService,
+        firestoreService: firestore,
+        deviceMetadataService: FakeDeviceMetadataService(),
+      );
+    });
+
+    test('existing user sign-in folds device metadata into the one write',
+        () async {
+      when(
+        authService.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.success(firebaseUser));
+      when(
+        firestore.getDocument<UserModel>(any, any, any),
+      ).thenAnswer((_) async => Result.success(_user()));
+
+      final result = await repoWithDeviceMetadata.signInWithGoogle();
+
+      expect(result.isSuccess, isTrue);
+      final data =
+          verify(
+                firestore.updateDocument(any, any, captureAny),
+              ).captured.single
+              as Map<String, dynamic>;
+      expect(data[DeviceMetadataService.fieldAppVersion], '9.9.9+99');
+      expect(
+        data[DeviceMetadataService.fieldInstallStore],
+        'com.android.vending',
+      );
+      expect(data[DeviceMetadataService.fieldDeviceCountry], 'IN');
+      expect(data[DeviceMetadataService.fieldDevice], {'os': 'android'});
+      // This surface unions itself into the footprint array so it reads
+      // ["android", ...] rather than desktop-only once a desktop is linked.
+      expect(data.containsKey(UserModel.fieldLinkedPlatforms), isTrue);
+      // Login metadata still rides the same write.
+      expect(data[UserModel.fieldSignInMethod], 'google');
+    });
+
+    test('new user create write carries device metadata', () async {
+      when(
+        authService.signInWithGoogle(),
+      ).thenAnswer((_) async => Result.success(firebaseUser));
+      when(firestore.getDocument<UserModel>(any, any, any)).thenAnswer(
+        (_) async => Result.failure(
+          const AppException(
+            code: ErrorCode.documentNotFound,
+            message: 'not found',
+          ),
+        ),
+      );
+      when(firestore.setDocument<UserModel>(any, any, any, any)).thenAnswer(
+        (_) async => Result.success(_user(onboardingComplete: false)),
+      );
+
+      final result = await repoWithDeviceMetadata.signInWithGoogle();
+
+      expect(result.isSuccess, isTrue);
+      final data =
+          verify(
+                firestore.setDocument<UserModel>(any, any, captureAny, any),
+              ).captured.single
+              as Map<String, dynamic>;
+      expect(data[DeviceMetadataService.fieldAppVersion], '9.9.9+99');
+      expect(data[DeviceMetadataService.fieldDeviceLocale], 'en-IN');
+    });
   });
 
   group('signInWithEmail', () {

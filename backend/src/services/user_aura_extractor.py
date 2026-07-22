@@ -681,11 +681,7 @@ async def _write_graph_turn_provenance(
     turn_index: int | None,
     surface: str,
 ) -> None:
-    if not session_id or not (
-        settings.GRAPH_BUILD
-        or settings.FOLLOWUP_SHADOW
-        or settings.PROACTIVE_FOLLOWUP_SEND
-    ):
+    if not session_id:
         return
     resolved_turn_id = turn_id or str(uuid.uuid4())
     if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
@@ -700,24 +696,14 @@ async def _write_graph_turn_provenance(
             text=message,
             entity_keys=_insight_entity_keys(insight),
         )
-    if settings.GRAPH_BUILD:
-        from .memory.graph_store import write_turn_provenance
-
-        await write_turn_provenance(
-            uid,
-            session_id,
-            resolved_turn_id,
-            turn_index=max(0, int(turn_index or 0)),
-            role="user",
-            text=message,
-            entity_keys=_insight_entity_keys(insight),
-            surface=surface,
-        )
+    # The old GRAPH_BUILD-gated `write_turn_provenance` call that lived here was
+    # dead code: the symbol never existed in memory.graph_store, and the flag
+    # being off hid the broken import. Removed 2026-07-20 when the graph went
+    # always-on. Turn-level session notes are `note_user_turn` above; graph
+    # content itself is written by `_upsert_graph_from_insight` below.
 
 
 async def _upsert_graph_from_insight(uid: str, insight: MessageInsight) -> None:
-    if not settings.GRAPH_BUILD:
-        return
     try:
         from .memory.graph_store import (
             GraphEdgeInput,

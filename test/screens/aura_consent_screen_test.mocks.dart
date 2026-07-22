@@ -149,13 +149,16 @@ class MockAuthViewModel extends _i1.Mock implements _i2.AuthViewModel {
           as _i4.Future<void>);
 
   @override
-  void markOnboardingComplete({required bool? auraConsentGranted}) =>
-      super.noSuchMethod(
-        Invocation.method(#markOnboardingComplete, [], {
-          #auraConsentGranted: auraConsentGranted,
-        }),
-        returnValueForMissingStub: null,
-      );
+  void markOnboardingComplete({
+    required bool? auraConsentGranted,
+    String? displayName,
+  }) => super.noSuchMethod(
+    Invocation.method(#markOnboardingComplete, [], {
+      #auraConsentGranted: auraConsentGranted,
+      #displayName: displayName,
+    }),
+    returnValueForMissingStub: null,
+  );
 
   @override
   _i4.Future<bool> revokeAuraMemory() =>
@@ -229,6 +232,7 @@ class MockOnboardingRepository extends _i1.Mock
   @override
   _i4.Future<bool> saveOnboardingResult({
     required String? uid,
+    required String? displayName,
     required String? dateOfBirth,
     required bool? auraConsentGranted,
     required String? gender,
@@ -239,6 +243,7 @@ class MockOnboardingRepository extends _i1.Mock
       (super.noSuchMethod(
             Invocation.method(#saveOnboardingResult, [], {
               #uid: uid,
+              #displayName: displayName,
               #dateOfBirth: dateOfBirth,
               #auraConsentGranted: auraConsentGranted,
               #gender: gender,
