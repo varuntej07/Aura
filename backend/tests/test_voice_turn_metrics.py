@@ -47,6 +47,7 @@ def test_assistant_turn_extracts_latency_to_ms(captured: _LogCapture) -> None:
             "llm_node_ttft": 0.42,
             "tts_node_ttfb": 0.13,
             "e2e_latency": 0.95,
+            "playback_latency": 0.02,
             "llm_metadata": {"model_name": "claude", "model_provider": "anthropic"},
             "tts_metadata": {"model_name": "sonic", "model_provider": "cartesia"},
         },
@@ -58,6 +59,7 @@ def test_assistant_turn_extracts_latency_to_ms(captured: _LogCapture) -> None:
     assert payload["llm_ttft_ms"] == 420
     assert payload["tts_ttfb_ms"] == 130
     assert payload["eou_to_first_audio_ms"] == 950
+    assert payload["playback_ms"] == 20
     assert payload["llm_provider"] == "anthropic"
     assert not captured.warn_calls
 
@@ -70,6 +72,7 @@ def test_user_turn_extracts_endpointing_and_stt(captured: _LogCapture) -> None:
         metrics={
             "end_of_turn_delay": 0.20,
             "transcription_delay": 0.08,
+            "on_user_turn_completed_delay": 0.015,
             "stt_metadata": {"model_name": "nova", "model_provider": "deepgram"},
         },
         tier="free",
@@ -79,6 +82,7 @@ def test_user_turn_extracts_endpointing_and_stt(captured: _LogCapture) -> None:
     _, payload = captured.info_calls[0]
     assert payload["endpointing_ms"] == 200
     assert payload["stt_final_ms"] == 80
+    assert payload["turn_hook_ms"] == 15
     assert not captured.warn_calls
 
 

@@ -41,6 +41,7 @@ class _Env:
         self.audio_deleted = False
         self.saved_note: dict | None = None
         self.transcribed_paths: list[str] = []
+        self.notified_statuses: list[str] = []
         self.gcs_paths = [
             f"meetings/{UID}/{MID}/{int(seg['seq']):04d}.flac"
             for seg in (segments or [])
@@ -94,6 +95,10 @@ class _Env:
         async def fake_tier(uid):
             return tier
 
+        async def fake_notify(uid, meeting_id):
+            self.notified_statuses.append(self.meeting[F.STATUS])
+            return self.meeting[F.STATUS] == F.STATUS_READY
+
         monkeypatch.setattr(synthesis.store, "transition_status", fake_transition)
         monkeypatch.setattr(synthesis.store, "claim_synthesis", fake_claim_synthesis)
         monkeypatch.setattr(synthesis.store, "get_meeting", fake_get_meeting)
@@ -104,6 +109,7 @@ class _Env:
         monkeypatch.setattr(synthesis.gcs_audio, "delete_meeting_audio", fake_delete)
         monkeypatch.setattr(synthesis.deepgram, "transcribe_segment", fake_transcribe)
         monkeypatch.setattr(synthesis, "get_user_effective_tier", fake_tier)
+        monkeypatch.setattr(synthesis.notifications, "notify_settled", fake_notify)
         self._set_llm(monkeypatch, ok=True)
         self._monkeypatch = monkeypatch
 
@@ -144,6 +150,22 @@ def test_settled_meeting_no_ops(monkeypatch):
     assert status == F.STATUS_READY
     assert not env.transcribed_paths     # STT never ran
     assert not env.audio_deleted         # nothing touched
+    assert env.notified_statuses == [F.STATUS_READY]
+
+
+def test_fresh_synthesis_lease_stays_retryable(monkeypatch):
+    env = _Env(monkeypatch, status=F.STATUS_SYNTHESIZING, segments=[_seg(0, 0)])
+
+    async def lease_is_busy(uid, meeting_id):
+        return False, F.STATUS_SYNTHESIZING
+
+    monkeypatch.setattr(synthesis.store, "claim_synthesis", lease_is_busy)
+
+    with pytest.raises(synthesis.SynthesisLeaseBusyError):
+        asyncio.run(synthesis.run_synthesis(UID, MID))
+
+    assert not env.transcribed_paths
+    assert not env.audio_deleted
 
 
 def test_exclude_keyword_deletes_audio_before_stt(monkeypatch):
@@ -183,7 +205,57 @@ def test_empty_transcript_short_circuits_without_llm(monkeypatch):
     assert status == F.STATUS_READY
     assert env.saved_note is not None
     assert env.saved_note["action_items"] == []
+    assert env.saved_note[F.NOTE_TRANSCRIPT] == []
     assert "No speech" in env.saved_note["summary"]
+
+
+def test_ready_note_persists_ordered_speaker_turns(monkeypatch):
+    env = _Env(monkeypatch, segments=[_seg(0, 0)])
+    env.deepgram_result = dg.SegmentTranscript(
+        utterances=[
+            dg.Utterance(channel=0, start_s=1.0, end_s=2.0, text="First thought."),
+            dg.Utterance(channel=0, start_s=2.0, end_s=3.0, text="More context."),
+            dg.Utterance(channel=1, start_s=3.0, end_s=4.0, text="A response."),
+        ],
+        mic_words=4,
+        loopback_words=2,
+        language="en",
+    )
+
+    status = asyncio.run(synthesis.run_synthesis(UID, MID))
+
+    assert status == F.STATUS_READY
+    assert env.saved_note is not None
+    assert env.saved_note[F.NOTE_TRANSCRIPT] == [
+        {F.TRANSCRIPT_SPEAKER: "You", F.TRANSCRIPT_TEXT: "First thought. More context."},
+        {F.TRANSCRIPT_SPEAKER: "Others", F.TRANSCRIPT_TEXT: "A response."},
+    ]
+
+
+def test_deepgram_parser_falls_back_without_inventing_speakers():
+    multichannel = dg._parse({
+        "results": {
+            "channels": [
+                {"alternatives": [{"transcript": "Mic fallback", "words": [{}, {}]}]},
+                {"alternatives": [{"transcript": "Loopback fallback", "words": [{}]}]},
+            ],
+        },
+    })
+    mono = dg._parse({"results": {"transcript": "Unattributed fallback"}})
+
+    assert [(turn.channel, turn.text) for turn in multichannel.utterances] == [
+        (dg.MIC_CHANNEL, "Mic fallback"),
+        (dg.LOOPBACK_CHANNEL, "Loopback fallback"),
+    ]
+    assert mono.utterances == [
+        dg.Utterance(
+            channel=-1,
+            start_s=0.0,
+            end_s=0.0,
+            text="Unattributed fallback",
+            speaker="",
+        ),
+    ]
 
 
 def test_llm_failure_is_terminal_fails_and_deletes_audio(monkeypatch):
@@ -264,3 +336,4 @@ def test_ready_path_deletes_audio(monkeypatch):
     assert env.audio_deleted
     assert env.saved_note is not None
     assert env.saved_note["summary"]
+    assert env.notified_statuses == [F.STATUS_READY]

@@ -12,11 +12,14 @@ regression guard). Firestore + the embedder are faked.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from datetime import UTC, datetime
 
 import pytest
 
-from src.services.memory import retrieval, fields as F
+from src.services.memory import fields as F
+from src.services.memory import retrieval
 from src.services.memory.retrieval import (
     RetrievedAtom,
     render_relevant_memory_block,
@@ -38,8 +41,9 @@ def _reset_circuit():
 
 # --- fakes ----------------------------------------------------------------
 class _Snap:
-    def __init__(self, data):
+    def __init__(self, data, id_="atom-test"):
         self._d = data
+        self.id = id_
 
     def to_dict(self):
         return self._d
@@ -221,6 +225,88 @@ def test_memory_block_is_not_in_cached_suffix():
     assert "relevant_memory" not in suffix
 
 
+def test_chat_graph_first_falls_back_to_legacy_when_graph_empty(monkeypatch):
+    """Graph read is always on (flags removed 2026-07-20). The graph fills
+    organically from new turns, so an empty subgraph must fall back to flat
+    atom retrieval instead of erasing recall of pre-graph memories."""
+    from src.services.chat_completion import prompt_builder
+
+    profile = {"explicit_facts": ["lives in Hyderabad"], "dominant_tone": "casual"}
+    atom = RetrievedAtom("doctor is Dr. Reddy", F.ATOM_TYPE_FACT, 0.9, 0.9)
+    calls = {"legacy": 0, "graph": 0}
+
+    async def _datetime(*_args):
+        return "Saturday, July 18, 2026 at 1:00 PM PDT"
+
+    async def _aura(*_args):
+        return profile, []
+
+    async def _legacy(*_args, **_kwargs):
+        calls["legacy"] += 1
+        return [atom]
+
+    async def _graph(*_args, **_kwargs):
+        calls["graph"] += 1
+        return []
+
+    monkeypatch.setattr(prompt_builder, "get_user_local_datetime", _datetime)
+    monkeypatch.setattr(prompt_builder, "fetch_cached_aura_data", _aura)
+    monkeypatch.setattr(prompt_builder, "retrieve_relevant_memory", _legacy)
+    monkeypatch.setattr(prompt_builder, "retrieve_relevant_subgraph", _graph)
+
+    actual = asyncio.run(prompt_builder.build_turn_system_blocks(
+        "u1", "who was my doctor?", "because you asked", user_doc={},
+    ))
+    aura_suffix = prompt_builder.build_injected_system_prompt_suffix(profile, [], "u1")
+    expected = prompt_builder.build_system_blocks(
+        prompt_builder.settings.BUDDY_CHAT_SYSTEM_PROMPT,
+        aura_suffix,
+        "Saturday, July 18, 2026 at 1:00 PM PDT",
+        "because you asked",
+    )
+    expected.append({
+        "type": "text",
+        "text": render_relevant_memory_block([atom]),
+    })
+    assert json.dumps(actual, ensure_ascii=False) == json.dumps(expected, ensure_ascii=False)
+    assert calls == {"legacy": 1, "graph": 1}
+
+
+def test_chat_graph_hit_skips_legacy_retrieval(monkeypatch):
+    """When the subgraph returns atoms, legacy retrieval is never consulted."""
+    from src.services.chat_completion import prompt_builder
+
+    profile = {"explicit_facts": ["lives in Hyderabad"], "dominant_tone": "casual"}
+    graph_atom = RetrievedAtom("doctor is Dr. Reddy", F.ATOM_TYPE_FACT, 0.9, 0.9)
+    calls = {"legacy": 0, "graph": 0}
+
+    async def _datetime(*_args):
+        return "Saturday, July 18, 2026 at 1:00 PM PDT"
+
+    async def _aura(*_args):
+        return profile, []
+
+    async def _legacy(*_args, **_kwargs):
+        calls["legacy"] += 1
+        return []
+
+    async def _graph(*_args, **_kwargs):
+        calls["graph"] += 1
+        return [graph_atom]
+
+    monkeypatch.setattr(prompt_builder, "get_user_local_datetime", _datetime)
+    monkeypatch.setattr(prompt_builder, "fetch_cached_aura_data", _aura)
+    monkeypatch.setattr(prompt_builder, "retrieve_relevant_memory", _legacy)
+    monkeypatch.setattr(prompt_builder, "retrieve_relevant_subgraph", _graph)
+
+    blocks = asyncio.run(prompt_builder.build_turn_system_blocks(
+        "u1", "who was my doctor?", "because you asked", user_doc={},
+    ))
+
+    assert calls == {"legacy": 0, "graph": 1}
+    assert any("Dr. Reddy" in str(block.get("text", "")) for block in blocks)
+
+
 # --- circuit breaker (protects time-to-first-token during an embed outage) -
 def test_circuit_opens_after_repeated_failures_and_skips_embed(monkeypatch):
     calls = {"n": 0}
@@ -256,3 +342,57 @@ def test_success_resets_the_failure_counter(monkeypatch):
     asyncio.run(retrieve_relevant_memory("u1", "a real question", now=NOW))
     _install(monkeypatch, [_cand("near", 0.1)])
     assert asyncio.run(retrieve_relevant_memory("u1", "a real question", now=NOW))[0].text == "near"
+
+
+# --- graph expansion ------------------------------------------------------
+def test_graph_traversal_timeout_returns_ranked_seeds(monkeypatch):
+    seed = RetrievedAtom("seed", F.ATOM_TYPE_FACT, 0.9, 0.9, node_id="seed")
+
+    async def _seeds(*_args, **_kwargs):
+        return [1.0, 0.0], [seed]
+
+    async def _slow_graph(*_args, **_kwargs):
+        await asyncio.sleep(0.2)
+        return []
+
+    monkeypatch.setattr(retrieval, "_gather_seed_result", _seeds)
+    monkeypatch.setattr(retrieval, "_traverse_graph", _slow_graph)
+    started = time.monotonic()
+    out = asyncio.run(retrieval.retrieve_relevant_subgraph(
+        "u1", "a real question", now=NOW, budget_s=0.03,
+    ))
+    elapsed = time.monotonic() - started
+    assert out == [seed]
+    assert elapsed < 0.12
+
+
+def test_graph_seed_error_keeps_established_empty_behavior(monkeypatch):
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("embed down")
+
+    monkeypatch.setattr(retrieval, "_gather_seed_result", _boom)
+    assert asyncio.run(retrieval.retrieve_relevant_subgraph(
+        "u1", "a real question", now=NOW,
+    )) == []
+
+
+def test_inactive_nodes_are_not_expanded_but_seed_is_directly_recallable(monkeypatch):
+    seed = RetrievedAtom("finished goal", "goal", 0.9, 0.9, node_id="seed")
+    nodes = {
+        "seed": {"status": "completed", "display": "finished goal"},
+        "abandoned": {"status": "abandoned", "display": "old plan"},
+    }
+
+    async def _nodes(_uid, ids):
+        return {node_id: nodes[node_id] for node_id in ids if node_id in nodes}
+
+    async def _adjacency(_uid, ids):
+        return {node_id: ("abandoned",) for node_id in ids}
+
+    monkeypatch.setattr(retrieval, "_read_graph_nodes", _nodes)
+    monkeypatch.setattr(retrieval, "_read_adjacency", _adjacency)
+    out = asyncio.run(retrieval._traverse_graph(
+        "u1", [seed], [1.0, 0.0], set(), NOW,
+    ))
+    assert [atom.text for atom in out] == ["finished goal"]
+    assert out[0].status == "completed"

@@ -45,7 +45,7 @@ class _FakeDocRef:
         self._store = store
         self._path = path
 
-    def collection(self, name: str) -> "_FakeCollection":
+    def collection(self, name: str) -> _FakeCollection:
         return _FakeCollection(self._store, self._path + (name,))
 
     def get(self, transaction=None) -> _FakeSnapshot:
@@ -65,6 +65,10 @@ class _FakeDocRef:
                     if element not in existing:
                         existing.append(element)
                 doc[key] = existing
+            elif isinstance(value, _FakeIncrement):
+                doc[key] = int(doc.get(key, 0)) + value.amount
+            elif value is _FAKE_DELETE_FIELD:
+                doc.pop(key, None)
             else:
                 doc[key] = value
 
@@ -102,9 +106,19 @@ class _FakeArrayUnion:
         self.elements = elements
 
 
+class _FakeIncrement:
+    def __init__(self, amount: int):
+        self.amount = amount
+
+
+_FAKE_DELETE_FIELD = object()
+
+
 class _FakeFirestoreModule:
     Transaction = _FakeTransaction
     ArrayUnion = _FakeArrayUnion
+    Increment = _FakeIncrement
+    DELETE_FIELD = _FAKE_DELETE_FIELD
     _lock = threading.Lock()
 
     @staticmethod
@@ -242,7 +256,11 @@ def test_transition_status_moves_only_from_allowed_states(docs):
 
 def _note() -> dict:
     return {"summary": "s", "decisions": [], "action_items": [],
-            "open_questions": [], "language": "en", "one_sided": False}
+            "open_questions": [], "language": "en", "one_sided": False,
+            "partial": False,
+            F.NOTE_TRANSCRIPT: [
+                {F.TRANSCRIPT_SPEAKER: "You", F.TRANSCRIPT_TEXT: "Stored turn"},
+            ]}
 
 
 def test_save_note_stamps_ttl_for_non_pro_only(docs):
@@ -251,6 +269,7 @@ def test_save_note_stamps_ttl_for_non_pro_only(docs):
         asyncio.run(store.save_note(UID, result.meeting_id, _note(), effective_tier=tier))
         meeting = docs[("users", UID, "meetings", result.meeting_id)]
         assert meeting[F.STATUS] == F.STATUS_READY
+        assert meeting[F.NOTE][F.NOTE_TRANSCRIPT] == _note()[F.NOTE_TRANSCRIPT]
         assert (F.EXPIRES_AT in meeting) == expects_ttl, tier
 
 
@@ -265,6 +284,36 @@ def test_append_segment_meta_is_idempotent(docs):
     assert meeting[F.SEGMENTS] == [
         {"seq": 0, "start_ms": 0, "duration_ms": 300_000, "incomplete": False},
     ]
+
+
+def test_upload_failure_is_durable_and_success_clears_it(docs):
+    result = _claim("free")
+    mid = result.meeting_id
+
+    asyncio.run(store.record_upload_failure(
+        UID,
+        mid,
+        code=F.FAIL_UPLOAD_STORAGE_UNAVAILABLE,
+    ))
+    meeting = docs[("users", UID, "meetings", mid)]
+    assert meeting[F.STATUS] == F.STATUS_CAPTURING
+    assert meeting[F.PROCESSING_STAGE] == F.STAGE_UPLOADING
+    assert meeting[F.FAILURE_CODE] == F.FAIL_UPLOAD_STORAGE_UNAVAILABLE
+    assert meeting[F.RETRYABLE] is True
+    assert meeting[F.LAST_ERROR_AT]
+
+    asyncio.run(store.append_segment_meta(
+        UID,
+        mid,
+        seq=0,
+        start_ms=0,
+        duration_ms=300_000,
+        incomplete=False,
+    ))
+    meeting = docs[("users", UID, "meetings", mid)]
+    assert F.FAILURE_CODE not in meeting
+    assert F.FAILURE_MESSAGE not in meeting
+    assert meeting[F.RETRYABLE] is False
 
 
 # ── Synthesis lease (Cloud Tasks at-least-once defense) ───────────────────────

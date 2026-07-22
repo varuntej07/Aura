@@ -98,7 +98,19 @@ class _FakeDb:
         self.state_ref = _FakeDocRef(state_data)
         self.linked_ref = MagicMock()
         self.linked_ref.id = "dev123"
+        # Stable root users/{uid} ref: routes subcollections AND captures the
+        # denormalized surface-footprint .set() the claim now writes onto it.
+        self.user_root_ref = MagicMock()
+        self.user_root_ref.collection.side_effect = self._subcollection
         self.txn = _FakeTxn()
+
+    def _subcollection(self, sub_name: str):
+        sub = MagicMock()
+        if sub_name == pairing.PAIRING_STATE_SUBCOLLECTION:
+            sub.document.return_value = self.state_ref
+        else:  # linked_devices; document() with no args -> auto-id ref
+            sub.document.return_value = self.linked_ref
+        return sub
 
     def collection(self, name: str):
         col = MagicMock()
@@ -107,18 +119,7 @@ class _FakeDb:
                 lambda code: self.code_refs.setdefault(code, _FakeDocRef(None))
             )
         else:  # users
-            user_ref = MagicMock()
-
-            def _subcollection(sub_name: str):
-                sub = MagicMock()
-                if sub_name == pairing.PAIRING_STATE_SUBCOLLECTION:
-                    sub.document.return_value = self.state_ref
-                else:  # linked_devices; document() with no args -> auto-id ref
-                    sub.document.return_value = self.linked_ref
-                return sub
-
-            user_ref.collection.side_effect = _subcollection
-            col.document.return_value = user_ref
+            col.document.return_value = self.user_root_ref
         return col
 
     def transaction(self):
@@ -258,6 +259,16 @@ async def test_pair_claim_happy_path(monkeypatch):
     assert linked_payload[pairing.FIELD_DEVICE_NAME] == "Varun's PC"
     assert linked_payload[pairing.FIELD_PLATFORM] == "windows"
     assert linked_payload[pairing.FIELD_LINKED_AT] is not None
+
+    # Surface footprint denormalized onto the root user doc: windows array-unioned
+    # in (idempotent) plus a desktop-active timestamp, via a non-clobbering merge.
+    root_payload, root_merge = db.user_root_ref.set.call_args.args[0], \
+        db.user_root_ref.set.call_args.kwargs["merge"]
+    assert root_merge is True
+    union = root_payload[pairing.FIELD_LINKED_PLATFORMS]
+    assert union.values == ["windows"]  # gcloud ArrayUnion sentinel
+    # ISO string, not a native datetime — the shared root-doc contract (ECOSYSTEM.md).
+    assert isinstance(root_payload[pairing.FIELD_LAST_DESKTOP_ACTIVE_AT], str)
 
     # The cap slot was freed in the same transaction (merge-set on pairing_state).
     state_payload, merge = db.state_ref.set_calls[-1]

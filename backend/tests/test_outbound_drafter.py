@@ -341,6 +341,69 @@ async def test_snippet_refine_is_valid_and_skips_length(monkeypatch):
     assert "use setx instead" in prompt
 
 
+async def test_on_screen_blank_length_is_valid_and_persona_no_ladder(monkeypatch):
+    """The adaptive on_screen channel (the voice tool's default for a form
+    field): a blank length is VALID, it carries the user's writing voice like a
+    message, but it never forces the length ladder or a LENGTH line."""
+    fake = _FakeProvider(
+        message="I'm building the same thing for Windows and can't wait to compare notes.",
+        summary="Waitlist answer for the Clicky team about why the user is excited.",
+    )
+    monkeypatch.setattr(drafter, "get_model_provider", lambda: fake)
+
+    result = await drafter.draft_outbound(
+        "uid1",
+        channel=drafter.DEFAULT_CHANNEL,
+        length="",  # inferred from the field, never asked for
+        recipient_hint="the Clicky team",
+        intent="why I'm excited to use Clicky",
+        jpeg_base64="ZmFrZQ==",
+        jpeg_width=2880,
+        jpeg_height=1800,
+        voice_lines=["Their natural register is warm and direct."],
+        display_name="Varun",
+    )
+
+    assert result.reason == drafter.REASON_OK
+    # A frame is present, so it rides the expert vision tier like a message.
+    assert fake.balanced_calls == []
+    call = fake.expert_calls[0]
+    system = call["system"]
+    # Persona: writes AS THE USER and carries the writing voice, unlike a snippet.
+    assert "AS THE USER" in system
+    assert "writing voice" in system
+    # No length ladder when length is blank.
+    assert "50 words" not in system and "80-120 words" not in system
+    # The user prompt has the screen + intent but no forced LENGTH line.
+    prompt = call["prompt"]
+    assert "LENGTH:" not in prompt
+    assert "screenshot" in prompt.lower()
+    assert "Clicky" in prompt
+
+
+async def test_on_screen_without_frame_needs_one(monkeypatch):
+    """on_screen writes for something visible, so no frame is an honest stop
+    (REASON_NO_FRAME), unlike a snippet which can be spec-only."""
+    fake = _FakeProvider()
+    monkeypatch.setattr(drafter, "get_model_provider", lambda: fake)
+
+    result = await drafter.draft_outbound(
+        "uid1",
+        channel=drafter.DEFAULT_CHANNEL,
+        length="",
+        recipient_hint="",
+        intent="write the field",
+        jpeg_base64="",
+        jpeg_width=None,
+        jpeg_height=None,
+        voice_lines=[],
+        display_name="",
+    )
+
+    assert result.reason == drafter.REASON_NO_FRAME
+    assert fake.expert_calls == [] and fake.balanced_calls == []
+
+
 def test_writing_voice_lines_maps_tone_and_caps(monkeypatch):
     monkeypatch.setattr(
         drafter,

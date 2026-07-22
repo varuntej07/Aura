@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.handlers import web_auth
+from src.handlers import pairing, web_auth
 from src.services.notifications import device_link_push
 
 NOW_WINDOW = timedelta(seconds=web_auth.WEB_AUTH_SESSION_TTL_SECONDS)
@@ -87,7 +87,16 @@ class _FakeDb:
         }
         self.linked_ref = MagicMock()
         self.linked_ref.id = "dev123"
+        # Stable root users/{uid} ref: routes linked_devices AND captures the
+        # denormalized surface-footprint .set() the sign-in now writes onto it.
+        self.user_root_ref = MagicMock()
+        self.user_root_ref.collection.side_effect = self._subcollection
         self.txn = _FakeTxn()
+
+    def _subcollection(self, sub_name: str):
+        sub = MagicMock()
+        sub.document.return_value = self.linked_ref  # linked_devices auto-id
+        return sub
 
     def collection(self, name: str):
         col = MagicMock()
@@ -96,15 +105,7 @@ class _FakeDb:
                 lambda code: self.session_refs.setdefault(code, _FakeDocRef(None))
             )
         else:  # users
-            user_ref = MagicMock()
-
-            def _subcollection(sub_name: str):
-                sub = MagicMock()
-                sub.document.return_value = self.linked_ref  # linked_devices auto-id
-                return sub
-
-            user_ref.collection.side_effect = _subcollection
-            col.document.return_value = user_ref
+            col.document.return_value = self.user_root_ref
         return col
 
     def transaction(self):
@@ -241,6 +242,15 @@ async def test_status_completed_returns_token_once_then_not_found(monkeypatch):
     # Linked device recorded + push fired, mirroring pairing's claim success path.
     linked_payload = db.linked_ref.set.call_args.args[0]
     assert linked_payload[web_auth.FIELD_PLATFORM] == "windows"
+
+    # Surface footprint denormalized onto the root user doc (same helper pairing
+    # uses): windows array-unioned in via a non-clobbering merge, plus a timestamp.
+    root_payload = db.user_root_ref.set.call_args.args[0]
+    assert db.user_root_ref.set.call_args.kwargs["merge"] is True
+    assert root_payload[pairing.FIELD_LINKED_PLATFORMS].values == ["windows"]
+    # ISO string, not a native datetime — the shared root-doc contract (ECOSYSTEM.md).
+    assert isinstance(root_payload[pairing.FIELD_LAST_DESKTOP_ACTIVE_AT], str)
+
     push.assert_awaited_once()
     sent = push.call_args.args[0]
     assert sent.dedup_key == "device_link:dev123"

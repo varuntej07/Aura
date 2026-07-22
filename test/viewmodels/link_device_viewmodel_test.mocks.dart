@@ -200,6 +200,25 @@ class MockBackendApiService extends _i1.Mock implements _i6.BackendApiService {
           as _i5.Future<_i7.Result<void>>);
 
   @override
+  _i5.Future<_i7.Result<void>> revokeAuraMemory() =>
+      (super.noSuchMethod(
+            Invocation.method(#revokeAuraMemory, []),
+            returnValue: _i5.Future<_i7.Result<void>>.value(
+              _i8.dummyValue<_i7.Result<void>>(
+                this,
+                Invocation.method(#revokeAuraMemory, []),
+              ),
+            ),
+            returnValueForMissingStub: _i5.Future<_i7.Result<void>>.value(
+              _i8.dummyValue<_i7.Result<void>>(
+                this,
+                Invocation.method(#revokeAuraMemory, []),
+              ),
+            ),
+          )
+          as _i5.Future<_i7.Result<void>>);
+
+  @override
   _i5.Future<_i7.Result<Map<String, dynamic>>> refreshBuddyPills() =>
       (super.noSuchMethod(
             Invocation.method(#refreshBuddyPills, []),

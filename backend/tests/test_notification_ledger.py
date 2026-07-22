@@ -80,6 +80,7 @@ async def test_record_send_writes_core_and_decision():
     assert doc[nl.FIELD_TIME_TO_TAP_SECONDS] is None
     assert doc[nl.FIELD_LED_TO_SESSION] is False
     assert doc[nl.FIELD_DELIVERY]["delivered"] is True
+    assert doc[nl.FIELD_DELIVERY][nl.FIELD_CHANNELS]["mobile"]["success_count"] == 2
     assert doc[nl.FIELD_EXPIRES_AT] > doc[nl.FIELD_SENT_AT]
     # Decision sub-map (the learning substrate).
     decision = doc[nl.FIELD_DECISION]
@@ -115,6 +116,21 @@ async def test_record_send_failed_delivery_has_no_decision():
     assert doc[nl.FIELD_STATUS] == nl.STATUS_FAILED
     assert doc[nl.FIELD_DELIVERY]["delivered"] is False
     assert doc[nl.FIELD_DECISION] is None  # deterministic path, no learning data
+
+
+def test_delivery_channels_reads_current_and_legacy_rows():
+    current = {
+        nl.FIELD_DELIVERY: {
+            "delivered": True,
+            nl.FIELD_CHANNELS: {"desktop": {"status": "queued"}},
+        }
+    }
+    legacy = {nl.FIELD_DELIVERY: {"delivered": True, "success_count": 1}}
+
+    assert nl.delivery_channels(current) == {"desktop": {"status": "queued"}}
+    assert nl.delivery_channels(legacy) == {
+        "mobile": {"delivered": True, "success_count": 1}
+    }
 
 
 @pytest.mark.asyncio

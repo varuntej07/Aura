@@ -267,6 +267,7 @@ def test_voice_prompt_formats_with_screen_sight_slot():
         "local_time": "9:00 AM",
         "local_date": "July 2",
         "memory_summary": "",
+        "graph_context": "",
         "last_session_context": "",
         "last_session_at": "",
         "archive_context": "",

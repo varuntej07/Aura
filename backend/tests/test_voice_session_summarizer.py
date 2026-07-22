@@ -10,10 +10,9 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -115,8 +114,10 @@ def _make_firestore_mock(
 
 @pytest.fixture()
 def mock_model_provider():
+    from src.services.voice_session_summarizer import VoiceSessionMemory
+
     provider = MagicMock()
-    provider.cheap = AsyncMock(return_value="session summary text")
+    provider.cheap = AsyncMock(return_value=VoiceSessionMemory(recap="session summary text"))
     with patch("src.services.voice_session_summarizer.get_model_provider", return_value=provider):
         yield provider
 
@@ -139,7 +140,7 @@ class TestGenerateSessionSummary:
     async def test_returns_empty_string_for_empty_turns(self, mock_model_provider):
         from src.services.voice_session_summarizer import _generate_session_summary
         result = await _generate_session_summary([])
-        assert result == ""
+        assert result.recap == ""
         mock_model_provider.cheap.assert_not_called()
 
     @pytest.mark.asyncio
@@ -147,16 +148,66 @@ class TestGenerateSessionSummary:
         from src.services.voice_session_summarizer import _generate_session_summary
         turns = [{"role": "user", "timestamp": "2026-01-01T00:00:00Z"}]
         result = await _generate_session_summary(turns)
-        assert result == ""
+        assert result.recap == ""
         mock_model_provider.cheap.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_happy_path_calls_gemini_and_returns_summary(self, mock_model_provider):
-        from src.services.voice_session_summarizer import _generate_session_summary
-        mock_model_provider.cheap.return_value = "OPEN LOOPS\nnone\nDECISIONS MADE\nnone"
+        from src.services.voice_session_summarizer import (
+            VoiceSessionMemory,
+            _generate_session_summary,
+        )
+
+        mock_model_provider.cheap.return_value = VoiceSessionMemory(
+            recap="Talked about work.", open_loops=["Finish the report"],
+        )
         result = await _generate_session_summary(_make_turns(2))
-        assert "OPEN LOOPS" in result
+        assert result.recap == "Talked about work."
+        assert result.open_loops == ["Finish the report"]
+        assert mock_model_provider.cheap.call_args.kwargs["response_model"] is VoiceSessionMemory
         mock_model_provider.cheap.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schema_v2_writer_reader_round_trip_uses_shared_field_contract():
+    from src.handlers.history import _session_summary_row
+    from src.services.voice_session_summarizer import VoiceSessionMemory, _write_session_doc
+
+    db = MagicMock()
+    session_ref = MagicMock()
+    (
+        db.collection.return_value.document.return_value
+        .collection.return_value.document
+    ).return_value = session_ref
+    memory = VoiceSessionMemory(
+        recap="We planned a call with Mom.",
+        open_loops=["Call Mom tomorrow"],
+        facts=["Mom lives in Chicago"],
+    )
+    receipts = [
+        {"tool_name": "set_reminder", "call_id": "c1", "success": True,
+         "occurred_at": "2026-07-14T20:00:00Z"},
+        {"tool_name": "create_calendar_event", "call_id": "c2", "success": False,
+         "occurred_at": "2026-07-14T20:00:01Z"},
+    ]
+
+    with patch("src.services.voice_session_summarizer.admin_firestore", return_value=db):
+        await _write_session_doc(
+            "u1", "run-1", memory, _make_turns(1),
+            "start", "end", 1000, ["set_reminder"], 0,
+            conversation_id="conversation-1",
+            surface="app",
+            action_receipts=receipts,
+        )
+
+    payload = session_ref.set.call_args.args[0]
+    row = _session_summary_row("run-1", payload)
+    assert row["voice_run_id"] == "run-1"
+    assert row["conversation_id"] == "conversation-1"
+    assert row["surface"] == "app"
+    assert row["schema_version"] == 2
+    assert row["recap"] == "We planned a call with Mom."
+    assert [action["tool_name"] for action in row["actions"]] == ["set_reminder"]
 
 
 # ---------------------------------------------------------------------------
@@ -202,11 +253,14 @@ class TestSynthesizeArchive:
 _PIPELINE_ARGS = dict(
     user_id="uid28chars1234567890123456",
     session_id="session-id-1",
+    conversation_id="conversation-id-1",
+    surface="app",
     turns=_make_turns(3),
     started_at="2026-01-01T10:00:00Z",
     ended_at="2026-01-01T10:10:00Z",
     duration_ms=600_000,
     tool_calls=["set_reminder"],
+    action_receipts=[],
 )
 
 
@@ -302,7 +356,9 @@ class TestRunPostSessionPipelineFaultIsolation:
                                     "src.services.voice_session_summarizer._archive_sessions",
                                     new_callable=AsyncMock,
                                 ):
-                                    from src.services.voice_session_summarizer import run_post_session_pipeline
+                                    from src.services.voice_session_summarizer import (
+                                        run_post_session_pipeline,
+                                    )
                                     await run_post_session_pipeline(**_PIPELINE_ARGS)
                                     mock_synth.assert_called_once()
                                     call_args = mock_synth.call_args

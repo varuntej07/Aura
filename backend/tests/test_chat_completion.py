@@ -42,7 +42,8 @@ def test_chat_reply_proposal_is_committed_and_never_stale():
 
 # ── complete_turn ────────────────────────────────────────────────────────────
 async def test_complete_turn_synthesizes_when_a_tool_already_ran(monkeypatch):
-    """A turn that already created a reminder must NOT re-run the LLM; it confirms."""
+    """A turn that already created a reminder must NOT re-run the LLM; it confirms, and
+    hydrates the reminder card from the actual receipt (not text-only)."""
     claimed = {
         turn_store.FIELD_SESSION_ID: "s1",
         turn_store.FIELD_COMPLETED_TOOLS: ["set_reminder"],
@@ -51,6 +52,11 @@ async def test_complete_turn_synthesizes_when_a_tool_already_ran(monkeypatch):
     monkeypatch.setattr(turn_store, "claim_for_completion", AsyncMock(return_value=claimed))
     mark_complete = AsyncMock()
     monkeypatch.setattr(turn_store, "mark_complete", mark_complete)
+    receipt = {"reminder_id": "r1", "title": "Call mom", "trigger_at": "2026-07-14T17:00:00Z"}
+    monkeypatch.setattr(
+        tool_idempotency, "get_turn_receipts",
+        AsyncMock(return_value={"set_reminder": receipt}),
+    )
     monkeypatch.setattr(
         completion, "_regenerate",
         AsyncMock(side_effect=AssertionError("must not regenerate a tool turn")),
@@ -67,6 +73,27 @@ async def test_complete_turn_synthesizes_when_a_tool_already_ran(monkeypatch):
     assert status == "synthesized"
     mark_complete.assert_awaited_once()
     assert "reminder" in pushed["answer"].lower()
+    # The receipt rides through to the turn doc so the client renders the card.
+    assert mark_complete.await_args.kwargs["reminder"] == receipt
+
+
+async def test_complete_turn_requires_receipt_for_non_reminder_side_effect(monkeypatch):
+    """Every synthesized side-effect claim is grounded in the owning turn receipt."""
+    claimed = {
+        turn_store.FIELD_SESSION_ID: "s1",
+        turn_store.FIELD_COMPLETED_TOOLS: ["track_topic"],
+        turn_store.FIELD_MESSAGE: "keep me posted on the match",
+    }
+    monkeypatch.setattr(turn_store, "claim_for_completion", AsyncMock(return_value=claimed))
+    monkeypatch.setattr(turn_store, "mark_complete", AsyncMock())
+    receipts = AsyncMock(return_value={"track_topic": {"topic_key": "match"}})
+    monkeypatch.setattr(tool_idempotency, "get_turn_receipts", receipts)
+    monkeypatch.setattr(completion, "_push_reply", AsyncMock())
+
+    status = await completion.complete_turn("u1", "c1", "s1")
+
+    assert status == "synthesized"
+    receipts.assert_awaited_once_with("u1", "c1")
 
 
 async def test_complete_turn_noop_when_not_claimable(monkeypatch):
@@ -151,6 +178,17 @@ def test_synthesize_confirmation_prefers_known_tool_then_falls_back():
     assert "calendar" in completion._synthesize_confirmation(["create_calendar_event"]).lower()
     # An unknown tool name falls back to the generic warm confirmation.
     assert completion._synthesize_confirmation(["mystery_tool"]) == "Done, I took care of that for you."
+
+
+def test_synthesize_confirmation_covers_every_committed_tool():
+    """A multi-tool turn confirms all of them, not just the first (deduped, in order)."""
+    out = completion._synthesize_confirmation(["set_reminder", "track_topic"])
+    assert "reminder" in out.lower()
+    assert "keep an eye" in out.lower()  # track_topic's confirmation
+    # A tool repeated in the turn is confirmed exactly once.
+    assert completion._synthesize_confirmation(["set_reminder", "set_reminder"]) == (
+        completion._synthesize_confirmation(["set_reminder"])
+    )
 
 
 # ── Tool idempotency ─────────────────────────────────────────────────────────

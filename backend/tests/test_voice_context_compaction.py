@@ -7,7 +7,7 @@ import json
 from livekit.agents import llm as lk_llm
 
 from src.agent.voice.action_policy import derive_turn_policy
-from src.agent.voice.capabilities import Capability, VoiceSurface
+from src.agent.voice.capabilities import VoiceSurface
 from src.agent.voice.context_compaction import (
     HARD_RAW_TURN_CEILING,
     VoiceContextCompactor,
@@ -128,7 +128,7 @@ async def test_stale_background_result_cannot_overwrite_changed_context():
     assert compactor.apply_ready(context) is None
 
 
-async def test_compaction_failure_falls_back_without_authorizing_a_write():
+async def test_compaction_failure_cannot_change_structural_tool_exposure():
     async def _fail(_: str) -> str:
         raise RuntimeError("provider unavailable")
 
@@ -149,8 +149,16 @@ async def test_compaction_failure_falls_back_without_authorizing_a_write():
         source_message_id="turn-21",
         turn_index=21,
     )
-    assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-    assert "set_reminder" not in policy.allowed_tools
+    unrelated_policy = derive_turn_policy(
+        "Or tonight",
+        compacted,
+        VoiceSurface.DESKTOP,
+        False,
+        source_message_id="turn-21",
+        turn_index=21,
+    )
+    assert policy.allowed_tools == unrelated_policy.allowed_tools
+    assert "set_reminder" in policy.allowed_tools
 
 
 async def test_one_hundred_turn_session_stays_bounded():

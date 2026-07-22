@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
-from src.services.memory import atom_store, fields as F
+from src.services.memory import atom_store
+from src.services.memory import fields as F
 from src.services.memory.atom_store import AtomInput
 
 NOW = datetime(2026, 6, 23, 12, 0, tzinfo=UTC)
@@ -28,6 +29,9 @@ class _Ref:
     @property
     def reference(self):  # used by wipe's batch.delete(snap.reference)
         return self
+
+    def delete(self):
+        self._store.pop(self.id, None)
 
 
 class _Snap:
@@ -192,3 +196,26 @@ def test_wipe_removes_all_atoms(monkeypatch):
     removed = asyncio.run(atom_store.wipe_atoms("u1"))
     assert removed == 2
     assert store == {}
+
+
+def test_delete_atom_cascades_graph_delete_and_fails_open(monkeypatch):
+    store = {"fact_abc": {F.TEXT: "remember me"}}
+    _install(monkeypatch, store, [])
+    from src.services.memory import graph_store
+
+    seen = []
+
+    async def _graph_failure(uid, node_id):
+        seen.append((uid, node_id))
+        raise RuntimeError("graph unavailable")
+
+    monkeypatch.setattr(graph_store, "delete_node", _graph_failure)
+
+    async def _delete_and_drain():
+        result = await atom_store.delete_atom("u1", "fact_abc")
+        await asyncio.sleep(0)
+        return result
+
+    assert asyncio.run(_delete_and_drain()) is True
+    assert store == {}
+    assert seen == [("u1", "fact_abc")]

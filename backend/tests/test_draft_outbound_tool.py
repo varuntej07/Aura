@@ -2,8 +2,9 @@
 Coverage for the voice worker's Buddy Drafts tool (agent/voice/draft_outbound).
 
 Pins the branch logic that guards cost and privacy:
-  - missing length / invalid channel return a corrective spoken line with no
-    model call, no events, and no quota charge;
+  - missing length defaults to medium and an unrecognized/blank channel falls
+    back to the adaptive on_screen channel, so a draft never bounces a
+    clarifying question (Buddy reads the screen instead);
   - no screen frame publishes draft.failed{no_frame} and speaks the arming hint;
   - the free-tier daily cap is charged ONCE per new draft, prod-only, and a
     voice refine never touches the counter or the frame store;
@@ -106,7 +107,9 @@ def _state(tier="free"):
     )
 
 
-async def test_missing_length_asks_without_side_effects(monkeypatch):
+async def test_missing_length_defaults_to_medium_and_drafts(monkeypatch):
+    """An outbound channel with no length no longer bounces a question: it
+    defaults to medium and drafts, so the user never hears "how long?"."""
     h = _Harness(monkeypatch, production=True)
     state = _state()
     store = _FakeFrameStore(_FakeFrame())
@@ -117,20 +120,51 @@ async def test_missing_length_asks_without_side_effects(monkeypatch):
         intent="decline", refine_instruction="",
     )
 
-    assert spoken == dm.SPOKEN_ASK_LENGTH
-    assert h.published == [] and h.quota_calls == [] and h.draft_calls == []
-    assert state.current is None
+    assert spoken == dm.SPOKEN_DRAFT_READY
+    assert h.draft_calls[0]["length"] == "medium"
+    assert h.event_types() == ["draft.generating", "draft.created"]
+    assert state.current is not None
 
 
-async def test_invalid_channel_asks_without_side_effects(monkeypatch):
-    h = _Harness(monkeypatch)
+async def test_unrecognized_channel_falls_back_to_on_screen(monkeypatch):
+    """A channel the model can't map (or a form field that is neither email nor
+    DM) falls back to the adaptive on_screen channel and drafts from the frame,
+    instead of the old dead-end "email or new message?" bounce."""
+    h = _Harness(monkeypatch, production=True)
+    state = _state()
+
     spoken = await dm.run_draft_tool(
-        _state(), _FakeFrameStore(_FakeFrame()),
-        channel="fax", length="short", recipient_hint="", intent="hi",
+        state, _FakeFrameStore(_FakeFrame()),
+        channel="fax", length="", recipient_hint="", intent="say why I'm excited",
         refine_instruction="",
     )
-    assert spoken == dm.SPOKEN_ASK_CHANNEL
-    assert h.published == [] and h.draft_calls == []
+
+    assert spoken == dm.SPOKEN_DRAFT_READY
+    assert h.draft_calls[0]["channel"] == dm.DEFAULT_CHANNEL
+    assert h.event_types() == ["draft.generating", "draft.created"]
+    assert state.current is not None and state.current.channel == dm.DEFAULT_CHANNEL
+
+
+async def test_empty_channel_with_frame_drafts_on_screen(monkeypatch):
+    """The transcript scenario: user on a web form asks Buddy to write the field
+    with no channel or length given. It must draft from the screen (on_screen),
+    never ask a clarifying question."""
+    h = _Harness(monkeypatch, production=True)
+    state = _state()
+
+    spoken = await dm.run_draft_tool(
+        state, _FakeFrameStore(_FakeFrame()),
+        channel="", length="", recipient_hint="the Clicky team",
+        intent="why I'm excited to use Clicky", refine_instruction="",
+    )
+
+    assert spoken == dm.SPOKEN_DRAFT_READY
+    call = h.draft_calls[0]
+    assert call["channel"] == dm.DEFAULT_CHANNEL
+    # on_screen infers its own length; the caller passes the blank through.
+    assert call["length"] == ""
+    assert call["jpeg_base64"] and call["jpeg_width"] == 1280
+    assert state.current is not None and state.current.channel == dm.DEFAULT_CHANNEL
 
 
 async def test_no_frame_fails_loudly_without_quota(monkeypatch):

@@ -78,6 +78,27 @@ def _end_turn_event() -> MagicMock:
     return ev
 
 
+def _tool_use_start_event(name: str, block_id: str) -> MagicMock:
+    """A content_block_start for a tool_use block, as the stream emits it."""
+    ev = MagicMock()
+    ev.type = "content_block_start"
+    ev.content_block = MagicMock()
+    ev.content_block.type = "tool_use"
+    ev.content_block.name = name
+    ev.content_block.id = block_id
+    return ev
+
+
+def _tool_use_block(name: str, block_id: str) -> MagicMock:
+    """A tool_use block on the final response.content (drives the tool round-trip)."""
+    block = MagicMock()
+    block.type = "tool_use"
+    block.name = name
+    block.id = block_id
+    block.input = {}
+    return block
+
+
 def _final_response(stop_reason: str = "end_turn", content=None) -> MagicMock:
     resp = MagicMock()
     resp.stop_reason = stop_reason
@@ -328,6 +349,37 @@ async def test_send_text_turn_escalates_to_fallback_model(monkeypatch):
     assert inner.messages.create.call_args_list[-1].kwargs["model"] == settings.ANTHROPIC_CHAT_MODEL_FALLBACK
 
 
+async def test_send_text_turn_honors_extra_excluded_tools():
+    """Non-streaming path applies per-request exclusions too, so an intent gate that hides
+    set_reminder from a status question cannot be bypassed by choosing this method."""
+    tool_executor = MagicMock()
+    tool_executor.execute = AsyncMock()
+    client = ClaudeClient(tool_executor)
+
+    block = MagicMock()
+    block.type = "text"
+    block.text = "no tools needed"
+    final = MagicMock()
+    final.stop_reason = "end_turn"
+    final.content = [block]
+    final.usage = _usage()
+
+    inner = MagicMock()
+    inner.messages.create = AsyncMock(return_value=final)
+    client._client = inner
+
+    await client.send_text_turn(
+        system_prompt="sys",
+        user_content="did the reminder set?",
+        extra_excluded_tools=frozenset({"set_reminder"}),
+    )
+
+    tools = inner.messages.create.call_args.kwargs["tools"]
+    names = {t["name"] for t in tools}
+    assert "set_reminder" not in names
+    assert names  # other tools stay exposed; only the gated one is removed
+
+
 async def test_send_text_turn_non_retryable_error_escalates_without_sleeping(monkeypatch):
     """Non-streaming: a 400 credit-balance error is NOT retryable, so Sonnet gets
     exactly one attempt (no backoff loop) before escalating straight to Haiku."""
@@ -356,3 +408,103 @@ async def test_send_text_turn_non_retryable_error_escalates_without_sleeping(mon
     sleep_spy.assert_not_called()
     last_call_model = inner.messages.create.call_args_list[-1].kwargs["model"]
     assert last_call_model == settings.ANTHROPIC_CHAT_MODEL_FALLBACK
+
+
+# --- tool_status "thinking" phrases ----------------------------------------
+# The chat bubble used to show blank typing dots for the whole 1-7s web search
+# whenever the model called web_surf without writing preamble prose (the only
+# thing that produced a tool_thinking event). These pin the reliable per-tool
+# status that replaces that dead air.
+
+async def test_stream_emits_tool_status_for_web_surf_without_preamble():
+    """web_surf called with NO narration still yields a tool_status phrase."""
+    from src.shared.tool_thinking_phrases import SLOW_TOOL_THINKING_PHRASES
+
+    tool_turn = _FakeStream(
+        events=[_tool_use_start_event("web_surf", "toolu_1")],
+        final=_final_response(
+            stop_reason="tool_use", content=[_tool_use_block("web_surf", "toolu_1")]
+        ),
+    )
+    final_turn = _FakeStream(events=[_text_delta_event("gold is up"), _end_turn_event()])
+    client, _inner = _client_with_streams([tool_turn, final_turn])
+
+    events = await _collect(
+        client.send_text_turn_stream(system_prompt="sys", user_content="gold price?")
+    )
+
+    status = [e for e in events if e["type"] == "tool_status"]
+    assert len(status) == 1
+    assert status[0]["tool"] == "web_surf"
+    assert status[0]["message"] in SLOW_TOOL_THINKING_PHRASES["web_surf"]
+    # No tool_thinking event, because the model wrote no preamble.
+    assert not any(e["type"] == "tool_thinking" for e in events)
+
+
+async def test_stream_no_tool_status_for_fast_tool():
+    """A fast tool (not in the phrase map) stays silent — no tool_status event."""
+    tool_turn = _FakeStream(
+        events=[_tool_use_start_event("set_reminder", "toolu_1")],
+        final=_final_response(
+            stop_reason="tool_use", content=[_tool_use_block("set_reminder", "toolu_1")]
+        ),
+    )
+    final_turn = _FakeStream(events=[_text_delta_event("done"), _end_turn_event()])
+    client, _inner = _client_with_streams([tool_turn, final_turn])
+
+    events = await _collect(
+        client.send_text_turn_stream(system_prompt="sys", user_content="remind me")
+    )
+
+    assert not any(e["type"] == "tool_status" for e in events)
+
+
+async def test_stream_one_tool_status_per_turn_for_parallel_calls():
+    """Two web_surf blocks in the same turn produce exactly one status (no stacking)."""
+    tool_turn = _FakeStream(
+        events=[
+            _tool_use_start_event("web_surf", "toolu_1"),
+            _tool_use_start_event("web_surf", "toolu_2"),
+        ],
+        final=_final_response(
+            stop_reason="tool_use",
+            content=[
+                _tool_use_block("web_surf", "toolu_1"),
+                _tool_use_block("web_surf", "toolu_2"),
+            ],
+        ),
+    )
+    final_turn = _FakeStream(events=[_text_delta_event("here"), _end_turn_event()])
+    client, _inner = _client_with_streams([tool_turn, final_turn])
+
+    events = await _collect(
+        client.send_text_turn_stream(system_prompt="sys", user_content="two things")
+    )
+
+    assert sum(1 for e in events if e["type"] == "tool_status") == 1
+
+
+def test_text_and_voice_share_one_phrase_map():
+    """Voice filler and the text path resolve phrases from the SAME object, so a
+    rename in one place can never silently drift the other (data-layer discipline)."""
+    from src.agent.voice import tool_filler
+    from src.shared import tool_thinking_phrases
+
+    assert (
+        tool_filler.SLOW_TOOL_THINKING_PHRASES
+        is tool_thinking_phrases.SLOW_TOOL_THINKING_PHRASES
+    )
+
+
+def test_pick_tool_thinking_phrase_is_deterministic_and_gates_fast_tools():
+    from src.shared.tool_thinking_phrases import (
+        SLOW_TOOL_THINKING_PHRASES,
+        pick_tool_thinking_phrase,
+    )
+
+    # Same (tool, seed) -> same phrase every call, so the streamed status never flickers.
+    first = pick_tool_thinking_phrase("web_surf", seed="toolu_abc")
+    assert first == pick_tool_thinking_phrase("web_surf", seed="toolu_abc")
+    assert first in SLOW_TOOL_THINKING_PHRASES["web_surf"]
+    # Fast/unknown tool -> None means "stay silent".
+    assert pick_tool_thinking_phrase("set_reminder", seed="toolu_abc") is None

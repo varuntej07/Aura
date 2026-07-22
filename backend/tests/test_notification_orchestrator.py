@@ -13,20 +13,113 @@ from datetime import UTC, datetime, timedelta
 from src.services import notification_budget, notification_ledger
 from src.services.notification_budget import BudgetDecision
 from src.services.notification_service import NotificationResult
-from src.services.notifications import orchestrator, post_send, proposal, queue_store, tap_gate
-from src.services.reactive import idempotency
+from src.services.notifications import (
+    delivery_router,
+    desktop_outbox,
+    orchestrator,
+    post_send,
+    proposal,
+    queue_store,
+    tap_gate,
+)
 from src.services.notifications.proposal import (
-    Disposition,
-    NotificationProposal,
-    ProposalKind,
     SOURCE_ICEBREAKER,
     SOURCE_NEWS,
     SOURCE_REMINDER,
     SOURCE_THREAD,
     SOURCE_TRACKING,
+    DeliveryChannel,
+    Disposition,
+    NotificationProposal,
+    ProposalKind,
 )
+from src.services.reactive import idempotency
 
 NOW = datetime(2026, 6, 21, 15, 0, tzinfo=UTC)  # 15:00 UTC, a non-quiet hour in UTC
+
+
+async def test_delivery_router_mobile_only_is_backward_compatible(monkeypatch):
+    calls: list[str] = []
+
+    async def send(*args, **kwargs):
+        calls.append("mobile")
+        assert kwargs["record_ledger"] is False
+        return NotificationResult(2, 1, 1, notification_id=kwargs["notification_id"])
+
+    async def enqueue(*args, **kwargs):
+        calls.append("desktop")
+        return desktop_outbox.OutboxWriteResult(True, True)
+
+    async def record(*args, **kwargs):
+        calls.append("ledger")
+
+    monkeypatch.setattr(delivery_router, "send_notification", send)
+    monkeypatch.setattr(delivery_router.desktop_outbox, "enqueue", enqueue)
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+
+    result = await delivery_router.deliver(
+        _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    )
+
+    assert calls == ["mobile", "ledger"]
+    assert result.delivered is True
+    assert result.desktop_queued_count == 0
+
+
+async def test_delivery_router_desktop_only(monkeypatch):
+    recorded: list[dict] = []
+
+    async def send(*args, **kwargs):
+        raise AssertionError("mobile sender should not run")
+
+    async def enqueue(*args, **kwargs):
+        return desktop_outbox.OutboxWriteResult(True, True)
+
+    async def record(*args, **kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(delivery_router, "send_notification", send)
+    monkeypatch.setattr(delivery_router.desktop_outbox, "enqueue", enqueue)
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+    item = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    item.notification_type = "generic"
+    item.channels = frozenset({DeliveryChannel.DESKTOP})
+
+    result = await delivery_router.deliver(item)
+
+    assert result.delivered is True
+    assert result.tokens_targeted == 0
+    assert result.desktop_queued_count == 1
+    assert recorded[0]["channel_results"]["desktop"]["status"] == "queued"
+
+
+async def test_delivery_router_both_channels_share_one_logical_id(monkeypatch):
+    ids: list[str] = []
+
+    async def send(*args, **kwargs):
+        ids.append(kwargs["notification_id"])
+        return NotificationResult(1, 1, 0, notification_id=kwargs["notification_id"])
+
+    async def enqueue(proposal, notification_id):
+        ids.append(notification_id)
+        return desktop_outbox.OutboxWriteResult(True, True)
+
+    async def record(*args, **kwargs):
+        ids.append(kwargs["notification_id"])
+        assert set(kwargs["channel_results"]) == {"mobile", "desktop"}
+
+    monkeypatch.setattr(delivery_router, "send_notification", send)
+    monkeypatch.setattr(delivery_router.desktop_outbox, "enqueue", enqueue)
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+    item = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    item.notification_type = "generic"
+    item.channels = frozenset({DeliveryChannel.MOBILE, DeliveryChannel.DESKTOP})
+
+    result = await delivery_router.deliver(item)
+
+    assert len(set(ids)) == 1
+    assert result.delivered is True
+    assert result.desktop_queued_count == 1
 
 
 def _proposal(source: str, *, kind: ProposalKind, dedup_key: str = "k",
@@ -83,6 +176,17 @@ def test_per_proposal_max_age_override():
     p = _proposal(SOURCE_TRACKING, kind=ProposalKind.COMMITTED,
                   content_ts=NOW - timedelta(hours=2), max_age=timedelta(hours=1))
     assert proposal.is_stale(p, NOW) is True
+
+
+def test_proactive_queue_round_trip_preserves_channels_and_legacy_defaults():
+    item = _proposal(SOURCE_NEWS, kind=ProposalKind.PROACTIVE)
+    item.notification_type = "generic"
+    item.channels = frozenset({DeliveryChannel.MOBILE, DeliveryChannel.DESKTOP})
+    doc = queue_store._proposal_to_doc(item, NOW)
+
+    assert queue_store._doc_to_proposal(doc).channels == item.channels
+    doc.pop(queue_store.FIELD_CHANNELS)
+    assert queue_store._doc_to_proposal(doc).channels == frozenset({DeliveryChannel.MOBILE})
 
 
 # ── Pure: arbitration ────────────────────────────────────────────────────────

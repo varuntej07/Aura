@@ -1,35 +1,35 @@
-"""Focused coverage for voice-only action orchestration."""
+"""Focused coverage for prompt-owned voice action orchestration."""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 from livekit.agents import Agent
 from livekit.agents import llm as lk_llm
 
+from src.agent import buddy_agent as buddy_agent_module
 from src.agent.buddy_agent import BuddyAgent
-from src.agent.voice.action_policy import (
-    ActionMode,
-    UnresolvedActionState,
-    WriteAuthorization,
-    derive_turn_policy,
-    evaluate_execution,
-    next_complex_tool,
-)
+from src.agent.voice.action_policy import derive_turn_policy, evaluate_execution
 from src.agent.voice.capabilities import (
     VOICE_TOOL_REGISTRY,
-    Capability,
+    ToolEffect,
     VoiceSurface,
 )
-from src.agent.voice.spoken_action_guard import (
-    guard_spoken_action_stream,
-    has_unauthorized_spoken_action,
-)
+from src.agent.voice.tool_skills import VOICE_TOOL_SKILLS
 from src.agent.voice_prompt import VOICE_PROMPT
+from src.services.memory.retrieval import RetrievedAtom
 
 
-def _policy(text: str, *, surface: str = "app", frame: bool = False, finalized=True):
+def _policy(
+    text: str,
+    *,
+    surface: str = "app",
+    frame: bool = False,
+    finalized: bool = True,
+):
     return derive_turn_policy(
         text,
         lk_llm.ChatContext(),
@@ -39,199 +39,98 @@ def _policy(text: str, *, surface: str = "app", frame: bool = False, finalized=T
     )
 
 
-def test_permanent_voice_prompt_has_no_reminder_clarification_policy():
-    lowered = VOICE_PROMPT.lower()
-    assert "# scheduling" not in lowered
-    assert "what time should" not in lowered
-    assert "what time tomorrow" not in lowered
-    assert "reminder_exact_time" not in lowered
-
-
-def test_create_prompt_is_visible_artifact_not_calendar_write():
-    policy = _policy(
-        "Create a prompt for my coding agent about the issue on screen",
-        surface="desktop",
-    )
-    assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-    assert "create_calendar_event" not in policy.allowed_tools
-
-
-def test_hypothetical_reminder_requires_precise_time():
-    policy = _policy("Why not remind me to do laundry after work?")
-    assert policy.capabilities == {Capability.REMINDER_WRITE}
-    assert "set_reminder" not in policy.allowed_tools
-    assert policy.write_authorization is WriteAuthorization.NEEDS_CLARIFICATION
-    assert policy.missing_slots == ("reminder_exact_time",)
-
-
-def test_remind_me_what_is_memory_not_reminder():
-    policy = _policy("Remind me what Sarah said after work.")
-    assert policy.capabilities == {Capability.MEMORY_READ}
-    assert policy.allowed_tools == {"query_memory"}
-    assert policy.action_mode is ActionMode.FAST
-    assert "set_reminder" not in policy.allowed_tools
-    assert "one natural clarification" in policy.transient_instruction()
-
-
-def test_calendar_compound_request_is_multi_label_and_clarifies_first():
-    policy = _policy("Check if I'm free, schedule lunch, and remind me an hour before.")
-    assert policy.capabilities == {
-        Capability.CALENDAR_READ,
-        Capability.CALENDAR_WRITE,
-        Capability.REMINDER_WRITE,
+def _agent_context_vars() -> dict[str, str]:
+    return {
+        "name": "V",
+        "timezone": "America/Los_Angeles",
+        "local_time": "8:00 PM",
+        "local_date": "July 19, 2026",
+        "memory_summary": "",
+        "graph_context": "",
+        "last_session_context": "",
+        "last_session_at": "",
+        "archive_context": "",
+        "user_aura_profile": "",
+        "surface": "",
+        "screen_sight": "",
     }
-    assert policy.action_mode is ActionMode.COMPLEX
-    assert policy.allowed_tools == {"get_upcoming_events"}
-    assert set(policy.missing_slots) == {
-        "calendar_date",
-        "calendar_time",
-        "reminder_exact_time",
-    }
-    assert policy.plan is not None
-    assert [step.tool for step in policy.plan.steps] == [
-        "get_upcoming_events",
-        "create_calendar_event",
-        "set_reminder",
-    ]
-    assert next_complex_tool(policy, lk_llm.ChatContext()) is None
 
 
-def test_desktop_draft_and_reminder_keeps_only_safe_first_step():
-    policy = _policy(
-        "Draft a response to what's on my screen and remind me to send it tonight.",
-        surface="desktop",
-        frame=True,
+def _fake_tools(*names: str) -> list[SimpleNamespace]:
+    return [SimpleNamespace(info=SimpleNamespace(name=name)) for name in names]
+
+
+async def _collect_llm(agent: BuddyAgent, context, tools):
+    return [item async for item in agent.llm_node(context, tools, None)]
+
+
+def test_voice_prompt_owns_action_semantics_without_slot_policy():
+    normalized = " ".join(VOICE_PROMPT.split())
+    assert "Use the conversation as one continuous exchange" in normalized
+    assert "answers your immediately preceding clarification" in normalized
+    assert "Never claim an action succeeded before its tool returns success" in normalized
+    assert "reminder_exact_time" not in VOICE_PROMPT
+    assert "missing_slots" not in VOICE_PROMPT
+
+
+def test_tool_exposure_is_identical_for_different_language():
+    utterances = (
+        "Remind me to call Mom",
+        "Or tonight",
+        "Why not?",
+        "Tell me a quick joke",
     )
-    assert policy.capabilities == {
-        Capability.OUTBOUND_DRAFT,
-        Capability.REMINDER_WRITE,
-    }
-    assert policy.action_mode is ActionMode.COMPLEX
-    assert policy.allowed_tools == {"draft_outbound_message"}
-    assert next_complex_tool(policy, lk_llm.ChatContext()) == "draft_outbound_message"
+    policies = [_policy(utterance) for utterance in utterances]
+    assert all(policy.allowed_tools == policies[0].allowed_tools for policy in policies)
+    assert "set_reminder" in policies[0].allowed_tools
+    assert "cancel_reminder" in policies[0].allowed_tools
+    assert "create_calendar_event" in policies[0].allowed_tools
 
 
-def test_screen_draft_surface_and_freshness_rules():
-    request = "Draft a response to what's on my screen"
-    assert "draft_outbound_message" not in _policy(request, surface="keyboard").allowed_tools
-    assert "draft_outbound_message" not in _policy(request, surface="app").allowed_tools
-    assert (
-        "draft_outbound_message"
-        not in _policy(request, surface="desktop", frame=False).allowed_tools
+def test_surface_and_fresh_frame_are_the_only_desktop_tool_boundaries():
+    app = _policy("anything", surface="app")
+    desktop_without_frame = _policy("anything", surface="desktop", frame=False)
+    desktop_with_frame = _policy("anything", surface="desktop", frame=True)
+
+    assert "present_visible_artifact" not in app.allowed_tools
+    assert "save_screen_item" not in app.allowed_tools
+    assert "present_visible_artifact" in desktop_without_frame.allowed_tools
+    assert "save_screen_item" not in desktop_without_frame.allowed_tools
+    assert "draft_outbound_message" not in desktop_without_frame.allowed_tools
+    assert "save_screen_item" in desktop_with_frame.allowed_tools
+    assert "draft_outbound_message" in desktop_with_frame.allowed_tools
+
+
+def test_speculative_generation_exposes_reads_only():
+    policy = _policy("Remind me tonight", finalized=False)
+    assert policy.allowed_tools
+    assert all(
+        VOICE_TOOL_REGISTRY[name].effect is ToolEffect.READ
+        for name in policy.allowed_tools
     )
-    assert "draft_outbound_message" in _policy(request, surface="desktop", frame=True).allowed_tools
 
 
-def test_command_artifact_needs_no_screen_frame_and_does_not_expose_message_draft():
-    policy = _policy(
-        "Give me the PowerShell command to make MobileApps the default folder",
-        surface="desktop",
-        frame=False,
-    )
-    assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-    assert "present_visible_artifact" in policy.allowed_tools
-    assert "draft_outbound_message" not in policy.allowed_tools
-    assert policy.write_authorization is WriteAuthorization.NONE
+def test_execution_gate_checks_registration_exposure_and_required_fields():
+    policy = _policy("wording is irrelevant")
+    context = lk_llm.ChatContext()
 
-
-def test_visible_artifact_execution_needs_content_but_not_write_authorization():
-    policy = _policy(
-        "Give me the PowerShell command to fix this",
-        surface="desktop",
-        frame=False,
-    )
-    allowed = evaluate_execution(
-        "present_visible_artifact",
-        '{"kind":"command","title":"Fix","content":"Get-Process"}',
-        policy,
-        lk_llm.ChatContext(),
-    )
+    unknown = evaluate_execution("not_a_tool", "{}", policy, context)
     missing = evaluate_execution(
-        "present_visible_artifact",
-        '{"kind":"command","title":"Fix","content":""}',
+        "set_reminder", '{"message":"call Mom"}', policy, context
+    )
+    valid = evaluate_execution(
+        "set_reminder",
+        '{"message":"call Mom","scheduled_at":"2026-07-19T21:00:00-07:00"}',
         policy,
-        lk_llm.ChatContext(),
+        context,
     )
-    assert allowed.allowed is True
-    assert allowed.reason_code == "execution_allowed"
-    assert missing.allowed is False
-    assert missing.reason_code == "missing_required_tool_field"
 
-
-def test_visible_output_repair_forces_the_registered_skill():
-    policy = _policy(
-        "No, stop reading it out loud. I asked you to show the command on my screen.",
-        surface="desktop",
-        frame=False,
-    )
-    instruction = policy.transient_instruction()
-    assert "visible_output_repair" in policy.reason_codes
-    assert "MUST use present_visible_artifact" in instruction
-    assert "must not speak the requested content" in instruction
-
-
-def test_failed_visible_output_then_short_retry_forces_visible_artifact():
-    policy = derive_turn_policy(
-        "Again, please.",
-        lk_llm.ChatContext(),
-        VoiceSurface.DESKTOP,
+    assert (unknown.allowed, unknown.reason_code) == (False, "unregistered_voice_tool")
+    assert (missing.allowed, missing.reason_code) == (
         False,
-        previous_visible_output_failed=True,
+        "missing_required_tool_field",
     )
-    assert Capability.VISIBLE_ARTIFACT in policy.capabilities
-    assert "visible_output_repeat" in policy.reason_codes
-    assert "MUST use present_visible_artifact" in policy.transient_instruction()
-
-
-def test_short_retry_does_not_invent_visible_intent_without_a_previous_failure():
-    policy = _policy("Again, please.", surface="desktop", frame=False)
-    assert Capability.VISIBLE_ARTIFACT not in policy.capabilities
-    assert "visible_output_repeat" not in policy.reason_codes
-    assert "MUST use present_visible_artifact" not in policy.transient_instruction()
-
-
-def test_general_speaking_frustration_does_not_force_an_artifact():
-    policy = _policy("Stop speaking so loudly", surface="desktop", frame=False)
-    assert Capability.VISIBLE_ARTIFACT not in policy.capabilities
-    assert "visible_output_repair" not in policy.reason_codes
-
-
-def test_artifact_specific_speaking_frustration_forces_an_artifact():
-    policy = _policy("Don't read the command out loud", surface="desktop", frame=False)
-    assert Capability.VISIBLE_ARTIFACT in policy.capabilities
-    assert "visible_output_repair" in policy.reason_codes
-
-
-def test_prompt_and_multistep_guidance_use_visible_artifact():
-    for request in (
-        "Generate a prompt for the agent in my codebase",
-        "What are the next steps to fix this?",
-        "Walk me through this setup",
-    ):
-        policy = _policy(request, surface="desktop", frame=False)
-        assert Capability.VISIBLE_ARTIFACT in policy.capabilities
-        assert "present_visible_artifact" in policy.allowed_tools
-
-
-def test_conversational_desktop_turn_can_choose_visible_output_without_forcing_it():
-    policy = _policy(
-        "Explain why PowerShell execution policy blocks scripts",
-        surface="desktop",
-        frame=False,
-    )
-    assert Capability.VISIBLE_ARTIFACT not in policy.capabilities
-    assert "present_visible_artifact" in policy.allowed_tools
-    assert "MUST use present_visible_artifact" not in policy.transient_instruction()
-
-
-def test_stale_desktop_turn_exposes_no_presentation_tool():
-    policy = _policy(
-        "Give me the command to fix this",
-        surface="desktop",
-        frame=False,
-        finalized=False,
-    )
-    assert policy.allowed_tools == set()
+    assert (valid.allowed, valid.reason_code) == (True, "execution_allowed")
 
 
 def test_every_current_voice_tool_has_registry_metadata():
@@ -254,337 +153,23 @@ def test_every_current_voice_tool_has_registry_metadata():
 
 
 def test_registered_tool_skills_resolve_without_orphans():
-    from src.agent.voice.tool_skills import VOICE_TOOL_SKILLS
-
     registered_skills = {
         item.skill_name for item in VOICE_TOOL_REGISTRY.values() if item.skill_name
     }
-    assert registered_skills <= set(VOICE_TOOL_SKILLS)
-    assert set(VOICE_TOOL_SKILLS) == registered_skills
+    assert registered_skills == set(VOICE_TOOL_SKILLS)
 
 
-def _result_context(*, failed: bool) -> lk_llm.ChatContext:
+async def test_original_followup_reaches_existing_model_with_reminder_tool(monkeypatch):
     context = lk_llm.ChatContext()
-    context.add_message(
-        role="user",
-        content=["Check if I'm free tomorrow at noon, schedule lunch, and remind me at 11 am."],
-    )
-    context.items.append(
-        lk_llm.FunctionCall(
-            call_id="availability-call",
-            name="get_upcoming_events",
-            arguments='{"range_name":"tomorrow"}',
-        )
-    )
-    context.items.append(
-        lk_llm.FunctionCallOutput(
-            call_id="availability-call",
-            name="get_upcoming_events",
-            output=(
-                '{"error":true,"user_message":"Your calendar is taking too long '
-                'to respond. Try again in a moment."}'
-                if failed
-                else '{"events":[]}'
-            ),
-            is_error=False,
-        )
-    )
-    return context
+    context.add_message(role="user", content=["Remind me to call Mom"])
+    context.add_message(role="assistant", content=["When should I remind you?"])
+    message = context.add_message(role="user", content=["Or tonight"])
+    tools = _fake_tools("set_reminder", "query_memory", "web_surf")
+    captured: dict[str, object] = {}
 
-
-def test_dependent_writes_run_one_step_at_a_time():
-    text = "Check if I'm free tomorrow at noon, schedule lunch, and remind me at 11 am."
-    policy = derive_turn_policy(text, _result_context(failed=False), VoiceSurface.APP, False)
-    assert next_complex_tool(policy, _result_context(failed=False)) == ("create_calendar_event")
-    allowed = evaluate_execution(
-        "create_calendar_event",
-        '{"title":"Lunch","start_time":"2026-07-13T12:00:00-07:00"}',
-        policy,
-        _result_context(failed=False),
-    )
-    deferred = evaluate_execution(
-        "set_reminder",
-        '{"message":"Lunch","scheduled_at":"2026-07-13T11:00:00-07:00"}',
-        policy,
-        _result_context(failed=False),
-    )
-    assert allowed.allowed is True
-    assert deferred.allowed is False
-    assert deferred.reason_code == "dependent_action_deferred"
-
-
-def test_failed_prerequisite_halts_write_and_preserves_failure_message():
-    context = _result_context(failed=True)
-    text = "Check if I'm free tomorrow at noon, schedule lunch, and remind me at 11 am."
-    policy = derive_turn_policy(text, context, VoiceSurface.APP, False)
-    assert next_complex_tool(policy, context) is None
-    decision = evaluate_execution(
-        "create_calendar_event",
-        '{"title":"Lunch","start_time":"2026-07-13T12:00:00-07:00"}',
-        policy,
-        context,
-    )
-    assert decision.allowed is False
-    output = context.items[-1]
-    assert isinstance(output, lk_llm.FunctionCallOutput)
-    assert output.output == (
-        '{"error":true,"user_message":"Your calendar is taking too long '
-        'to respond. Try again in a moment."}'
-    )
-
-
-def test_stale_preemptive_turn_never_authorizes_write():
-    policy = _policy("Remind me tomorrow at 9 am", finalized=False)
-    assert policy.write_authorization is WriteAuthorization.STALE_TURN
-    assert policy.allowed_tools == set()
-
-
-def test_hypothetical_calendar_question_does_not_authorize_write():
-    policy = _policy("Should I schedule lunch tomorrow at noon?")
-    assert Capability.CALENDAR_WRITE in policy.capabilities
-    assert policy.write_authorization is WriteAuthorization.NEEDS_CLARIFICATION
-    assert "create_calendar_event" not in policy.allowed_tools
-
-
-def test_clarification_turn_preserves_prior_authorization_and_missing_slots():
-    unresolved = UnresolvedActionState(
-        source_message_id="turn-1",
-        source_turn_index=1,
-        capabilities=frozenset({Capability.REMINDER_WRITE}),
-        missing_slots=("reminder_exact_time",),
-        created_at_turn=1,
-        write_authorized=True,
-    )
-    policy = derive_turn_policy(
-        "7 pm",
-        lk_llm.ChatContext(),
-        VoiceSurface.APP,
-        False,
-        unresolved,
-        source_message_id="turn-2",
-        turn_index=2,
-    )
-    assert policy.write_authorization is WriteAuthorization.AUTHORIZED
-    assert policy.missing_slots == ()
-    assert policy.allowed_tools == {"set_reminder"}
-
-
-def test_timezone_correction_keeps_reminder_owned_for_exactly_next_turn():
-    first = derive_turn_policy(
-        "Remind me tomorrow at 5 pm Eastern, no, Central time to call Mom",
-        lk_llm.ChatContext(),
-        VoiceSurface.APP,
-        False,
-        source_message_id="turn-1",
-        turn_index=1,
-    )
-    assert first.missing_slots == ("reminder_timezone",)
-    assert "set_reminder" not in first.allowed_tools
-
-    unresolved = UnresolvedActionState(
-        source_message_id="turn-1",
-        source_turn_index=1,
-        capabilities=first.capabilities,
-        missing_slots=first.missing_slots,
-        created_at_turn=1,
-        write_authorized=True,
-    )
-    corrected = derive_turn_policy(
-        "No. Central time.",
-        lk_llm.ChatContext(),
-        VoiceSurface.APP,
-        False,
-        unresolved,
-        source_message_id="turn-2",
-        turn_index=2,
-    )
-    assert corrected.missing_slots == ()
-    assert corrected.allowed_tools == {"set_reminder"}
-    assert "continued_unresolved_action" in corrected.reason_codes
-
-
-def test_stale_reminder_state_cannot_latch_for_twenty_turns():
-    unresolved = UnresolvedActionState(
-        source_message_id="turn-1",
-        source_turn_index=1,
-        capabilities=frozenset({Capability.REMINDER_WRITE}),
-        missing_slots=("reminder_exact_time",),
-        created_at_turn=1,
-        write_authorized=True,
-    )
-    policy = derive_turn_policy(
-        "Generate a prompt draft about the issue on screen",
-        lk_llm.ChatContext(),
-        VoiceSurface.DESKTOP,
-        False,
-        unresolved,
-        source_message_id="turn-20",
-        turn_index=20,
-    )
-    assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-    assert policy.missing_slots == ()
-    assert policy.clarification_question is None
-    assert "set_reminder" not in policy.allowed_tools
-    assert "unresolved_action_cleared" in policy.reason_codes
-
-
-def test_correction_clears_immediately_preceding_reminder():
-    unresolved = UnresolvedActionState(
-        source_message_id="turn-1",
-        source_turn_index=1,
-        capabilities=frozenset({Capability.REMINDER_WRITE}),
-        missing_slots=("reminder_exact_time",),
-        created_at_turn=1,
-        write_authorized=True,
-    )
-    policy = derive_turn_policy(
-        "Actually, generate a prompt instead",
-        lk_llm.ChatContext(),
-        VoiceSurface.DESKTOP,
-        False,
-        unresolved,
-        source_message_id="turn-2",
-        turn_index=2,
-    )
-    assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-    assert policy.missing_slots == ()
-    assert policy.allowed_tools == {"present_visible_artifact"}
-
-
-def test_summary_text_cannot_create_reminder_capability():
-    context = lk_llm.ChatContext()
-    context.add_message(
-        role="system",
-        content=[
-            '<voice_session_summary>{"current_topic":"old reminder"}'
-            "</voice_session_summary>"
-        ],
-    )
-    policy = derive_turn_policy(
-        "Generate a prompt about the issue on screen",
-        context,
-        VoiceSurface.DESKTOP,
-        False,
-        source_message_id="turn-30",
-        turn_index=30,
-    )
-    assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-    assert not ({"set_reminder", "list_reminders", "cancel_reminder"} & policy.allowed_tools)
-
-
-def test_thirty_turn_coding_flow_never_exposes_reminder_guidance():
-    unresolved = UnresolvedActionState()
-    for turn_index in range(1, 31):
-        policy = derive_turn_policy(
-            f"Generate prompt {turn_index} for my coding agent",
-            lk_llm.ChatContext(),
-            VoiceSurface.DESKTOP,
-            False,
-            unresolved,
-            source_message_id=f"turn-{turn_index}",
-            turn_index=turn_index,
-        )
-        instruction = policy.transient_instruction().lower()
-        assert policy.capabilities == {Capability.VISIBLE_ARTIFACT}
-        assert not ({"set_reminder", "list_reminders", "cancel_reminder"} & policy.allowed_tools)
-        assert "reminder clarification" not in instruction
-        assert policy.clarification_question is None
-        unresolved = UnresolvedActionState()
-
-
-def _agent_context_vars() -> dict[str, str]:
-    return {
-        "name": "V",
-        "timezone": "America/Los_Angeles",
-        "local_time": "8:00 PM",
-        "local_date": "July 12, 2026",
-        "memory_summary": "",
-        "last_session_context": "",
-        "last_session_at": "",
-        "archive_context": "",
-        "user_aura_profile": "",
-        "surface": "",
-        "screen_sight": "",
-    }
-
-
-def _fake_tools(*extra_names: str) -> list[SimpleNamespace]:
-    return [
-        SimpleNamespace(info=SimpleNamespace(name=name))
-        for name in ("set_reminder", "query_memory", "web_surf", *extra_names)
-    ]
-
-
-async def _collect_llm(agent: BuddyAgent, context, tools):
-    return [item async for item in agent.llm_node(context, tools, None)]
-
-
-async def test_always_on_orchestration_records_turn_policy_and_tool_telemetry(monkeypatch):
-    context = lk_llm.ChatContext()
-    message = context.add_message(role="user", content=["Remind me what Sarah said"])
-    tools = _fake_tools()
-    telemetry = SimpleNamespace(
-        turn_index=1,
-        start_turn=Mock(),
-        policy=Mock(),
-        first_response=Mock(),
-        emitted=Mock(),
-        deferred=Mock(),
-        execution=Mock(),
-    )
-
-    async def _default(agent, passed_context, passed_tools, settings):
-        yield lk_llm.ChatChunk(
-            id="tool-calls",
-            delta=lk_llm.ChoiceDelta(
-                tool_calls=[
-                    lk_llm.FunctionToolCall(
-                        name="query_memory",
-                        arguments='{"query":"Sarah"}',
-                        call_id="allowed-memory-read",
-                    ),
-                    lk_llm.FunctionToolCall(
-                        name="set_reminder",
-                        arguments=(
-                            '{"message":"Sarah","scheduled_at":"2026-07-13T18:00:00-07:00"}'
-                        ),
-                        call_id="blocked-reminder-write",
-                    ),
-                ]
-            ),
-        )
-
-    monkeypatch.setattr(Agent.default, "llm_node", _default)
-    agent = BuddyAgent(
-        user_id="u",
-        context_vars=_agent_context_vars(),
-        chat_ctx=lk_llm.ChatContext(),
-        session_id="s",
-    )
-    agent._action_telemetry = telemetry
-
-    await agent.on_user_turn_completed(lk_llm.ChatContext(), message)
-    output = await _collect_llm(agent, context, tools)
-    agent.record_voice_tool_execution("query_memory", success=True)
-
-    assert [call.name for call in output[0].delta.tool_calls] == ["query_memory"]
-    telemetry.start_turn.assert_called_once_with()
-    telemetry.policy.assert_called_once()
-    telemetry.first_response.assert_called()
-    telemetry.emitted.assert_called_once_with("query_memory", "execution_allowed")
-    telemetry.deferred.assert_called_once()
-    telemetry.execution.assert_called_once_with("query_memory", success=True)
-
-
-async def test_orchestration_filters_only_llm_visible_list_and_keeps_context(monkeypatch):
-    context = lk_llm.ChatContext()
-    message = context.add_message(role="user", content=["Remind me what Sarah said"])
-    tools = _fake_tools()
-    captured = {}
-
-    async def _default(agent, passed_context, passed_tools, settings):
+    async def _default(_agent, passed_context, passed_tools, _settings):
         captured.update(context=passed_context, tools=passed_tools)
-        yield "checking"
+        yield "model decides from the existing conversation"
 
     monkeypatch.setattr(Agent.default, "llm_node", _default)
     agent = BuddyAgent(
@@ -595,66 +180,31 @@ async def test_orchestration_filters_only_llm_visible_list_and_keeps_context(mon
     )
     agent._finalized_message_id = message.id
     agent._finalized_transcript = message.text_content
-    original_items = list(context.items)
-    await _collect_llm(agent, context, tools)
-    assert [tool.info.name for tool in captured["tools"]] == ["query_memory"]
-    assert captured["context"] is not context
-    assert context.items == original_items
-    assert [tool.info.name for tool in tools] == [
+
+    output = await _collect_llm(agent, context, tools)
+
+    assert output == ["model decides from the existing conversation"]
+    assert [tool.info.name for tool in captured["tools"]] == [
         "set_reminder",
         "query_memory",
         "web_surf",
     ]
+    passed_context = captured["context"]
+    assert [item.text_content for item in passed_context.items] == [
+        "Remind me to call Mom",
+        "When should I remind you?",
+        "Or tonight",
+    ]
 
 
-async def test_orchestration_injects_only_the_visible_artifact_skill(monkeypatch):
-    context = lk_llm.ChatContext()
-    message = context.add_message(
-        role="user", content=["Give me the PowerShell command to fix this"]
-    )
-    tools = _fake_tools("present_visible_artifact", "draft_outbound_message")
-    captured = {}
-
-    async def _default(agent, passed_context, passed_tools, settings):
-        captured.update(context=passed_context, tools=passed_tools)
-        yield "done"
-
-    monkeypatch.setattr(Agent.default, "llm_node", _default)
-    agent = BuddyAgent(
-        user_id="u",
-        context_vars=_agent_context_vars(),
-        chat_ctx=lk_llm.ChatContext(),
-        session_id="s",
-        launch_surface="desktop",
-    )
-    agent._finalized_message_id = message.id
-    agent._finalized_transcript = message.text_content
-
-    await _collect_llm(agent, context, tools)
-
-    assert [tool.info.name for tool in captured["tools"]] == ["present_visible_artifact"]
-    assert captured["context"] is not context
-    transient = captured["context"].items[-1]
-    assert "<tool_skills>" in transient.text_content
-    assert "Use present_visible_artifact" in transient.text_content
-    assert "outbound_draft" not in transient.text_content
-
-
-async def test_orchestration_drops_same_generation_dependent_writes():
-    text = "Check if I'm free tomorrow at noon, schedule lunch, and remind me at 11 am."
-    context = lk_llm.ChatContext()
-    message = context.add_message(role="user", content=[text])
-    policy = derive_turn_policy(text, context, VoiceSurface.APP, False)
+async def test_same_generation_allows_at_most_one_side_effect():
+    policy = _policy("wording is irrelevant")
     agent = BuddyAgent(
         user_id="u",
         context_vars=_agent_context_vars(),
         chat_ctx=lk_llm.ChatContext(),
         session_id="s",
     )
-    agent._finalized_message_id = message.id
-    agent._finalized_transcript = text
-    original_items = list(context.items)
-
     chunk = lk_llm.ChatChunk(
         id="chunk",
         delta=lk_llm.ChoiceDelta(
@@ -666,12 +216,16 @@ async def test_orchestration_drops_same_generation_dependent_writes():
                 ),
                 lk_llm.FunctionToolCall(
                     name="create_calendar_event",
-                    arguments=('{"title":"Lunch","start_time":"2026-07-13T12:00:00-07:00"}'),
+                    arguments=(
+                        '{"title":"Lunch","start_time":"2026-07-20T12:00:00-07:00"}'
+                    ),
                     call_id="calendar-write",
                 ),
                 lk_llm.FunctionToolCall(
                     name="set_reminder",
-                    arguments=('{"message":"Lunch","scheduled_at":"2026-07-13T11:00:00-07:00"}'),
+                    arguments=(
+                        '{"message":"Lunch","scheduled_at":"2026-07-20T11:00:00-07:00"}'
+                    ),
                     call_id="reminder-write",
                 ),
             ]
@@ -684,304 +238,171 @@ async def test_orchestration_drops_same_generation_dependent_writes():
     output = [
         item
         async for item in agent._apply_execution_safety(
-            _chunks(), policy=policy, chat_ctx=context
+            _chunks(), policy=policy, chat_ctx=lk_llm.ChatContext()
         )
     ]
-    kept = output[0].delta.tool_calls
-    assert [call.name for call in kept] == ["get_upcoming_events"]
-    assert context.items == original_items
+
+    assert [call.name for call in output[0].delta.tool_calls] == [
+        "get_upcoming_events",
+        "create_calendar_event",
+    ]
 
 
-async def test_final_turn_marker_invalidates_preemptive_generation():
+async def test_every_finalized_turn_invalidates_speculative_generation():
     agent = BuddyAgent(
         user_id="u",
         context_vars=_agent_context_vars(),
         chat_ctx=lk_llm.ChatContext(),
         session_id="s",
     )
-    turn_context = lk_llm.ChatContext()
-    message = lk_llm.ChatMessage(role="user", content=["Remind me tomorrow at 9 am"])
+    for text in ("Remind me tonight", "Tell me a joke"):
+        turn_context = lk_llm.ChatContext()
+        message = lk_llm.ChatMessage(role="user", content=[text])
+        await agent.on_user_turn_completed(turn_context, message)
+        assert len(turn_context.items) == 1
+        assert "finalized transcript" in turn_context.items[0].text_content
 
-    await agent.on_user_turn_completed(turn_context, message)
 
+async def test_tool_and_policy_telemetry_survive_native_tool_calling(monkeypatch):
+    context = lk_llm.ChatContext()
+    message = context.add_message(role="user", content=["Or tonight"])
+    telemetry = SimpleNamespace(
+        turn_index=1,
+        start_turn=Mock(),
+        policy=Mock(),
+        first_response=Mock(),
+        emitted=Mock(),
+        deferred=Mock(),
+        execution=Mock(),
+    )
+
+    async def _default(_agent, _context, _tools, _settings):
+        yield lk_llm.ChatChunk(
+            id="tool-call",
+            delta=lk_llm.ChoiceDelta(
+                tool_calls=[
+                    lk_llm.FunctionToolCall(
+                        name="set_reminder",
+                        arguments=(
+                            '{"message":"call Mom",'
+                            '"scheduled_at":"2026-07-19T21:00:00-07:00"}'
+                        ),
+                        call_id="reminder",
+                    )
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(Agent.default, "llm_node", _default)
+    agent = BuddyAgent(
+        user_id="u",
+        context_vars=_agent_context_vars(),
+        chat_ctx=lk_llm.ChatContext(),
+        session_id="s",
+    )
+    agent._action_telemetry = telemetry
+    agent._finalized_message_id = message.id
+    agent._finalized_transcript = message.text_content
+
+    output = await _collect_llm(
+        agent,
+        context,
+        _fake_tools("set_reminder", "query_memory"),
+    )
+    agent.record_voice_tool_execution("set_reminder", success=True)
+
+    assert [call.name for call in output[0].delta.tool_calls] == ["set_reminder"]
+    telemetry.policy.assert_called_once()
+    telemetry.emitted.assert_called_once_with("set_reminder", "execution_allowed")
+    telemetry.execution.assert_called_once_with("set_reminder", success=True)
+
+
+async def test_graph_retrieval_exception_does_not_drop_voice_reply(monkeypatch):
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("firestore failed")
+
+    async def _default(_agent, _ctx, _tools, _settings):
+        yield "still replying"
+
+    monkeypatch.setattr(buddy_agent_module, "retrieve_relevant_subgraph", _boom)
+    monkeypatch.setattr(Agent.default, "llm_node", _default)
+    agent = BuddyAgent(
+        user_id="u",
+        context_vars=_agent_context_vars(),
+        chat_ctx=lk_llm.ChatContext(),
+        session_id="s",
+    )
+    turn_ctx = lk_llm.ChatContext()
+    message = lk_llm.ChatMessage(role="user", content=["What was my interview plan?"])
+
+    await agent.on_user_turn_completed(turn_ctx, message)
+    output = await _collect_llm(agent, turn_ctx, [])
+
+    assert output == ["still replying"]
     assert agent._finalized_message_id == message.id
-    assert len(turn_context.items) == 1
-    marker = turn_context.items[0]
-    assert isinstance(marker, lk_llm.ChatMessage)
-    assert marker.role == "system"
-    assert "finalized transcript" in marker.text_content
 
 
-async def test_agent_remembers_failed_visible_output_for_the_next_turn():
-    agent = BuddyAgent(
-        user_id="u",
-        context_vars=_agent_context_vars(),
-        chat_ctx=lk_llm.ChatContext(),
-        session_id="s",
-        launch_surface="desktop",
-    )
+async def test_slow_live_graph_retrieval_respects_turn_budget(monkeypatch):
+    async def _slow(*_args, **_kwargs):
+        await asyncio.sleep(0.2)
+        return [RetrievedAtom("late", "fact", 0.9, 0.9)]
 
-    first_context = lk_llm.ChatContext()
-    first_message = lk_llm.ChatMessage(role="user", content=["Show me the PowerShell command"])
-    await agent.on_user_turn_completed(first_context, first_message)
-    assert agent._current_turn_visible_request is True
-    assert agent._current_turn_visible_success is False
-
-    second_context = lk_llm.ChatContext()
-    second_message = lk_llm.ChatMessage(role="user", content=["Again, please"])
-    await agent.on_user_turn_completed(second_context, second_message)
-    assert agent._visible_output_failed_previous_turn is True
-
-    policy = derive_turn_policy(
-        agent._finalized_transcript,
-        second_context,
-        VoiceSurface.DESKTOP,
-        False,
-        previous_visible_output_failed=agent._visible_output_failed_previous_turn,
-    )
-    assert "visible_output_repeat" in policy.reason_codes
-
-
-async def test_successful_visible_output_clears_repeat_repair_state():
-    agent = BuddyAgent(
-        user_id="u",
-        context_vars=_agent_context_vars(),
-        chat_ctx=lk_llm.ChatContext(),
-        session_id="s",
-        launch_surface="desktop",
-    )
-
-    first_context = lk_llm.ChatContext()
-    first_message = lk_llm.ChatMessage(role="user", content=["Show me the PowerShell command"])
-    await agent.on_user_turn_completed(first_context, first_message)
-    agent.record_voice_tool_execution("present_visible_artifact", success=True)
-
-    second_context = lk_llm.ChatContext()
-    second_message = lk_llm.ChatMessage(role="user", content=["Again, please"])
-    await agent.on_user_turn_completed(second_context, second_message)
-
-    assert agent._visible_output_failed_previous_turn is False
-
-
-async def test_fake_llm_reminder_question_is_blocked_and_regenerated_once():
-    async def _primary():
-        yield "What exact time should the reminder fire?"
-
-    async def _retry():
-        yield "I put the prompt on your screen."
-
-    output = [
-        item
-        async for item in guard_spoken_action_stream(
-            _primary(),
-            capabilities=frozenset({Capability.VISIBLE_ARTIFACT}),
-            regenerate=_retry,
-            neutral_recovery="Let's stick with the prompt.",
-        )
-    ]
-    assert output == ["I put the prompt on your screen."]
-
-
-async def test_spoken_guard_fails_closed_when_retry_repeats_reminder_language():
-    async def _unsafe():
-        yield "What time should I set the reminder?"
-
-    output = [
-        item
-        async for item in guard_spoken_action_stream(
-            _unsafe(),
-            capabilities=frozenset({Capability.VISIBLE_ARTIFACT}),
-            regenerate=_unsafe,
-            neutral_recovery="Let's stick with the prompt.",
-        )
-    ]
-    assert output == ["Let's stick with the prompt."]
-
-
-def test_reverse_order_reminder_success_claim_blocked_without_receipt():
-    """The exact reported bug: 'reminder set' / 'locked in' with no set_reminder receipt.
-    The old verb-first regex missed these reverse-order phrases."""
-    caps = frozenset({Capability.REMINDER_WRITE})
-    assert has_unauthorized_spoken_action("Your reminder is set for 5pm.", caps)
-    assert has_unauthorized_spoken_action("All set, I locked that in for you.", caps)
-    assert has_unauthorized_spoken_action("Okay, I'll remind you at 5.", caps)
-
-
-def test_reminder_success_language_allowed_once_receipt_exists():
-    """With a real set_reminder receipt, success language is honest and must pass."""
-    caps = frozenset({Capability.REMINDER_WRITE})
-    assert not has_unauthorized_spoken_action(
-        "Your reminder is set for 5pm.", caps, reminder_committed=True
-    )
-    assert not has_unauthorized_spoken_action(
-        "All set, locked that in.", caps, reminder_committed=True
-    )
-
-
-def test_reminder_clarification_language_is_never_blocked():
-    """Withheld-slot clarification (capability present, tool not run) must still speak,
-    even when it contains 'set ... reminder' phrasing inside a question."""
-    caps = frozenset({Capability.REMINDER_WRITE})
-    assert not has_unauthorized_spoken_action("What exact time should the reminder fire?", caps)
-    assert not has_unauthorized_spoken_action("Which day should I set that reminder for?", caps)
-
-
-def test_declarative_claim_before_trailing_question_is_still_blocked():
-    """A false claim isn't laundered by appending a question to the same utterance."""
-    caps = frozenset({Capability.REMINDER_WRITE})
-    assert has_unauthorized_spoken_action(
-        "Your reminder is set for 5pm. Want me to add a note?", caps
-    )
-
-
-def test_scheduled_inflection_blocked_when_no_reminder_capability():
-    """'scheduled'/'scheduling' evaded the old \\bschedule\\b verb group."""
-    caps: frozenset[Capability] = frozenset()
-    assert has_unauthorized_spoken_action("I scheduled a reminder for you.", caps)
-    assert has_unauthorized_spoken_action("I'm scheduling that reminder now.", caps)
-
-
-def test_bare_completion_not_over_blocked_off_reminder_turn():
-    """'all set' / 'locked it in' after a non-reminder action must not be blocked."""
-    caps = frozenset({Capability.VISIBLE_ARTIFACT})
-    assert not has_unauthorized_spoken_action("All set, I pulled that up on your screen.", caps)
-    assert not has_unauthorized_spoken_action("Locked it in, here's the command.", caps)
-
-
-def test_reported_2026_07_16_delivery_claim_blocked_without_receipt():
-    """The exact line Buddy spoke (chat_history 01:50:00Z) with no set_reminder receipt.
-    'Locked in for ...' + 'you'll get the reminder ... right on time' named no
-    set/scheduled/created verb, so the old regexes let a fabricated confirmation
-    reach TTS. Both halves must now block."""
-    caps = frozenset({Capability.REMINDER_WRITE})
-    real_line = (
-        "Locked in for 10 PM tonight, babe. "
-        "You’ll get the reminder for that to-do task right on time."
-    )
-    assert has_unauthorized_spoken_action(real_line, caps)
-    # Each half independently, so neither sentence alone can slip.
-    assert has_unauthorized_spoken_action("Locked in for 10 PM tonight, babe.", caps)
-    assert has_unauthorized_spoken_action(
-        "You’ll get the reminder for that to-do task right on time.", caps
-    )
-    # Delivery-across-devices phrasing (no "reminder" word) must also block on a
-    # reminder turn.
-    assert has_unauthorized_spoken_action(
-        "Done, it’ll notify you on your phone and your Windows desktop at 10.", caps
-    )
-
-
-def test_delivery_claim_allowed_once_receipt_exists():
-    """With a real receipt the same delivery language is honest and must pass."""
-    caps = frozenset({Capability.REMINDER_WRITE})
-    assert not has_unauthorized_spoken_action(
-        "You’ll get the reminder right on time.", caps, reminder_committed=True
-    )
-
-
-def test_notification_promise_not_blocked_off_reminder_turn():
-    """A genuine non-reminder notification promise (e.g. meeting notes) must not be
-    caught by the reminder-turn-only delivery guard."""
-    caps = frozenset({Capability.VISIBLE_ARTIFACT})
-    assert not has_unauthorized_spoken_action(
-        "You’ll get a notification when your notes are ready.", caps
-    )
-
-
-def test_set_a_reminder_is_authorized_and_exposes_tool():
-    """The 2026-07-16 root cause: 'set a reminder ...' classified as a reminder write
-    but the voice auth gate omitted 'set', so set_reminder was withheld and nothing
-    was written. It must now be a complete, authorized write."""
-    policy = _policy("set a reminder for tonight at 10pm")
-    assert policy.capabilities == {Capability.REMINDER_WRITE}
-    assert "set_reminder" in policy.allowed_tools
-    assert policy.write_authorization is WriteAuthorization.AUTHORIZED
-
-
-def test_bare_set_without_reminder_does_not_authorize():
-    """'set' authorizes only next to 'reminder'; a bare 'set' must not grant a write."""
-    policy = _policy("set that aside for now")
-    assert Capability.REMINDER_WRITE not in policy.capabilities
-    assert policy.write_authorization is not WriteAuthorization.AUTHORIZED
-
-
-def test_voice_and_chat_gates_agree_on_reminder_create_verbs():
-    """Anti-drift: every create verb the chat gate accepts must also authorize AND
-    expose set_reminder on the voice gate. This is the parity that silently broke for
-    'set' (auth) and 'schedule' (classification)."""
-    from src.services.action_intent_policy import explicitly_requests_reminder_create
-
-    for verb in ("set", "create", "schedule", "add"):
-        text = f"{verb} a reminder for 10pm"
-        assert explicitly_requests_reminder_create(text), f"chat gate rejects {verb!r}"
-        policy = _policy(text)
-        assert Capability.REMINDER_WRITE in policy.capabilities, f"voice misclassifies {verb!r}"
-        assert "set_reminder" in policy.allowed_tools, f"voice gate withholds {verb!r}"
-        assert policy.write_authorization is WriteAuthorization.AUTHORIZED, (
-            f"voice gate does not authorize {verb!r}"
-        )
-
-
-async def test_stream_allows_success_language_once_receipt_commits_mid_generation():
-    """The receipt callable is polled at flush, so a claim clears the moment the tool
-    commits partway through the reply."""
-    committed = {"done": False}
-
-    async def _primary():
-        yield "All set, "
-        committed["done"] = True  # set_reminder commits between chunks
-        yield "your reminder is locked in for 5pm."
-
-    output = [
-        item
-        async for item in guard_spoken_action_stream(
-            _primary(),
-            capabilities=frozenset({Capability.REMINDER_WRITE}),
-            regenerate=None,
-            neutral_recovery="Let me double-check that.",
-            reminder_committed=lambda: committed["done"],
-        )
-    ]
-    assert "".join(str(item) for item in output) == "All set, your reminder is locked in for 5pm."
-
-
-async def test_stream_fails_closed_on_success_claim_without_receipt():
-    async def _primary():
-        yield "All set, your reminder is locked in for 5pm."
-
-    output = [
-        item
-        async for item in guard_spoken_action_stream(
-            _primary(),
-            capabilities=frozenset({Capability.REMINDER_WRITE}),
-            regenerate=None,
-            neutral_recovery="Let me make sure I've got that right.",
-            reminder_committed=lambda: False,
-        )
-    ]
-    assert output == ["Let me make sure I've got that right."]
-
-
-def test_genuine_reminder_clarification_is_not_blocked_by_policy_guard():
-    policy = _policy("Remind me tomorrow to call Sarah")
-    assert policy.capabilities == {Capability.REMINDER_WRITE}
-    assert policy.clarification_question == "what exact time the reminder should fire"
-
-
-async def test_any_tool_completion_clears_unresolved_action_state():
+    monkeypatch.setattr(buddy_agent_module, "VOICE_RETRIEVAL_BUDGET_S", 0.03)
+    monkeypatch.setattr(buddy_agent_module, "retrieve_relevant_subgraph", _slow)
     agent = BuddyAgent(
         user_id="u",
         context_vars=_agent_context_vars(),
         chat_ctx=lk_llm.ChatContext(),
         session_id="s",
     )
-    agent._unresolved_action = UnresolvedActionState(
-        source_message_id="turn-1",
-        source_turn_index=1,
-        capabilities=frozenset({Capability.REMINDER_WRITE}),
-        missing_slots=("reminder_exact_time",),
-        created_at_turn=1,
-        write_authorized=True,
+    turn_ctx = lk_llm.ChatContext()
+    message = lk_llm.ChatMessage(role="user", content=["What was my interview plan?"])
+
+    started = time.monotonic()
+    await agent.on_user_turn_completed(turn_ctx, message)
+
+    assert time.monotonic() - started < 0.12
+    assert all("late" not in item.text_content for item in turn_ctx.items)
+
+
+async def test_smalltalk_skips_live_graph_without_calling_retrieval(monkeypatch):
+    calls = 0
+
+    async def _retrieve(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return []
+
+    monkeypatch.setattr(buddy_agent_module, "retrieve_relevant_subgraph", _retrieve)
+    agent = BuddyAgent(
+        user_id="u",
+        context_vars=_agent_context_vars(),
+        chat_ctx=lk_llm.ChatContext(),
+        session_id="s",
     )
-    agent.record_voice_tool_execution("query_memory", success=False)
-    assert agent._unresolved_action == UnresolvedActionState()
+
+    await agent.on_user_turn_completed(
+        lk_llm.ChatContext(),
+        lk_llm.ChatMessage(role="user", content=["thanks"]),
+    )
+
+    assert calls == 0
+
+
+def test_card_skills_yield_actions_to_dedicated_tools():
+    """Surface Routing Contract: the desktop card/draft skills must never
+    reabsorb requests an action tool owns (the 2026-07-20 transcript bug where
+    "create me a calendar event" was routed to present_visible_artifact), and
+    the old "note for other reusable text" catch-all must stay gone."""
+    from src.agent.voice.tool_skills import VOICE_TOOL_SKILLS
+
+    visible_artifact = VOICE_TOOL_SKILLS["visible_artifact"].instruction
+    outbound_draft = VOICE_TOOL_SKILLS["outbound_draft"].instruction
+    assert "never a substitute" in visible_artifact
+    assert "action tool" in visible_artifact
+    assert "never a substitute" in outbound_draft
+    assert "note for other reusable text" not in visible_artifact
+
+    calendar_write = VOICE_TOOL_SKILLS["calendar_write"].instruction
+    assert "never a card" in calendar_write
+    assert "ONE" in calendar_write  # single-question delegation rule

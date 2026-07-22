@@ -59,3 +59,61 @@ def test_skips_entries_without_a_name():
     )
     rec._on_tools_executed(ev)
     assert rec.tool_calls == ["query_memory"]
+
+
+def test_captures_only_safe_structured_write_receipt_fields():
+    rec = _make_recorder()
+    ev = SimpleNamespace(
+        function_calls=[SimpleNamespace(name="set_reminder", call_id="call-1")],
+        function_call_outputs=[SimpleNamespace(
+            is_error=False,
+            output=(
+                '{"reminder_id":"r1","title":"Call Mom",'
+                '"trigger_at":"2026-07-15T00:00:00Z","private_blob":"drop me"}'
+            ),
+        )],
+    )
+
+    rec._on_tools_executed(ev)
+
+    assert len(rec.action_receipts) == 1
+    receipt = rec.action_receipts[0]
+    assert receipt["tool_name"] == "set_reminder"
+    assert receipt["call_id"] == "call-1"
+    assert receipt["success"] is True
+    assert receipt["result"] == {
+        "reminder_id": "r1",
+        "title": "Call Mom",
+        "trigger_at": "2026-07-15T00:00:00Z",
+    }
+
+
+def test_write_receipt_captures_tool_returned_spoken_line():
+    # Action Truth Contract: the `say` line a write tool returns is part of the
+    # session record, so post-session review shows exactly what Buddy was given
+    # to speak for each write.
+    rec = _make_recorder()
+    rec._on_tools_executed(SimpleNamespace(
+        function_calls=[SimpleNamespace(name="create_calendar_event", call_id="call-3")],
+        function_call_outputs=[SimpleNamespace(
+            is_error=False,
+            output='{"event_id":"e1","say":"Done, I added \\"Coffee\\" to your calendar."}',
+        )],
+    ))
+    assert rec.action_receipts[0]["result"] == {
+        "event_id": "e1",
+        "say": 'Done, I added "Coffee" to your calendar.',
+    }
+
+
+def test_failed_write_receipt_is_recorded_but_not_claimed_successful():
+    rec = _make_recorder()
+    rec._on_tools_executed(SimpleNamespace(
+        function_calls=[SimpleNamespace(name="set_reminder", call_id="call-2")],
+        function_call_outputs=[SimpleNamespace(
+            is_error=False,
+            output='{"error": true, "private_blob": "drop me"}',
+        )],
+    ))
+    assert rec.action_receipts[0]["success"] is False
+    assert "result" not in rec.action_receipts[0]

@@ -13,8 +13,9 @@ import asyncio
 import json
 from unittest.mock import MagicMock
 
-from src.handlers import aura
-from src.services.memory import atom_store, fields as F
+from src.handlers import aura, memories
+from src.services.memory import atom_store
+from src.services.memory import fields as F
 
 
 # --- fake Firestore query chain for list_atoms ----------------------------
@@ -151,3 +152,69 @@ def test_delete_memory_missing_id(monkeypatch):
     monkeypatch.setattr(aura, "resolve_user_id_from_request", lambda _r: "u1")
     resp = asyncio.run(aura.handle_delete_memory(MagicMock(), "   "))
     assert resp.status_code == 400
+
+
+def test_consent_revoke_routes_to_strict_memory_tree_wipe(monkeypatch):
+    monkeypatch.setattr(aura, "resolve_user_id_from_request", lambda _r: "u1")
+    seen = []
+    monkeypatch.setattr(
+        aura,
+        "_revoke_and_delete_aura_memory",
+        lambda uid: seen.append(uid) or 9,
+    )
+
+    async def _wipe_graph(uid):
+        seen.append(f"graph:{uid}")
+        return 3
+
+    monkeypatch.setattr(aura, "wipe_graph", _wipe_graph)
+
+    resp = asyncio.run(aura.handle_wipe_memory(MagicMock()))
+    body = json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body == {"ok": True, "removed": 12}
+    assert seen == ["u1", "graph:u1"]
+
+
+def test_consent_revoke_reports_failure_for_retry(monkeypatch):
+    monkeypatch.setattr(aura, "resolve_user_id_from_request", lambda _r: "u1")
+
+    def _fail(_uid):
+        raise RuntimeError("firestore unavailable")
+
+    monkeypatch.setattr(aura, "_revoke_and_delete_aura_memory", _fail)
+    resp = asyncio.run(aura.handle_wipe_memory(MagicMock()))
+    assert resp.status_code == 500
+
+
+def test_visible_memory_delete_cascades_to_graph_fail_open(monkeypatch):
+    monkeypatch.setattr(memories, "resolve_user_id_from_request", lambda _r: "u1")
+    deleted = []
+
+    class _MemoryDoc:
+        def delete(self):
+            deleted.append("row-1")
+
+    class _MemoryCollection:
+        def document(self, _memory_id):
+            return _MemoryDoc()
+
+    monkeypatch.setattr(memories, "_memories_ref", lambda _uid: _MemoryCollection())
+
+    async def _graph_failure(uid, node_id):
+        deleted.append(f"graph:{uid}:{node_id}")
+        raise RuntimeError("graph unavailable")
+
+    monkeypatch.setattr(memories, "delete_node", _graph_failure)
+    request = MagicMock()
+    request.query_params = {}
+
+    async def _delete_and_drain():
+        result = await memories.handle_delete_memory(request, "row-1")
+        await asyncio.sleep(0)
+        return result
+
+    resp = asyncio.run(_delete_and_drain())
+    assert resp.status_code == 200
+    assert json.loads(bytes(resp.body)) == {"ok": True}
+    assert deleted == ["row-1", "graph:u1:row-1"]
