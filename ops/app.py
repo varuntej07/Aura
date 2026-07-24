@@ -94,6 +94,17 @@ async def llm_tools(
     return JSONResponse(data)
 
 
+@app.get("/api/provider-costs")
+async def provider_costs(
+    range: str = Query(default="7d"),
+    _gate: None = Depends(require_passcode),
+) -> JSONResponse:
+    data = await anyio.to_thread.run_sync(
+        functools.partial(panels.build_provider_costs, _clamp_range(range))
+    )
+    return JSONResponse(data)
+
+
 @app.get("/api/tab/mobile")
 async def tab_mobile(_gate: None = Depends(require_passcode)) -> JSONResponse:
     data = await anyio.to_thread.run_sync(panels.build_mobile_tab)
@@ -115,9 +126,9 @@ async def tab_web(_gate: None = Depends(require_passcode)) -> JSONResponse:
 @app.get("/api/logs")
 async def logs(
     services: str = Query(default="", max_length=200),
-    severity: str = Query(default="DEFAULT", max_length=16),
+    severity: str = Query(default="ERROR", max_length=16),
     q: str = Query(default="", max_length=200),
-    hours: int = Query(default=24, ge=1, le=336),
+    hours: int = Query(default=24, ge=1, le=720),
     limit: int = Query(default=100, ge=1, le=300),
     _gate: None = Depends(require_passcode),
 ) -> JSONResponse:

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from providers import (
+    cost_provider,
     crashlytics_provider,
     firestore_provider,
     github_releases_provider,
@@ -30,7 +31,6 @@ from providers import (
     logging_provider,
     monitoring_provider,
     posthog_provider,
-    sentry_provider,
 )
 
 PROJECT_ID = os.environ.get("GCP_PROJECT", "juno-2ea45")
@@ -44,11 +44,15 @@ POSTHOG_WEB_PROJECT_ID = os.environ.get("OPS_POSTHOG_WEB_PROJECT_ID", "") or POS
 LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST", "https://us.cloud.langfuse.com")
 LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
-SENTRY_ORG = os.environ.get("SENTRY_ORG", "")
-SENTRY_PROJECT = os.environ.get("SENTRY_PROJECT", "")
-SENTRY_AUTH_TOKEN = os.environ.get("SENTRY_AUTH_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 CRASHLYTICS_BQ_DATASET = os.environ.get("OPS_CRASHLYTICS_BQ_DATASET", "firebase_crashlytics")
+GCP_BILLING_TABLE = os.environ.get("OPS_GCP_BILLING_TABLE", "")
+PROVIDER_MONTHLY_COSTS_JSON = os.environ.get("OPS_PROVIDER_MONTHLY_COSTS_JSON", "")
+
+try:
+    BRAVE_COST_PER_QUERY_USD = float(os.environ["OPS_BRAVE_COST_PER_QUERY_USD"])
+except (KeyError, TypeError, ValueError):
+    BRAVE_COST_PER_QUERY_USD = None
 
 # ── In-process TTL cache (the read-cost gate; see module docstring) ──────────
 # The UI never auto-refreshes (data loads once per tab; the Refresh button is
@@ -173,6 +177,36 @@ def build_llm_tools(range_key: str = "7d", tool_filter: str = "") -> dict:
         ))
 
 
+def build_provider_costs(range_key: str = "7d") -> dict:
+    """Provider spend and usage with actual/estimated/manual labels."""
+    days = {"today": 1, "7d": 7, "30d": 30}.get(range_key, 7)
+
+    def _produce() -> dict:
+        usage = _cached(
+            f"provider_usage:{days}",
+            TTL_ANALYTICS_S,
+            lambda: logging_provider.provider_usage_stats(PROJECT_ID, days=days),
+        )
+        gcp_cost = _cached(
+            f"gcp_billing:{days}",
+            TTL_CRASH_SCAN_S,
+            lambda: cost_provider.gcp_billing_cost(PROJECT_ID, GCP_BILLING_TABLE, days),
+        )
+        result = cost_provider.build_provider_costs(
+            range_key=range_key,
+            llm_cost={"configured": False, "models": []},
+            usage=usage,
+            manual_monthly_costs_json=PROVIDER_MONTHLY_COSTS_JSON,
+            brave_cost_per_query_usd=BRAVE_COST_PER_QUERY_USD,
+            gcp_cost=gcp_cost,
+        )
+        result["generated_at"] = datetime.now(timezone.utc).isoformat()
+        result["usage"] = usage
+        return result
+
+    return _cached(f"provider_costs:{range_key}", TTL_ANALYTICS_S, _produce)
+
+
 def build_overview_analytics() -> dict:
     """The slower Overview panels (retention, funnels, default LLM views);
     each section is a network call to PostHog or Langfuse, so the whole
@@ -190,8 +224,8 @@ def build_overview_analytics() -> dict:
                 POSTHOG_HOST, POSTHOG_PROJECT_ID, POSTHOG_KEY, days=30,
             ),
             "payment_intents": firestore_provider.payment_intents(users),
-            "llm_cost": build_llm_cost("7d"),
-            "llm_tools": build_llm_tools("7d"),
+            "llm_cost": {"configured": False},
+            "llm_tools": {"configured": False},
         }
     return _cached("overview_analytics", TTL_ANALYTICS_S, _produce)
 
@@ -225,6 +259,11 @@ def build_mobile_tab() -> dict:
             "voice_first_response": posthog_provider.voice_first_response_stats(
                 POSTHOG_HOST, POSTHOG_PROJECT_ID, POSTHOG_KEY, days=7, platform="mobile",
             ),
+            "voice_worker_latency": _cached(
+                "voice_worker_latency:7d",
+                TTL_ANALYTICS_S,
+                lambda: logging_provider.voice_latency_stats(PROJECT_ID, days=7),
+            ),
             # TODO(store launch): wire Play Console / App Store Connect APIs once
             # the apps are live. Both are still in review; an honest empty state
             # beats querying real APIs against nothing.
@@ -243,13 +282,25 @@ def build_desktop_tab() -> dict:
     def _produce() -> dict:
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "crashes": sentry_provider.desktop_crashes(SENTRY_ORG, SENTRY_PROJECT, SENTRY_AUTH_TOKEN),
+            "crashes": {
+                "available": False,
+                "note": (
+                    "Sentry is intentionally disabled. Desktop operational errors "
+                    "are available in Logs; Firebase Crashlytics powers the mobile app."
+                ),
+                "crashes": [],
+            },
             "backend_latency": _platform_latency_block(["windows"]),
             "chat_latency": posthog_provider.chat_latency_percentiles(
                 POSTHOG_HOST, POSTHOG_PROJECT_ID, POSTHOG_KEY, days=7, platform="desktop",
             ),
             "voice_first_response": posthog_provider.voice_first_response_stats(
                 POSTHOG_HOST, POSTHOG_PROJECT_ID, POSTHOG_KEY, days=7, platform="desktop",
+            ),
+            "voice_worker_latency": _cached(
+                "voice_worker_latency:7d",
+                TTL_ANALYTICS_S,
+                lambda: logging_provider.voice_latency_stats(PROJECT_ID, days=7),
             ),
             "downloads": github_releases_provider.desktop_downloads(GITHUB_TOKEN),
         }
@@ -270,22 +321,34 @@ def build_web_tab() -> dict:
     return _cached("tab_web", TTL_ANALYTICS_S, _produce)
 
 
-def search_logs(services: str = "", severity: str = "DEFAULT", text: str = "", hours: int = 24, limit: int = 100) -> dict:
-    """Log viewer payload. `services` is a comma-separated subset of
-    logging_provider.KNOWN_SERVICES (empty = all). The voice worker note is
-    carried in the payload because its logs genuinely are NOT here: LiveKit
-    Cloud Agents keeps them in its own dashboard, not GCP Cloud Logging."""
+def search_logs(services: str = "", severity: str = "ERROR", text: str = "", hours: int = 24, limit: int = 100) -> dict:
+    """Merge Cloud Logging and redacted client error events."""
     requested = [s.strip() for s in services.split(",") if s.strip()]
-    selected = [s for s in requested if s in logging_provider.KNOWN_SERVICES] or list(logging_provider.KNOWN_SERVICES)
+    selected = [s for s in requested if s in logging_provider.KNOWN_SERVICES]
+    include_client = not requested or "mobile-client" in requested
+    if not requested:
+        selected = list(logging_provider.KNOWN_SERVICES)
+    entries = logging_provider.search_logs(
+        PROJECT_ID, services=selected, min_severity=severity,
+        text=text, hours=hours, limit=limit,
+    ) if selected else []
+    if include_client:
+        entries.extend(posthog_provider.client_log_entries(
+            POSTHOG_HOST,
+            POSTHOG_PROJECT_ID,
+            POSTHOG_KEY,
+            min_severity=severity,
+            hours=hours,
+            text=text,
+            limit=limit,
+        ))
+    entries.sort(key=lambda item: item.get("at") or "", reverse=True)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "services": list(logging_provider.KNOWN_SERVICES),
+        "services": [*logging_provider.KNOWN_SERVICES, "mobile-client"],
         "voice_note": (
-            "Voice worker logs are not in GCP: the worker runs on LiveKit Cloud "
-            "Agents, whose logs live only in LiveKit Cloud's dashboard."
+            "LiveKit worker errors appear here after its GCP log drain is configured. "
+            "Mobile client warnings/errors are redacted before they reach PostHog."
         ),
-        "entries": logging_provider.search_logs(
-            PROJECT_ID, services=selected, min_severity=severity,
-            text=text, hours=hours, limit=limit,
-        ),
+        "entries": entries[:limit],
     }

@@ -158,6 +158,23 @@ input:focus, select:focus { outline: 1px solid var(--teal); border-color: transp
   .col-8, .col-6, .col-4 { grid-column: span 12; }
 }
 
+@media (max-width: 760px) {
+  header { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
+  #tabs {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+  .tab { flex: 0 0 auto; padding: 7px 11px; }
+  .wrap { padding: 10px 10px 64px; }
+  .card { padding: 12px; border-radius: 18px; }
+  .strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric { border-radius: 16px; }
+  .metric .n { font-size: 18px; }
+  #stamp { display: none; }
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--line);

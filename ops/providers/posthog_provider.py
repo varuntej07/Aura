@@ -204,13 +204,20 @@ def chat_latency_percentiles(
     app emits: ttft_ms = send -> first token, total_ms = send -> done). History
     only exists from the client build that ships the event onward; count=0 is
     rendered honestly by the UI, not as zero latency."""
-    empty = {"count": 0, "ttft_p95": None, "total_p95": None, "total_p99": None}
+    empty = {
+        "count": 0,
+        "ttft_p50": None, "ttft_p95": None, "ttft_p99": None,
+        "total_p50": None, "total_p95": None, "total_p99": None,
+    }
     if not (personal_key and project_id):
         return empty
     try:
         rows = _run_hogql(host, project_id, personal_key, (
             "SELECT count(), "
+            "quantile(0.50)(toFloat(properties.ttft_ms)), "
             "quantile(0.95)(toFloat(properties.ttft_ms)), "
+            "quantile(0.99)(toFloat(properties.ttft_ms)), "
+            "quantile(0.50)(toFloat(properties.total_ms)), "
             "quantile(0.95)(toFloat(properties.total_ms)), "
             "quantile(0.99)(toFloat(properties.total_ms)) "
             "FROM events WHERE event = 'chat_e2e_latency' "
@@ -225,9 +232,12 @@ def chat_latency_percentiles(
 
             return {
                 "count": int(r[0] or 0),
-                "ttft_p95": _ms(r[1]),
-                "total_p95": _ms(r[2]),
-                "total_p99": _ms(r[3]),
+                "ttft_p50": _ms(r[1]),
+                "ttft_p95": _ms(r[2]),
+                "ttft_p99": _ms(r[3]),
+                "total_p50": _ms(r[4]),
+                "total_p95": _ms(r[5]),
+                "total_p99": _ms(r[6]),
             }
     except Exception as exc:
         logger.error("chat latency query failed (%s): %s", platform, exc)
@@ -241,23 +251,75 @@ def voice_first_response_stats(
     HONEST CAVEAT: the event historically carried NO properties (it marks that
     the agent spoke at all, once per session); elapsed_ms only exists from the
     client build that adds it, so p95 may be null while count is not."""
-    empty = {"count": 0, "elapsed_p95": None}
+    empty = {"count": 0, "elapsed_p50": None, "elapsed_p95": None, "elapsed_p99": None}
     if not (personal_key and project_id):
         return empty
     try:
         rows = _run_hogql(host, project_id, personal_key, (
-            "SELECT count(), quantile(0.95)(toFloat(properties.elapsed_ms)) "
-            "FROM events WHERE event = 'voice_first_response' "
+            "SELECT count(), "
+            "quantile(0.50)(toFloat(properties.elapsed_ms)), "
+            "quantile(0.95)(toFloat(properties.elapsed_ms)), "
+            "quantile(0.99)(toFloat(properties.elapsed_ms)) "
+            "FROM events WHERE event = 'voice_start_to_first_talk' "
             f"{_platform_clause(platform)}"
             f"AND timestamp > now() - INTERVAL {int(days)} DAY"
         ))
         if rows and rows[0]:
             r = rows[0]
-            p95 = round(float(r[1]), 1) if isinstance(r[1], (int, float)) else None
-            return {"count": int(r[0] or 0), "elapsed_p95": p95}
+            def _ms(value):
+                return round(float(value), 1) if isinstance(value, (int, float)) else None
+            return {
+                "count": int(r[0] or 0),
+                "elapsed_p50": _ms(r[1]),
+                "elapsed_p95": _ms(r[2]),
+                "elapsed_p99": _ms(r[3]),
+            }
     except Exception as exc:
         logger.error("voice_first_response query failed (%s): %s", platform, exc)
     return empty
+
+
+def client_log_entries(
+    host: str,
+    project_id: str,
+    personal_key: str,
+    min_severity: str = "WARNING",
+    hours: int = 24,
+    text: str = "",
+    limit: int = 100,
+) -> list[dict]:
+    """Redacted Flutter warning/error events captured by AppLogger."""
+    if not (personal_key and project_id):
+        return []
+    severity_filter = (
+        "properties.severity = 'ERROR'"
+        if min_severity.upper() == "ERROR"
+        else "properties.severity IN ('WARNING', 'ERROR')"
+    )
+    try:
+        rows = _run_hogql(host, project_id, personal_key, (
+            "SELECT timestamp, properties.severity, properties.tag, "
+            "properties.message, properties.platform "
+            "FROM events WHERE event = 'client_log' "
+            f"AND {severity_filter} "
+            f"AND timestamp > now() - INTERVAL {max(1, min(int(hours), 720))} HOUR "
+            "ORDER BY timestamp DESC "
+            f"LIMIT {max(1, min(int(limit), 300))}"
+        ))
+        entries = [{
+            "at": str(row[0] or ""),
+            "severity": str(row[1] or "WARNING"),
+            "service": f"mobile-{str(row[4] or 'client').lower()}",
+            "message": f"[{str(row[2] or 'app')}] {str(row[3] or '')}"[:500],
+        } for row in rows if len(row) >= 5]
+        needle = text.strip().lower()
+        return [
+            entry for entry in entries
+            if not needle or needle in entry["message"].lower()
+        ]
+    except Exception as exc:
+        logger.error("client_log_entries query failed: %s", exc)
+        return []
 
 
 def web_analytics(host: str, project_id: str, personal_key: str, days: int = 30) -> dict:

@@ -5,6 +5,62 @@ Logging, and PostHog into one screen. Lives in this repo (never bundled into the
 backend image) and deploys as its own Cloud Run service, reachable from any phone or laptop
 behind a passcode.
 
+## Architecture and data flow
+
+```text
++----------------------- provider APIs ------------------------+
+| Firestore | Cloud Monitoring/Logging | PostHog               |
+| Crashlytics BigQuery | GitHub Releases | GCP Billing          |
++-----------------------------+-------------------------------+
+                              |
+                              v
+                    +---------------------+
+                    | providers/          |
+                    | bounded reads/cache |
+                    +----------+----------+
+                               |
+                               v
+                    +---------------------+
+                    | panels.py + app.py  |
+                    | passcode-gated API  |
+                    +----------+----------+
+                               |
+                               v
+                    +---------------------+
+                    | static browser UI   |
+                    | no embedded secrets |
+                    +---------------------+
+
+Architecture tab -> local synthetic twin data -> canvas + inspector
+```
+
+The dashboard is read-only and outside every mobile, backend, and voice request path. The Architecture tab is currently a synthetic prototype and does not read live traces.
+
+## Failure, retry, and recovery
+
+```text
+Wrong/missing passcode -----> 401; no provider data is fetched for the user
+OPS_PASSCODE unset ---------> 503 fail-closed
+Provider succeeds ----------> refresh server TTL cache
+Provider fails with cache --> serve labeled stale data where supported
+Provider fails without cache -> only that panel is unavailable; never show zero
+Browser revisits tab --------> reuse client memory until explicit Refresh
+Process restarts -----------> caches start cold and refill on bounded demand
+```
+
+### Obvious walkthrough: load Overview
+
+1. The browser loads public static HTML with no user data.
+2. A passcode-gated API request composes the required providers.
+3. Provider results populate server caches and the response renders in the browser.
+
+### Non-obvious walkthrough: one provider times out
+
+1. The requested tab starts several independent provider reads.
+2. One provider times out while the others succeed.
+3. A safe cached value is returned with stale state, or only that panel shows unavailable.
+4. The browser does not auto-refresh into a retry storm; the founder can use the rate-limited Refresh control.
+
 ## Deploy (one command)
 
 ```bash
@@ -39,23 +95,28 @@ phone/laptop ─► https://juno-ops-….run.app ─► enter passcode ─► co
                                                   Firestore / Monitoring / Logging / PostHog
 ```
 
-## Layout (v2: dark control-room, five tabs)
+## Layout (v2: dark control-room)
 
 ```
 Overview:  metric strip (signins/new/active/total/msgs/p95/5xx) ·
            messages + voice feeds · recommender health · recommendations sent ·
            top screens · users table · feedback · multi-service errors ·
-           LLM cost by model (Langfuse, today/7d/30d) · tool-call analytics ·
            retention (DAU/WAU/MAU + cohort grid) · notification funnel ·
            revenue funnel (paywall interest capture)
 Mobile:    Crashlytics crash feed (BigQuery export) · per-platform backend
-           latency · client-observed chat/voice latency · downloads (honest
+           latency · client-observed chat/voice p50/p95/p99 · LiveKit worker
+           first-talk and reply p50/p95/p99 · downloads (honest
            "not live yet" until the store listings ship)
-Desktop:   Sentry crash feed (Aura-Desktop) · same latency block ·
+Desktop:   operational errors in Logs · same latency block ·
            GitHub Releases download counts
 Web:       auravoiceapp.com pageviews · referrers · download funnel
            (download_page_viewed -> download_clicked -> installer downloads)
-Logs:      searchable Cloud Run log viewer (text + severity + service + range)
+Costs:     Claude/Gemini/OpenAI traced spend · Brave query count and breakdown ·
+           GCP billing export · manual subscription costs with explicit labels
+Logs:      error-first merged Cloud Run/LiveKit/mobile viewer · warning toggle ·
+           text/service/range filters · duplicate grouping
+Architecture: synthetic static/runtime topology, concurrent sample traces,
+              inspector, waterfall, fallback and cache overlays
 ```
 
 Refresh model: NOTHING auto-refreshes. Each tab fetches once on first view,
@@ -69,18 +130,41 @@ scripted curl loop cost one provider fetch per window, never one per request.
 
 | Var | Feeds | Notes |
 |---|---|---|
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | LLM cost + tool panels | Same keys the backend uses to WRITE traces; host defaults to US cloud |
-| `SENTRY_ORG` / `SENTRY_PROJECT` / `SENTRY_AUTH_TOKEN` | Desktop crash feed | Token scopes: project:read + event:read. Project already live (see ECOSYSTEM.md) |
 | `OPS_CRASHLYTICS_BQ_DATASET` | Mobile crash feed | Default `firebase_crashlytics`; requires the one-click BigQuery export in Firebase console |
 | `GITHUB_TOKEN` | Desktop downloads | Optional; lifts the 60 req/hr unauthenticated limit (provider caches 15 min anyway) |
 | `OPS_POSTHOG_WEB_PROJECT_ID` | Web tab | Only if aura-web uses a different PostHog project than the app (unverified, see ECOSYSTEM.md) |
+| `OPS_GCP_BILLING_TABLE` | Actual GCP cost | Full BigQuery billing export table name: `project.dataset.table` |
+| `OPS_BRAVE_COST_PER_QUERY_USD` | Estimated Brave cost | Optional unit rate multiplied by observed billable queries |
+| `OPS_PROVIDER_MONTHLY_COSTS_JSON` | Providers with subscriptions | JSON map such as `{"livekit":50,"cartesia":20}`; values are prorated for the selected range |
+
+## Error and voice log sources
+
+The Logs tab loads `ERROR` and above automatically. Select `WARNING` to include
+all warnings and errors. Backend and ops records come from Cloud Logging; release
+mobile warnings/errors are redacted by `AppLogger` and read from PostHog.
+
+The LiveKit worker emits structured first-talk and per-turn records, but they
+appear only after the LiveKit Cloud project has a Google Cloud log drain pointed
+at this project. Configure that drain in LiveKit Cloud, then grant the ops
+service account `roles/logging.viewer`. Until then worker values remain `n/a`.
+
+The voice measurements intentionally distinguish:
+
+- client voice start to first assistant transcript delta;
+- worker entrypoint to first assistant audio metrics;
+- user end-of-utterance to first assistant audio;
+- token-mint to first talk, retained as a diagnostic and not shown as the user
+  startup metric because prewarmed tokens can make it misleading.
+
+Chat TTFT starts at send and stops only on the first non-empty visible text
+delta. Connection, tool, and status events do not stop the timer.
 
 ## Per-platform backend latency (one-time GCP setup)
 
 Cloud Run's `request_latencies` metric cannot see custom headers, so the
 Mobile/Desktop latency split reads a log-based DISTRIBUTION metric fed by the
 backend's `request_metric` log lines (one per client request carrying
-`X-Aura-Platform`; see `RequestLoggingMiddleware` in `backend/src/main.py`).
+  `X-Aura-Platform`; see `RequestLoggingMiddleware` in `backend/src/main.py`).
 Create the metric ONCE (needs a config file because distribution metrics take
 extractors):
 
@@ -107,7 +191,7 @@ bucketOptions:
     scale: 10
 YAML
 gcloud logging metrics create request_latency_by_platform \
-  --project=juno-2ea45 --config-from-file=/tmp/req_lat_metric.yaml
+  --project=juno-2ea45 --config-from-file=ops/request_latency_by_platform.yaml
 ```
 
 Until the metric exists AND clients send the header (new app/desktop builds),
@@ -146,7 +230,7 @@ When this reaches hundreds of users, switch `latest_notifications` to one
 | `panels.py` | composes the providers into per-endpoint payloads |
 | `providers/` | one module per source (firestore, monitoring, logging, posthog, langfuse, crashlytics/BigQuery, sentry, github releases) |
 | `fields.py` | every Firestore field name in one place, mirroring the app/backend writers |
-| `static/` | the UI: `index.html` + `style.css` + `app.js` + vendored `vendor/chart.umd.min.js` (no build step) |
+| `static/` | the UI: `index.html`, `style.css`, `app.js`, the architecture-twin module, and vendored Chart.js (no build step) |
 
 ## Run locally (optional smoke test before deploying)
 

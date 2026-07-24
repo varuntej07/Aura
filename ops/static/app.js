@@ -32,8 +32,9 @@
     cooldownTimer: null,
     llmCostRange: "7d",
     llmToolsRange: "7d",
+    providerCostRange: "7d",
     llmToolFilter: "",
-    logs: { services: "", severity: "DEFAULT", q: "", hours: 24 },
+    logs: { services: "", severity: "ERROR", q: "", hours: 24 },
   };
 
   /* ── helpers ─────────────────────────────────────────────────────── */
@@ -233,7 +234,7 @@
     if (payload && payload.available === false) {
       body = `<div class="note">${esc(payload.note || "Source not configured.")}</div>`;
     } else if (payload && payload.configured === false) {
-      body = `<div class="note">Sentry not configured: set SENTRY_ORG / SENTRY_PROJECT / SENTRY_AUTH_TOKEN in ops/.env.</div>`;
+      body = `<div class="note">${esc(payload.note || "Crash source intentionally disabled.")}</div>`;
     } else {
       const rows = (payload && payload.crashes) || [];
       body = rows.map(crashRow).join("") || '<p class="empty">No crashes in the window. Genuinely quiet.</p>';
@@ -241,25 +242,40 @@
     return `<div class="card col-6"><h2>${esc(title)}</h2><div class="scroll">${body}</div></div>`;
   }
 
-  function latencyCard(title, blocks, chatLatency, voiceStats) {
+  function percentileTiles(stats, label) {
+    const values = stats || {};
+    return ["p50", "p95", "p99"].map((p) =>
+      metric(values[p] !== null && values[p] !== undefined ? ms(values[p]) : "n/a", label + " " + p)
+    ).join("");
+  }
+
+  function latencyCard(title, blocks, chatLatency, voiceStats, workerStats) {
     const tiles = Object.entries(blocks || {}).map(([platform, p]) =>
       metric(p && p.p95 !== null && p.p95 !== undefined ? ms(p.p95) : "n/a", platform + " p95") +
       metric(p && p.p99 !== null && p.p99 !== undefined ? ms(p.p99) : "n/a", platform + " p99")
     ).join("");
     const chat = chatLatency || {};
     const voice = voiceStats || {};
+    const worker = workerStats || {};
     const note = (!Object.values(blocks || {}).some((p) => p && p.p95 !== null && p.p95 !== undefined))
       ? `<div class="note">Backend split needs the request_latency_by_platform log-based metric plus clients sending X-Aura-Platform (new builds). Until both exist this reads n/a, not zero.</div>`
       : "";
     return `<div class="card col-6"><h2>${esc(title)}</h2>
       <div class="strip">${tiles}
-        ${metric(chat.count ? ms(chat.ttft_p95) : "n/a", "chat ttft p95")}
-        ${metric(chat.count ? ms(chat.total_p95) : "n/a", "chat e2e p95")}
-        ${metric(chat.count ? ms(chat.total_p99) : "n/a", "chat e2e p99")}
-        ${metric(voice.count || "0", "voice sessions 7d")}
-        ${metric(voice.elapsed_p95 !== null && voice.elapsed_p95 !== undefined ? ms(voice.elapsed_p95) : "n/a", "voice 1st reply p95")}
+        ${percentileTiles({
+          p50: chat.ttft_p50, p95: chat.ttft_p95, p99: chat.ttft_p99,
+        }, "chat first text")}
+        ${percentileTiles({
+          p50: chat.total_p50, p95: chat.total_p95, p99: chat.total_p99,
+        }, "chat complete")}
+        ${percentileTiles({
+          p50: voice.elapsed_p50, p95: voice.elapsed_p95, p99: voice.elapsed_p99,
+        }, "voice start to talk")}
+        ${percentileTiles(worker.worker_first_talk, "worker start to talk")}
+        ${percentileTiles(worker.reply_to_first_talk, "user stop to audio")}
       </div>
       ${chat.count ? `<p class="faint">chat latency from ${chat.count} client-observed turns (7d)</p>` : ""}
+      ${worker.count ? `<p class="faint">voice worker latency from ${worker.count} structured records (7d)</p>` : ""}
       ${note}</div>`;
   }
 
@@ -373,8 +389,6 @@
     const intents = d.payment_intents || [];
 
     box.innerHTML = `
-      <div class="card col-6" id="llm-cost-card"></div>
-      <div class="card col-6" id="llm-tools-card"></div>
       <div class="card col-8"><h2>Retention · daily actives (30d)</h2>
         <div class="strip">
           ${metric(num(r.dau), "DAU", "accent")}${metric(num(r.wau), "WAU")}${metric(num(r.mau), "MAU")}
@@ -403,9 +417,6 @@
           ${intents.map((i) => `<div class="row"><span class="when">${ago(i.at)}</span>
             <span class="who">${esc(i.name)}</span><span class="tag">${esc(i.tier)} · ${esc(i.period)}</span></div>`).join("")
             || '<p class="empty">no captured intents in Firestore yet</p>'}</div></div>`;
-
-    renderLlmCostCard(d.llm_cost);
-    renderLlmToolsCard(d.llm_tools);
 
     const daily = r.daily || [];
     mountChart("dauChart", {
@@ -580,13 +591,13 @@
         </table></div></div>`;
     }
     content.innerHTML = `<div class="grid">
-      ${latencyCard("Latency · backend by platform + client-observed", d.backend_latency, d.chat_latency, d.voice_first_response)}
+      ${latencyCard("Latency · backend by platform + client-observed", d.backend_latency, d.chat_latency, d.voice_first_response, d.voice_worker_latency)}
       ${downloadsCard}
-      ${crashPanel(kind === "mobile" ? "Crashes · Crashlytics (7d)" : "Crashes · Sentry (14d)", d.crashes)}
+      ${crashPanel(kind === "mobile" ? "Crashes · Firebase Crashlytics (7d)" : "Desktop runtime errors", d.crashes)}
       <div class="card col-6"><h2>Notes</h2><div class="note">
         ${kind === "mobile"
           ? "Store downloads land here when Play / App Store listings go live (both still in review). Crash data requires the Crashlytics BigQuery export toggle in Firebase console."
-          : "Desktop = Aura-Desktop (Tauri) via its live Sentry project. Backend latency split needs the new client build (sends X-Aura-Platform) plus the log-based metric."}
+          : "Desktop = Aura-Desktop (React + Rust). Sentry is intentionally disabled. Use Logs for desktop operational errors. Firebase Crashlytics covers the Flutter mobile app."}
       </div></div>
     </div>`;
   }
@@ -636,6 +647,54 @@
     }
   }
 
+  /* ── COSTS tab ───────────────────────────────────────────────────── */
+  function renderCostsTab(d) {
+    setStamp(d.generated_at);
+    const providers = d.providers || [];
+    const usage = (d.usage && d.usage.rows) || [];
+    content.innerHTML = `<div class="grid">
+      <div class="card col-12"><h2>Provider cost
+        <span class="controls">${seg(state.providerCostRange, ["today", "7d", "30d"], "opsSetProviderCostRange")}</span></h2>
+        <div class="strip">
+          ${metric(d.actual_total === null || d.actual_total === undefined ? "n/a" : usd(d.actual_total), "actual total", "accent")}
+          ${metric(d.estimated_total === null || d.estimated_total === undefined ? "n/a" : usd(d.estimated_total), "estimated + manual")}
+          ${metric(compact(usage.reduce((n, row) => n + (row.billable || 0), 0)), "billable requests")}
+          ${metric(compact(usage.reduce((n, row) => n + (row.rate_limited || 0), 0)), "rate limited")}
+        </div>
+        <div class="note">Actual, estimated, and manually prorated subscription costs are never mixed. A provider marked needs setup remains n/a instead of displaying a false zero.</div>
+      </div>
+      <div class="card col-8"><h2>Cost by provider</h2><div class="scroll"><table>
+        <tr><th>Provider</th><th>Source</th><th>Kind</th><th>Status</th><th class="num">Usage</th><th class="num">Cost</th></tr>
+        ${providers.map((row) => `<tr>
+          <td>${esc(row.provider)}</td><td>${esc(row.source || "not connected")}</td>
+          <td>${esc(row.cost_kind)}</td><td>${esc(row.status)}</td>
+          <td class="num">${row.usage === null || row.usage === undefined ? "n/a" : compact(row.usage)}</td>
+          <td class="num">${row.cost === null || row.cost === undefined ? "n/a" : usd(row.cost)}</td>
+        </tr>`).join("") || '<tr><td colspan="6" class="empty">no provider data</td></tr>'}
+      </table></div></div>
+      <div class="card col-4"><h2>Brave queries by feature</h2><table>
+        <tr><th>Feature</th><th class="num">Billable</th><th class="num">Cache</th><th class="num">429</th></tr>
+        ${usage.filter((row) => row.provider === "brave").map((row) => `<tr>
+          <td>${esc(row.feature)}</td><td class="num">${compact(row.billable)}</td>
+          <td class="num">${compact(row.cache_hits)}</td><td class="num">${compact(row.rate_limited)}</td>
+        </tr>`).join("") || '<tr><td colspan="4" class="empty">no Brave query events yet</td></tr>'}
+      </table></div>
+    </div>`;
+  }
+
+  async function refetchProviderCosts() {
+    try {
+      const d = await api("/api/provider-costs?range=" + state.providerCostRange);
+      state.tabData.costs = d;
+      if (state.tab === "costs") renderCostsTab(d);
+    } catch (e) { /* handled by api() */ }
+  }
+
+  window.opsSetProviderCostRange = (r) => {
+    state.providerCostRange = r;
+    refetchProviderCosts();
+  };
+
   /* ── LOGS tab ────────────────────────────────────────────────────── */
   function renderLogsShell(services) {
     const opts = (services || ["juno-backend", "juno-ops"]).map((s) =>
@@ -651,13 +710,13 @@
               `<option ${state.logs.severity === s ? "selected" : ""}>${s}</option>`).join("")}
           </select>
           <select id="logHours">
-            ${[["1", "1h"], ["6", "6h"], ["24", "24h"], ["72", "3d"], ["168", "7d"]].map(([v, l]) =>
+            ${[["1", "1h"], ["6", "6h"], ["24", "24h"], ["72", "3d"], ["168", "7d"], ["720", "30d"]].map(([v, l]) =>
               `<option value="${v}" ${String(state.logs.hours) === v ? "selected" : ""}>${l}</option>`).join("")}
           </select>
           <button class="primary" id="logRun">Search</button>
         </div>
         <div id="logNote"></div>
-        <div id="logResults" class="scroll" style="max-height:70vh"><p class="empty">Run a search. Nothing loads on its own.</p></div>
+        <div id="logResults" class="scroll" style="max-height:70vh"><p class="empty">Loading errors…</p></div>
       </div>`;
     document.getElementById("logRun").onclick = runLogSearch;
     document.getElementById("logQ").addEventListener("keydown", (e) => { if (e.key === "Enter") runLogSearch(); });
@@ -681,12 +740,23 @@
       return;
     }
     document.getElementById("logNote").innerHTML = `<div class="note">${esc(d.voice_note || "")}</div>`;
-    const entries = d.entries || [];
+    const grouped = new Map();
+    for (const entry of d.entries || []) {
+      const key = [entry.severity, entry.service, entry.message].join("|");
+      const current = grouped.get(key);
+      if (current) {
+        current.count += 1;
+        if ((entry.at || "") < (current.first_seen || "")) current.first_seen = entry.at;
+      } else {
+        grouped.set(key, { ...entry, count: 1, first_seen: entry.at });
+      }
+    }
+    const entries = [...grouped.values()];
     results.innerHTML = entries.map((e) => `<div class="log-line">
         <span class="ts">${esc((e.at || "").replace("T", " ").slice(0, 19))}</span>
         <span class="sev sev-${esc(e.severity)}">${esc(e.severity)}</span>
         <span class="svc">${esc(e.service)}</span>
-        <span class="msg">${esc(e.message)}</span>
+        <span class="msg">${e.count > 1 ? `<span class="tag red">${e.count}×</span> ` : ""}${esc(e.message)}</span>
       </div>`).join("") || '<p class="empty">no matching entries</p>';
   }
 
@@ -703,13 +773,21 @@
       return;
     }
     if (tab === "logs") {
-      renderLogsShell(["juno-backend", "juno-ops"]);
+      renderLogsShell(["juno-backend", "juno-ops", "livekit-worker", "mobile-client"]);
+      runLogSearch();
+      return;
+    }
+    if (tab === "architecture") {
+      setStamp("synthetic data");
+      window.AuraArchitectureTwin.mount(content);
       return;
     }
 
     const cached = state.tabData[tab];
     if (cached) {
-      if (tab === "web") renderWebTab(cached); else renderPlatformTab(tab, cached);
+      if (tab === "web") renderWebTab(cached);
+      else if (tab === "costs") renderCostsTab(cached);
+      else renderPlatformTab(tab, cached);
       return;
     }
     await fetchTab(tab);
@@ -718,13 +796,18 @@
   async function fetchTab(tab) {
     content.innerHTML = skelTab();
     let d;
-    try { d = await api("/api/tab/" + tab); } catch (e) {
+    const path = tab === "costs"
+      ? "/api/provider-costs?range=" + state.providerCostRange
+      : "/api/tab/" + tab;
+    try { d = await api(path); } catch (e) {
       content.innerHTML = '<p class="bad">Load failed.</p>';
       return;
     }
     if (state.tab !== tab) return;
     state.tabData[tab] = d;
-    if (tab === "web") renderWebTab(d); else renderPlatformTab(tab, d);
+    if (tab === "web") renderWebTab(d);
+    else if (tab === "costs") renderCostsTab(d);
+    else renderPlatformTab(tab, d);
   }
 
   function forceRefreshActiveTab() {
@@ -736,6 +819,10 @@
     }
     if (tab === "logs") {
       runLogSearch();
+      return;
+    }
+    if (tab === "architecture") {
+      window.AuraArchitectureTwin.mount(content);
       return;
     }
     delete state.tabData[tab];
