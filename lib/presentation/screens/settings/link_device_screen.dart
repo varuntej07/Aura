@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/constants/app_constants.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/services/backend_api_service.dart';
@@ -120,6 +123,8 @@ class _LinkDeviceScreenState extends State<LinkDeviceScreen> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
+            const _DesktopDownloadBanner(),
+            const SizedBox(height: 24),
             Text(
               'On your PC, open Buddy and type this code:',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -237,6 +242,112 @@ class _LinkDeviceScreenState extends State<LinkDeviceScreen> {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// "Get Buddy for Windows" banner shown above the pairing code. The user is on
+/// their phone but needs to install on their PC, so copying the link (to paste
+/// into the PC's browser) is the primary action; opening it here is secondary.
+class _DesktopDownloadBanner extends StatelessWidget {
+  const _DesktopDownloadBanner();
+
+  // Scheme stripped for display; the full URL (with https://) is what we copy
+  // and launch so it resolves correctly wherever it's pasted.
+  static const _displayUrl = 'auravoiceapp.com';
+
+  Future<void> _copyLink(BuildContext context) async {
+    await Clipboard.setData(
+      const ClipboardData(text: AppConstants.desktopDownloadUrl),
+    );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text("Link copied. Paste it in your PC's browser."),
+        ),
+      );
+  }
+
+  Future<void> _openLink() async {
+    await launchUrl(
+      Uri.parse(AppConstants.desktopDownloadUrl),
+      mode: LaunchMode.externalApplication,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FauxGlassCard.section(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.laptop_windows_outlined,
+                  size: 20, color: AppColors.accentBase),
+              const SizedBox(width: 10),
+              Text(
+                'Buddy for Windows',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      color: AppColors.textPrimary,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            "Don't have the desktop app yet? Get it on your PC, then enter the "
+            'code below to link them.',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: AppColors.textPrimary.withValues(alpha: 0.7),
+                ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => _copyLink(context),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppColors.glassWhiteFill,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.glassBorderDim),
+                    ),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            _displayUrl,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontFamily: 'GeistMono',
+                              fontSize: 14,
+                              color: AppColors.textPrimary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(Icons.content_copy_outlined,
+                            size: 16, color: AppColors.textTertiary),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              GlassIconButton(
+                icon: Icons.open_in_new,
+                onTap: _openLink,
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

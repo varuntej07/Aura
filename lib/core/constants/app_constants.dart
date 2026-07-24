@@ -20,6 +20,13 @@ class AppConstants {
   static const maxApiRetries = 3;
   static const retryBaseDelay = Duration(seconds: 1);
 
+  // External links
+  // Marketing site that hosts the Aura-Desktop (Windows) download. The page
+  // resolves "latest" from GitHub Releases at request time, so the mobile app
+  // never pins a versioned installer URL that would 404 on the next desktop
+  // release. See ECOSYSTEM.md (Aura-Web download page).
+  static const desktopDownloadUrl = 'https://auravoiceapp.com';
+
   // UI
   static const animationDuration = Duration(milliseconds: 300);
   static const micButtonSize = 72.0;

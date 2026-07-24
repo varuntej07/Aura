@@ -27,6 +27,7 @@ migrate_working_dir/
 **/doc/api/
 **/ios/Flutter/.last_build_id
 .dart_tool/
+/.dart-appdata/
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
@@ -42,6 +43,7 @@ android/app/google-services.json
 ios/Runner/GoogleService-Info.plist
 backend/service-account.json
 backend/google-oauth-calendar.json
+backend/agent.secrets.env
 
 # Symbolication related
 app.*.symbols
@@ -76,3 +78,50 @@ devtools_options.yaml
 
 # Android Gradle build output (android/.gitignore ships without a /build/ rule)
 /android/build/
+
+# Local environment files (secrets) - never commit
+#.env
+backend/.env
+
+# Coverage / test artifacts
+.coverage
+backend/.coverage
+__pycache__/
+
+# Personal pitch material and large binaries (not source)
+/branding/
+*.docx
+*.pdf
+lessons-learnt.text
+pitch_text.txt
+playstore data.txt
+fire aura.png
+fire aura compressed.png
+
+# Stray tooling manifests (not used by the Flutter/Python app)
+/package.json
+/package-lock.json
+skills-lock.json
+
+# Generated architecture graph and extraction caches
+/graphify-out/
+/backend/graphify-out/
+
+# Python analyzer and test caches
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.pyright/
+
+# Local environment files can contain secrets
+.env
+**/.env
+
+# Local agent runtime state
+/.codex/
+/.claude/settings.json
+/.claude/scheduled_tasks.lock
+
+# Windows filesystem noise
+Thumbs.db
+Desktop.ini
