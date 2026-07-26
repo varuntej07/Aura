@@ -27,6 +27,7 @@ dependencies:
   uuid:
   intl:
   shared_preferences:
+  path_provider:
   flutter_timezone:
   livekit_client: ^2.5.4  # >=2.5.4 required for PreConnectAudioBuffer
   image_picker:

@@ -14,6 +14,7 @@ import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_backup_service.dart';
 import '../../data/services/chat_session_manager.dart';
 import '../../data/services/feedback_service.dart';
+import '../../data/services/get_better_image_cache.dart';
 import '../../data/services/notification_service.dart';
 import '../../data/services/posthog_analytics_service.dart';
 import '../../core/network/connectivity_service.dart';
@@ -29,6 +30,7 @@ import '../../presentation/screens/settings/settings_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
 import '../../presentation/viewmodels/auth_viewmodel.dart';
 import '../../presentation/viewmodels/briefing_viewmodel.dart';
+import '../../presentation/viewmodels/get_better_viewmodel.dart';
 import '../../presentation/viewmodels/text_chat_viewmodel.dart';
 GoRouter buildRouter(
   AuthViewModel authViewModel,
@@ -167,8 +169,35 @@ GoRouter buildRouter(
       GoRoute(
         path: '/get-better',
         name: 'Get Better',
-        pageBuilder: (context, state) =>
-            _slidePage(state, const GetBetterScreen()),
+        pageBuilder: (context, state) => _modalSheetPage(
+          state,
+          MultiProvider(
+            providers: [
+              ChangeNotifierProvider(
+                create: (_) => GetBetterViewModel(
+                  backendApiService: context.read<BackendApiService>(),
+                  imageCache: GetBetterImageCache(),
+                ),
+              ),
+              ChangeNotifierProvider(
+                create: (_) => TextChatViewModel(
+                  backendService: context.read<ChatServiceProvider>(),
+                  chatRepository: context.read<ChatRepository>(),
+                  chatBackupService: context.read<ChatBackupService>(),
+                  feedbackService: context.read<FeedbackService>(),
+                  connectivityService: context.read<ConnectivityService>(),
+                  chatSessionManager: context.read<ChatSessionManager>(),
+                  postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
+                  suggestionPillsRepository: context
+                      .read<AgentSuggestionPillsRepository>(),
+                  buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
+                  sessionConsolidator: context.read<SessionConsolidator>(),
+                ),
+              ),
+            ],
+            child: const GetBetterScreen(),
+          ),
+        ),
       ),
 
       // Full-screen: Daily briefing - opened from the drawer or a briefing push.
@@ -230,5 +259,31 @@ CustomTransitionPage<void> _slidePage(GoRouterState state, Widget child) {
       );
     },
     transitionDuration: const Duration(milliseconds: 300),
+  );
+}
+
+/// A full-height modal route that rises from the bottom and reverses smoothly
+/// back down for the system back gesture, the close button, and the sheet handle.
+CustomTransitionPage<void> _modalSheetPage(GoRouterState state, Widget child) {
+  return CustomTransitionPage<void>(
+    key: state.pageKey,
+    name: state.name,
+    child: child,
+    transitionDuration: const Duration(milliseconds: 420),
+    reverseTransitionDuration: const Duration(milliseconds: 340),
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0, 1),
+          end: Offset.zero,
+        ).animate(curved),
+        child: child,
+      );
+    },
   );
 }

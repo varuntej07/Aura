@@ -7,6 +7,7 @@ import '../../core/network/api_client.dart';
 import '../../core/network/api_response.dart';
 import '../models/chat_attachment.dart';
 import '../models/daily_briefing.dart';
+import '../models/get_better_feed.dart';
 import 'chat_service_provider.dart';
 
 // SSE stream events
@@ -458,5 +459,25 @@ class BackendApiService implements ChatServiceProvider {
       success: (briefing) => briefing,
       failure: (_) => null,
     );
+  }
+
+  /// Generates a structured Get Better feed. The first request may use the
+  /// signed-in user's consented Aura profile for its first two ideas; subsequent
+  /// cursors intentionally ask for different directions. [excludeIds] prevents
+  /// "more ideas" from recycling cards already on screen.
+  Future<GetBetterFeed?> fetchGetBetterFeed({
+    int cursor = 0,
+    List<String> excludeIds = const [],
+  }) async {
+    final result = await _apiClient.post<GetBetterFeed?>(
+      '/get-better/ideas',
+      {'cursor': cursor, if (excludeIds.isNotEmpty) 'exclude_ids': excludeIds},
+      (json) {
+        final raw = json['feed'];
+        return raw is Map<String, dynamic> ? GetBetterFeed.fromJson(raw) : null;
+      },
+      timeout: const Duration(seconds: 50),
+    );
+    return result.when(success: (feed) => feed, failure: (_) => null);
   }
 }

@@ -93,6 +93,7 @@ from .handlers.engagement import (
     handle_engagement_responded,
 )
 from .handlers.entitlement import handle_get_entitlement
+from .handlers.get_better import handle_post_get_better_ideas
 from .handlers.history import (
     handle_delete_conversation,
     handle_delete_session,
@@ -713,6 +714,12 @@ async def briefing_generate_endpoint(request: Request) -> JSONResponse:
 @app.post("/briefing/world")
 async def briefing_world_endpoint(request: Request) -> JSONResponse:
     return await handle_post_world_briefing(request)
+
+
+# Get Better: consent-gated personalized lead ideas plus varied discovery cards.
+@app.post("/get-better/ideas")
+async def get_better_ideas_endpoint(request: Request) -> JSONResponse:
+    return await handle_post_get_better_ideas(request)
 
 
 # Signal scoring (internal — the Cloud Task enqueued by content-ingest, or an
