@@ -54,6 +54,7 @@ REGION="${2:-us-central1}"
 SERVICE_NAME="juno-backend"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 LIVEKIT_URL="wss://aura-i06eolmd.livekit.cloud"
+MEETING_STORAGE_SERVICE_ACCOUNT="firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com"
 
 # Dodo Payments (billing). Test-mode base until launch; flip to
 # https://live.dodopayments.com in the Phase 5 launch sequence. The four product
@@ -104,6 +105,23 @@ fi
 echo "▶ Stable service URL (token audience): ${STABLE_SERVICE_URL}"
 echo "▶ Audiences the backend will accept:   ${ACCEPTED_AUDIENCES}"
 
+# ── Meeting-audio storage preflight ──────────────────────────────────────────
+# The new Cloud Run revision takes 100% of traffic the moment `gcloud run deploy`
+# returns (there is no traffic-split stage below), so a missing/misconfigured
+# meeting-audio bucket must be caught HERE, before traffic shifts. The 2026-07-14
+# incident shipped a revision whose bucket was never provisioned: every segment
+# upload 404'd, the handler answered 503, and no meeting ever produced a note.
+# This read-only gate makes that unshippable. Under `set -euo pipefail` a non-zero
+# exit aborts the deploy. Runtime upload failures stay retryable in the handler,
+# so this gate does not change the at-runtime retry contract.
+echo "▶ Preflighting meeting-audio bucket (existence, region, lifecycle, access)..."
+python "${SCRIPT_DIR}/scripts/check_meeting_storage.py" --check \
+  --project "${PROJECT_ID}" \
+  --bucket "juno-2ea45-meeting-audio" \
+  --region "${REGION}" \
+  --required-member "serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
+  --required-role "roles/storage.objectAdmin"
+
 # Deploy to Cloud Run
 echo "▶ Deploying to Cloud Run..."
 gcloud run deploy "${SERVICE_NAME}" \
@@ -119,13 +137,15 @@ gcloud run deploy "${SERVICE_NAME}" \
   --timeout=3600 \
   --concurrency=80 \
   --set-env-vars="ENV=production" \
+  --set-env-vars="REALTIME_BRIDGE_ENABLED=true" \
   --set-env-vars="ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6" \
   --set-env-vars="ANTHROPIC_VOICE_MODEL=claude-haiku-4-5" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
-  --set-env-vars="GOOGLE_REDIRECT_URI=" \
+  --set-env-vars="GOOGLE_REDIRECT_URI=${STABLE_SERVICE_URL}/connectors/oauth/google/callback" \
   --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
   --set-env-vars="SCHEDULER_OIDC_AUDIENCES=${ACCEPTED_AUDIENCES}" \
   --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
+  --set-secrets="OPENAI_API_KEY=juno-openai-api-key:latest" \
   --set-secrets="LIVEKIT_API_KEY=livekit-api-key:latest" \
   --set-secrets="LIVEKIT_API_SECRET=livekit-api-secret:latest" \
   --set-secrets="DEEPGRAM_API_KEY=deepgram-api-key:latest" \
@@ -149,11 +169,23 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="DODO_PRODUCT_PRO_YEARLY=${DODO_PRODUCT_PRO_YEARLY}" \
   --set-env-vars="MEETINGS_AUDIO_BUCKET=juno-2ea45-meeting-audio"
   # ^ One-time prerequisites for the meetings bucket (NOT created by this
-  # script): `gsutil mb -l us-central1 gs://juno-2ea45-meeting-audio` plus a
-  # 7-day lifecycle DELETE rule. The lifecycle rule is a real privacy
-  # backstop, not an optimization - the worker's post-synthesis audio delete
-  # is best-effort, and without the rule a failed cleanup keeps raw meeting
-  # audio indefinitely. Also enable the Firestore TTL policy:
+  # script, but now VERIFIED by the storage preflight above before every
+  # deploy - a missing bucket or absent lifecycle rule fails the deploy).
+  # Provision once (gcloud storage; gsutil still works but Google is retiring it):
+  #   gcloud storage buckets create gs://juno-2ea45-meeting-audio \
+  #     --location=us-central1 --uniform-bucket-level-access
+  #   gcloud storage buckets update gs://juno-2ea45-meeting-audio \
+  #     --lifecycle-file=scripts/lifecycle-7day-delete.json
+  #   gcloud storage buckets add-iam-policy-binding gs://juno-2ea45-meeting-audio \
+  #     --member=serviceAccount:firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com \
+  #     --role=roles/storage.objectAdmin
+  # The IAM grant targets the FIREBASE service account, because the backend runs
+  # every Google client (incl. Cloud Storage) as GOOGLE_APPLICATION_CREDENTIALS
+  # (=/run/secrets/service-account.json, the juno-firebase-service-account secret),
+  # not the Cloud Run runtime SA. The 7-day lifecycle DELETE rule is a real privacy backstop, not an
+  # optimization - the worker's post-synthesis audio delete is best-effort, and
+  # without the rule a failed cleanup keeps raw meeting audio indefinitely. Also
+  # enable the Firestore TTL policy (not covered by the preflight):
   # `gcloud firestore fields ttls update expires_at --collection-group=meetings --enable-ttl`
   # After Dodo onboarding, create the two secrets (header above) and move these
   # two lines INTO the gcloud command block; referencing a secret that does not
@@ -233,6 +265,7 @@ echo ""
 echo "▶ Pruning Cloud Run revisions (keeping newest ${KEEP_REVISIONS})..."
 gcloud run revisions list --service="${SERVICE_NAME}" --region="${REGION}" --project="${PROJECT_ID}" \
   --sort-by="~metadata.creationTimestamp" --format="value(metadata.name)" \
+  | tr -d '\r' \
   | tail -n "+$((KEEP_REVISIONS + 1))" \
   | while read -r rev; do
       [[ -z "${rev}" ]] && continue
@@ -254,8 +287,9 @@ gcloud run revisions list --service="${SERVICE_NAME}" --region="${REGION}" --pro
 #      So we skip every digest still referenced by a live revision.
 echo "▶ Pruning untagged container images (keeping in-use + live-image digests)..."
 IN_USE_DIGESTS="$(gcloud run revisions list --service="${SERVICE_NAME}" --region="${REGION}" \
-  --project="${PROJECT_ID}" --format='value(status.imageDigest)' 2>/dev/null | sed 's/.*@//' | sort -u)"
+  --project="${PROJECT_ID}" --format='value(status.imageDigest)' 2>/dev/null | tr -d '\r' | sed 's/.*@//' | sort -u)"
 gcloud container images list-tags "${IMAGE}" --filter="-tags:*" --format="get(digest)" \
+  | tr -d '\r' \
   | while read -r digest; do
       [[ -z "${digest}" ]] && continue
       if [[ -n "${IN_USE_DIGESTS}" ]] && grep -qF "${digest}" <<<"${IN_USE_DIGESTS}"; then

@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart'
-    show Uint8List;
+import 'package:flutter/foundation.dart' show Uint8List;
 import 'package:http/http.dart' as http;
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -27,7 +26,7 @@ const _tag = 'VoiceSession';
 // lands in 2-5s; 15s is a generous ceiling for "it's genuinely stuck".
 const _replyWatchdogTimeout = Duration(seconds: 15);
 
-// How long a token fetched at app-open stays usable for a tap-to-talk. 
+// How long a token fetched at app-open stays usable for a tap-to-talk.
 // The backend mints LiveKit tokens with the SDK default 6h TTL, so this is a
 // conservative reuse window that keeps us well clear of expiry while removing
 // the token round-trip from the critical path when the user taps soon after.
@@ -47,6 +46,7 @@ class VoiceSessionService {
   bool _didReceiveAssistantOutput = false;
   bool _awaitingAssistantReply = false;
   bool _didTrackFirstResponse = false;
+  bool _didTrackFirstTalk = false;
   bool _closingByClient = false;
   // Token prefetched at app open (see prewarm), reused by startSession while fresh.
   Map<String, dynamic>? _prewarmedToken;
@@ -59,6 +59,8 @@ class VoiceSessionService {
   Timer? _screenContextRetry1;
   Timer? _screenContextRetry2;
   final Stopwatch _sessionStopwatch = Stopwatch();
+  final Stopwatch _sessionStartToTalkStopwatch = Stopwatch();
+  final Stopwatch _replyToTalkStopwatch = Stopwatch();
   final StreamController<VoiceServerEvent> _eventsController =
       StreamController<VoiceServerEvent>.broadcast();
 
@@ -66,9 +68,9 @@ class VoiceSessionService {
     required Future<String?> Function() tokenProvider,
     required AnalyticsClient postHogAnalyticsService,
     ScreenWakeLock? screenWakeLock,
-  })  : _tokenProvider = tokenProvider,
-        _postHogAnalyticsService = postHogAnalyticsService,
-        _screenWakeLock = screenWakeLock ?? WakelockPlusScreenWakeLock();
+  }) : _tokenProvider = tokenProvider,
+       _postHogAnalyticsService = postHogAnalyticsService,
+       _screenWakeLock = screenWakeLock ?? WakelockPlusScreenWakeLock();
 
   Stream<VoiceServerEvent> get events => _eventsController.stream;
   bool get isConnected => _room != null;
@@ -90,8 +92,11 @@ class VoiceSessionService {
         AppLogger.info('Prewarmed LiveKit token', tag: _tag);
       }
     } catch (e) {
-      AppLogger.warning('Voice prewarm: token prefetch failed', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Voice prewarm: token prefetch failed',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
     }
     // Pre-resolve mic permission so the OS prompt is off the tap-to-talk path.
     // request() is idempotent, it only shows the dialog if undecided, and
@@ -99,8 +104,11 @@ class VoiceSessionService {
     try {
       await Permission.microphone.request();
     } catch (e) {
-      AppLogger.warning('Voice prewarm: mic permission prefetch failed', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Voice prewarm: mic permission prefetch failed',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
     }
   }
 
@@ -120,15 +128,24 @@ class VoiceSessionService {
 
   Future<Result<void>> startSession(VoiceSessionConfig config) async {
     if (_room != null || _isConnecting) {
-      AppLogger.warning('startSession called while already connected or connecting', tag: _tag);
+      AppLogger.warning(
+        'startSession called while already connected or connecting',
+        tag: _tag,
+      );
       return const Result.success(null);
     }
     _isConnecting = true;
+    _sessionStartToTalkStopwatch
+      ..reset()
+      ..start();
     _pendingScreenContext = config.screenContext;
     _screenContextSent = false;
 
-    AppLogger.info('Requesting LiveKit token', tag: _tag,
-        metadata: {'userId': config.userId});
+    AppLogger.info(
+      'Requesting LiveKit token',
+      tag: _tag,
+      metadata: {'userId': config.userId},
+    );
 
     try {
       // Reuse the token prefetched at app open if it's still fresh; otherwise
@@ -148,7 +165,9 @@ class VoiceSessionService {
       }
       if (tokenResult == null) {
         return Result.failure(
-          AppException.unexpected("Couldn't get Buddy on the line. Try again in a sec?"),
+          AppException.unexpected(
+            "Couldn't get Buddy on the line. Try again in a sec?",
+          ),
         );
       }
 
@@ -169,20 +188,28 @@ class VoiceSessionService {
           // without touching the screen, so the OS would otherwise sleep it.
           // Released in _cleanupRoom() on every teardown path.
           _acquireScreenWakeLock();
-          AppLogger.info('LiveKit room connected', tag: _tag,
-              metadata: {'room': roomName});
-          unawaited(_postHogAnalyticsService.trackEvent('voice_session_started'));
-          _eventsController.add(VoiceServerEvent(
-            type: 'session.ready',
-            sessionId: roomName,
-          ));
+          AppLogger.info(
+            'LiveKit room connected',
+            tag: _tag,
+            metadata: {'room': roomName},
+          );
+          unawaited(
+            _postHogAnalyticsService.trackEvent('voice_session_started'),
+          );
+          _eventsController.add(
+            VoiceServerEvent(type: 'session.ready', sessionId: roomName),
+          );
           // Watchdog: if no agent joins within 20s the worker is likely scaled-down.
           _agentJoinWatchdog = Timer(const Duration(seconds: 20), () {
             if (_room != null && !_didReceiveAssistantOutput) {
-              AppLogger.warning('Agent join timeout, no agent joined within 20s', tag: _tag);
+              AppLogger.warning(
+                'Agent join timeout, no agent joined within 20s',
+                tag: _tag,
+              );
               _emitSessionError(
                 code: 'agent_join_timeout',
-                message: "Buddy's taking too long to pick up. Give it another tap?",
+                message:
+                    "Buddy's taking too long to pick up. Give it another tap?",
               );
               close();
             }
@@ -190,31 +217,46 @@ class VoiceSessionService {
         })
         ..on<RoomDisconnectedEvent>((e) {
           final wasClientClose = _closingByClient;
-          final endedBeforeAssistantOutput = _didEmitSessionReady && !_didReceiveAssistantOutput;
+          final endedBeforeAssistantOutput =
+              _didEmitSessionReady && !_didReceiveAssistantOutput;
           final reason = e.reason?.toString() ?? 'unknown';
-          AppLogger.info('LiveKit room disconnected', tag: _tag,
-              metadata: {
-                'room': roomName,
-                'reason': reason,
-                'clientInitiated': wasClientClose,
-                'endedBeforeAssistantOutput': endedBeforeAssistantOutput,
-              });
+          AppLogger.info(
+            'LiveKit room disconnected',
+            tag: _tag,
+            metadata: {
+              'room': roomName,
+              'reason': reason,
+              'clientInitiated': wasClientClose,
+              'endedBeforeAssistantOutput': endedBeforeAssistantOutput,
+            },
+          );
           if (wasClientClose) {
-            _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
+            _eventsController.add(
+              const VoiceServerEvent(type: 'session.ended'),
+            );
           } else if (endedBeforeAssistantOutput) {
             _emitSessionError(
               code: 'agent_disconnected_early',
-              message: "Call dropped before Buddy could say anything. Let's try again?",
+              message:
+                  "Call dropped before Buddy could say anything. Let's try again?",
               extra: {'reason': reason},
             );
           } else {
-            _eventsController.add(const VoiceServerEvent(type: 'session.ended'));
+            _eventsController.add(
+              const VoiceServerEvent(type: 'session.ended'),
+            );
           }
           _cleanupRoom();
         })
         ..on<ParticipantConnectedEvent>((e) {
-          AppLogger.info('Remote participant joined room', tag: _tag,
-              metadata: {'identity': e.participant.identity, 'kind': e.participant.kind.toString()});
+          AppLogger.info(
+            'Remote participant joined room',
+            tag: _tag,
+            metadata: {
+              'identity': e.participant.identity,
+              'kind': e.participant.kind.toString(),
+            },
+          );
           if (e.participant.kind == ParticipantKind.AGENT) {
             _agentJoinWatchdog?.cancel();
             _agentJoinWatchdog = null;
@@ -227,8 +269,11 @@ class VoiceSessionService {
           }
         })
         ..on<ParticipantDisconnectedEvent>((e) {
-          AppLogger.info('Remote participant left room', tag: _tag,
-              metadata: {'identity': e.participant.identity});
+          AppLogger.info(
+            'Remote participant left room',
+            tag: _tag,
+            metadata: {'identity': e.participant.identity},
+          );
         })
         ..on<ParticipantAttributesChanged>((e) {
           if (e.participant is RemoteParticipant) {
@@ -240,10 +285,12 @@ class VoiceSessionService {
               if (agentState == 'thinking' || agentState == 'speaking') {
                 _pokeReplyWatchdog();
               }
-              _eventsController.add(VoiceServerEvent(
-                type: 'session.state',
-                payload: {'state': mappedState},
-              ));
+              _eventsController.add(
+                VoiceServerEvent(
+                  type: 'session.state',
+                  payload: {'state': mappedState},
+                ),
+              );
               if (mappedState == 'error') {
                 _emitSessionError(
                   code: 'agent_state_failed',
@@ -256,8 +303,8 @@ class VoiceSessionService {
         })
         ..on<TrackSubscribedEvent>((e) {
           if (e.track is RemoteAudioTrack) {
-            _markAssistantResponded();
             (e.track as RemoteAudioTrack).start();
+            _markAssistantResponded();
             AppLogger.info('Remote audio track started', tag: _tag);
           }
         })
@@ -270,14 +317,22 @@ class VoiceSessionService {
           for (final seg in e.segments) {
             final isAssistant = e.participant is RemoteParticipant;
             final role = isAssistant ? 'assistant' : 'user';
-            if (isAssistant) _markAssistantResponded();
-            _eventsController.add(VoiceServerEvent(
-              type: '$role.text.${seg.isFinal ? 'final' : 'delta'}',
-              text: seg.text,
-              sessionId: roomName,
-            ));
+            if (isAssistant) {
+              if (seg.text.trim().isNotEmpty) _markAssistantTalkObserved();
+              _markAssistantResponded();
+            }
+            _eventsController.add(
+              VoiceServerEvent(
+                type: '$role.text.${seg.isFinal ? 'final' : 'delta'}',
+                text: seg.text,
+                sessionId: roomName,
+              ),
+            );
             if (seg.isFinal && !isAssistant) {
               AppLogger.info('Voice user transcript final', tag: _tag);
+              _replyToTalkStopwatch
+                ..reset()
+                ..start();
               // User just finished talking — start the clock on Buddy's reply.
               _armReplyWatchdog(reason: 'awaiting_reply');
             }
@@ -302,34 +357,46 @@ class VoiceSessionService {
           await _room!.localParticipant?.setMicrophoneEnabled(true);
         },
         timeout: const Duration(seconds: 25),
-        onError: (e) => AppLogger.warning('Preconnect audio buffer error',
-            tag: _tag, metadata: {'error': e.toString()}),
+        onError: (e) => AppLogger.warning(
+          'Preconnect audio buffer error',
+          tag: _tag,
+          metadata: {'error': e.toString()},
+        ),
       );
 
       AppLogger.info('LiveKit mic enabled', tag: _tag);
       unawaited(AnalyticsService.logVoiceStarted());
       return const Result.success(null);
     } catch (e, st) {
-      AppLogger.error('Failed to connect to LiveKit', error: e, stackTrace: st,
-          tag: _tag, metadata: {'userId': config.userId});
+      AppLogger.error(
+        'Failed to connect to LiveKit',
+        error: e,
+        stackTrace: st,
+        tag: _tag,
+        metadata: {'userId': config.userId},
+      );
       _cleanupRoom();
       final errorText = e.toString();
-      final isIceFailure = errorText.contains('MediaConnectException') ||
+      final isIceFailure =
+          errorText.contains('MediaConnectException') ||
           errorText.contains('PeerConnection');
       // Audio-capture failures (Windows privacy toggle, device busy, driver)
       // surface here as getUserMedia/media-device errors; give them actionable
       // copy instead of the generic line (failure mode #6).
-      final isMicCaptureFailure = errorText.contains('getUserMedia') ||
+      final isMicCaptureFailure =
+          errorText.contains('getUserMedia') ||
           errorText.contains('MediaDevice') ||
           errorText.contains('audio renderer');
       return Result.failure(
         AppException.unexpected(
           isMicCaptureFailure
               ? voiceErrorMessageForCode(
-                  code: micCaptureFailedCode, fallbackMessage: null)
+                  code: micCaptureFailedCode,
+                  fallbackMessage: null,
+                )
               : isIceFailure
-                  ? "Couldn't reach Buddy. Looks like a network hiccup. Try again?"
-                  : "Couldn't start the call. Give it another shot in a sec?",
+              ? "Couldn't reach Buddy. Looks like a network hiccup. Try again?"
+              : "Couldn't start the call. Give it another shot in a sec?",
           error: e,
           stackTrace: st,
         ),
@@ -343,7 +410,9 @@ class VoiceSessionService {
   Future<Result<void>> sendTextInput(String text) async {
     final room = _room;
     if (room == null) {
-      return Result.failure(AppException.unexpected('Voice session is not connected.'));
+      return Result.failure(
+        AppException.unexpected('Voice session is not connected.'),
+      );
     }
     try {
       await room.localParticipant?.publishData(
@@ -353,7 +422,11 @@ class VoiceSessionService {
       return const Result.success(null);
     } catch (e, st) {
       return Result.failure(
-        AppException.unexpected('Failed to send text input.', error: e, stackTrace: st),
+        AppException.unexpected(
+          'Failed to send text input.',
+          error: e,
+          stackTrace: st,
+        ),
       );
     }
   }
@@ -369,17 +442,22 @@ class VoiceSessionService {
     final participant = _room?.localParticipant;
     if (participant == null) return;
     try {
-      final writer = await participant.streamBytes(StreamBytesOptions(
-        topic: 'screen_frame',
-        mimeType: 'image/jpeg',
-        totalSize: jpegBytes.length,
-        attributes: attributes,
-      ));
+      final writer = await participant.streamBytes(
+        StreamBytesOptions(
+          topic: 'screen_frame',
+          mimeType: 'image/jpeg',
+          totalSize: jpegBytes.length,
+          attributes: attributes,
+        ),
+      );
       await writer.write(jpegBytes);
       await writer.close();
     } catch (e, st) {
-      AppLogger.warning('Failed to send screen frame', tag: _tag,
-          metadata: {'error': e.toString(), 'stackTrace': st.toString()});
+      AppLogger.warning(
+        'Failed to send screen frame',
+        tag: _tag,
+        metadata: {'error': e.toString(), 'stackTrace': st.toString()},
+      );
     }
   }
 
@@ -393,8 +471,11 @@ class VoiceSessionService {
         reliable: true,
       );
     } catch (e, st) {
-      AppLogger.warning('Failed to send OCR context', tag: _tag,
-          metadata: {'error': e.toString(), 'stackTrace': st.toString()});
+      AppLogger.warning(
+        'Failed to send OCR context',
+        tag: _tag,
+        metadata: {'error': e.toString(), 'stackTrace': st.toString()},
+      );
     }
   }
 
@@ -406,10 +487,14 @@ class VoiceSessionService {
     if (ctx == null || _screenContextSent) return;
     _screenContextSent = true;
     unawaited(_sendScreenContext(ctx));
-    _screenContextRetry1 =
-        Timer(const Duration(milliseconds: 1200), () => unawaited(_sendScreenContext(ctx)));
-    _screenContextRetry2 =
-        Timer(const Duration(milliseconds: 2600), () => unawaited(_sendScreenContext(ctx)));
+    _screenContextRetry1 = Timer(
+      const Duration(milliseconds: 1200),
+      () => unawaited(_sendScreenContext(ctx)),
+    );
+    _screenContextRetry2 = Timer(
+      const Duration(milliseconds: 2600),
+      () => unawaited(_sendScreenContext(ctx)),
+    );
   }
 
   Future<void> _sendScreenContext(ScreenContextHandoff ctx) async {
@@ -417,17 +502,22 @@ class VoiceSessionService {
     if (room == null) return;
     try {
       await room.localParticipant?.publishData(
-        utf8.encode(jsonEncode({
-          'type': 'screen_context',
-          'context_before': ctx.text,
-          if (ctx.fieldType != null) 'field_type': ctx.fieldType,
-          if (ctx.app != null) 'app': ctx.app,
-        })),
+        utf8.encode(
+          jsonEncode({
+            'type': 'screen_context',
+            'context_before': ctx.text,
+            if (ctx.fieldType != null) 'field_type': ctx.fieldType,
+            if (ctx.app != null) 'app': ctx.app,
+          }),
+        ),
         reliable: true,
       );
     } catch (e, st) {
-      AppLogger.warning('Failed to send screen context', tag: _tag,
-          metadata: {'error': e.toString(), 'stackTrace': st.toString()});
+      AppLogger.warning(
+        'Failed to send screen context',
+        tag: _tag,
+        metadata: {'error': e.toString(), 'stackTrace': st.toString()},
+      );
     }
   }
 
@@ -436,18 +526,23 @@ class VoiceSessionService {
     AppLogger.info('Closing voice session', tag: _tag);
     _closingByClient = true;
     _sessionStopwatch.stop();
-    unawaited(_postHogAnalyticsService.trackEvent(
-      'voice_session_ended',
-      properties: {'duration_seconds': _sessionStopwatch.elapsed.inSeconds},
-    ));
+    unawaited(
+      _postHogAnalyticsService.trackEvent(
+        'voice_session_ended',
+        properties: {'duration_seconds': _sessionStopwatch.elapsed.inSeconds},
+      ),
+    );
     try {
       await _room?.disconnect();
     } catch (e) {
       // Disconnecting a half-dead room can throw; the session is ending anyway,
       // so we don't surface it — but we leave a breadcrumb so a stuck close is
       // traceable instead of vanishing.
-      AppLogger.warning('Ignored error while disconnecting room', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Ignored error while disconnecting room',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
     }
     _cleanupRoom();
   }
@@ -467,14 +562,22 @@ class VoiceSessionService {
         _awaitingAssistantReply = false;
         _replyWatchdog?.cancel();
         _replyWatchdog = null;
-        final code = event.payload?['code'] as String? ?? 'backend_session_error';
-        unawaited(_postHogAnalyticsService.trackEvent('voice_error',
-            properties: {'code': code}));
+        final code =
+            event.payload?['code'] as String? ?? 'backend_session_error';
+        unawaited(
+          _postHogAnalyticsService.trackEvent(
+            'voice_error',
+            properties: {'code': code},
+          ),
+        );
       }
       _eventsController.add(event);
     } catch (e) {
-      AppLogger.warning('Failed to parse data channel message', tag: _tag,
-          metadata: {'error': e.toString()});
+      AppLogger.warning(
+        'Failed to parse data channel message',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
     }
   }
 
@@ -485,8 +588,11 @@ class VoiceSessionService {
     _replyWatchdog?.cancel();
     _replyWatchdog = Timer(_replyWatchdogTimeout, () {
       if (_room == null || !_awaitingAssistantReply) return;
-      AppLogger.warning('Reply watchdog fired, Buddy went silent', tag: _tag,
-          metadata: {'reason': reason});
+      AppLogger.warning(
+        'Reply watchdog fired, Buddy went silent',
+        tag: _tag,
+        metadata: {'reason': reason},
+      );
       _emitSessionError(
         code: 'agent_silent',
         message: "Buddy's connected but gone quiet on me. Tap to try again?",
@@ -514,10 +620,43 @@ class VoiceSessionService {
       _didTrackFirstResponse = true;
       // _sessionStopwatch starts on RoomConnectedEvent, so this measures time
       // from room connect to Buddy's first output.
-      unawaited(_postHogAnalyticsService.trackEvent(
-        'voice_first_response',
-        properties: {'elapsed_ms': _sessionStopwatch.elapsed.inMilliseconds},
-      ));
+      unawaited(
+        _postHogAnalyticsService.trackEvent(
+          'voice_first_response',
+          properties: {'elapsed_ms': _sessionStopwatch.elapsed.inMilliseconds},
+        ),
+      );
+    }
+  }
+
+  /// Record startup and conversational first-talk latency on the first
+  /// assistant transcript delta. Track subscription only means the audio
+  /// channel opened, so it must not be used as a proxy for Buddy talking.
+  void _markAssistantTalkObserved() {
+    if (_sessionStartToTalkStopwatch.isRunning && !_didTrackFirstTalk) {
+      _didTrackFirstTalk = true;
+      _sessionStartToTalkStopwatch.stop();
+      unawaited(
+        _postHogAnalyticsService.trackEvent(
+          'voice_start_to_first_talk',
+          properties: {
+            'elapsed_ms': _sessionStartToTalkStopwatch.elapsedMilliseconds,
+            'measurement_quality': 'assistant_transcript_first_delta',
+          },
+        ),
+      );
+    }
+    if (_replyToTalkStopwatch.isRunning) {
+      _replyToTalkStopwatch.stop();
+      unawaited(
+        _postHogAnalyticsService.trackEvent(
+          'voice_reply_to_first_talk',
+          properties: {
+            'elapsed_ms': _replyToTalkStopwatch.elapsedMilliseconds,
+            'measurement_quality': 'assistant_transcript_first_delta',
+          },
+        ),
+      );
     }
   }
 
@@ -530,13 +669,19 @@ class VoiceSessionService {
     _awaitingAssistantReply = false;
     _replyWatchdog?.cancel();
     _replyWatchdog = null;
-    unawaited(_postHogAnalyticsService.trackEvent('voice_error',
-        properties: {'code': code}));
-    _eventsController.add(VoiceServerEvent(
-      type: 'session.error',
-      message: message,
-      payload: {'code': code, ...?extra},
-    ));
+    unawaited(
+      _postHogAnalyticsService.trackEvent(
+        'voice_error',
+        properties: {'code': code},
+      ),
+    );
+    _eventsController.add(
+      VoiceServerEvent(
+        type: 'session.error',
+        message: message,
+        payload: {'code': code, ...?extra},
+      ),
+    );
   }
 
   String _mapAgentState(String agentState) {
@@ -558,19 +703,29 @@ class VoiceSessionService {
   /// Ask the OS to keep the screen on for the duration of the call. A failure
   /// here must never break the session, so it's swallowed with a breadcrumb.
   void _acquireScreenWakeLock() {
-    unawaited(_screenWakeLock.enable().catchError((Object e) {
-      AppLogger.warning('Failed to acquire screen wake lock', tag: _tag,
-          metadata: {'error': e.toString()});
-    }));
+    unawaited(
+      _screenWakeLock.enable().catchError((Object e) {
+        AppLogger.warning(
+          'Failed to acquire screen wake lock',
+          tag: _tag,
+          metadata: {'error': e.toString()},
+        );
+      }),
+    );
   }
 
   /// Let the screen sleep again on its normal timer. Idempotent at the OS level,
   /// so calling it on a session that never acquired the lock is harmless.
   void _releaseScreenWakeLock() {
-    unawaited(_screenWakeLock.disable().catchError((Object e) {
-      AppLogger.warning('Failed to release screen wake lock', tag: _tag,
-          metadata: {'error': e.toString()});
-    }));
+    unawaited(
+      _screenWakeLock.disable().catchError((Object e) {
+        AppLogger.warning(
+          'Failed to release screen wake lock',
+          tag: _tag,
+          metadata: {'error': e.toString()},
+        );
+      }),
+    );
   }
 
   void _cleanupRoom() {
@@ -592,6 +747,13 @@ class VoiceSessionService {
     _didReceiveAssistantOutput = false;
     _awaitingAssistantReply = false;
     _didTrackFirstResponse = false;
+    _didTrackFirstTalk = false;
+    _sessionStartToTalkStopwatch
+      ..stop()
+      ..reset();
+    _replyToTalkStopwatch
+      ..stop()
+      ..reset();
     _closingByClient = false;
   }
 
@@ -606,23 +768,33 @@ class VoiceSessionService {
         if (conversationId != null && conversationId.isNotEmpty)
           'conversation_id': conversationId,
       };
-      final resp = await http.get(
-        Uri.parse(ApiEndpoints.voiceToken).replace(
-          queryParameters: query.isEmpty ? null : query,
-        ),
-        headers: {
-          'Content-Type': 'application/json',
-          if (idToken != null) 'Authorization': 'Bearer $idToken',
-        },
-      ).timeout(const Duration(seconds: 10));
+      final resp = await http
+          .get(
+            Uri.parse(
+              ApiEndpoints.voiceToken,
+            ).replace(queryParameters: query.isEmpty ? null : query),
+            headers: {
+              'Content-Type': 'application/json',
+              if (idToken != null) 'Authorization': 'Bearer $idToken',
+            },
+          )
+          .timeout(const Duration(seconds: 10));
       if (resp.statusCode == 200) {
         return jsonDecode(resp.body) as Map<String, dynamic>;
       }
-      AppLogger.error('Voice token request failed', tag: _tag,
-          metadata: {'status': resp.statusCode});
+      AppLogger.error(
+        'Voice token request failed',
+        tag: _tag,
+        metadata: {'status': resp.statusCode},
+      );
       return null;
     } catch (e, st) {
-      AppLogger.error('Voice token request error', error: e, stackTrace: st, tag: _tag);
+      AppLogger.error(
+        'Voice token request error',
+        error: e,
+        stackTrace: st,
+        tag: _tag,
+      );
       return null;
     }
   }

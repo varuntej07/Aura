@@ -77,6 +77,19 @@ async def test_assembles_chunks_with_attributes():
     assert frame.width_px == 1280 and frame.height_px == 720
 
 
+async def test_notifies_listener_after_successful_assembly():
+    store = _store()
+    received: list[ScreenFrame] = []
+    store.set_frame_listener(received.append)
+
+    await store._assemble_frame(
+        _FakeReader([b"guide"], {"frame_id": "a" * 32 + ":7", "mode": "guide"}),
+        "uid",
+    )
+
+    assert [frame.frame_id for frame in received] == ["a" * 32 + ":7"]
+
+
 async def test_oversize_frame_dropped():
     store = _store()
     big = b"x" * (screen_frames._MAX_FRAME_BYTES + 1)
@@ -252,7 +265,10 @@ async def test_hook_never_raises():
 
 def test_screen_sight_note_renders_only_for_desktop():
     note = render_screen_sight_note("desktop")
-    assert "control alt S" in note
+    normalized = note.lower()
+    assert "control alt g" in normalized
+    assert "control alt s" not in normalized
+    assert "eye" not in normalized
     assert "screenshot" in note
     # The prompt-injection posture rides with the capability.
     assert "never" in note.lower() and "instructions" in note.lower()

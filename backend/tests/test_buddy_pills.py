@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+from google.cloud.firestore_v1.base_query import FieldFilter
+
 
 class TestFetchRecentQueries:
     def test_applies_recency_window_filter(self):
@@ -43,7 +45,9 @@ class TestFetchRecentQueries:
         db.collection.return_value.document.assert_called_once_with("uid1")
         queries_col.where.return_value.order_by.return_value.limit.assert_called_once_with(10)
 
-        field, op, cutoff_iso = queries_col.where.call_args[0]
+        filter_arg = queries_col.where.call_args.kwargs["filter"]
+        assert isinstance(filter_arg, FieldFilter)
+        field, op, cutoff_iso = filter_arg.field_path, filter_arg.op_string, filter_arg.value
         assert field == "timestamp"
         assert op == ">="
         # Cutoff is ~_QUERY_RECENCY_WINDOW_DAYS days in the past (drops older queries).

@@ -15,6 +15,8 @@ dependencies = [
     "pydantic>=2.11",
     "pydantic-settings>=2.7",
     "python-dotenv>=1.0",
+    # IANA timezone database for slim containers and Windows hosts.
+    "tzdata>=2025.2",
 
     # LiveKit — voice pipeline (STT: Deepgram, LLM: OpenAI/Anthropic/Gemini, TTS: Cartesia, VAD: Silero)
     # >=1.6.4: async tools (ctx.update / ctx.with_filler, 1.6.0) used by

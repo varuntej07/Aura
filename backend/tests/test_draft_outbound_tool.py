@@ -5,7 +5,7 @@ Pins the branch logic that guards cost and privacy:
   - missing length defaults to medium and an unrecognized/blank channel falls
     back to the adaptive on_screen channel, so a draft never bounces a
     clarifying question (Buddy reads the screen instead);
-  - no screen frame publishes draft.failed{no_frame} and speaks the arming hint;
+  - no screen frame publishes draft.failed{no_frame} and speaks the retry line;
   - the free-tier daily cap is charged ONCE per new draft, prod-only, and a
     voice refine never touches the counter or the frame store;
   - a refine with no current draft falls through to a new draft using the
@@ -161,8 +161,11 @@ async def test_empty_channel_with_frame_drafts_on_screen(monkeypatch):
     assert spoken == dm.SPOKEN_DRAFT_READY
     call = h.draft_calls[0]
     assert call["channel"] == dm.DEFAULT_CHANNEL
-    # on_screen infers its own length; the caller passes the blank through.
-    assert call["length"] == ""
+    # on_screen infers its own real length internally, but a blank length is
+    # normalized to a valid ladder value so draft.created ships an enum every
+    # desktop client accepts (a blank length was dropped as malformed there,
+    # leaving the card stuck on its skeleton).
+    assert call["length"] == "medium"
     assert call["jpeg_base64"] and call["jpeg_width"] == 1280
     assert state.current is not None and state.current.channel == dm.DEFAULT_CHANNEL
 

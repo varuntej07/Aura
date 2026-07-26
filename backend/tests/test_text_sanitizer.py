@@ -58,6 +58,14 @@ def test_strips_headers_and_links_keep_text():
     assert sanitize_for_speech("_really_ good") == "really good"
 
 
+def test_raw_urls_never_reach_speech():
+    out = sanitize_for_speech("Open https://www.notion.so/my-integrations next.")
+    assert "https://" not in out
+    assert "www.notion.so" not in out
+    assert "my-integrations" not in out
+    assert out == "Open the link on screen next."
+
+
 def test_hyphenated_words_survive():
     out = sanitize_for_speech("a voice-first, low-latency build")
     assert "voice-first" in out
