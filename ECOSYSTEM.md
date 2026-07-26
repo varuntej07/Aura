@@ -21,13 +21,14 @@ Do **not** update it for internal refactors, UI changes, or anything that stays 
 | **Aura** (this repo) | `MobileApps/Aura` | `varuntej07/juno` (repo renamed Aura, remote URL still says juno) | Flutter (mobile, Android/iOS) + FastAPI (`backend/`) | Mobile: Play Store / manual `.aab`. Backend: `docker build` straight from local disk (`backend/deploy.sh`), no git trigger, Cloud Run `juno-2ea45`/`us-central1` | Primary client (full API surface) and the shared backend every other repo talks to |
 | **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` + `latest.json`) | Current live Windows companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
 | **Aura-Web** | `MobileApps/Aura-Web` | `varuntej07/aura-web` | Next.js (App Router) + React + Framer Motion | Git-triggered deploy to Vercel (push to main auto-builds) | Marketing site (`auravoiceapp.com`), hosts the Google sign-in browser leg, and serves as the download page for Aura-Desktop |
-| Legacy Flutter desktop (was `lib/main_desktop.dart`, inside this repo) | (deleted) | same as Aura | Flutter (Windows target) | Built `.exe` was pushed to a GCS bucket (`gs://aura-desktop-downloads`) | **Deleted 2026-07-11** (code, `windows/` platform tree, and the GCS-hosted installers). Aura-Desktop (Tauri) is the only Windows client. This repo keeps the backend contracts it consumes (pairing, web-auth, dashboard-link, draft-outbound, voice screen-sight, screen saves). |
+| Legacy Flutter desktop (was `lib/main_desktop.dart`, inside this repo) | (deleted) | same as Aura | Flutter (Windows target) | Built `.exe` was pushed to a GCS bucket (`gs://aura-desktop-downloads`) | **Deleted 2026-07-11** (code, `windows/` platform tree, and the GCS-hosted installers). Aura-Desktop (Tauri) is the only Windows client. This repo keeps the backend contracts it consumes (pairing, web-auth, connector OAuth, draft-outbound, voice screen-sight, screen saves). |
 
 `MobileApps/Juno` (no `.git`, last touched 2026-05-20) is a stale leftover checkout, not a live repo. It is not part of this system; if it keeps causing confusion it's a candidate to delete, but nothing currently reads or writes it.
 
 ## Shared infrastructure
 
 - **Firebase project `juno-2ea45`**: Auth + Firestore, used by all three repos. All three write/read the same `users/{uid}` document shape (Aura-Web's `auth/complete/route.ts` explicitly builds a doc matching what the Flutter app writes, timestamps as ISO strings, not Firestore `Timestamp`, because Flutter's `DateTime.parse()` would crash on the latter).
+  - **Surface footprint on the root doc:** `platform` records only the single mobile device the account was born on (every account is created by the Flutter app; desktop and web are always secondary links). `linked_platforms` is an array-union accumulation of every surface the account has touched (e.g. `["android", "windows"]`), written idempotently by each surface: the mobile app unions its own platform on every app open, and `handlers/pairing.py` / `handlers/web_auth.py` union `windows` when a desktop links. `last_desktop_active_at` (ISO string, per the rule above) is stamped on each desktop link. A user's full device inventory still lives in the `users/{uid}/linked_devices/{id}` subcollection; these two root fields are a denormalized summary so one doc read reveals surface usage without the join.
 - **juno-backend on Cloud Run**: the only backend. Aura mobile talks to nearly its full route surface; Aura-Desktop and Aura-Web each talk to a narrow slice (see contracts below).
 - **LiveKit Cloud**: voice rooms for both mobile and desktop clients, joined by the same backend-issued token from `GET /voice/token`. The voice agent worker itself deploys separately via `lk agent deploy`, not through Cloud Run.
 - **PostHog**: the app side (Aura mobile, Aura-Desktop, and `juno-backend`'s own server-side capture) confirmed share one project; funnel event names are contract-tested (`backend/src/services/analytics/funnel_events.py` vs `lib/core/analytics/funnel_events.dart`). Aura-Web initializes its own `posthog-js` client from its own env vars (`NEXT_PUBLIC_POSTHOG_KEY`); whether that resolves to the same PostHog project as the app side has not been verified, see "Known gaps."
@@ -101,11 +102,20 @@ The contract, all under Firebase-ID-token auth (`backend/src/handlers/meetings.p
 `POST /meetings/claim` gates capture and charges the transactional monthly counter (`users/{uid}/usage/meetings_{YYYYMM}`; 5/month on free AND companion, unlimited pro; 402 body mirrors the `/voice/token` cap shape `{"detail": {"code": "meeting_cap_reached", "seconds_until_reset"}}`; 409 `meeting_already_claimed` for a cross-device conflict; same-device re-claim is idempotent via `users/{uid}/meeting_claims/{sha1(event_id)}` locks that self-expire at event end + 30 min).
 `POST /meetings/{id}/segments/{seq}` takes raw 2-channel 16 kHz FLAC bodies (ch0 = device owner's mic, ch1 = system loopback) with `X-Segment-Start-Ms`/`X-Segment-Duration-Ms` headers into GCS `gs://juno-2ea45-meeting-audio/meetings/{uid}/{meeting_id}/` (bucket has a 7-day lifecycle rule as backstop; the worker deletes audio immediately after synthesis).
 The bucket plus that lifecycle rule are a VERIFIED deploy prerequisite, not a comment: `backend/deploy.sh` runs `scripts/check_meeting_storage.py --check` before shifting traffic and aborts the deploy when the bucket is missing, in the wrong region, or lacks the lifecycle rule (2026-07-14 incident: the bucket was never provisioned, so every segment upload 404'd, the handler answered 503, and a real 22-minute meeting produced no note; the desktop's durable encrypted queue held the audio and recovered on the next signed-in restart once the bucket existed).
-`POST /meetings/{id}/complete` enqueues one Cloud Tasks job (existing `juno-engagement` queue, deterministic task name) to `/internal/meetings/synthesize`, which transcribes per-channel (Deepgram nova-3 multichannel, the same `DEEPGRAM_API_KEY` the voice worker mounts), checks the user's exclude-keyword list (`users/{uid}/settings/meeting_notes`) BEFORE any STT, synthesizes `{summary, decisions, action_items, open_questions, language, one_sided}` and persists to `users/{uid}/meetings/{meeting_id}` with a 7-day `expires_at` TTL for non-pro tiers (TTL policy setup: `gcloud firestore fields ttls update expires_at --collection-group=meetings --enable-ttl`).
-`GET /meetings/recent` + `GET /meetings/{id}` are the desktop's delivery poll (and a future dashboard feed).
+`POST /meetings/{id}/complete` enqueues one Cloud Tasks job (existing `juno-engagement` queue, deterministic task name) to `/internal/meetings/synthesize`, which transcribes per-channel (Deepgram nova-3 multichannel, the same `DEEPGRAM_API_KEY` the voice worker mounts), checks the user's exclude-keyword list (`users/{uid}/settings/meeting_notes`) BEFORE any STT, synthesizes `{summary, decisions, action_items, open_questions, language, one_sided, partial}`, attaches provider-derived `transcript: [{speaker, text}]` turns, and persists the ready note atomically to `users/{uid}/meetings/{meeting_id}`. The insight model never authors transcript text or speaker labels.
+Free and Companion meeting documents, including transcripts, carry a 7-day `expires_at` TTL. Pro notes and transcripts remain until account deletion. The TTL policy is declared in `firestore.indexes.json`; the equivalent one-time command is `gcloud firestore fields ttls update expires_at --collection-group=meetings --enable-ttl`. Raw audio is deleted immediately after the ready note is durable, with the bucket's 7-day lifecycle as a backstop. Account deletion strictly removes any remaining `meetings/{uid}/` GCS objects before Firestore data and Firebase Auth.
+`GET /meetings/recent` returns the note without transcript turns for a bounded dashboard payload. `GET /meetings/{id}` returns the full note with transcript. Both use an explicit public note-field allowlist, and legacy notes without transcripts remain valid.
 Capture trust model is load-bearing for the brand: user-armed only (global toggle default OFF), visible recording indicator the entire time, session-lock pause.
 Duration is TEMPORARILY clamped to 60 minutes on every tier (product decision 2026-07-11): events scheduled longer than an hour are not armable, the desktop engine hard-stops capture at 60 minutes per meeting, and the backend synthesis caps mirror the clamp (design values of 4h capture / 240min Pro synthesis return when long-meeting support lands).
 Join detection polls only inside the event's exact scheduled window, start to end, because detection is not link-matched in v1 and a wider armed window widens the misattribution surface.
+
+### 5c. Desktop notification outbox and preferences
+
+Aura-Desktop registers its notification capability with authenticated `PUT /desktop/notifications/preferences`, polls `GET /desktop/notifications` with an owner-bound opaque cursor, and acknowledges lifecycle through `POST /desktop/notifications/{notification_id}/ack`. The backend stores capability and category preferences at `users/{uid}/notification_preferences/desktop`, and durable outbox rows at `users/{uid}/desktop_notifications/{notification_id}`.
+
+Channel selection is backend-owned and evaluated at delivery time. Enabled desktop users receive compatible committed, proactive, and account notifications on both mobile and desktop under one logical notification ID and budget decision. Meeting lifecycle events remain desktop-only; device-link security alerts remain mobile-only. A missing capability or failed preference lookup fails closed to mobile-only. Desktop received, seen, and acted acknowledgements update the existing notification ledger row, so adaptive engagement counts one logical send rather than one send per surface.
+
+The Firebase UID is the ownership boundary on both sides. The system does not infer that two different UIDs belong to one person and does not merge their outboxes or preferences.
 
 ### 6. Windows desktop distribution and auto-update
 
@@ -116,15 +126,9 @@ Two independent consumers of the same Aura-Desktop GitHub release, not one share
 
 So: publishing a new Aura-Desktop GitHub release is a single action that both the download page and the in-app auto-updater pick up on their own, with no manual step in Aura-Web. This replaced the older mechanism (see "Known gaps" below).
 
-### 7. Web dashboard data reads (browser calls juno-backend directly, CORS-gated)
+### 7. Desktop-owned product data
 
-Unlike every other Aura-Web <-> juno-backend contract above, `/dashboard`'s data endpoints — `GET /history/sessions` + `DELETE /history/sessions/{id}`, `GET /screen-saves` + `DELETE /screen-saves/{id}`, and `GET /drafts` + `DELETE /drafts/{id}` (the Buddy Drafts feed from contract 5) — are called **directly from the browser** with a Firebase ID token (`Authorization: Bearer <token>`), not proxied through an Aura-Web API route. Only the sign-in handoff (`POST /devices/dashboard-link/start` on the desktop side, `POST /devices/dashboard-link/claim` proxied through Aura-Web's `/api/dashboard-link/claim`) goes through Aura-Web's own API, for a reason unrelated to CORS: that claim endpoint is unauthenticated by design (the token is the credential), so `isAllowedOrigin` there is real defense-in-depth against browser-based abuse, something CORS can't provide against a non-browser caller anyway.
-
-Because this is genuine browser-JS-to-juno-backend traffic (mobile's native HTTP client and Aura-Desktop's Tauri `plugin-http` are never subject to CORS), juno-backend now runs `CORSMiddleware` (`backend/src/main.py`, added as the outermost layer) gated on an explicit origin allowlist: `settings.cors_allowed_origins`, sourced from the `CORS_ALLOWED_ORIGINS` env var (`backend/src/config/settings.py`, default `https://auravoiceapp.com`). `allow_credentials` is always `False` — auth here is a Bearer header, not a cookie, so there is nothing for CORS credentials mode to protect.
-
-**This origin allowlist is a cross-repo contract with Aura-Web's own origin allowlist** (`Aura-Web/src/lib/origin.ts`'s `SITE_URL` + `VOICE_ALLOWED_ORIGINS`, which gates `isAllowedOrigin` on Aura-Web's mutating API routes). The two lists serve different directions of the same relationship — Aura-Web's decides who may POST into it; juno-backend's decides which origins' browser-JS may read its responses — but they should name the same domain set. If Aura-Web ever adds a new deploy domain (a custom preview domain, a domain migration), both `VOICE_ALLOWED_ORIGINS` on Aura-Web and `CORS_ALLOWED_ORIGINS` on juno-backend need updating together, or the newer domain's dashboard silently can't read its own data (fails as a client-side `TypeError: Failed to fetch` with no status code, not a clean error — see Aura-Web's `juno-backend.client.ts`, which collapses that failure into its generic `history_failed` retry state).
-
-The base URL Aura-Web's browser code targets (`NEXT_PUBLIC_JUNO_BACKEND_URL`, `Aura-Web/src/lib/juno-backend-url.ts`) defaults to the same production Cloud Run URL every other client uses (`https://juno-backend-620715294422.us-central1.run.app`) — no separate URL exists for this contract.
+Aura-Web has no authenticated product dashboard. History, saved items, drafts, memories, connector status, and settings are read and changed only by Aura-Desktop or the mobile app through authenticated juno-backend endpoints. Aura-Web retains account sign-in and billing checkout/portal flows only.
 
 ### 7b. Aura-Desktop dashboard reads and first-run profile attribution
 
@@ -133,6 +137,7 @@ Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebas
 | Endpoint | Request | Response contract |
 |---|---|---|
 | `POST /devices/profile` | `{where_heard, where_heard_other, role, role_other}` where every field is `string | null` | `{ok: true}`. Last write wins on `users/{uid}`. |
+| `POST /devices/guide-usage` | `{guide_session_id (32-hex), started_at, ended_at (ISO), duration_ms, outcome (completed\|abandoned\|signed_out\|session_ended), frames_sent, steps_received, agent_timeouts}` | `{ok: true}`, always (fail-soft; the desktop treats any non-2xx as a swallowed blip). Merges into a Guide Mode rollup on `users/{uid}` (lifetime counters + one latest-session snapshot; no subcollection). The voice worker's `GuideCoordinator` writes the fields the client cannot see (model, avg TTFT, tools used, last user turn, frames processed) onto the SAME rollup, keyed by `guide_session_id`; a transaction guards the snapshot so a stale writer never clobbers a newer session. |
 | `GET /desktop/home/stats` | none | `{last_used_at, last_session_seconds, sessions_this_week}` for desktop-surface voice sessions. |
 | `GET /desktop/activity?limit=8` | `limit` is capped at 50 | `{items: [{id, kind, title, subtitle?, timestamp}]}` merging desktop voice sessions, drafts, and saved memory. |
 | `GET /desktop/conversations?limit=30&cursor=` | `limit` capped at 100; cursor is opaque | `{items: [{id, title, preview?, started_at, duration_seconds?}], next_cursor?}`. |
@@ -141,14 +146,29 @@ Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebas
 
 The endpoint field names are snake_case. `Aura-Desktop/src/lib/dashboardApi.ts` maps them to its own camelCase models, so neither side may rename fields independently. Empty data is a successful empty payload, not an error.
 
+### 7c. Google connector control and browser handoff
+
+Aura-Desktop controls Google Calendar and Gmail through authenticated juno-backend endpoints. Integration documents remain the credential owners; clients only receive connector state.
+
+| Endpoint | Semantics |
+|---|---|
+| `GET /connectors` | Returns the connector catalog. Google Calendar and Gmail include `enabled`, `can_reconnect`, and connector-specific status fields. |
+| `POST /connectors/google-calendar/enable` | Re-enables with retained credentials, performs a full sync, and recreates the webhook. Returns HTTP 409 with `{"error":"reauthorization_required"}` when usable credentials are missing or Google has revoked them. |
+| `POST /connectors/google-calendar/disable` | Stops the webhook, removes active cached Calendar data, and sets `enabled: false`. It deliberately retains the server-side OAuth credentials so a later enable normally needs no consent screen. |
+| `POST /connectors/google-calendar/sync` | Performs an explicit sync only while the connector is enabled. |
+| `POST /connectors/gmail/enable` | Re-enables Gmail with retained credentials after refreshing them when needed. Returns the same HTTP 409 reauthorization contract when consent is required. |
+| `POST /connectors/gmail/disable` | Sets Gmail `enabled: false` while retaining its server-side OAuth credentials. |
+
+When Desktop receives `reauthorization_required`, it calls authenticated `POST /connectors/oauth/authorize` with an allowlisted `google_calendar` or `gmail` connector. juno-backend creates an owner-bound, ten-minute `connector_oauth_attempts` row with a PKCE verifier and returns Google's authorization URL. Google calls `GET /connectors/oauth/google/callback` on juno-backend, which atomically claims the attempt, exchanges the code, and writes the existing authoritative integration document. The callback opens `aura://connectors/complete`; Desktop consumes the result and refreshes `GET /connectors` once. There is no web dashboard, browser custom-token exchange, or connector polling loop.
+
 ## Full system diagram
 
 ```text
 +----------------------- clients and sites ------------------------+
-| Aura mobile | Aura-Desktop | Aura-Web auth/dashboard/download   |
+| Aura mobile | Aura-Desktop | Aura-Web auth/billing/download     |
 +------+---------------+----------------------+--------------------+
        |               |                      |
-       | full API      | pairing/auth/voice   | browser APIs/auth handoff
+       | full API      | pairing/auth/voice   | auth and billing
        +---------------+----------+-----------+
                                   v
                        +----------------------+

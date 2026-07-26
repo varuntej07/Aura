@@ -1,0 +1,89 @@
+# Changelog
+
+All notable production release changes are recorded here. The app version at
+the time of this entry is `2.2.0+11`; use a new, unused Google Play version
+code for the next upload.
+
+## Unreleased - Android billing cleanup
+
+### Changed
+
+- Removed obsolete R8/ProGuard rules for `com.android.billingclient` from
+  `android/app/proguard-rules.pro`.
+- The Android client does not declare or use Google Play Billing or Flutter
+  in-app-purchase packages.
+
+### Payment and entitlement behavior retained
+
+- `PaywallScreen` presents subscription choices only when backend steering
+  permits web checkout.
+- `SubscriptionService.openCheckout` POSTs to the backend checkout endpoint
+  and opens the returned Dodo checkout URL in the device's external browser.
+- The app never grants an entitlement after a checkout attempt. The backend's
+  Dodo webhook remains the entitlement writer; the app updates after the
+  entitlement push or a resume-time entitlement refetch.
+
+### Why this release is safe for Google Play
+
+The obsolete ProGuard rules were the only Android-specific references to the
+Google Play Billing namespace found in the repository manifests and source.
+The source and lockfile do not declare a Google Billing or Flutter
+in-app-purchase package. Upload a newly built AAB to every active Play track
+so Play Console can re-scan the artifact.
+
+The local Gradle dependency inspection could not run because this shell has no
+`JAVA_HOME` or `java` configured. If Play Console still reports Billing after
+the new upload, configure Java 17 and run:
+
+```powershell
+cd android
+.\gradlew.bat :app:dependencyInsight --dependency com.android.billingclient --configuration releaseRuntimeClasspath
+```
+
+### Build and upload checklist
+
+Run these commands in PowerShell from the repository root. Replace
+`<NEXT_VERSION_CODE>` with an integer higher than every version code already
+uploaded to Google Play. Do not reuse `11`.
+
+```powershell
+flutter pub get
+flutter analyze
+flutter test
+flutter build appbundle --release --build-number=<NEXT_VERSION_CODE>
+Get-FileHash .\build\app\outputs\bundle\release\app-release.aab -Algorithm SHA256
+```
+
+The resulting bundle is:
+
+```text
+build\app\outputs\bundle\release\app-release.aab
+```
+
+There is no configured repository command for publishing to Google Play.
+Upload this AAB manually in Play Console:
+
+1. Open **Play Console > Aura > Release > Production** (and each track you
+   actively publish to).
+2. Create or edit the release and upload `app-release.aab`.
+3. Use the release notes below, review, and roll out the release.
+4. Confirm Play Console has completed processing and that the Billing Library
+   warning is cleared.
+
+### Google Play release notes
+
+```text
+This update removes unused legacy Android billing configuration. Subscriptions
+continue to be completed securely in your browser, with access syncing back to
+the app automatically after payment.
+```
+
+### Validation and rollback
+
+- Validate a signed release build with the commands above before upload.
+- On a test account, open the paywall, start checkout, complete or cancel in
+  the browser, return to the app, and verify that the displayed entitlement is
+  refreshed from the backend.
+- If a release issue is found after rollout, halt or roll back the Play release
+  in Play Console. The removed rules have no source-level runtime behavior
+  because the app does not import or call BillingClient.

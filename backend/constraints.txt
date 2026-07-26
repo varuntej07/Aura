@@ -136,6 +136,7 @@ typer==0.16.0
 types-protobuf==7.34.1.20260408
 typing-inspection==0.4.2
 typing_extensions==4.14.1
+tzdata==2025.2
 uritemplate==4.2.0
 urllib3==2.5.0
 uvicorn==0.34.2

@@ -10,27 +10,72 @@ Aura is a voice-first personal AI companion. The assistant persona is **Buddy**,
 - **Reach out first.** Proactive notifications, curiosity-driven follow-up questions, a daily evening briefing, and life-aware openers, all timed to be useful rather than noisy.
 - **Search the live web.** When something could have changed since training, Buddy looks it up and answers from the result instead of guessing.
 - **Handle your calendar and email.** Buddy works with Google Calendar and Gmail on your behalf.
+- **Live everywhere.** A custom Android keyboard brings Buddy into any app on your phone, for drafting replies and quick answers without switching apps. On Windows, the Aura-Desktop companion (Tauri, separate repo) pairs to the same account.
 
-## Voice architecture
+## Architecture
 
-Voice is a separate LiveKit Agents worker, not part of the FastAPI request path. It runs as its own service so a slow or failing voice session never blocks the rest of the app.
+```text
++-------------------- Flutter client ---------------------+
+| text chat | LiveKit voice | briefing | memory | pushes |
++---------------------------+-----------------------------+
+                            |
+             HTTPS/SSE      |       WebRTC
+                 +----------+-----------+
+                 v                      v
+      +----------------------+  +-----------------------+
+      | FastAPI on Cloud Run |  | LiveKit Cloud         |
+      | handlers + services  |  | rooms + voice worker  |
+      +----+------------+----+  +-----------+-----------+
+           |            ^                   |
+           |            +-------------------+
+           |             authenticated MCP tools
+           v
+      +----------------------+       +---------------------+
+      | Firebase/Firestore   |       | external providers  |
+      | user + durable state |       | models, STT/TTS, APIs|
+      +----------+-----------+       +---------------------+
+                 ^
+                 |
+      +----------+-----------+
+      | Scheduler/Cloud Tasks|
+      | durable background   |
+      +----------------------+
+```
 
-**Pipeline.** The worker uses a cascading architecture: speech to text, then language model, then text to speech.
+Flutter uses MVVM layers under `lib/`. The backend is a FastAPI application under `backend/src/`. Voice is a separately deployed LiveKit Agents worker, so a slow voice session does not occupy the FastAPI request path. Text and voice share backend tools through the authenticated MCP boundary.
 
-- **STT**: Deepgram Nova, with `nova-3` falling back to `nova-2`
-- **LLM**: OpenAI GPT-4.1 mini, falling back to Anthropic Claude, then Gemini Flash (`build_llm_pipeline`)
-- **TTS**: Cartesia `sonic-3` (conditioned), falling back to Deepgram `aura-2`, then Cartesia `sonic-2`
-- **Turn taking**: Silero VAD plus the LiveKit multilingual turn detector
+Fresh users start with neutral context. Returning users can contribute consent-allowed memory and Aura summaries to chat and voice. A context read failure degrades to an empty value instead of blocking the conversation.
 
-**Connection flow.** The Flutter client requests a LiveKit room token, then joins room `voice-{uid}`. The worker is waiting on LiveKit Cloud, sees the participant join, and starts a session. Audio flows over WebRTC the whole time.
+## Failure, retry, and recovery
 
-**Tools.** The agent does not embed its own tools. It pulls them from the backend over MCP using `livekit.agents.mcp.MCPServerHTTP`, authenticating with a short-lived Firebase ID token it mints per session from the user's uid. This means voice and text chat share one tool implementation.
+```text
+Chat provider fails before output -> Anthropic/Gemini/OpenAI fallback contract
+Voice STT/LLM/TTS stage fails ----> next pipeline adapter
+All voice adapters fail ----------> friendly session.error to Flutter
+Durable Cloud Task fails ---------> retry with idempotent claim/dedup identity
+Optional context read fails ------> continue with empty context
+Proactive notification conflicts -> central policy holds/drops/arbitrates
+Committed user action fails ------> surface controlled failure; never claim success
+```
 
-**Module layout.** `voice_agent.py` is a thin orchestrator; its pieces live in `backend/src/agent/voice/`: structured session telemetry, pipeline error classification, Firestore context fetchers, prompt assembly, the STT/LLM/TTS/MCP/turn-detector pipeline builders, per-user voice conditioning, session event recording, and per-session Firebase token minting.
+### Obvious walkthrough: text chat
 
-**Failure handling.** Two watchdogs cover the dangerous case where the agent connects but never speaks, for example when LLM credit runs out.
+1. Flutter sends an authenticated chat turn and receives SSE events.
+2. The backend builds context, runs the model/tool loop, and streams deltas.
+3. Tool writes go through shared services, and Flutter finishes on the `done` event.
 
-- The Flutter client arms a 15 second silence watchdog when the agent joins and after each user turn. Any sign of life (agent state, audio, text, or data) resets it. On timeout it emits a coded `session.error` that maps to friendly copy, and the mic orb becomes the retry button.
-- The backend publishes a `session.error` down the LiveKit data channel on pipeline failure, so the client does not have to wait on its own timer. `classify_pipeline_error` separates provider-exhausted or quota errors from generic failures.
+### Non-obvious walkthrough: returning user starts voice during a memory outage
 
-Voice telemetry fires PostHog `voice_first_response` on success and `voice_error` with a code on failure. The backend also logs structured `VoiceSession` lines to Cloud Logging.
+1. Flutter obtains a LiveKit token and joins the room.
+2. The worker gathers profile, memory, Aura, archive, and last-session inputs in parallel.
+3. Memory times out, so only that input becomes empty.
+4. The session starts normally with the remaining context. Later pipeline failures still use STT, LLM, or TTS fallbacks independently.
+
+## Documentation
+
+- Architecture index: [`architectures/README.md`](architectures/README.md)
+- Backend operations: [`backend/README.md`](backend/README.md)
+- Cross-repository contracts: [`ECOSYSTEM.md`](ECOSYSTEM.md)
+- Monitoring: [`MONITORING.md`](MONITORING.md)
+- Scalability: [`scalability_doc.md`](scalability_doc.md)
+- Repository working rules: [`CLAUDE.md`](CLAUDE.md)
