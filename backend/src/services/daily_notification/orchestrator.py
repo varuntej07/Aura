@@ -23,6 +23,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from google.cloud import firestore as fs
+
 from ...lib.logger import logger
 from ...services.firebase import admin_firestore
 from ...services.model_provider import ModelProvider
@@ -189,7 +191,7 @@ async def _fetch_recent_queries(user_id: str) -> list[dict]:
         docs = (
             db.collection("users").document(user_id)
             .collection("queries")
-            .where("timestamp", ">=", cutoff_iso)
+            .where(filter=fs.FieldFilter("timestamp", ">=", cutoff_iso))
             .order_by("timestamp", direction="DESCENDING")
             .limit(10)
             .stream()
@@ -361,8 +363,8 @@ async def _fetch_upcoming_calendar_events(user_id: str, days_ahead: int = 7) -> 
         snapshot = (
             db.collection("users").document(user_id)
             .collection("calendar_events")
-            .where("start_at_ts", ">=", now_utc)
-            .where("start_at_ts", "<", end_utc)
+            .where(filter=fs.FieldFilter("start_at_ts", ">=", now_utc))
+            .where(filter=fs.FieldFilter("start_at_ts", "<", end_utc))
             .order_by("start_at_ts")
             .limit(50)
             .stream()

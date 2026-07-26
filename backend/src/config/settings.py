@@ -83,6 +83,19 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
 
+    # OpenAI Realtime bridge: the instant speech-to-speech leg the desktop opens
+    # while the LiveKit cascade worker cold-starts. The desktop connects direct to
+    # OpenAI over WebRTC with a short-lived ephemeral secret minted by
+    # /realtime/session; the real OPENAI_API_KEY never leaves the server.
+    OPENAI_REALTIME_MODEL: str = "gpt-realtime"
+    OPENAI_REALTIME_VOICE: str = "marin"
+    OPENAI_REALTIME_TRANSCRIBE_MODEL: str = "gpt-4o-mini-transcribe"
+    # Ephemeral secret TTL. Short by design: the desktop must connect promptly.
+    OPENAI_REALTIME_SECRET_TTL_S: int = 60
+    # Kill switch. When false, /realtime/session returns 503 and the desktop falls
+    # back to the plain (cold) LiveKit path.
+    REALTIME_BRIDGE_ENABLED: bool = False
+
     # Google Calendar (optional)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""

@@ -17,6 +17,7 @@ import httpx
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from ...services.observability import log_provider_request
 from .brave_news import _parse_page_age
 
 _REQUEST_TIMEOUT_S = 7.0  # real-time path: chat + voice (user is waiting)
@@ -137,6 +138,7 @@ async def brave_search(
     uid: str,
     recency: str = "any",
     timeout_s: float = _REQUEST_TIMEOUT_S,
+    feature: str = "web_surf",
 ) -> dict[str, Any]:
     """Raw web search via Brave. Returns {text, sources, query, cached}.
 
@@ -161,6 +163,15 @@ async def brave_search(
         logger.info("brave_search cache hit", {
             "uid": uid, "query_len": len(query), "source_count": len(cached.get("sources", [])),
         })
+        log_provider_request(
+            provider="brave",
+            operation="web_search",
+            feature=feature,
+            outcome="cache_hit",
+            billable=False,
+            result_count=len(cached.get("sources", [])),
+            cache_hit=True,
+        )
         return {**cached, "cached": True}
 
     params: dict[str, Any] = {"q": query, "count": _RESULT_COUNT, "extra_snippets": "true"}
@@ -173,12 +184,42 @@ async def brave_search(
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout_s) as client:
             response = await client.get(_BRAVE_SEARCH_URL, params=params, headers=headers)
-    except httpx.HTTPError as exc:
+    except httpx.TimeoutException as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
         logger.warn("brave_search request failed", {"uid": uid, "error": str(exc)})
+        log_provider_request(
+            provider="brave",
+            operation="web_search",
+            feature=feature,
+            outcome="timeout",
+            billable=False,
+            latency_ms=latency_ms,
+        )
+        return {"text": "", "sources": [], "query": query, "cached": False}
+    except httpx.HTTPError as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        logger.warn("brave_search request failed", {"uid": uid, "error": str(exc)})
+        log_provider_request(
+            provider="brave",
+            operation="web_search",
+            feature=feature,
+            outcome="network_error",
+            billable=False,
+            latency_ms=latency_ms,
+        )
         return {"text": "", "sources": [], "query": query, "cached": False}
 
     if response.status_code != 200:
         logger.warn("brave_search non-200", {"uid": uid, "status": response.status_code})
+        log_provider_request(
+            provider="brave",
+            operation="web_search",
+            feature=feature,
+            outcome="rate_limited" if response.status_code == 429 else "provider_error",
+            billable=False,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            status_code=response.status_code,
+        )
         return {"text": "", "sources": [], "query": query, "cached": False}
 
     text, sources, latest_published = _parse_brave_response(response.json())
@@ -200,4 +241,14 @@ async def brave_search(
         "latency_ms": latency_ms,
         "recency": recency,
     })
+    log_provider_request(
+        provider="brave",
+        operation="web_search",
+        feature=feature,
+        outcome="success",
+        billable=True,
+        latency_ms=latency_ms,
+        status_code=response.status_code,
+        result_count=len(sources),
+    )
     return result

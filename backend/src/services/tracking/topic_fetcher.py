@@ -348,7 +348,11 @@ async def _fetch_brave(query: str, locale: Locale) -> tuple[str, list[dict[str, 
 
     try:
         result = await brave_search(
-            query, uid="topic_tracking", recency="fresh", timeout_s=_BRAVE_TIMEOUT_S,
+            query,
+            uid="topic_tracking",
+            recency="fresh",
+            timeout_s=_BRAVE_TIMEOUT_S,
+            feature="topic_tracking",
         )
     except ValueError:
         # BRAVE_API_KEY unset — tier unavailable, fall through (not an error worth raising).

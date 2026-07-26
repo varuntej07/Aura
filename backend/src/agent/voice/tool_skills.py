@@ -95,22 +95,24 @@ VOICE_TOOL_SKILLS: dict[str, VoiceToolSkill] = {
         VoiceToolSkill(
             name="outbound_draft",
             instruction=(
-                "Use draft_outbound_message whenever the user wants you to write, "
-                "draft, frame, or compose text for something on their screen: an email "
-                "reply, a DM or message, a form or application field, a comment, a bio, "
-                "a post, a review, any place words go. You can see their screen, so read "
-                "it to work out what is being asked and where the text goes, and follow "
-                "their spoken instructions on tone, length, and content. Call it right "
-                "away with whatever they gave you; every argument is optional and "
+                "Use draft_outbound_message ONLY when the useful answer is a message "
+                "addressed to a person that they will SEND: an email reply, a DM or chat "
+                "message, a comment, a post, a review, or a bio. The test is the "
+                "destination, the words go TO someone. If the words instead go INTO "
+                "another tool, a terminal, a field they act on, or another AI (a prompt, "
+                "a command, code, config, a script), that is present_visible_artifact, "
+                "not this tool. The verb does not decide it: \"draft me a prompt\" or "
+                "\"draft me a command\" is a visible artifact, never an outbound message. "
+                "You can see their screen, so read it to work out what is being asked and "
+                "follow their spoken instructions on tone, length, and content. Call it "
+                "right away with whatever they gave you; every argument is optional and "
                 "inferred from the screen. Never ask a clarifying question whose answer "
                 "is on the screen: never ask whether it's an email or a new message, and "
                 "never ask how long it should be. The text is written to their screen as "
                 "a card, so never speak the draft itself, not even a preview: say one "
-                "short line confirming it's there and offer to tweak it. Use "
-                "present_visible_artifact instead for runnable commands, code, "
-                "configuration, and prompts for another agent. A draft or card is never a "
-                "substitute for a real action: if they ask you to create an event, a "
-                "reminder, or a tracker, call that action tool instead."
+                "short line confirming it's there and offer to tweak it. A draft or card "
+                "is never a substitute for a real action: if they ask you to create an "
+                "event, a reminder, or a tracker, call that action tool instead."
             ),
         ),
         VoiceToolSkill(

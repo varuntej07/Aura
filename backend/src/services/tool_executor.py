@@ -842,6 +842,17 @@ class ToolExecutor:
         # gate so a cached repeat is free even for a user who is already at the cap.
         cached = peek_cache(query, uid=self._user_id, recency=recency)
         if cached is not None:
+            from .observability import log_provider_request
+
+            log_provider_request(
+                provider="brave",
+                operation="web_search",
+                feature="web_surf",
+                outcome="cache_hit",
+                billable=False,
+                result_count=len(cached.get("sources", [])),
+                cache_hit=True,
+            )
             return cached
 
         # Cache miss: this will be a real network call, so enforce the hard daily cap here.

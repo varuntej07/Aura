@@ -20,7 +20,12 @@ from ..lib.logger import logger
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
 
-def exchange_server_auth_code(auth_code: str) -> dict[str, Any]:
+def exchange_server_auth_code(
+    auth_code: str,
+    *,
+    redirect_uri: str | None = None,
+    code_verifier: str | None = None,
+) -> dict[str, Any]:
     """Exchange a Google server auth code for tokens.
 
     The granted scopes are encoded in the auth code itself, so no scope
@@ -32,8 +37,10 @@ def exchange_server_auth_code(auth_code: str) -> dict[str, Any]:
         "client_secret": settings.GOOGLE_CLIENT_SECRET,
         "grant_type": "authorization_code",
     }
-    if settings.GOOGLE_REDIRECT_URI:
-        form_fields["redirect_uri"] = settings.GOOGLE_REDIRECT_URI
+    if redirect_uri:
+        form_fields["redirect_uri"] = redirect_uri
+    if code_verifier:
+        form_fields["code_verifier"] = code_verifier
     form = urllib.parse.urlencode(form_fields).encode("utf-8")
 
     request = urllib.request.Request(

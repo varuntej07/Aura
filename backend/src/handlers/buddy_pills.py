@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from google.cloud import firestore as fs
 
 from ..lib.logger import logger
 from ..services.daily_notification.suggestion_pills_agent import SuggestionPillsAgent
@@ -92,7 +93,7 @@ def _fetch_recent_queries(user_id: str) -> list[dict]:
         docs = (
             db.collection("users").document(user_id)
             .collection("queries")
-            .where("timestamp", ">=", cutoff_iso)
+            .where(filter=fs.FieldFilter("timestamp", ">=", cutoff_iso))
             .order_by("timestamp", direction="DESCENDING")
             .limit(10)
             .stream()

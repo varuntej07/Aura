@@ -38,6 +38,10 @@ GMAIL_SCOPES = [GMAIL_SEND_SCOPE]
 CONNECTOR_DOC_ID = "gmail"
 
 
+class GmailReauthorizationRequired(Exception):
+    """Stored Google credentials can no longer authorize Gmail access."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -170,6 +174,7 @@ class GmailConnector:
         self._integration_ref().set(payload, merge=True)
 
     def _gmail_client(self, refresh: bool = True) -> Any:
+        integration = self._load_integration()
         creds = self._credentials_from_integration()
         if creds is None:
             raise ValueError("Gmail is not connected.")
@@ -182,6 +187,7 @@ class GmailConnector:
                 access_token=creds.token,
                 refresh_token=creds.refresh_token,
                 expiry_at=creds.expiry,
+                enabled=bool(integration.get("enabled")),
             )
 
         return build("gmail", "v1", credentials=creds, cache_discovery=False)
@@ -192,13 +198,26 @@ class GmailConnector:
         integration = self._load_integration()
         return {
             "enabled": bool(integration.get("enabled")),
+            "can_reconnect": bool(
+                integration.get("refresh_token") or integration.get("access_token")
+            ),
             "email_address": integration.get("email_address"),
             "connected_at": integration.get("connected_at"),
             "last_error": integration.get("last_error"),
         }
 
-    def connect(self, auth_code: str) -> dict[str, Any]:
-        token_data = exchange_server_auth_code(auth_code)
+    def connect(
+        self,
+        auth_code: str,
+        *,
+        redirect_uri: str | None = None,
+        code_verifier: str | None = None,
+    ) -> dict[str, Any]:
+        token_data = exchange_server_auth_code(
+            auth_code,
+            redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+        )
         expires_in = int(token_data.get("expires_in", 3600) or 3600)
         expiry_at = _utc_now() + timedelta(seconds=expires_in)
 
@@ -226,6 +245,63 @@ class GmailConnector:
                 "error": str(exc),
             })
 
+        return self.get_status()
+
+    @staticmethod
+    def _requires_reauthorization(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "invalid_grant",
+                "token has been expired or revoked",
+                "token_revoked",
+                "reconnect required",
+                "not connected",
+            )
+        )
+
+    def enable(self) -> dict[str, Any]:
+        integration = self._load_integration()
+        if not integration.get("refresh_token") and not integration.get("access_token"):
+            raise GmailReauthorizationRequired("Gmail authorization is required.")
+
+        try:
+            self._gmail_client(refresh=True)
+        except Exception as exc:
+            if self._requires_reauthorization(exc):
+                self._integration_ref().set(
+                    {
+                        "enabled": False,
+                        "last_error": "Gmail authorization is required.",
+                        "updated_at": _to_iso(_utc_now()),
+                    },
+                    merge=True,
+                )
+                raise GmailReauthorizationRequired(
+                    "Gmail authorization is required."
+                ) from exc
+            raise
+
+        self._integration_ref().set(
+            {
+                "enabled": True,
+                "last_error": None,
+                "updated_at": _to_iso(_utc_now()),
+            },
+            merge=True,
+        )
+        return self.get_status()
+
+    def disable(self) -> dict[str, Any]:
+        self._integration_ref().set(
+            {
+                "enabled": False,
+                "last_error": None,
+                "updated_at": _to_iso(_utc_now()),
+            },
+            merge=True,
+        )
         return self.get_status()
 
     def disconnect(self) -> dict[str, Any]:

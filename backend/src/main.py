@@ -51,17 +51,21 @@ from .handlers.chat import handle_chat_stream
 from .handlers.connectors import (
     connect_gmail,
     connect_google_calendar,
+    disable_gmail,
+    disable_google_calendar,
     disconnect_gmail,
     disconnect_google_calendar,
+    enable_gmail,
+    enable_google_calendar,
     get_connectors,
     google_calendar_webhook,
     sync_google_calendar,
 )
-from .handlers.daily_notification import handle_send_nudge
-from .handlers.dashboard_link import (
-    handle_dashboard_link_claim,
-    handle_dashboard_link_start,
+from .handlers.connector_oauth import (
+    complete_connector_oauth,
+    start_connector_oauth,
 )
+from .handlers.daily_notification import handle_send_nudge
 from .handlers.desktop_dashboard import (
     handle_desktop_activity,
     handle_desktop_conversations,
@@ -76,6 +80,7 @@ from .handlers.desktop_notifications import (
     handle_update_preferences as handle_desktop_notification_preferences_update,
 )
 from .handlers.desktop_profile import handle_desktop_profile
+from .handlers.guide_usage import handle_guide_usage
 from .handlers.devices import register_device
 from .handlers.draft_outbound import handle_draft_outbound_refine
 from .handlers.drafts import (
@@ -96,6 +101,7 @@ from .handlers.history import (
 )
 from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
 from .handlers.mcp import register_mcp
+from .handlers.realtime import create_realtime_session
 from .handlers.meetings import (
     handle_claim as handle_meeting_claim,
 )
@@ -238,6 +244,7 @@ async def health() -> dict[str, bool]:
 # Launch surfaces the voice worker understands (voice_agent._KNOWN_SURFACES). Anything
 # else collapses to "app", the neutral default, so a bad query param never changes behavior.
 _VOICE_SURFACES = frozenset({"app", "keyboard", "desktop"})
+_VOICE_MODES = frozenset({"standard", "guide"})
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
@@ -259,13 +266,26 @@ async def voice_token(request: Request) -> JSONResponse:
     surface = request.query_params.get("surface", "app")
     if surface not in _VOICE_SURFACES:
         surface = "app"
+    mode = request.query_params.get("mode", "standard")
+    if mode not in _VOICE_MODES:
+        mode = "standard"
     conversation_id = request.query_params.get("conversation_id", "").strip()
     if conversation_id and not _CONVERSATION_ID_RE.fullmatch(conversation_id):
         raise HTTPException(status_code=400, detail="Invalid conversation_id")
 
-    participant_metadata = {"surface": surface}
+    participant_metadata = {
+        "surface": surface,
+        "mode": mode,
+        "voice_request_id": uuid.uuid4().hex,
+        "voice_requested_at_ms": int(time.time() * 1000),
+    }
     if conversation_id:
         participant_metadata["conversation_id"] = conversation_id
+    # Realtime bridge: the desktop opened an instant OpenAI Realtime leg and this session
+    # should HOLD for a handover instead of greeting. The worker also gates on its own
+    # REALTIME_BRIDGE_ENABLED flag, so this metadata alone can never strand it.
+    if request.query_params.get("bridged") == "1":
+        participant_metadata["bridged"] = True
     if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
         origin = request.query_params.get("origin", "").strip()
         origin_candidate_id = request.query_params.get("origin_candidate_id", "").strip()
@@ -290,6 +310,17 @@ async def voice_token(request: Request) -> JSONResponse:
         .to_jwt()
     )
     return JSONResponse({"token": token, "url": settings.LIVEKIT_URL, "room": room_name})
+
+
+@app.post("/realtime/session")
+async def realtime_session(request: Request) -> JSONResponse:
+    """Mint a short-lived OpenAI Realtime ephemeral secret for the desktop bridge leg.
+
+    The desktop opens an instant speech-to-speech Realtime session (client-direct over
+    WebRTC) while the LiveKit cascade worker cold-starts, then hands off. The real
+    OPENAI_API_KEY stays server-side; see handlers/realtime.py.
+    """
+    return await create_realtime_session(request)
 
 
 # REST endpoints
@@ -338,6 +369,11 @@ async def devices_profile_endpoint(request: Request) -> JSONResponse:
     return await handle_desktop_profile(request)
 
 
+@app.post("/devices/guide-usage")
+async def devices_guide_usage_endpoint(request: Request) -> JSONResponse:
+    return await handle_guide_usage(request)
+
+
 @app.get("/desktop/home/stats")
 async def desktop_home_stats_endpoint(request: Request) -> JSONResponse:
     return await handle_desktop_home_stats(request)
@@ -380,21 +416,6 @@ async def devices_pair_claim_endpoint(request: Request) -> JSONResponse:
 @app.post("/devices/unlink")
 async def devices_unlink_endpoint(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     return await handle_unlink_device(request, background_tasks)
-
-
-# Dashboard-link handshake: the signed-in desktop app requests a short-lived
-# token to open a signed-in web dashboard without a second login.
-@app.post("/devices/dashboard-link/start")
-async def devices_dashboard_link_start_endpoint(request: Request) -> JSONResponse:
-    return await handle_dashboard_link_start(request)
-
-
-# Dashboard-link handshake: the web dashboard exchanges the token for a Firebase
-# custom token. UNAUTHENTICATED by design (reviewed decision) -- the one-time
-# token IS the credential.
-@app.post("/devices/dashboard-link/claim")
-async def devices_dashboard_link_claim_endpoint(request: Request) -> JSONResponse:
-    return await handle_dashboard_link_claim(request)
 
 
 # Web sign-up handshake: desktop opens a browser to /auth?session=<code>;
@@ -743,6 +764,16 @@ async def connectors_endpoint(request: Request) -> JSONResponse:
     return await get_connectors(request)
 
 
+@app.post("/connectors/oauth/authorize")
+async def connectors_oauth_authorize_endpoint(request: Request) -> JSONResponse:
+    return await start_connector_oauth(request)
+
+
+@app.get("/connectors/oauth/google/callback")
+async def connectors_oauth_callback_endpoint(request: Request):
+    return await complete_connector_oauth(request)
+
+
 @app.post("/connectors/google-calendar/connect")
 async def connectors_google_calendar_connect_endpoint(request: Request) -> JSONResponse:
     return await connect_google_calendar(request)
@@ -751,6 +782,16 @@ async def connectors_google_calendar_connect_endpoint(request: Request) -> JSONR
 @app.post("/connectors/google-calendar/disconnect")
 async def connectors_google_calendar_disconnect_endpoint(request: Request) -> JSONResponse:
     return await disconnect_google_calendar(request)
+
+
+@app.post("/connectors/google-calendar/enable")
+async def connectors_google_calendar_enable_endpoint(request: Request) -> JSONResponse:
+    return await enable_google_calendar(request)
+
+
+@app.post("/connectors/google-calendar/disable")
+async def connectors_google_calendar_disable_endpoint(request: Request) -> JSONResponse:
+    return await disable_google_calendar(request)
 
 
 @app.post("/connectors/google-calendar/sync")
@@ -766,6 +807,16 @@ async def connectors_gmail_connect_endpoint(request: Request) -> JSONResponse:
 @app.post("/connectors/gmail/disconnect")
 async def connectors_gmail_disconnect_endpoint(request: Request) -> JSONResponse:
     return await disconnect_gmail(request)
+
+
+@app.post("/connectors/gmail/enable")
+async def connectors_gmail_enable_endpoint(request: Request) -> JSONResponse:
+    return await enable_gmail(request)
+
+
+@app.post("/connectors/gmail/disable")
+async def connectors_gmail_disable_endpoint(request: Request) -> JSONResponse:
+    return await disable_gmail(request)
 
 
 @app.post("/integrations/google-calendar/webhook", name="google_calendar_webhook")

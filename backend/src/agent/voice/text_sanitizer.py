@@ -28,6 +28,9 @@ _FENCE = re.compile(r"```[^\n`]*\n?")
 # Images before links so the alt text wins; both keep the label, drop the URL.
 _IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# Raw URLs are never useful speech. Keep this deterministic so TTS cannot spell
+# out a URL character by character when a model ignores the voice prompt.
+_URL = re.compile(r"https?://[^\s<>\]]+", re.IGNORECASE)
 # Bold/strong first, so the inner ** pairs are consumed before single-* italic runs.
 _BOLD_STAR = re.compile(r"\*\*([^\n]+?)\*\*")
 _BOLD_UNDER = re.compile(r"__([^\n]+?)__")
@@ -60,6 +63,7 @@ def sanitize_for_speech(text: str) -> str:
         s = s.replace("`", "")
         s = _IMAGE.sub(r"\1", s)
         s = _LINK.sub(r"\1", s)
+        s = _URL.sub("the link on screen", s)
         s = _BOLD_STAR.sub(r"\1", s)
         s = _BOLD_UNDER.sub(r"\1", s)
         s = _HEADER.sub("", s)

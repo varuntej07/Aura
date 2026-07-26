@@ -1,7 +1,7 @@
 """Screen frames streamed from the desktop client into a live voice session.
 
-The Windows desktop overlay lets the user ARM screen sight (Ctrl+Alt+S or the eye
-button); while armed, the client captures the display the cursor is on and sends one
+During a standard Windows desktop voice session, the client captures the display the
+cursor is on and sends one
 JPEG per user turn over a LiveKit byte stream (topic ``screen_frame``), timed to land
 while the user is still talking. This module assembles those streams, keeps ONLY the
 newest frame in process memory (never on disk, never in Firestore), and attaches it to
@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from livekit.agents import llm as lk_llm
@@ -102,6 +103,7 @@ class ScreenFrameStore:
         self._frame_landed = asyncio.Event()
         self._assembly_tasks: set[asyncio.Task] = set()
         self._frame_count = 0
+        self._frame_listener: Callable[[ScreenFrame], None] | None = None
 
     @property
     def has_ever_received_frame(self) -> bool:
@@ -113,6 +115,10 @@ class ScreenFrameStore:
         (for the desktop history screen's "screen-sight used Nx" line) — never the
         frame bytes themselves, which this store still only ever keeps one of."""
         return self._frame_count
+
+    def set_frame_listener(self, listener: Callable[[ScreenFrame], None]) -> None:
+        """Notify a live feature after a frame has assembled successfully."""
+        self._frame_listener = listener
 
     def handle_stream(self, reader, participant_identity: str) -> None:
         """Sync callback for ``room.register_byte_stream_handler``; assembles async."""
@@ -158,6 +164,15 @@ class ScreenFrameStore:
                 "frame_id": self._latest.frame_id,
                 "jpeg_px": f"{self._latest.width_px}x{self._latest.height_px}",
             })
+            if self._frame_listener is not None:
+                try:
+                    self._frame_listener(self._latest)
+                except Exception as exc:
+                    logger.warn("VoiceSession: screen frame listener failed", {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "error": str(exc),
+                    })
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -193,7 +208,7 @@ class ScreenFrameStore:
         return frame
 
 
-def _strip_stale_images(turn_ctx: lk_llm.ChatContext) -> int:
+def strip_stale_images(turn_ctx: lk_llm.ChatContext) -> int:
     """Collapse earlier turns' screenshots into text placeholders.
 
     ``turn_ctx`` is a shallow copy sharing message objects with the agent's real
@@ -244,7 +259,7 @@ async def attach_screen_frame_to_turn(
         if not store.has_ever_received_frame:
             return None
 
-        stripped = _strip_stale_images(turn_ctx)
+        stripped = strip_stale_images(turn_ctx)
 
         frame = await store.fresh_frame()
         if frame is None:

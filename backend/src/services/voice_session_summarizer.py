@@ -16,6 +16,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 
+from google.cloud import firestore as fs
 from pydantic import BaseModel, Field
 
 from ..config.settings import settings
@@ -139,7 +140,7 @@ async def _count_active_sessions(user_id: str) -> int:
             .collection("users").document(user_id)
             .collection("voice_sessions")
         )
-        result = coll.where("archived", "==", False).count().get()
+        result = coll.where(filter=fs.FieldFilter("archived", "==", False)).count().get()
         return result[0][0].value
     return await asyncio.to_thread(_count)
 
@@ -250,7 +251,7 @@ async def _fetch_oldest_active_summaries(
             .collection("voice_sessions")
         )
         query = (
-            coll.where("archived", "==", False)
+            coll.where(filter=fs.FieldFilter("archived", "==", False))
             .order_by("started_at")
             .limit(limit)
         )

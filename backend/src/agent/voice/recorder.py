@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from ast import literal_eval
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -116,6 +117,11 @@ class VoiceSessionRecorder:
         user_tier: str,
         tool_observer: object | None = None,
         screen_frames: "ScreenFrameStore | None" = None,
+        guide: object | None = None,
+        worker_started_monotonic: float | None = None,
+        voice_requested_at_ms: int | None = None,
+        voice_request_id: str = "",
+        surface: str = "unknown",
     ) -> None:
         self._session = session
         self._ctx = ctx
@@ -123,6 +129,16 @@ class VoiceSessionRecorder:
         self._user_id = user_id
         self._user_tier = user_tier
         self._tool_observer = tool_observer
+        # Guide Mode coordinator (None on non-desktop sessions). The recorder is
+        # the one place that already sees per-turn metrics + tool executions, so
+        # it forwards them; the coordinator keeps only what lands inside an armed
+        # Guide window.
+        self._guide = guide
+        self._worker_started_monotonic = worker_started_monotonic
+        self._voice_requested_at_ms = voice_requested_at_ms
+        self._voice_request_id = voice_request_id
+        self._surface = surface
+        self._first_talk_logged = False
         # ScreenFrameStore on desktop sessions (None elsewhere); lets the away
         # nudge pick the screen-aware instruction only when a fresh frame exists.
         self._screen_frames = screen_frames
@@ -202,6 +218,11 @@ class VoiceSessionRecorder:
             # between agent turns is not the user actually returning. Only a final
             # transcript (_on_user_transcript) proves they spoke and re-opens nudging.
             self._cancel_second_away_nudge()
+            return
+        # Guide Mode owns the conversation with terse, screen-driven steps; a chatty
+        # companion-persona away nudge would break that flow, so suppress it.
+        guide_is_active = getattr(self._guide, "is_active", None)
+        if callable(guide_is_active) and guide_is_active():
             return
         # Already checked in during this silence span. LiveKit re-emits "away"
         # after every agent turn while the user stays quiet, so without this latch
@@ -311,6 +332,9 @@ class VoiceSessionRecorder:
                 "text": ev.transcript,
                 "timestamp": timestamp.isoformat(),
             })
+            note_user_turn = getattr(self._guide, "note_user_turn", None)
+            if callable(note_user_turn):
+                note_user_turn(str(ev.transcript))
             if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
                 from ...services.session_followup.lifecycle import session_lifecycle_service
 
@@ -338,6 +362,17 @@ class VoiceSessionRecorder:
 
         role = getattr(item, "role", None)
 
+        if role == "assistant":
+            source = "normal_turn"
+            reply_source = getattr(self._guide, "current_reply_source", None)
+            if callable(reply_source):
+                source = reply_source()
+            logger.info("VoiceSession: reply completed", {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "source": source,
+            })
+
         # Per-turn component telemetry. LiveKit populates ChatMessage.metrics
         # before this event fires (user turns: endpointing + STT;
         # assistant turns: LLM TTFT, TTS TTFB, EOU->first-audio)
@@ -350,6 +385,31 @@ class VoiceSessionRecorder:
                 metrics=metrics,
                 tier=self._user_tier,
             )
+            note_metrics = getattr(self._guide, "note_turn_metrics", None)
+            if callable(note_metrics):
+                note_metrics(role, metrics)
+            if role == "assistant" and not self._first_talk_logged:
+                self._first_talk_logged = True
+                now_epoch_ms = int(time.time() * 1000)
+                worker_first_talk_ms = (
+                    int((time.monotonic() - self._worker_started_monotonic) * 1000)
+                    if self._worker_started_monotonic is not None
+                    else None
+                )
+                request_first_talk_ms = (
+                    max(0, now_epoch_ms - self._voice_requested_at_ms)
+                    if self._voice_requested_at_ms is not None
+                    else None
+                )
+                logger.info("VoiceSession: first talk metrics", {
+                    "session_id": self._session_id,
+                    "voice_request_id": self._voice_request_id,
+                    "surface": self._surface,
+                    "tier": self._user_tier,
+                    "worker_first_talk_ms": worker_first_talk_ms,
+                    "token_minted_to_first_talk_ms": request_first_talk_ms,
+                    "measurement_quality": "assistant_audio_metrics_observed",
+                })
 
         if role == "assistant":
             # text_content is the raw llm_node output, which still carries the
@@ -388,6 +448,9 @@ class VoiceSessionRecorder:
             name = getattr(fnc_call, "name", "") or ""
             if name:
                 self.tool_calls.append(name)
+                note_tool = getattr(self._guide, "note_tool", None)
+                if callable(note_tool):
+                    note_tool(name)
                 output = outputs[index] if index < len(outputs) else None
                 success = output is not None and tool_output_succeeded(output)
                 registration = VOICE_TOOL_REGISTRY.get(name)

@@ -54,9 +54,15 @@ from .voice.context_compaction import VoiceContextCompactor
 from .voice.draft_outbound import DraftOutboundSession, run_draft_tool
 from .voice.emotion_tags import convert_audio_cue_stream
 from .voice.greeting import resolve_opener
+from .voice.guide_prompt import GUIDE_SYSTEM_PROMPT
 from .voice.point_tag import PointTarget, filter_point_tags, publish_element_point
 from .voice.screen_frames import ScreenFrameStore, attach_screen_frame_to_turn
 from .voice.screen_saves import save_screen_item as _save_screen_item
+from .voice.spoken_action_guard import (
+    artifact_kind_for,
+    looks_copyable,
+    wants_copyable_artifact,
+)
 from .voice.text_sanitizer import sanitize_text_stream, strip_nonverbal_cue_stream
 from .voice.tool_filler import ToolFillerSpeaker
 from .voice.tool_skills import instructions_for_skill_names
@@ -98,6 +104,7 @@ class BuddyAgent(agents.Agent):
         display_name: str = "",
         launch_surface: str = "app",
         opener_task: "asyncio.Task[str] | None" = None,
+        bridged: bool = False,
     ) -> None:
         voice_surface = VoiceSurface(launch_surface)
         session_skill_names = [
@@ -116,8 +123,20 @@ class BuddyAgent(agents.Agent):
         self._screen_frames = screen_frames
         self._session_id = session_id
         self._launch_surface = voice_surface
+        # Realtime-bridge mode: the desktop already opened an instant OpenAI Realtime
+        # leg and is mid-conversation. This agent joins silently (no greeting) and waits
+        # for the bridge handover; the coordinator drives greet()/seed instead of on_enter.
+        self._bridged = bridged
         # Memory-seeded opener racing the static greeting (see voice/greeting.py).
         self._opener_task = opener_task
+        # Guide Mode is a clean state switch: while armed the whole system prompt is
+        # swapped to the small GUIDE_SYSTEM_PROMPT and tools to [] (apply_guide_persona),
+        # then restored on disarm. Stash the companion instructions now and the tool
+        # list lazily (tools resolve only once the agent is active).
+        self._guide_active = False
+        self._guide_name = context_vars.get("name") or "there"
+        self._companion_instructions = instructions
+        self._companion_tools: list | None = None
         # The frame injected into the current turn; element.point events carry
         # its id so the client maps coordinates against the right geometry.
         self._last_injected_frame_id = ""
@@ -145,7 +164,56 @@ class BuddyAgent(agents.Agent):
         self._context_compactor = VoiceContextCompactor(session_id=session_id)
         self._context_compaction_checks: set[asyncio.Task] = set()
 
+    def set_guide_frame(self, frame_id: str) -> None:
+        """Correlate a Guide Mode [POINT] tag with the frame being discussed."""
+        self._last_injected_frame_id = frame_id
+        self._fresh_frame_for_turn = True
+
+    async def apply_guide_persona(self, active: bool) -> None:
+        """Swap the whole agent to the guide skill (no tools) on arm, restore on disarm.
+
+        Fail-soft: a failed swap must never break the live session. LiveKit's
+        update_instructions/update_tools take effect for every subsequent generation,
+        so the guide prompt is active before the next turn even begins.
+        """
+        try:
+            if active:
+                if self._companion_tools is None:
+                    self._companion_tools = self.tools
+                await self.update_instructions(
+                    GUIDE_SYSTEM_PROMPT.format(name=self._guide_name)
+                )
+                await self.update_tools([])
+                self._guide_active = True
+                logger.info("VoiceSession: guide persona applied", {
+                    "session_id": self._session_id, "user_id": self._user_id,
+                })
+            else:
+                await self.update_instructions(self._companion_instructions)
+                await self.update_tools(self._companion_tools or [])
+                self._guide_active = False
+                logger.info("VoiceSession: guide persona restored", {
+                    "session_id": self._session_id, "user_id": self._user_id,
+                })
+        except Exception as exc:
+            logger.warn("VoiceSession: guide persona swap failed", {
+                "session_id": self._session_id, "user_id": self._user_id,
+                "active": active, "error": str(exc),
+            })
+
+    def is_guide_active(self) -> bool:
+        return self._guide_active
+
     async def on_enter(self) -> None:
+        # In bridge mode the desktop's Realtime leg is already talking; stay silent and
+        # let BridgeHandoverCoordinator drive greet() (on skip) or seed context (on
+        # handover). on_enter MUST return promptly here - blocking would stall
+        # session.start and deadlock the very hold_ready/handover it is waiting for.
+        if self._bridged:
+            return
+        await self.greet()
+
+    async def greet(self) -> None:
         # Prefer the memory-seeded opener when it resolves inside the budget;
         # otherwise the static list keeps the sub-1s hello. resolve_opener is
         # fail-open ("" on timeout/error), so the greeting can never hang.
@@ -170,7 +238,10 @@ class BuddyAgent(agents.Agent):
         if compacted_context is not None:
             turn_ctx.items[:] = compacted_context.items
         finalized_transcript = new_message.text_content
-        await self._append_live_graph_context(turn_ctx, finalized_transcript)
+        # Guide Mode answers only from the current screen; pulling memory here would
+        # invite the very restating/parroting Guide Mode must avoid, and costs latency.
+        if not self._guide_active:
+            await self._append_live_graph_context(turn_ctx, finalized_transcript)
         frame = None
         if self._screen_frames is not None:
             frame = await attach_screen_frame_to_turn(
@@ -530,7 +601,23 @@ class BuddyAgent(agents.Agent):
         )
         stream = self._speak_filler_on_tool_calls(raw_stream)
         first_output_logged = False
+        # Accumulated to run the spoken-artifact backstop after the turn: what the
+        # model actually spoke, and whether it carded the answer itself.
+        assistant_text_parts: list[str] = []
+        artifact_or_draft_emitted = False
         async for item in filter_point_tags(stream, on_point=_on_point):
+            delta = getattr(item, "delta", None)
+            content = getattr(delta, "content", None)
+            if content:
+                assistant_text_parts.append(content)
+            elif isinstance(item, str):
+                assistant_text_parts.append(item)
+            for call in getattr(delta, "tool_calls", None) or []:
+                if getattr(call, "name", "") in (
+                    "present_visible_artifact",
+                    "draft_outbound_message",
+                ):
+                    artifact_or_draft_emitted = True
             if not first_output_logged:
                 first_output_logged = True
                 now = time.monotonic()
@@ -551,12 +638,63 @@ class BuddyAgent(agents.Agent):
             self._action_telemetry.first_response()
             yield item
 
+        # Deterministic backstop: the user clearly asked for copyable text (a
+        # prompt/command/code) but the model narrated it without carding. The audio
+        # already played once, but guarantee a copyable card appears so they never
+        # have to ask again. Finalized desktop turns only; additive, never removes a
+        # tool from inference.
+        if (
+            finalized
+            and self._launch_surface is VoiceSurface.DESKTOP
+            and not artifact_or_draft_emitted
+            and wants_copyable_artifact(transcript or "")
+        ):
+            spoken = "".join(assistant_text_parts).strip()
+            if looks_copyable(spoken):
+                await self._backstop_visible_artifact(transcript or "", spoken)
+
     @staticmethod
     def _latest_user_message(chat_ctx: lk_llm.ChatContext) -> lk_llm.ChatMessage | None:
         for item in reversed(chat_ctx.items):
             if isinstance(item, lk_llm.ChatMessage) and item.role == "user":
                 return item
         return None
+
+    async def _backstop_visible_artifact(self, transcript: str, spoken: str) -> None:
+        """Card copyable content the model spoke without calling the artifact tool.
+
+        Additive and fail-soft: the audio already played this once, but the user
+        still gets a copyable card instead of having to ask again. Never raises
+        into the turn pipeline.
+        """
+        kind, title = artifact_kind_for(transcript)
+        try:
+            await _present_visible_artifact(
+                user_id=self._user_id,
+                session_id=self._session_id,
+                kind=kind,
+                title=title,
+                content=spoken,
+                language="",
+            )
+            logger.info(
+                "VoiceSession: spoken-artifact backstop carded a copyable answer",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "kind": kind,
+                    "chars": len(spoken),
+                },
+            )
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: spoken-artifact backstop failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "error": str(exc),
+                },
+            )
 
     async def _apply_execution_safety(self, chunks, *, policy, chat_ctx):
         """Gate complete model-emitted calls before LiveKit's concurrent executor."""

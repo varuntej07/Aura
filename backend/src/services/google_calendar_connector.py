@@ -30,6 +30,10 @@ CONNECTOR_DOC_ID = "google_calendar"
 SOURCE_DOC_ID = "primary"
 
 
+class GoogleCalendarReauthorizationRequired(Exception):
+    """Stored Google credentials can no longer authorize Calendar access."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -139,6 +143,7 @@ class GoogleCalendarConnector:
         auth_code: str,
         *,
         redirect_uri: str | None = None,
+        code_verifier: str | None = None,
     ) -> dict[str, Any]:
         form_fields: dict[str, str] = {
             "code": auth_code,
@@ -146,9 +151,10 @@ class GoogleCalendarConnector:
             "client_secret": settings.GOOGLE_CLIENT_SECRET,
             "grant_type": "authorization_code",
         }
-        resolved_redirect_uri = redirect_uri or settings.GOOGLE_REDIRECT_URI
-        if resolved_redirect_uri:
-            form_fields["redirect_uri"] = resolved_redirect_uri
+        if redirect_uri:
+            form_fields["redirect_uri"] = redirect_uri
+        if code_verifier:
+            form_fields["code_verifier"] = code_verifier
         form = urllib.parse.urlencode(form_fields).encode("utf-8")
 
         request = urllib.request.Request(
@@ -228,6 +234,7 @@ class GoogleCalendarConnector:
         self._integration_ref().set(payload, merge=True)
 
     def _calendar_client(self, refresh: bool = True) -> Any:
+        integration = self._load_integration()
         creds = self._credentials_from_integration()
         if creds is None:
             raise ValueError("Google Calendar is not connected.")
@@ -240,6 +247,7 @@ class GoogleCalendarConnector:
                 access_token=creds.token,
                 refresh_token=creds.refresh_token,
                 expiry_at=creds.expiry,
+                enabled=bool(integration.get("enabled")),
             )
 
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
@@ -263,6 +271,9 @@ class GoogleCalendarConnector:
 
         return {
             "enabled": enabled,
+            "can_reconnect": bool(
+                integration.get("refresh_token") or integration.get("access_token")
+            ),
             "watch_active": watch_active,
             "automatic_sync_available": automatic_sync_available,
             "webhook_url_configured": bool(settings.GOOGLE_CALENDAR_WEBHOOK_URL),
@@ -283,8 +294,13 @@ class GoogleCalendarConnector:
         *,
         watch_url: str | None,
         redirect_uri: str | None = None,
+        code_verifier: str | None = None,
     ) -> dict[str, Any]:
-        token_data = self._exchange_server_auth_code(auth_code, redirect_uri=redirect_uri)
+        token_data = self._exchange_server_auth_code(
+            auth_code,
+            redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+        )
         expires_in = int(token_data.get("expires_in", 3600) or 3600)
         expiry_at = _utc_now() + timedelta(seconds=expires_in)
 
@@ -313,6 +329,108 @@ class GoogleCalendarConnector:
 
         return self.get_status()
 
+    @staticmethod
+    def _requires_reauthorization(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "invalid_grant",
+                "token has been expired or revoked",
+                "token_revoked",
+                "reconnect required",
+                "not connected",
+            )
+        )
+
+    def enable(self, *, watch_url: str | None) -> dict[str, Any]:
+        integration = self._load_integration()
+        if not integration.get("refresh_token") and not integration.get("access_token"):
+            raise GoogleCalendarReauthorizationRequired(
+                "Google Calendar authorization is required."
+            )
+
+        try:
+            self._sync_calendar(reason="manual_reenable", force_full_sync=True)
+        except Exception as exc:
+            if self._requires_reauthorization(exc):
+                self._integration_ref().set(
+                    {
+                        "enabled": False,
+                        "last_error": "Google Calendar authorization is required.",
+                        "updated_at": _to_iso(_utc_now()),
+                    },
+                    merge=True,
+                )
+                raise GoogleCalendarReauthorizationRequired(
+                    "Google Calendar authorization is required."
+                ) from exc
+            raise
+
+        if watch_url:
+            try:
+                self._ensure_watch_channel(watch_url=watch_url)
+            except Exception as exc:
+                self._source_ref().set(
+                    {
+                        "last_error": f"Webhook watch setup failed: {exc}",
+                        "watch_requested_url": watch_url,
+                        "updated_at": _to_iso(_utc_now()),
+                    },
+                    merge=True,
+                )
+                logger.warn(
+                    "Google Calendar watch setup failed during re-enable",
+                    {"user_id": self._user_id, "error": str(exc)},
+                )
+
+        self._integration_ref().set(
+            {
+                "enabled": True,
+                "last_error": None,
+                "updated_at": _to_iso(_utc_now()),
+            },
+            merge=True,
+        )
+        return self.get_status()
+
+    def disable(self) -> dict[str, Any]:
+        source = self._load_source()
+        channel_id = source.get("channel_id")
+        resource_id = source.get("channel_resource_id")
+
+        if channel_id and resource_id:
+            try:
+                self._stop_watch_channel(
+                    channel_id=str(channel_id),
+                    resource_id=str(resource_id),
+                )
+            except Exception as exc:
+                logger.warn(
+                    "Failed to stop Google Calendar channel during disable",
+                    {
+                        "user_id": self._user_id,
+                        "channel_id": channel_id,
+                        "error": str(exc),
+                    },
+                )
+
+        if channel_id:
+            self._channel_ref(str(channel_id)).delete()
+
+        self._job_ref().delete()
+        self._purge_calendar_cache()
+        self._source_ref().delete()
+        self._integration_ref().set(
+            {
+                "enabled": False,
+                "last_error": None,
+                "updated_at": _to_iso(_utc_now()),
+            },
+            merge=True,
+        )
+        return self.get_status()
+
     def disconnect(self) -> dict[str, Any]:
         source = self._load_source()
         channel_id = source.get("channel_id")
@@ -338,6 +456,8 @@ class GoogleCalendarConnector:
         return self.get_status()
 
     def sync_now(self) -> dict[str, Any]:
+        if not self._load_integration().get("enabled"):
+            raise ValueError("Google Calendar is disabled.")
         self._sync_calendar(reason="manual_resync")
         return self.get_status()
 
@@ -725,8 +845,8 @@ class GoogleCalendarConnector:
 
         snapshot = (
             self._events_ref()
-            .where("start_at_ts", ">=", range_start)
-            .where("start_at_ts", "<", range_end)
+            .where(filter=fs.FieldFilter("start_at_ts", ">=", range_start))
+            .where(filter=fs.FieldFilter("start_at_ts", "<", range_end))
             .order_by("start_at_ts")
             .limit(max(limit, 1) * 4)
             .stream()
@@ -784,7 +904,7 @@ class GoogleCalendarConnector:
         db = admin_firestore()
         jobs = (
             db.collection(SYNC_JOBS_COLLECTION)
-            .where("status", "==", "pending")
+            .where(filter=fs.FieldFilter("status", "==", "pending"))
             .limit(limit)
             .stream()
         )
@@ -826,7 +946,7 @@ class GoogleCalendarConnector:
         threshold = _utc_now() + timedelta(seconds=settings.GOOGLE_CALENDAR_CHANNEL_RENEWAL_LEAD_SECONDS)
         channels = (
             db.collection(CHANNELS_COLLECTION)
-            .where("expires_at", "<=", _to_iso(threshold))
+            .where(filter=fs.FieldFilter("expires_at", "<=", _to_iso(threshold)))
             .limit(limit)
             .stream()
         )

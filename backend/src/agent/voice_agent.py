@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
 from livekit.agents import llm as lk_llm
 from livekit.agents.voice import room_io
-from livekit.plugins import silero
+from livekit.agents import inference
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -40,9 +40,11 @@ from ..services.entitlement import add_free_voice_seconds
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
 from .voice.auth import mint_firebase_id_token
+from .voice.bridge_handover import BRIDGE_CONTROL_TYPES, BridgeHandoverCoordinator
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
 from .voice.greeting import start_opener_task
+from .voice.guide_mode import GUIDE_MODE_TYPE, GuideCoordinator
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -72,6 +74,7 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 # Launch surfaces the client stamps into its participant metadata at /voice/token.
 # Anything else (or a missing value) collapses to "app", the neutral default.
 _KNOWN_SURFACES = frozenset({"app", "keyboard", "desktop"})
+_KNOWN_VOICE_MODES = frozenset({"standard", "guide"})
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
@@ -92,6 +95,50 @@ def _resolve_participant_metadata(ctx: JobContext) -> tuple[str | None, str]:
     except Exception:
         pass
     return None, ""
+
+
+def _resolve_voice_mode(ctx: JobContext) -> str:
+    """Read the bounded voice-session mode stamped by the token endpoint."""
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            mode = json.loads(raw).get("mode")
+            return mode if mode in _KNOWN_VOICE_MODES else "standard"
+    except Exception:
+        pass
+    return "standard"
+
+
+def _resolve_bridged(ctx: JobContext) -> bool:
+    """True when the desktop stamped ``bridged`` into its token metadata, meaning it
+    opened a Realtime leg and this worker should HOLD for a handover instead of greeting."""
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            return json.loads(raw).get("bridged") is True
+    except Exception:
+        pass
+    return False
+
+
+def _resolve_voice_request_timing(ctx: JobContext) -> tuple[str, int | None]:
+    """Return the request correlation id and backend request timestamp."""
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            request_id = str(data.get("voice_request_id") or "")[:64]
+            requested_at = data.get("voice_requested_at_ms")
+            return request_id, requested_at if isinstance(requested_at, int) else None
+    except Exception:
+        pass
+    return "", None
 
 
 def _resolve_surface(ctx: JobContext) -> str:
@@ -133,7 +180,9 @@ def _resolve_followup_metadata(ctx: JobContext) -> tuple[str, str | None, list[s
 
 def prewarm(process: JobProcess) -> None:
     logger.info("VoiceWorker: prewarming VAD model")
-    process.userdata["vad"] = silero.VAD.load()
+    # Bundled local silero VAD (livekit-local-inference); replaces the deprecated
+    # livekit-plugins-silero. Loaded here so the model isn't cold on the first job.
+    process.userdata["vad"] = inference.VAD(model="silero")
     # The semantic end-of-turn model can't be prewarmed: LiveKit loads and
     # initializes it inside AgentSession on first use (it needs the job's
     # inference executor, which only exists in the entrypoint). Only its
@@ -193,6 +242,7 @@ def _build_sonic3_controls(
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    worker_started_mono = time.monotonic()
     logger.info("VoiceAgent: job dispatched", {"room": ctx.room.name})
     candidate_user_id = ctx.room.name.removeprefix("voice-")
 
@@ -242,7 +292,21 @@ async def entrypoint(ctx: JobContext) -> None:
         # built once per session in BuddyAgent), so a keyboard tap stays short and
         # task-focused for the whole session, not just the first turn.
         persisted_surface, conversation_id = _resolve_participant_metadata(ctx)
+        voice_request_id, voice_requested_at_ms = _resolve_voice_request_timing(ctx)
         surface = persisted_surface or "app"
+        voice_mode = _resolve_voice_mode(ctx)
+        # Realtime-bridge session: the API only stamps signed `bridged` participant
+        # metadata after it has admitted the Realtime leg. Treat that metadata as the
+        # single handover authority so the separately deployed API and LiveKit worker
+        # cannot disagree because one runtime missed an environment update.
+        bridged = _resolve_bridged(ctx)
+        logger.info(
+            "bridge: mode resolved",
+            {
+                "session_id": session_id,
+                "bridged": bridged,
+            },
+        )
         context_vars["surface"] = render_surface_note(surface)
         context_vars["screen_sight"] = render_screen_sight_note(surface)
         if persisted_surface is None:
@@ -256,6 +320,10 @@ async def entrypoint(ctx: JobContext) -> None:
         if surface != "app":
             logger.info("VoiceSession: launch surface", {
                 "session_id": session_id, "user_id": user_id, "surface": surface,
+            })
+        if voice_mode == "guide":
+            logger.info("VoiceSession: Guide Mode launch", {
+                "session_id": session_id, "user_id": user_id,
             })
 
         # memory_summary is already injected once via the {memory_summary} slot in
@@ -349,7 +417,29 @@ async def entrypoint(ctx: JobContext) -> None:
             display_name=draft_display_name,
             launch_surface=surface,
             opener_task=opener_task,
+            bridged=bridged,
         )
+
+        bridge = (
+            BridgeHandoverCoordinator(
+                session=session,
+                buddy=buddy,
+                room=ctx.room,
+                session_id=session_id,
+                user_id=user_id,
+            )
+            if bridged
+            else None
+        )
+
+        guide = GuideCoordinator(
+            session=session,
+            buddy=buddy,
+            room=ctx.room,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        screen_frames.set_frame_listener(guide.submit_frame)
 
         recorder = VoiceSessionRecorder(
             session=session,
@@ -359,6 +449,11 @@ async def entrypoint(ctx: JobContext) -> None:
             user_tier=session_context.user_tier,
             tool_observer=buddy,
             screen_frames=screen_frames,
+            guide=guide,
+            worker_started_monotonic=worker_started_mono,
+            voice_requested_at_ms=voice_requested_at_ms,
+            voice_request_id=voice_request_id,
+            surface=surface,
         )
         recorder.attach()
 
@@ -376,13 +471,19 @@ async def entrypoint(ctx: JobContext) -> None:
         # session is live. screen_context fires once per session.
         screen_context_fired = False
         session_live = False
-        pending_context_payloads: list[dict] = []
+        pending_context_payloads: list[tuple[dict, str]] = []
         context_tasks: list[asyncio.Task] = []
 
-        def _dispatch_context_payload(msg: dict) -> None:
+        def _dispatch_context_payload(msg: dict, participant_identity: str) -> None:
             nonlocal screen_context_fired
             msg_type = msg.get("type")
-            if msg_type == SCREEN_CONTEXT_TYPE:
+            if msg_type in BRIDGE_CONTROL_TYPES:
+                if bridge is not None:
+                    bridge.handle(msg)
+                return
+            if msg_type == GUIDE_MODE_TYPE:
+                guide.apply_control(msg, participant_identity)
+            elif msg_type == SCREEN_CONTEXT_TYPE:
                 if screen_context_fired:
                     return
                 screen_context_fired = True
@@ -430,10 +531,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 return  # not our JSON; ignore (other features may share the channel)
             if not isinstance(msg, dict) or "type" not in msg:
                 return
+            participant = getattr(packet, "participant", None)
+            participant_identity = str(getattr(participant, "identity", "") or "")
             if session_live:
-                _dispatch_context_payload(msg)
+                _dispatch_context_payload(msg, participant_identity)
             else:
-                pending_context_payloads.append(msg)
+                pending_context_payloads.append((msg, participant_identity))
 
         ctx.room.on("data_received", _on_data_received)
 
@@ -456,8 +559,13 @@ async def entrypoint(ctx: JobContext) -> None:
             # The session is live: process any context packet that arrived during startup,
             # then let the handler dispatch live ones directly.
             session_live = True
-            for _payload in pending_context_payloads:
-                _dispatch_context_payload(_payload)
+            guide.start()
+            # Announce HOLD before flushing buffered packets so hold_ready reaches the
+            # desktop ahead of any handover reply and no early control packet is lost.
+            if bridge is not None:
+                await bridge.start()
+            for _payload, _participant_identity in pending_context_payloads:
+                _dispatch_context_payload(_payload, _participant_identity)
             pending_context_payloads.clear()
 
             # Free tier only: warn ~60s before the daily voice budget runs out,
@@ -490,6 +598,9 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
 
             await recorder.done.wait()
+
+            if bridge is not None:
+                await bridge.aclose()
 
             session_end_iso = datetime.now(UTC).isoformat()
             elapsed_ms = int((time.monotonic() - session_start_mono) * 1000)
@@ -538,6 +649,7 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             raise
         finally:
+            await guide.close()
             if voice_limit_task is not None:
                 voice_limit_task.cancel()
             for task in context_tasks:

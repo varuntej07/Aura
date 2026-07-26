@@ -65,14 +65,14 @@ from .tool_filler import (
 _CTX_UPDATE_TIMEOUT_S = 5.0
 
 # What the model speaks when a call can't produce a draft. Each line is a
-# complete, natural sentence the TTS reads verbatim, mirroring the voice
-# prompt's own phrasing (the control-alt-S line matches the screen-sight note).
+# complete, natural sentence the TTS reads verbatim.
 # There is deliberately NO ask-channel or ask-length line: Buddy can see the
 # screen, so the drafter infers both instead of interrogating the user (the
 # old email-vs-DM question had no answer for a form field and looped forever).
+# No hotkey/eye-icon instruction here: a desktop call auto-captures the screen
+# every turn, so the fix is simply to ask again, not to toggle a removed control.
 SPOKEN_NO_FRAME = (
-    "I can't see your screen yet. Hit control alt S, or tap the eye on my "
-    "panel, then ask me again."
+    "I didn't catch your screen that time. Ask me again and I'll take a look."
 )
 SPOKEN_QUOTA = (
     "That's the last of today's free drafts, they reset tomorrow. Want me to "
@@ -162,10 +162,13 @@ async def run_draft_tool(
             # DraftState/store/refine contract satisfied and is ignored by the
             # snippet prompt.
             length = "short"
-        elif channel != DEFAULT_CHANNEL and length not in LENGTHS:
-            # email_reply / cold_dm still want a ladder length. Default rather
-            # than ask, so a missing length never bounces the draft. on_screen
-            # is skipped here: it infers its own length from the field/context.
+        elif length not in LENGTHS:
+            # email_reply / cold_dm want a ladder length. on_screen infers its
+            # real length from the field/context, but it STILL needs a wire-valid
+            # enum: draft.created ships this value and the desktop drops any draft
+            # whose length is not short/medium/detailed (an empty on_screen length
+            # was parsed as malformed and left the card stuck on its skeleton).
+            # Default rather than ask, so a missing length never bounces the draft.
             length = "medium"
 
         return await _draft_new(

@@ -12,8 +12,11 @@ from pydantic import BaseModel, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..services.gmail_connector import GmailConnector
-from ..services.google_calendar_connector import GoogleCalendarConnector
+from ..services.gmail_connector import GmailConnector, GmailReauthorizationRequired
+from ..services.google_calendar_connector import (
+    GoogleCalendarConnector,
+    GoogleCalendarReauthorizationRequired,
+)
 from ..services.request_auth import resolve_user_id_from_request
 
 
@@ -24,6 +27,7 @@ class GoogleCalendarConnectBody(BaseModel):
 
 class GmailConnectBody(BaseModel):
     server_auth_code: str
+    redirect_uri: str | None = None
 
 
 def _unauthorized() -> JSONResponse:
@@ -133,6 +137,51 @@ async def disconnect_google_calendar(request: Request) -> JSONResponse:
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
+async def enable_google_calendar(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    watch_url = _resolve_watch_url(request)
+
+    def _enable() -> dict:
+        return GoogleCalendarConnector(user_id).enable(watch_url=watch_url)
+
+    try:
+        status = await asyncio.to_thread(_enable)
+        return JSONResponse(status_code=200, content=status)
+    except GoogleCalendarReauthorizationRequired:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "reauthorization_required"},
+        )
+    except Exception as exc:
+        logger.exception(
+            "Google Calendar enable failed",
+            {"user_id": user_id, "error": str(exc)},
+        )
+        return JSONResponse(status_code=500, content={"error": "enable_failed"})
+
+
+async def disable_google_calendar(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    def _disable() -> dict:
+        return GoogleCalendarConnector(user_id).disable()
+
+    try:
+        status = await asyncio.to_thread(_disable)
+        return JSONResponse(status_code=200, content=status)
+    except Exception as exc:
+        logger.exception(
+            "Google Calendar disable failed",
+            {"user_id": user_id, "error": str(exc)},
+        )
+        return JSONResponse(status_code=500, content={"error": "disable_failed"})
+
+
 async def sync_google_calendar(request: Request) -> JSONResponse:
     user_id = resolve_user_id_from_request(request)
     if not user_id:
@@ -162,8 +211,16 @@ async def connect_gmail(request: Request) -> JSONResponse:
     except (ValidationError, ValueError):
         return JSONResponse(status_code=400, content={"error": "server_auth_code is required."})
 
+    redirect_uri = body.redirect_uri.rstrip("/") if body.redirect_uri else None
+    validation_error = _validate_web_oauth_request(request, redirect_uri)
+    if validation_error:
+        return JSONResponse(status_code=400, content={"error": validation_error})
+
     def _connect() -> dict:
-        return GmailConnector(user_id).connect(body.server_auth_code)
+        return GmailConnector(user_id).connect(
+            body.server_auth_code,
+            redirect_uri=redirect_uri,
+        )
 
     try:
         status = await asyncio.to_thread(_connect)
@@ -193,6 +250,43 @@ async def disconnect_gmail(request: Request) -> JSONResponse:
             "error": str(exc),
         })
         return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+async def enable_gmail(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    try:
+        status = await asyncio.to_thread(GmailConnector(user_id).enable)
+        return JSONResponse(status_code=200, content=status)
+    except GmailReauthorizationRequired:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "reauthorization_required"},
+        )
+    except Exception as exc:
+        logger.exception("Gmail enable failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse(status_code=500, content={"error": "enable_failed"})
+
+
+async def disable_gmail(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    try:
+        status = await asyncio.to_thread(GmailConnector(user_id).disable)
+        return JSONResponse(status_code=200, content=status)
+    except Exception as exc:
+        logger.exception("Gmail disable failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse(status_code=500, content={"error": "disable_failed"})
 
 
 async def google_calendar_webhook(request: Request) -> JSONResponse:

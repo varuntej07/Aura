@@ -31,6 +31,7 @@ they only ever flow through the personal lane, never the breaking lane.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -39,6 +40,7 @@ import httpx
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from ...services.observability import log_provider_request
 
 _BRAVE_NEWS_URL = "https://api.search.brave.com/res/v1/news/search"
 
@@ -162,13 +164,52 @@ async def fetch_brave_news(
             "freshness": _FRESHNESS,
             "spellcheck": 0,
         }
+        started = time.monotonic()
         async with semaphore:
             try:
                 resp = await client.get(_BRAVE_NEWS_URL, params=params, headers=headers)
                 resp.raise_for_status()
                 payload = resp.json() if resp.content else {}
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                log_provider_request(
+                    provider="brave",
+                    operation="news_search",
+                    feature="signal_ingest",
+                    outcome="rate_limited" if status == 429 else "provider_error",
+                    billable=False,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    status_code=status,
+                )
+                logger.warn("brave_news: query failed", {
+                    "category": spec.category,
+                    "status": status,
+                })
+                return []
+            except httpx.TimeoutException:
+                log_provider_request(
+                    provider="brave",
+                    operation="news_search",
+                    feature="signal_ingest",
+                    outcome="timeout",
+                    billable=False,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                )
+                logger.warn("brave_news: query timed out", {"category": spec.category})
+                return []
             except Exception as exc:
-                logger.warn("brave_news: query failed", {"query": spec.query, "error": str(exc)})
+                log_provider_request(
+                    provider="brave",
+                    operation="news_search",
+                    feature="signal_ingest",
+                    outcome="network_error",
+                    billable=False,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                )
+                logger.warn("brave_news: query failed", {
+                    "category": spec.category,
+                    "error_type": type(exc).__name__,
+                })
                 return []
 
         results = payload.get("results") if isinstance(payload, dict) else None
@@ -195,6 +236,16 @@ async def fetch_brave_news(
                 "image_url": str((thumbnail or {}).get("src") or "").strip(),
                 "published_at": _parse_page_age(entry.get("page_age")),
             })
+        log_provider_request(
+            provider="brave",
+            operation="news_search",
+            feature="signal_ingest",
+            outcome="success",
+            billable=True,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            status_code=resp.status_code,
+            result_count=len(out),
+        )
         return out
 
     try:

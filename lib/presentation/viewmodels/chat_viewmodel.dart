@@ -61,8 +61,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   // Live streaming output, published per token WITHOUT notifyListeners so only
   // the streaming bubble repaints (the finalized message list and the rest of
   // the screen stay put). See [StreamingSnapshot].
-  final ValueNotifier<StreamingSnapshot> _streamingOutput =
-      ValueNotifier(StreamingSnapshot.empty);
+  final ValueNotifier<StreamingSnapshot> _streamingOutput = ValueNotifier(
+    StreamingSnapshot.empty,
+  );
   String? _currentSessionId;
   String? _currentUserId;
   bool _sessionTitleSet = false;
@@ -90,13 +91,13 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     required FeedbackService feedbackService,
     required ChatSessionManager chatSessionManager,
     required PostHogAnalyticsService postHogAnalyticsService,
-  })  : _backendService = backendService,
-        _connectivityService = connectivityService,
-        _chatRepository = chatRepository,
-        _chatBackupService = chatBackupService,
-        _feedbackService = feedbackService,
-        _sessionManager = chatSessionManager,
-        postHogAnalytics = postHogAnalyticsService {
+  }) : _backendService = backendService,
+       _connectivityService = connectivityService,
+       _chatRepository = chatRepository,
+       _chatBackupService = chatBackupService,
+       _feedbackService = feedbackService,
+       _sessionManager = chatSessionManager,
+       postHogAnalytics = postHogAnalyticsService {
     _connectivitySub = _connectivityService.statusStream.listen((status) {
       _isOffline = status == ConnectivityStatus.disconnected;
       safeNotifyListeners();
@@ -139,7 +140,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   /// Exposed to subclasses for session bootstrapping.
   ChatRepository get chatRepository => _chatRepository;
 
-  // Init 
+  // Init
 
   /// Called by the screen once the userId is known. Subclasses control which
   /// session gets loaded via [initializeSession].
@@ -148,7 +149,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
     await _loadSessions();
     if (agentId == null) {
-      // Main chat: restore cloud history + repair unsynced rows 
+      // Main chat: restore cloud history + repair unsynced rows
       // (guarded so it runs once per uid; safe to re-run when auth resolves later).
       await ensureRestoredForUser(userId);
     }
@@ -218,7 +219,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       );
       _sessionTitleSet = false;
     } catch (e) {
-      AppLogger.error('Failed to start new chat', error: e, tag: 'ChatViewModel');
+      AppLogger.error(
+        'Failed to start new chat',
+        error: e,
+        tag: 'ChatViewModel',
+      );
     }
     _setState(ViewState.idle);
     await _refreshSessions();
@@ -263,10 +268,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     // step. Fire once, then disarm so later replies don't double-count.
     final pendingReply = _pendingReply;
     if (pendingReply != null) {
-      unawaited(postHogAnalytics.trackEvent(
-        pendingReply.event,
-        properties: pendingReply.properties,
-      ));
+      unawaited(
+        postHogAnalytics.trackEvent(
+          pendingReply.event,
+          properties: pendingReply.properties,
+        ),
+      );
       _pendingReply = null;
     }
 
@@ -277,14 +284,18 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
     if (!_sessionTitleSet && _currentSessionId != null) {
       _sessionTitleSet = true;
-      // First message of this session means a new conversation just began. 
+      // First message of this session means a new conversation just began.
       // This branch only runs while no title is set yet, so it fires once per session.
-      unawaited(postHogAnalytics.trackEvent(
-        'chat_session_started',
-        properties: {'agent_id': agentId ?? 'general'},
-      ));
+      unawaited(
+        postHogAnalytics.trackEvent(
+          'chat_session_started',
+          properties: {'agent_id': agentId ?? 'general'},
+        ),
+      );
 
-      final title = trimmed.length > 60 ? '${trimmed.substring(0, 57)}...' : trimmed;
+      final title = trimmed.length > 60
+          ? '${trimmed.substring(0, 57)}...'
+          : trimmed;
       unawaited(_persistSessionTitle(_currentSessionId!, title));
     }
 
@@ -367,13 +378,15 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     await _chatRepository.updateFeedback(messageId, feedback);
 
     if (_currentUserId != null && _currentSessionId != null) {
-      unawaited(_feedbackService.saveFeedback(
-        userId: _currentUserId!,
-        messageId: messageId,
-        sessionId: _currentSessionId!,
-        feedback: feedback,
-        messageContent: _messages[idx].text,
-      ));
+      unawaited(
+        _feedbackService.saveFeedback(
+          userId: _currentUserId!,
+          messageId: messageId,
+          sessionId: _currentSessionId!,
+          feedback: feedback,
+          messageContent: _messages[idx].text,
+        ),
+      );
     }
   }
 
@@ -426,26 +439,30 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       for (final m in priorMessages) {
         final content = (m['content'] as String?)?.trim() ?? '';
         if (content.isEmpty) continue;
-        await _persistMessage(ChatMessageModel(
-          id: _uuid.v4(),
-          text: content,
-          isUser: (m['role'] as String?) == 'user',
-          timestamp: DateTime.now(),
-          channel: ChatMessageChannel.text,
-          sessionId: _currentSessionId,
-        ));
+        await _persistMessage(
+          ChatMessageModel(
+            id: _uuid.v4(),
+            text: content,
+            isUser: (m['role'] as String?) == 'user',
+            timestamp: DateTime.now(),
+            channel: ChatMessageChannel.text,
+            sessionId: _currentSessionId,
+          ),
+        );
       }
       _threadSuggestions = const [];
     } else {
       if (question.isNotEmpty) {
-        await _persistMessage(ChatMessageModel(
-          id: _uuid.v4(),
-          text: question,
-          isUser: false,
-          timestamp: DateTime.now(),
-          channel: ChatMessageChannel.text,
-          sessionId: _currentSessionId,
-        ));
+        await _persistMessage(
+          ChatMessageModel(
+            id: _uuid.v4(),
+            text: question,
+            isUser: false,
+            timestamp: DateTime.now(),
+            channel: ChatMessageChannel.text,
+            sessionId: _currentSessionId,
+          ),
+        );
       }
       _threadSuggestions = List.unmodifiable(suggestedReplies);
     }
@@ -517,7 +534,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   }) async {
     _messages.clear();
     _error = null;
-    _pendingNotificationReason = notificationReason.isEmpty ? null : notificationReason;
+    _pendingNotificationReason = notificationReason.isEmpty
+        ? null
+        : notificationReason;
 
     if (initialMessage.isNotEmpty) {
       final msg = ChatMessageModel(
@@ -581,7 +600,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   }) async {
     _messages.clear();
     _error = null;
-    _pendingNotificationReason = notificationReason.isEmpty ? null : notificationReason;
+    _pendingNotificationReason = notificationReason.isEmpty
+        ? null
+        : notificationReason;
 
     if (openingMessage.isNotEmpty) {
       final msg = ChatMessageModel(
@@ -634,25 +655,25 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     }
 
     if (newsMessage.trim().isNotEmpty) {
-      await _persistMessage(ChatMessageModel(
-        id: _uuid.v4(),
-        text: newsMessage,
-        isUser: false,
-        timestamp: DateTime.now(),
-        channel: ChatMessageChannel.text,
-        sessionId: _currentSessionId,
-      ));
+      await _persistMessage(
+        ChatMessageModel(
+          id: _uuid.v4(),
+          text: newsMessage,
+          isUser: false,
+          timestamp: DateTime.now(),
+          channel: ChatMessageChannel.text,
+          sessionId: _currentSessionId,
+        ),
+      );
     }
     _setState(ViewState.loaded);
     await _refreshSessions();
 
-    _pendingReply = _PendingNotificationReply(
-      FunnelEvents.briefingChatStarted,
-      {
-        FunnelEvents.propNotificationOrigin: FunnelEvents.originBriefing,
-        'channel': 'in_chat',
-      },
-    );
+    _pendingReply =
+        _PendingNotificationReply(FunnelEvents.briefingChatStarted, {
+          FunnelEvents.propNotificationOrigin: FunnelEvents.originBriefing,
+          'channel': 'in_chat',
+        });
 
     await sendMessage(question, _currentUserId!);
   }
@@ -660,9 +681,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   /// Pre-loads the opener from a topic-tracker live-update notification tap. Seeds
   /// Buddy's update as the first bubble. v1 has no funnel attribution for trackers,
   /// so unlike the other notification origins this only seeds the opener.
-  Future<void> loadTrackerContext({
-    required String openingMessage,
-  }) async {
+  Future<void> loadTrackerContext({required String openingMessage}) async {
     _messages.clear();
     _error = null;
 
@@ -713,11 +732,10 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     // turn it can finish in the background. A transport drop after this is recoverable
     // (pending), not a dead-end error.
     var streamStarted = false;
-    // End-to-end turn latency: ttft is stamped on the first stream event (the
-    // streamStarted flip), total on DoneEvent. Analytics only; the streaming
-    // render path is untouched.
+    // End-to-end turn latency: TTFT is the first non-empty visible text delta,
+    // not a connection/status/tool event. Total is stamped on DoneEvent.
     final turnStopwatch = Stopwatch()..start();
-    int? firstEventElapsedMs;
+    int? firstVisibleTokenElapsedMs;
 
     _streamSub = _backendService
         .sendMessageStream(
@@ -731,113 +749,186 @@ abstract class ChatViewModel extends SafeChangeNotifier {
           notificationReason: notificationReason,
         )
         .listen(
-      (event) {
-        if (!streamStarted) {
-          streamStarted = true;
-          firstEventElapsedMs = turnStopwatch.elapsedMilliseconds;
-        }
-        switch (event) {
-          case TextDeltaEvent(:final delta):
-            // Per-token update on the notifier only — repaints the streaming
-            // bubble, not the whole screen.
-            final current = _streamingOutput.value;
-            _streamingOutput.value = StreamingSnapshot(
-              text: current.text + delta,
-              thinkingMessage: current.thinkingMessage,
-            );
+          (event) {
+            if (!streamStarted) streamStarted = true;
+            switch (event) {
+              case TextDeltaEvent(:final delta):
+                if (delta.isNotEmpty && firstVisibleTokenElapsedMs == null) {
+                  firstVisibleTokenElapsedMs =
+                      turnStopwatch.elapsedMilliseconds;
+                }
+                // Per-token update on the notifier only — repaints the streaming
+                // bubble, not the whole screen.
+                final current = _streamingOutput.value;
+                _streamingOutput.value = StreamingSnapshot(
+                  text: current.text + delta,
+                  thinkingMessage: current.thinkingMessage,
+                );
 
-          case ToolThinkingEvent(:final message):
-            _streamingOutput.value = StreamingSnapshot(
-              text: _streamingOutput.value.text,
-              thinkingMessage: message,
-            );
+              case ToolThinkingEvent(:final message):
+                _streamingOutput.value = StreamingSnapshot(
+                  text: _streamingOutput.value.text,
+                  thinkingMessage: message,
+                );
 
-          case ToolStatusEvent(:final message):
-            // Reliable per-tool status: renders through the same thinkingMessage
-            // bubble as ToolThinkingEvent, but fires even when Buddy wrote no
-            // preamble, so a bare web_surf no longer shows blank typing dots.
-            _streamingOutput.value = StreamingSnapshot(
-              text: _streamingOutput.value.text,
-              thinkingMessage: message,
-            );
+              case ToolStatusEvent(:final message):
+                // Reliable per-tool status: renders through the same thinkingMessage
+                // bubble as ToolThinkingEvent, but fires even when Buddy wrote no
+                // preamble, so a bare web_surf no longer shows blank typing dots.
+                _streamingOutput.value = StreamingSnapshot(
+                  text: _streamingOutput.value.text,
+                  thinkingMessage: message,
+                );
 
-          case ClarificationUiEvent(
-              :final clarificationId,
-              :final question,
-              :final options,
-              :final multiSelect,
-            ):
+              case ClarificationUiEvent(
+                :final clarificationId,
+                :final question,
+                :final options,
+                :final multiSelect,
+              ):
+                _isStreaming = false;
+                _streamingOutput.value = StreamingSnapshot.empty;
+                final clarMsg = ChatMessageModel(
+                  id: _uuid.v4(),
+                  text: '',
+                  isUser: false,
+                  timestamp: DateTime.now(),
+                  channel: ChatMessageChannel.text,
+                  sessionId: _currentSessionId,
+                  clarificationPayload: ClarificationPayload(
+                    clarificationId: clarificationId,
+                    question: question,
+                    options: options,
+                    multiSelect: multiSelect,
+                  ),
+                );
+                unawaited(_persistMessage(clarMsg));
+                _error = null;
+                _setState(ViewState.loaded);
+
+              case DoneEvent(:final metadata, :final awaitingClarification):
+                if (awaitingClarification) return;
+                _isStreaming = false;
+                final reminderJson =
+                    metadata?['reminder'] as Map<String, dynamic>?;
+                final assistantMsg = ChatMessageModel(
+                  id: replyId,
+                  text: _streamingOutput.value.text,
+                  isUser: false,
+                  timestamp: DateTime.now(),
+                  channel: ChatMessageChannel.text,
+                  sessionId: _currentSessionId,
+                  reminderPayload: reminderJson != null
+                      ? ReminderPayload.fromJson(reminderJson)
+                      : null,
+                );
+                _streamingOutput.value = StreamingSnapshot.empty;
+                unawaited(_persistMessage(assistantMsg));
+                _error = null;
+                _setState(ViewState.loaded);
+                ErrorHandler.logBreadcrumb('message_sent');
+                unawaited(
+                  AnalyticsService.logMessageSent(agentId ?? 'general'),
+                );
+                unawaited(
+                  postHogAnalytics.trackEvent(
+                    'chat_message_sent',
+                    properties: {'agent_type': agentId ?? 'general'},
+                  ),
+                );
+                unawaited(
+                  postHogAnalytics.trackEvent(
+                    'chat_e2e_latency',
+                    properties: {
+                      'ttft_ms':
+                          firstVisibleTokenElapsedMs ??
+                          turnStopwatch.elapsedMilliseconds,
+                      'total_ms': turnStopwatch.elapsedMilliseconds,
+                      'agent_type': agentId ?? 'general',
+                    },
+                  ),
+                );
+
+              case ChatLimitReachedEvent():
+                _isStreaming = false;
+                _streamingOutput.value = StreamingSnapshot.empty;
+                _chatLimitReached = true;
+                _setState(
+                  _messages.isEmpty ? ViewState.idle : ViewState.loaded,
+                );
+
+              case ErrorStreamEvent(:final message, :final code):
+                _isStreaming = false;
+                _streamingOutput.value = StreamingSnapshot.empty;
+
+                // A server-emitted error event (code == null) carries copy the backend
+                // already wrote in Buddy's voice for this exact failure - show it verbatim.
+                // A client-side transport failure carries an ErrorCode we map.
+                final reason = code == null
+                    ? (message.trim().isNotEmpty
+                          ? message.trim()
+                          : 'Something went wrong. Try again in a moment.')
+                    : _friendlyError(
+                        AppException(code: code, message: message),
+                      );
+                final errMsg = ChatMessageModel(
+                  id: replyId,
+                  text: '',
+                  isUser: false,
+                  timestamp: DateTime.now(),
+                  channel: ChatMessageChannel.text,
+                  sessionId: _currentSessionId,
+                  status: MessageStatus.error,
+                  errorReason: reason,
+                );
+                unawaited(_persistMessage(errMsg));
+                _setState(ViewState.loaded);
+                AppLogger.warning(
+                  'Stream error: $message',
+                  tag: 'ChatViewModel',
+                );
+            }
+          },
+          onError: (Object e, StackTrace st) {
             _isStreaming = false;
-            _streamingOutput.value = StreamingSnapshot.empty;
-            final clarMsg = ChatMessageModel(
-              id: _uuid.v4(),
-              text: '',
-              isUser: false,
-              timestamp: DateTime.now(),
-              channel: ChatMessageChannel.text,
-              sessionId: _currentSessionId,
-              clarificationPayload: ClarificationPayload(
-                clarificationId: clarificationId,
-                question: question,
-                options: options,
-                multiSelect: multiSelect,
-              ),
-            );
-            unawaited(_persistMessage(clarMsg));
-            _error = null;
-            _setState(ViewState.loaded);
-
-          case DoneEvent(:final metadata, :final awaitingClarification):
-            if (awaitingClarification) return;
-            _isStreaming = false;
-            final reminderJson = metadata?['reminder'] as Map<String, dynamic>?;
-            final assistantMsg = ChatMessageModel(
-              id: replyId,
-              text: _streamingOutput.value.text,
-              isUser: false,
-              timestamp: DateTime.now(),
-              channel: ChatMessageChannel.text,
-              sessionId: _currentSessionId,
-              reminderPayload:
-                  reminderJson != null ? ReminderPayload.fromJson(reminderJson) : null,
-            );
-            _streamingOutput.value = StreamingSnapshot.empty;
-            unawaited(_persistMessage(assistantMsg));
-            _error = null;
-            _setState(ViewState.loaded);
-            ErrorHandler.logBreadcrumb('message_sent');
-            unawaited(AnalyticsService.logMessageSent(agentId ?? 'general'));
-            unawaited(postHogAnalytics.trackEvent(
-              'chat_message_sent',
-              properties: {'agent_type': agentId ?? 'general'},
-            ));
-            unawaited(postHogAnalytics.trackEvent(
-              'chat_e2e_latency',
-              properties: {
-                'ttft_ms': firstEventElapsedMs ?? turnStopwatch.elapsedMilliseconds,
-                'total_ms': turnStopwatch.elapsedMilliseconds,
-                'agent_type': agentId ?? 'general',
-              },
-            ));
-
-          case ChatLimitReachedEvent():
-            _isStreaming = false;
-            _streamingOutput.value = StreamingSnapshot.empty;
-            _chatLimitReached = true;
-            _setState(_messages.isEmpty ? ViewState.idle : ViewState.loaded);
-
-          case ErrorStreamEvent(:final message, :final code):
-            _isStreaming = false;
+            final partial = _streamingOutput.value.text;
             _streamingOutput.value = StreamingSnapshot.empty;
 
-            // A server-emitted error event (code == null) carries copy the backend
-            // already wrote in Buddy's voice for this exact failure - show it verbatim. 
-            // A client-side transport failure carries an ErrorCode we map.
-            final reason = code == null
-                ? (message.trim().isNotEmpty
-                    ? message.trim()
-                    : 'Something went wrong. Try again in a moment.')
-                : _friendlyError(AppException(code: code, message: message));
+            // A transport drop AFTER the server accepted the stream (we saw events, or have
+            // partial text) means the turn is finishing server-side. Show a calm "finishing
+            // up" state, keep whatever streamed, and let the push + hydration deliver the
+            // rest — never the misleading "check your connection". Only a failure with
+            // nothing received (the request likely never reached the server, so no turn was
+            // recorded) is a real dead-end the user should retry.
+            final recoverable = streamStarted || partial.trim().isNotEmpty;
+            if (recoverable) {
+              final pendingMsg = ChatMessageModel(
+                id: replyId,
+                text: partial,
+                isUser: false,
+                timestamp: DateTime.now(),
+                channel: ChatMessageChannel.text,
+                sessionId: _currentSessionId,
+                status: MessageStatus.pending,
+              );
+              unawaited(_persistMessage(pendingMsg));
+              _setState(ViewState.loaded);
+              AppLogger.info(
+                'Stream dropped mid-turn; awaiting server completion',
+                tag: 'ChatViewModel',
+              );
+              return;
+            }
+
+            ErrorHandler.handle(e, st);
+            final exc = e is AppException
+                ? e
+                : AppException.unexpected(
+                    e.toString(),
+                    error: e,
+                    stackTrace: st,
+                  );
+            // Bubble only, no banner.
             final errMsg = ChatMessageModel(
               id: replyId,
               text: '',
@@ -846,63 +937,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
               channel: ChatMessageChannel.text,
               sessionId: _currentSessionId,
               status: MessageStatus.error,
-              errorReason: reason,
+              errorReason: _friendlyError(exc),
             );
             unawaited(_persistMessage(errMsg));
             _setState(ViewState.loaded);
-            AppLogger.warning('Stream error: $message', tag: 'ChatViewModel');
-        }
-      },
-      onError: (Object e, StackTrace st) {
-        _isStreaming = false;
-        final partial = _streamingOutput.value.text;
-        _streamingOutput.value = StreamingSnapshot.empty;
-
-        // A transport drop AFTER the server accepted the stream (we saw events, or have
-        // partial text) means the turn is finishing server-side. Show a calm "finishing
-        // up" state, keep whatever streamed, and let the push + hydration deliver the
-        // rest — never the misleading "check your connection". Only a failure with
-        // nothing received (the request likely never reached the server, so no turn was
-        // recorded) is a real dead-end the user should retry.
-        final recoverable = streamStarted || partial.trim().isNotEmpty;
-        if (recoverable) {
-          final pendingMsg = ChatMessageModel(
-            id: replyId,
-            text: partial,
-            isUser: false,
-            timestamp: DateTime.now(),
-            channel: ChatMessageChannel.text,
-            sessionId: _currentSessionId,
-            status: MessageStatus.pending,
-          );
-          unawaited(_persistMessage(pendingMsg));
-          _setState(ViewState.loaded);
-          AppLogger.info(
-            'Stream dropped mid-turn; awaiting server completion',
-            tag: 'ChatViewModel',
-          );
-          return;
-        }
-
-        ErrorHandler.handle(e, st);
-        final exc = e is AppException
-            ? e
-            : AppException.unexpected(e.toString(), error: e, stackTrace: st);
-        // Bubble only, no banner.
-        final errMsg = ChatMessageModel(
-          id: replyId,
-          text: '',
-          isUser: false,
-          timestamp: DateTime.now(),
-          channel: ChatMessageChannel.text,
-          sessionId: _currentSessionId,
-          status: MessageStatus.error,
-          errorReason: _friendlyError(exc),
+          },
         );
-        unawaited(_persistMessage(errMsg));
-        _setState(ViewState.loaded);
-      },
-    );
   }
 
   Future<void> _loadSession(String sessionId) async {
@@ -943,7 +983,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         safeNotifyListeners();
       },
       failure: (e) {
-        AppLogger.error('Failed to load messages', error: e, tag: 'ChatViewModel');
+        AppLogger.error(
+          'Failed to load messages',
+          error: e,
+          tag: 'ChatViewModel',
+        );
         _state = ViewState.error;
         _error = e;
         safeNotifyListeners();
@@ -960,7 +1004,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
       _sessionTitleSet = false;
       await _refreshSessions();
     } catch (e) {
-      AppLogger.error('Failed to create session', error: e, tag: 'ChatViewModel');
+      AppLogger.error(
+        'Failed to create session',
+        error: e,
+        tag: 'ChatViewModel',
+      );
     }
   }
 
@@ -977,7 +1025,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
         if (notify) safeNotifyListeners();
       },
       failure: (e) {
-        AppLogger.error('Failed to load sessions', error: e, tag: 'ChatViewModel');
+        AppLogger.error(
+          'Failed to load sessions',
+          error: e,
+          tag: 'ChatViewModel',
+        );
       },
     );
   }
@@ -988,7 +1040,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     // the assistant reply uses a stable id (`<cmid>::reply`) so a "finishing up"
     // placeholder is cleanly replaced by the hydrated final reply, in order.
     final existingIdx = _messages.indexWhere((m) => m.id == msg.id);
-    final ChatMessageModel? previous = existingIdx >= 0 ? _messages[existingIdx] : null;
+    final ChatMessageModel? previous = existingIdx >= 0
+        ? _messages[existingIdx]
+        : null;
     if (existingIdx >= 0) {
       _messages[existingIdx] = msg;
     } else {
@@ -996,7 +1050,10 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     }
     safeNotifyListeners();
 
-    final result = await _chatRepository.saveMessage(msg, userId: _currentUserId);
+    final result = await _chatRepository.saveMessage(
+      msg,
+      userId: _currentUserId,
+    );
     if (result.isFailure) {
       // Roll back this id to its prior state (restore the replaced message, or remove
       // the one we appended).
@@ -1008,7 +1065,8 @@ abstract class ChatViewModel extends SafeChangeNotifier {
           _messages.removeAt(idx);
         }
       }
-      _error = result.errorOrNull ??
+      _error =
+          result.errorOrNull ??
           AppException.unexpected('Failed to save message locally.');
       _state = ViewState.error;
       safeNotifyListeners();
@@ -1024,35 +1082,45 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     final uid = _currentUserId;
     if (uid == null || uid.isEmpty || clientMessageId.isEmpty) return;
 
-    final reply = await _chatBackupService.fetchServerReply(uid, clientMessageId);
+    final reply = await _chatBackupService.fetchServerReply(
+      uid,
+      clientMessageId,
+    );
     if (reply == null) return;
 
     final replyId = '$clientMessageId::reply';
     if (reply.status == 'complete' && reply.answerText.trim().isNotEmpty) {
-      await _persistMessage(ChatMessageModel(
-        id: replyId,
-        text: reply.answerText,
-        isUser: false,
-        timestamp: DateTime.now(),
-        channel: ChatMessageChannel.text,
-        sessionId: _currentSessionId ??
-            (reply.sessionId.isNotEmpty ? reply.sessionId : null),
-        reminderPayload:
-            reply.reminder != null ? ReminderPayload.fromJson(reply.reminder!) : null,
-      ));
+      await _persistMessage(
+        ChatMessageModel(
+          id: replyId,
+          text: reply.answerText,
+          isUser: false,
+          timestamp: DateTime.now(),
+          channel: ChatMessageChannel.text,
+          sessionId:
+              _currentSessionId ??
+              (reply.sessionId.isNotEmpty ? reply.sessionId : null),
+          reminderPayload: reply.reminder != null
+              ? ReminderPayload.fromJson(reply.reminder!)
+              : null,
+        ),
+      );
       _setState(ViewState.loaded);
     } else if (reply.status == 'failed') {
       // Background completion gave up: turn the placeholder into an honest, retryable error.
-      await _persistMessage(ChatMessageModel(
-        id: replyId,
-        text: '',
-        isUser: false,
-        timestamp: DateTime.now(),
-        channel: ChatMessageChannel.text,
-        sessionId: _currentSessionId,
-        status: MessageStatus.error,
-        errorReason: "I couldn't finish that one. Tap retry to give it another go.",
-      ));
+      await _persistMessage(
+        ChatMessageModel(
+          id: replyId,
+          text: '',
+          isUser: false,
+          timestamp: DateTime.now(),
+          channel: ChatMessageChannel.text,
+          sessionId: _currentSessionId,
+          status: MessageStatus.error,
+          errorReason:
+              "I couldn't finish that one. Tap retry to give it another go.",
+        ),
+      );
       _setState(ViewState.loaded);
     }
     // Otherwise still generating/regenerating: leave the placeholder for a later sweep.
@@ -1063,10 +1131,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   Future<void> reconcilePendingTurns() async {
     const suffix = '::reply';
     final pendingClientMessageIds = _messages
-        .where((m) =>
-            !m.isUser &&
-            m.status == MessageStatus.pending &&
-            m.id.endsWith(suffix))
+        .where(
+          (m) =>
+              !m.isUser &&
+              m.status == MessageStatus.pending &&
+              m.id.endsWith(suffix),
+        )
         .map((m) => m.id.substring(0, m.id.length - suffix.length))
         .toList();
     for (final cmid in pendingClientMessageIds) {
@@ -1107,8 +1177,9 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     final source = _messages
         .where((m) => m != exclude && m.status != MessageStatus.error)
         .toList();
-    final slice =
-        source.length > window ? source.sublist(source.length - window) : source;
+    final slice = source.length > window
+        ? source.sublist(source.length - window)
+        : source;
 
     final turns = <Map<String, dynamic>>[];
     for (var i = 0; i < slice.length; i++) {
