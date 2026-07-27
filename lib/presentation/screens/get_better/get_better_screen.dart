@@ -115,33 +115,36 @@ class _GetBetterScreenState extends State<GetBetterScreen> {
       useSafeArea: true,
       backgroundColor: Colors.transparent,
       barrierColor: AppColors.textPrimary.withValues(alpha: 0.28),
-      builder: (sheetContext) => Consumer<GetBetterViewModel>(
-        builder: (context, currentViewModel, _) => _IdeaDetailSheet(
-          idea: idea,
-          imageFile: cachedImages[idea.imageKey],
-          relatedStories: currentViewModel.relatedStories(idea),
-          cachedImages: cachedImages,
-          state: currentViewModel.storyState(idea.id),
-          onToggleSaved: () => currentViewModel.toggleSaved(idea),
-          onToggleCompleted: () => currentViewModel.toggleCompleted(idea),
-          onShare: () => _shareStory(idea, currentViewModel),
-          onOpenRelated: (related) {
-            Navigator.of(sheetContext).pop();
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted) return;
-              _openIdea(
-                related,
-                currentViewModel.cachedImages,
-                currentViewModel,
-                fromRelatedStory: true,
-              );
-            });
-          },
-          onTalk: () {
-            currentViewModel.recordBuddyChatStarted(idea);
-            Navigator.of(sheetContext).pop();
-            _bringIdeaIntoChat(idea);
-          },
+      builder: (sheetContext) => ChangeNotifierProvider.value(
+        value: viewModel,
+        child: Consumer<GetBetterViewModel>(
+          builder: (context, currentViewModel, _) => _IdeaDetailSheet(
+            idea: idea,
+            imageFile: cachedImages[idea.imageKey],
+            relatedStories: currentViewModel.relatedStories(idea),
+            cachedImages: cachedImages,
+            state: currentViewModel.storyState(idea.id),
+            onToggleSaved: () => currentViewModel.toggleSaved(idea),
+            onToggleCompleted: () => currentViewModel.toggleCompleted(idea),
+            onShare: () => _shareStory(idea, currentViewModel),
+            onOpenRelated: (related) {
+              Navigator.of(sheetContext).pop();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                _openIdea(
+                  related,
+                  currentViewModel.cachedImages,
+                  currentViewModel,
+                  fromRelatedStory: true,
+                );
+              });
+            },
+            onTalk: () {
+              currentViewModel.recordBuddyChatStarted(idea);
+              Navigator.of(sheetContext).pop();
+              _bringIdeaIntoChat(idea);
+            },
+          ),
         ),
       ),
     );
