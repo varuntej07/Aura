@@ -1,13 +1,14 @@
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/models/get_better_feed.dart';
+import '../../../data/repositories/get_better_repository.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/get_better_viewmodel.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
@@ -25,7 +26,6 @@ class GetBetterScreen extends StatefulWidget {
 
 class _GetBetterScreenState extends State<GetBetterScreen> {
   final _chatScrollController = ScrollController();
-  final _ideasScrollController = ScrollController();
   final _inputController = TextEditingController();
   final _inputFocusNode = FocusNode();
 
@@ -49,7 +49,6 @@ class _GetBetterScreenState extends State<GetBetterScreen> {
   @override
   void dispose() {
     _chatScrollController.dispose();
-    _ideasScrollController.dispose();
     _inputController.dispose();
     _inputFocusNode.dispose();
     super.dispose();
@@ -105,21 +104,63 @@ class _GetBetterScreenState extends State<GetBetterScreen> {
   Future<void> _openIdea(
     GetBetterIdea idea,
     Map<String, File> cachedImages,
-  ) async {
+    GetBetterViewModel viewModel, {
+    bool fromRelatedStory = false,
+  }) async {
+    await viewModel.recordOpened(idea, fromRelatedStory: fromRelatedStory);
+    if (!mounted) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
       backgroundColor: Colors.transparent,
       barrierColor: AppColors.textPrimary.withValues(alpha: 0.28),
-      builder: (sheetContext) => _IdeaDetailSheet(
-        idea: idea,
-        imageFile: cachedImages[idea.imageKey],
-        onTalk: () {
-          Navigator.of(sheetContext).pop();
-          _bringIdeaIntoChat(idea);
-        },
+      builder: (sheetContext) => Consumer<GetBetterViewModel>(
+        builder: (context, currentViewModel, _) => _IdeaDetailSheet(
+          idea: idea,
+          imageFile: cachedImages[idea.imageKey],
+          relatedStories: currentViewModel.relatedStories(idea),
+          cachedImages: cachedImages,
+          state: currentViewModel.storyState(idea.id),
+          onToggleSaved: () => currentViewModel.toggleSaved(idea),
+          onToggleCompleted: () => currentViewModel.toggleCompleted(idea),
+          onShare: () => _shareStory(idea, currentViewModel),
+          onOpenRelated: (related) {
+            Navigator.of(sheetContext).pop();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
+              _openIdea(
+                related,
+                currentViewModel.cachedImages,
+                currentViewModel,
+                fromRelatedStory: true,
+              );
+            });
+          },
+          onTalk: () {
+            currentViewModel.recordBuddyChatStarted(idea);
+            Navigator.of(sheetContext).pop();
+            _bringIdeaIntoChat(idea);
+          },
+        ),
       ),
+    );
+  }
+
+  Future<void> _shareStory(
+    GetBetterIdea idea,
+    GetBetterViewModel viewModel,
+  ) async {
+    final shareText =
+        '${idea.title}\n\n${idea.narrative}\n\n'
+        'What it means: ${idea.whatItMeans}\n\n'
+        'Try this: ${idea.tryThis}\n\n'
+        'From Aura Get Better';
+    await Clipboard.setData(ClipboardData(text: shareText));
+    await viewModel.recordShared(idea);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Story copied. It is ready to share.')),
     );
   }
 
@@ -180,10 +221,10 @@ class _GetBetterScreenState extends State<GetBetterScreen> {
                           : _DiscoveryBody(
                               key: const ValueKey('get-better-discovery'),
                               viewModel: getBetterViewModel,
-                              ideasScrollController: _ideasScrollController,
                               onOpenIdea: (idea) => _openIdea(
                                 idea,
                                 getBetterViewModel.cachedImages,
+                                getBetterViewModel,
                               ),
                             ),
                     ),
@@ -309,25 +350,39 @@ class _SheetHeader extends StatelessWidget {
 
 class _DiscoveryBody extends StatelessWidget {
   final GetBetterViewModel viewModel;
-  final ScrollController ideasScrollController;
   final ValueChanged<GetBetterIdea> onOpenIdea;
 
   const _DiscoveryBody({
     super.key,
     required this.viewModel,
-    required this.ideasScrollController,
     required this.onOpenIdea,
   });
 
   @override
   Widget build(BuildContext context) {
+    final feed = viewModel.feed;
+    if (feed == null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Text(
+            viewModel.notice ??
+                'The story library is not available yet. Please try again.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 15,
+              height: 1.5,
+            ),
+          ),
+        ),
+      );
+    }
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 700;
         final horizontalPadding = wide ? 32.0 : 18.0;
-        final cardWidth = wide
-            ? 260.0
-            : (constraints.maxWidth * 0.68).clamp(214.0, 252.0);
 
         return ListView(
           padding: EdgeInsets.fromLTRB(
@@ -344,14 +399,13 @@ class _DiscoveryBody extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _BannerCard(
-                      idea: viewModel.feed.banner,
-                      imageFile: viewModel
-                          .cachedImages[viewModel.feed.banner.imageKey],
-                      onTap: () => onOpenIdea(viewModel.feed.banner),
+                      idea: feed.banner,
+                      imageFile: viewModel.cachedImages[feed.banner.imageKey],
+                      onTap: () => onOpenIdea(feed.banner),
                     ),
                     const SizedBox(height: 22),
                     Text(
-                      viewModel.feed.headline,
+                      feed.headline,
                       style: TextStyle(
                         fontFamily: 'CormorantGaramond',
                         color: AppColors.textPrimary,
@@ -363,7 +417,7 @@ class _DiscoveryBody extends StatelessWidget {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      viewModel.feed.intro,
+                      feed.intro,
                       style: const TextStyle(
                         color: AppColors.textSecondary,
                         fontSize: 14,
@@ -375,7 +429,7 @@ class _DiscoveryBody extends StatelessWidget {
                       children: [
                         const Expanded(
                           child: Text(
-                            'Try a direction',
+                            'Pick a story',
                             style: TextStyle(
                               color: AppColors.textPrimary,
                               fontSize: 18,
@@ -385,7 +439,7 @@ class _DiscoveryBody extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          'Swipe to explore',
+                          '${feed.allStories.length} ideas',
                           style: TextStyle(
                             color: AppColors.textPrimary.withValues(
                               alpha: 0.46,
@@ -396,51 +450,13 @@ class _DiscoveryBody extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    SizedBox(
-                      height: 286,
-                      child: ListView.separated(
-                        controller: ideasScrollController,
-                        scrollDirection: Axis.horizontal,
-                        physics: const BouncingScrollPhysics(),
-                        itemCount: viewModel.feed.ideas.length,
-                        separatorBuilder: (_, _) => const SizedBox(width: 12),
-                        itemBuilder: (context, index) {
-                          final idea = viewModel.feed.ideas[index];
-                          return SizedBox(
-                            width: cardWidth,
-                            child: _IdeaCard(
-                              idea: idea,
-                              imageFile: viewModel.cachedImages[idea.imageKey],
-                              onTap: () => onOpenIdea(idea),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Center(
-                      child: _MoreIdeasButton(
-                        loading: viewModel.loadingMore,
-                        onTap: () async {
-                          await viewModel.loadMore();
-                          if (!ideasScrollController.hasClients) return;
-                          final personalizedCount = viewModel.feed.ideas
-                              .where((idea) => idea.personalized)
-                              .length;
-                          final targetOffset = math.min(
-                            ideasScrollController.position.maxScrollExtent,
-                            personalizedCount * (cardWidth + 12),
-                          );
-                          await ideasScrollController.animateTo(
-                            targetOffset,
-                            duration: const Duration(milliseconds: 420),
-                            curve: Curves.easeOutCubic,
-                          );
-                        },
-                      ),
+                    _StoryMosaic(
+                      stories: feed.ideas,
+                      cachedImages: viewModel.cachedImages,
+                      onOpenIdea: onOpenIdea,
                     ),
                     if (viewModel.notice != null) ...[
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 18),
                       Text(
                         viewModel.notice!,
                         textAlign: TextAlign.center,
@@ -713,61 +729,142 @@ class _IdeaLabel extends StatelessWidget {
   }
 }
 
-class _MoreIdeasButton extends StatelessWidget {
-  final bool loading;
+class _StoryMosaic extends StatelessWidget {
+  final List<GetBetterIdea> stories;
+  final Map<String, File> cachedImages;
+  final ValueChanged<GetBetterIdea> onOpenIdea;
+
+  const _StoryMosaic({
+    required this.stories,
+    required this.cachedImages,
+    required this.onOpenIdea,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <Widget>[];
+    for (var index = 0; index < stories.length;) {
+      final story = stories[index];
+      final isWide =
+          story.cardType == 'wide' ||
+          story.cardType == 'prompt' ||
+          story.cardType == 'challenge';
+      if (isWide) {
+        rows.add(
+          _WideStoryCard(
+            idea: story,
+            imageFile: cachedImages[story.imageKey],
+            onTap: () => onOpenIdea(story),
+          ),
+        );
+        index += 1;
+      } else {
+        final second = index + 1 < stories.length ? stories[index + 1] : null;
+        rows.add(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 286,
+                  child: _IdeaCard(
+                    idea: story,
+                    imageFile: cachedImages[story.imageKey],
+                    onTap: () => onOpenIdea(story),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: second == null
+                    ? const SizedBox.shrink()
+                    : SizedBox(
+                        height: 286,
+                        child: _IdeaCard(
+                          idea: second,
+                          imageFile: cachedImages[second.imageKey],
+                          onTap: () => onOpenIdea(second),
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        );
+        index += 2;
+      }
+      if (index < stories.length) rows.add(const SizedBox(height: 12));
+    }
+    return Column(children: rows);
+  }
+}
+
+class _WideStoryCard extends StatelessWidget {
+  final GetBetterIdea idea;
+  final File? imageFile;
   final VoidCallback onTap;
 
-  const _MoreIdeasButton({required this.loading, required this.onTap});
+  const _WideStoryCard({
+    required this.idea,
+    required this.imageFile,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
-      label: 'more ideas',
+      label: '${idea.title}. Open story.',
       child: GestureDetector(
-        onTap: loading ? null : onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
-          decoration: BoxDecoration(
-            color: AppColors.textPrimary,
-            borderRadius: BorderRadius.circular(999),
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.textPrimary.withValues(alpha: 0.16),
-                blurRadius: 20,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (loading)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    color: Colors.white,
-                    strokeWidth: 2,
+        onTap: onTap,
+        child: FauxGlassCard(
+          borderRadius: 22,
+          padding: const EdgeInsets.all(12),
+          child: SizedBox(
+            height: 156,
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 5,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 10, 12, 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _IdeaLabel(
+                          category: idea.category,
+                          personalized: false,
+                        ),
+                        const Spacer(),
+                        Text(
+                          idea.title,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontFamily: 'CormorantGaramond',
+                            color: AppColors.textPrimary,
+                            fontSize: 26,
+                            height: 1,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                )
-              else
-                const Icon(
-                  Icons.refresh_rounded,
-                  color: Colors.white,
-                  size: 18,
                 ),
-              const SizedBox(width: 8),
-              Text(
-                loading ? 'finding ideas' : 'more ideas',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+                Expanded(
+                  flex: 4,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: SizedBox.expand(
+                      child: _EditorialImage(
+                        imageKey: idea.imageKey,
+                        imageFile: imageFile,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -778,11 +875,25 @@ class _MoreIdeasButton extends StatelessWidget {
 class _IdeaDetailSheet extends StatelessWidget {
   final GetBetterIdea idea;
   final File? imageFile;
+  final List<GetBetterIdea> relatedStories;
+  final Map<String, File> cachedImages;
+  final GetBetterStoryState state;
+  final VoidCallback onToggleSaved;
+  final VoidCallback onToggleCompleted;
+  final VoidCallback onShare;
+  final ValueChanged<GetBetterIdea> onOpenRelated;
   final VoidCallback onTalk;
 
   const _IdeaDetailSheet({
     required this.idea,
     required this.imageFile,
+    required this.relatedStories,
+    required this.cachedImages,
+    required this.state,
+    required this.onToggleSaved,
+    required this.onToggleCompleted,
+    required this.onShare,
+    required this.onOpenRelated,
     required this.onTalk,
   });
 
@@ -862,11 +973,11 @@ class _IdeaDetailSheet extends StatelessWidget {
                             ),
                             const SizedBox(height: 14),
                             Text(
-                              idea.summary,
+                              idea.narrative,
                               style: const TextStyle(
                                 color: AppColors.textSecondary,
                                 fontSize: 16,
-                                height: 1.55,
+                                height: 1.65,
                               ),
                             ),
                             const SizedBox(height: 22),
@@ -875,7 +986,7 @@ class _IdeaDetailSheet extends StatelessWidget {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Text(
-                                    'Why this could help',
+                                    'What this means',
                                     style: TextStyle(
                                       color: AppColors.textPrimary,
                                       fontSize: 14,
@@ -884,7 +995,7 @@ class _IdeaDetailSheet extends StatelessWidget {
                                   ),
                                   const SizedBox(height: 7),
                                   Text(
-                                    idea.whyItFits,
+                                    idea.whatItMeans,
                                     style: const TextStyle(
                                       color: AppColors.textSecondary,
                                       fontSize: 14,
@@ -896,7 +1007,7 @@ class _IdeaDetailSheet extends StatelessWidget {
                             ),
                             const SizedBox(height: 24),
                             const Text(
-                              'A gentle way to start',
+                              'Try this',
                               style: TextStyle(
                                 color: AppColors.textPrimary,
                                 fontSize: 18,
@@ -905,15 +1016,106 @@ class _IdeaDetailSheet extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(height: 12),
-                            for (
-                              var index = 0;
-                              index < idea.steps.length;
-                              index++
-                            )
-                              _StepRow(
-                                number: index + 1,
-                                text: idea.steps[index],
+                            FauxGlassCard.section(
+                              child: Text(
+                                idea.tryThis,
+                                style: const TextStyle(
+                                  color: AppColors.textSecondary,
+                                  fontSize: 15,
+                                  height: 1.55,
+                                ),
                               ),
+                            ),
+                            if (idea.steps.isNotEmpty) ...[
+                              const SizedBox(height: 24),
+                              const Text(
+                                'Small steps',
+                                style: TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              for (
+                                var index = 0;
+                                index < idea.steps.length;
+                                index++
+                              )
+                                _StepRow(
+                                  number: index + 1,
+                                  text: idea.steps[index],
+                                ),
+                            ],
+                            if (relatedStories.isNotEmpty) ...[
+                              const SizedBox(height: 24),
+                              const Text(
+                                'Keep exploring',
+                                style: TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                height: 184,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  physics: const BouncingScrollPhysics(),
+                                  itemCount: relatedStories.length,
+                                  separatorBuilder: (_, _) =>
+                                      const SizedBox(width: 12),
+                                  itemBuilder: (context, index) {
+                                    final related = relatedStories[index];
+                                    return _RelatedStoryCard(
+                                      story: related,
+                                      imageFile: cachedImages[related.imageKey],
+                                      onTap: () => onOpenRelated(related),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 22),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: onToggleSaved,
+                                    icon: Icon(
+                                      state.saved
+                                          ? Icons.bookmark_rounded
+                                          : Icons.bookmark_border_rounded,
+                                    ),
+                                    label: Text(state.saved ? 'Saved' : 'Save'),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    onPressed: onToggleCompleted,
+                                    icon: Icon(
+                                      state.completed
+                                          ? Icons.check_circle_rounded
+                                          : Icons.check_circle_outline_rounded,
+                                    ),
+                                    label: Text(
+                                      state.completed ? 'Done' : 'Mark done',
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              child: OutlinedButton.icon(
+                                onPressed: onShare,
+                                icon: const Icon(Icons.ios_share_rounded),
+                                label: const Text('Copy story to share'),
+                              ),
+                            ),
                             const SizedBox(height: 22),
                             SizedBox(
                               width: double.infinity,
@@ -998,6 +1200,68 @@ class _StepRow extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _RelatedStoryCard extends StatelessWidget {
+  final GetBetterIdea story;
+  final File? imageFile;
+  final VoidCallback onTap;
+
+  const _RelatedStoryCard({
+    required this.story,
+    required this.imageFile,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: '${story.title}. Open related story.',
+      child: GestureDetector(
+        onTap: onTap,
+        child: SizedBox(
+          width: 210,
+          child: FauxGlassCard(
+            borderRadius: 18,
+            padding: EdgeInsets.zero,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(17),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    height: 102,
+                    width: double.infinity,
+                    child: _EditorialImage(
+                      imageKey: story.imageKey,
+                      imageFile: imageFile,
+                    ),
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(
+                        story.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontSize: 14,
+                          height: 1.15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

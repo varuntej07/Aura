@@ -4,11 +4,12 @@
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
 import 'dart:async' as _i5;
-import 'dart:typed_data' as _i11;
+import 'dart:typed_data' as _i12;
 
 import 'package:aura/core/network/api_response.dart' as _i7;
 import 'package:aura/data/models/chat_attachment.dart' as _i9;
 import 'package:aura/data/models/daily_briefing.dart' as _i10;
+import 'package:aura/data/models/get_better_feed.dart' as _i11;
 import 'package:aura/data/services/backend_api_service.dart' as _i6;
 import 'package:cloud_firestore/cloud_firestore.dart' as _i4;
 import 'package:cloud_firestore_platform_interface/cloud_firestore_platform_interface.dart'
@@ -404,6 +405,35 @@ class MockBackendApiService extends _i1.Mock implements _i6.BackendApiService {
             returnValueForMissingStub: _i5.Future<_i10.DailyBriefing?>.value(),
           )
           as _i5.Future<_i10.DailyBriefing?>);
+
+  @override
+  _i5.Future<_i11.GetBetterCatalogSync?> syncGetBetterCatalog({
+    String? knownCatalogVersion,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#syncGetBetterCatalog, [], {
+              #knownCatalogVersion: knownCatalogVersion,
+            }),
+            returnValue: _i5.Future<_i11.GetBetterCatalogSync?>.value(),
+            returnValueForMissingStub:
+                _i5.Future<_i11.GetBetterCatalogSync?>.value(),
+          )
+          as _i5.Future<_i11.GetBetterCatalogSync?>);
+
+  @override
+  _i5.Future<bool> sendGetBetterActivityBatch({
+    required String? batchId,
+    required List<_i11.GetBetterActivityEvent>? events,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#sendGetBetterActivityBatch, [], {
+              #batchId: batchId,
+              #events: events,
+            }),
+            returnValue: _i5.Future<bool>.value(false),
+            returnValueForMissingStub: _i5.Future<bool>.value(false),
+          )
+          as _i5.Future<bool>);
 }
 
 /// A class which mocks [FirebaseFirestore].
@@ -516,7 +546,7 @@ class MockFirebaseFirestore extends _i1.Mock implements _i4.FirebaseFirestore {
           as _i5.Future<void>);
 
   @override
-  _i4.LoadBundleTask loadBundle(_i11.Uint8List? bundle) =>
+  _i4.LoadBundleTask loadBundle(_i12.Uint8List? bundle) =>
       (super.noSuchMethod(
             Invocation.method(#loadBundle, [bundle]),
             returnValue: _FakeLoadBundleTask_4(

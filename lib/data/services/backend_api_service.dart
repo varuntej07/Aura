@@ -94,28 +94,26 @@ class ReminderPayload {
       message: json['message'] as String? ?? '',
       triggerAt:
           DateTime.tryParse(json['trigger_at'] as String? ?? '') ??
-              DateTime.now(),
+          DateTime.now(),
       status: json['status'] as String? ?? 'pending',
       priority: json['priority'] as String? ?? 'normal',
     );
   }
 
   Map<String, dynamic> toJson() => {
-        'reminder_id': reminderId,
-        'message': message,
-        'trigger_at': triggerAt.toUtc().toIso8601String(),
-        'status': status,
-        'priority': priority,
-      };
+    'reminder_id': reminderId,
+    'message': message,
+    'trigger_at': triggerAt.toUtc().toIso8601String(),
+    'status': status,
+    'priority': priority,
+  };
 
   String toJsonString() => jsonEncode(toJson());
 
   static ReminderPayload? tryFromJsonString(String? raw) {
     if (raw == null || raw.isEmpty) return null;
     try {
-      return ReminderPayload.fromJson(
-        jsonDecode(raw) as Map<String, dynamic>,
-      );
+      return ReminderPayload.fromJson(jsonDecode(raw) as Map<String, dynamic>);
     } catch (_) {
       return null;
     }
@@ -144,15 +142,14 @@ class ChatResponse {
       text: json['text'] as String? ?? '',
       intent: json['intent'] as String?,
       metadata: meta,
-      reminderPayload: reminderJson != null ? ReminderPayload.fromJson(reminderJson) : null,
+      reminderPayload: reminderJson != null
+          ? ReminderPayload.fromJson(reminderJson)
+          : null,
     );
   }
 
   factory ChatResponse.stub(String message) {
-    return ChatResponse(
-      text: message,
-      intent: 'stub',
-    );
+    return ChatResponse(text: message, intent: 'stub');
   }
 }
 
@@ -248,7 +245,8 @@ class BackendApiService implements ChatServiceProvider {
         return ClarificationUiEvent(
           clarificationId: json['clarification_id'] as String? ?? '',
           question: json['question'] as String? ?? '',
-          options: (json['options'] as List<dynamic>?)
+          options:
+              (json['options'] as List<dynamic>?)
                   ?.map((e) => e as String)
                   .toList() ??
               [],
@@ -258,7 +256,8 @@ class BackendApiService implements ChatServiceProvider {
         final meta = json['metadata'] as Map<String, dynamic>?;
         return DoneEvent(
           metadata: meta,
-          awaitingClarification: meta?['awaiting_clarification'] as bool? ?? false,
+          awaitingClarification:
+              meta?['awaiting_clarification'] as bool? ?? false,
         );
       case 'error':
         return ErrorStreamEvent(json['message'] as String? ?? 'Unknown error');
@@ -274,11 +273,9 @@ class BackendApiService implements ChatServiceProvider {
   /// Cloud Tasks are cancelled. Fire-and-forget — failures are logged, not thrown.
   @override
   Future<void> markEngagementResponded(String engagementId) async {
-    final result = await _apiClient.post(
-      '/internal/engage/responded',
-      {'engagement_id': engagementId},
-      (json) => json,
-    );
+    final result = await _apiClient.post('/internal/engage/responded', {
+      'engagement_id': engagementId,
+    }, (json) => json);
     result.when(
       success: (_) => AppLogger.info(
         'Engagement responded acknowledged',
@@ -345,11 +342,11 @@ class BackendApiService implements ChatServiceProvider {
     required List<Map<String, dynamic>> turns,
     String modality = 'text',
   }) async {
-    return _apiClient.post(
-      '/aura/consolidate-session',
-      {'session_id': sessionId, 'turns': turns, 'modality': modality},
-      (json) => json,
-    );
+    return _apiClient.post('/aura/consolidate-session', {
+      'session_id': sessionId,
+      'turns': turns,
+      'modality': modality,
+    }, (json) => json);
   }
 
   /// Seeds the user's declared onboarding interests into UserAura on the server
@@ -359,11 +356,9 @@ class BackendApiService implements ChatServiceProvider {
   Future<Result<Map<String, dynamic>>> seedOnboardingInterests(
     List<String> interestSlugs,
   ) async {
-    return _apiClient.post(
-      '/onboarding/profile',
-      {'interests': interestSlugs},
-      (json) => json,
-    );
+    return _apiClient.post('/onboarding/profile', {
+      'interests': interestSlugs,
+    }, (json) => json);
   }
 
   /// Post one or more signal-engine events. Fire-and-forget on the server
@@ -371,11 +366,7 @@ class BackendApiService implements ChatServiceProvider {
   Future<Result<Map<String, dynamic>>> postSignalEvents(
     List<Map<String, dynamic>> events,
   ) async {
-    return _apiClient.post(
-      '/events',
-      {'events': events},
-      (json) => json,
-    );
+    return _apiClient.post('/events', {'events': events}, (json) => json);
   }
 
   /// Loads a curiosity thread's server-authoritative conversation (the silent
@@ -385,10 +376,14 @@ class BackendApiService implements ChatServiceProvider {
   ///
   /// Deliberately concrete (not on [ChatServiceProvider]) so the chat interface
   /// and its generated mocks stay untouched.
-  Future<List<Map<String, dynamic>>> fetchThreadMessages(String threadId) async {
+  Future<List<Map<String, dynamic>>> fetchThreadMessages(
+    String threadId,
+  ) async {
     final result = await _apiClient.get(
       '/threads/$threadId/messages',
-      (json) => (json['messages'] as List?)?.cast<Map<String, dynamic>>() ?? const <Map<String, dynamic>>[],
+      (json) =>
+          (json['messages'] as List?)?.cast<Map<String, dynamic>>() ??
+          const <Map<String, dynamic>>[],
     );
     return result.when(
       success: (messages) => messages,
@@ -400,17 +395,13 @@ class BackendApiService implements ChatServiceProvider {
   /// user-local date). Returns null when none is ready yet or on any failure, so
   /// the briefing screen shows its empty state rather than an error.
   Future<DailyBriefing?> fetchTodayBriefing() async {
-    final result = await _apiClient.get<DailyBriefing?>(
-      '/briefing/today',
-      (json) {
-        final raw = json['briefing'];
-        return raw is Map<String, dynamic> ? DailyBriefing.fromJson(raw) : null;
-      },
-    );
-    return result.when(
-      success: (briefing) => briefing,
-      failure: (_) => null,
-    );
+    final result = await _apiClient.get<DailyBriefing?>('/briefing/today', (
+      json,
+    ) {
+      final raw = json['briefing'];
+      return raw is Map<String, dynamic> ? DailyBriefing.fromJson(raw) : null;
+    });
+    return result.when(success: (briefing) => briefing, failure: (_) => null);
   }
 
   /// Generates (and persists) today's briefing on demand: called when no briefing
@@ -430,10 +421,7 @@ class BackendApiService implements ChatServiceProvider {
       // default per-call timeout (the screen shows a skeleton meanwhile).
       timeout: const Duration(seconds: 50),
     );
-    return result.when(
-      success: (briefing) => briefing,
-      failure: (_) => null,
-    );
+    return result.when(success: (briefing) => briefing, failure: (_) => null);
   }
 
   /// Fetches an on-demand "Catch me up on the world" snapshot (2-3 globally buzzing
@@ -455,29 +443,38 @@ class BackendApiService implements ChatServiceProvider {
       // (cache-miss) fetch room beyond the default per-call timeout so it isn't cut off.
       timeout: const Duration(seconds: 50),
     );
-    return result.when(
-      success: (briefing) => briefing,
-      failure: (_) => null,
-    );
+    return result.when(success: (briefing) => briefing, failure: (_) => null);
   }
 
-  /// Generates a structured Get Better feed. The first request may use the
-  /// signed-in user's consented Aura profile for its first two ideas; subsequent
-  /// cursors intentionally ask for different directions. [excludeIds] prevents
-  /// "more ideas" from recycling cards already on screen.
-  Future<GetBetterFeed?> fetchGetBetterFeed({
-    int cursor = 0,
-    List<String> excludeIds = const [],
+  /// Synchronizes the reviewed Get Better catalog in one batch.
+  ///
+  /// When [knownCatalogVersion] is current, the backend returns only a small
+  /// not-modified response. No story generation occurs on this endpoint.
+  Future<GetBetterCatalogSync?> syncGetBetterCatalog({
+    String? knownCatalogVersion,
   }) async {
-    final result = await _apiClient.post<GetBetterFeed?>(
-      '/get-better/ideas',
-      {'cursor': cursor, if (excludeIds.isNotEmpty) 'exclude_ids': excludeIds},
-      (json) {
-        final raw = json['feed'];
-        return raw is Map<String, dynamic> ? GetBetterFeed.fromJson(raw) : null;
-      },
-      timeout: const Duration(seconds: 50),
+    final result = await _apiClient.post<GetBetterCatalogSync>(
+      '/get-better/catalog',
+      {'known_catalog_version': ?knownCatalogVersion},
+      GetBetterCatalogSync.fromJson,
     );
-    return result.when(success: (feed) => feed, failure: (_) => null);
+    return result.when(success: (sync) => sync, failure: (_) => null);
+  }
+
+  /// Flushes a durable client outbox as one idempotent backend write.
+  Future<bool> sendGetBetterActivityBatch({
+    required String batchId,
+    required List<GetBetterActivityEvent> events,
+  }) async {
+    if (events.isEmpty) return true;
+    final result = await _apiClient.post<bool>(
+      '/get-better/activity',
+      {
+        'batch_id': batchId,
+        'events': events.map((event) => event.toJson()).toList(growable: false),
+      },
+      (json) => (json['accepted'] as num?)?.toInt() == events.length,
+    );
+    return result.when(success: (accepted) => accepted, failure: (_) => false);
   }
 }

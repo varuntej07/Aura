@@ -8,11 +8,12 @@ import 'dart:async' as _i3;
 import 'package:aura/core/network/api_response.dart' as _i6;
 import 'package:aura/data/models/chat_attachment.dart' as _i10;
 import 'package:aura/data/models/daily_briefing.dart' as _i11;
+import 'package:aura/data/models/get_better_feed.dart' as _i12;
 import 'package:aura/data/models/user_model.dart' as _i5;
 import 'package:aura/data/repositories/auth_repository.dart' as _i2;
 import 'package:aura/data/services/backend_api_service.dart' as _i9;
 import 'package:aura/data/services/notification_service.dart' as _i8;
-import 'package:aura/data/services/posthog_analytics_service.dart' as _i12;
+import 'package:aura/data/services/posthog_analytics_service.dart' as _i13;
 import 'package:firebase_auth/firebase_auth.dart' as _i4;
 import 'package:mockito/mockito.dart' as _i1;
 import 'package:mockito/src/dummies.dart' as _i7;
@@ -707,13 +708,42 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
             returnValueForMissingStub: _i3.Future<_i11.DailyBriefing?>.value(),
           )
           as _i3.Future<_i11.DailyBriefing?>);
+
+  @override
+  _i3.Future<_i12.GetBetterCatalogSync?> syncGetBetterCatalog({
+    String? knownCatalogVersion,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#syncGetBetterCatalog, [], {
+              #knownCatalogVersion: knownCatalogVersion,
+            }),
+            returnValue: _i3.Future<_i12.GetBetterCatalogSync?>.value(),
+            returnValueForMissingStub:
+                _i3.Future<_i12.GetBetterCatalogSync?>.value(),
+          )
+          as _i3.Future<_i12.GetBetterCatalogSync?>);
+
+  @override
+  _i3.Future<bool> sendGetBetterActivityBatch({
+    required String? batchId,
+    required List<_i12.GetBetterActivityEvent>? events,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#sendGetBetterActivityBatch, [], {
+              #batchId: batchId,
+              #events: events,
+            }),
+            returnValue: _i3.Future<bool>.value(false),
+            returnValueForMissingStub: _i3.Future<bool>.value(false),
+          )
+          as _i3.Future<bool>);
 }
 
 /// A class which mocks [PostHogAnalyticsService].
 ///
 /// See the documentation for Mockito's code generation for more information.
 class MockPostHogAnalyticsService extends _i1.Mock
-    implements _i12.PostHogAnalyticsService {
+    implements _i13.PostHogAnalyticsService {
   @override
   _i3.Future<void> trackEvent(
     String? event, {
