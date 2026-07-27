@@ -2084,12 +2084,1356 @@ class ChatSyncJobsCompanion extends UpdateCompanion<ChatSyncJob> {
   }
 }
 
+class $GetBetterCatalogCachesTable extends GetBetterCatalogCaches
+    with TableInfo<$GetBetterCatalogCachesTable, GetBetterCatalogCache> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $GetBetterCatalogCachesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _cacheKeyMeta = const VerificationMeta(
+    'cacheKey',
+  );
+  @override
+  late final GeneratedColumn<String> cacheKey = GeneratedColumn<String>(
+    'cache_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _catalogVersionMeta = const VerificationMeta(
+    'catalogVersion',
+  );
+  @override
+  late final GeneratedColumn<String> catalogVersion = GeneratedColumn<String>(
+    'catalog_version',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _feedJsonMeta = const VerificationMeta(
+    'feedJson',
+  );
+  @override
+  late final GeneratedColumn<String> feedJson = GeneratedColumn<String>(
+    'feed_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _checkedAtMeta = const VerificationMeta(
+    'checkedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> checkedAt = GeneratedColumn<DateTime>(
+    'checked_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    cacheKey,
+    catalogVersion,
+    feedJson,
+    checkedAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'get_better_catalog_caches';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<GetBetterCatalogCache> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('cache_key')) {
+      context.handle(
+        _cacheKeyMeta,
+        cacheKey.isAcceptableOrUnknown(data['cache_key']!, _cacheKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_cacheKeyMeta);
+    }
+    if (data.containsKey('catalog_version')) {
+      context.handle(
+        _catalogVersionMeta,
+        catalogVersion.isAcceptableOrUnknown(
+          data['catalog_version']!,
+          _catalogVersionMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_catalogVersionMeta);
+    }
+    if (data.containsKey('feed_json')) {
+      context.handle(
+        _feedJsonMeta,
+        feedJson.isAcceptableOrUnknown(data['feed_json']!, _feedJsonMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_feedJsonMeta);
+    }
+    if (data.containsKey('checked_at')) {
+      context.handle(
+        _checkedAtMeta,
+        checkedAt.isAcceptableOrUnknown(data['checked_at']!, _checkedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_checkedAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {cacheKey};
+  @override
+  GetBetterCatalogCache map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return GetBetterCatalogCache(
+      cacheKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}cache_key'],
+      )!,
+      catalogVersion: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}catalog_version'],
+      )!,
+      feedJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}feed_json'],
+      )!,
+      checkedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}checked_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $GetBetterCatalogCachesTable createAlias(String alias) {
+    return $GetBetterCatalogCachesTable(attachedDatabase, alias);
+  }
+}
+
+class GetBetterCatalogCache extends DataClass
+    implements Insertable<GetBetterCatalogCache> {
+  final String cacheKey;
+  final String catalogVersion;
+  final String feedJson;
+  final DateTime checkedAt;
+  final DateTime updatedAt;
+  const GetBetterCatalogCache({
+    required this.cacheKey,
+    required this.catalogVersion,
+    required this.feedJson,
+    required this.checkedAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['cache_key'] = Variable<String>(cacheKey);
+    map['catalog_version'] = Variable<String>(catalogVersion);
+    map['feed_json'] = Variable<String>(feedJson);
+    map['checked_at'] = Variable<DateTime>(checkedAt);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  GetBetterCatalogCachesCompanion toCompanion(bool nullToAbsent) {
+    return GetBetterCatalogCachesCompanion(
+      cacheKey: Value(cacheKey),
+      catalogVersion: Value(catalogVersion),
+      feedJson: Value(feedJson),
+      checkedAt: Value(checkedAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory GetBetterCatalogCache.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return GetBetterCatalogCache(
+      cacheKey: serializer.fromJson<String>(json['cacheKey']),
+      catalogVersion: serializer.fromJson<String>(json['catalogVersion']),
+      feedJson: serializer.fromJson<String>(json['feedJson']),
+      checkedAt: serializer.fromJson<DateTime>(json['checkedAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'cacheKey': serializer.toJson<String>(cacheKey),
+      'catalogVersion': serializer.toJson<String>(catalogVersion),
+      'feedJson': serializer.toJson<String>(feedJson),
+      'checkedAt': serializer.toJson<DateTime>(checkedAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  GetBetterCatalogCache copyWith({
+    String? cacheKey,
+    String? catalogVersion,
+    String? feedJson,
+    DateTime? checkedAt,
+    DateTime? updatedAt,
+  }) => GetBetterCatalogCache(
+    cacheKey: cacheKey ?? this.cacheKey,
+    catalogVersion: catalogVersion ?? this.catalogVersion,
+    feedJson: feedJson ?? this.feedJson,
+    checkedAt: checkedAt ?? this.checkedAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  GetBetterCatalogCache copyWithCompanion(
+    GetBetterCatalogCachesCompanion data,
+  ) {
+    return GetBetterCatalogCache(
+      cacheKey: data.cacheKey.present ? data.cacheKey.value : this.cacheKey,
+      catalogVersion: data.catalogVersion.present
+          ? data.catalogVersion.value
+          : this.catalogVersion,
+      feedJson: data.feedJson.present ? data.feedJson.value : this.feedJson,
+      checkedAt: data.checkedAt.present ? data.checkedAt.value : this.checkedAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('GetBetterCatalogCache(')
+          ..write('cacheKey: $cacheKey, ')
+          ..write('catalogVersion: $catalogVersion, ')
+          ..write('feedJson: $feedJson, ')
+          ..write('checkedAt: $checkedAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(cacheKey, catalogVersion, feedJson, checkedAt, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is GetBetterCatalogCache &&
+          other.cacheKey == this.cacheKey &&
+          other.catalogVersion == this.catalogVersion &&
+          other.feedJson == this.feedJson &&
+          other.checkedAt == this.checkedAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class GetBetterCatalogCachesCompanion
+    extends UpdateCompanion<GetBetterCatalogCache> {
+  final Value<String> cacheKey;
+  final Value<String> catalogVersion;
+  final Value<String> feedJson;
+  final Value<DateTime> checkedAt;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const GetBetterCatalogCachesCompanion({
+    this.cacheKey = const Value.absent(),
+    this.catalogVersion = const Value.absent(),
+    this.feedJson = const Value.absent(),
+    this.checkedAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  GetBetterCatalogCachesCompanion.insert({
+    required String cacheKey,
+    required String catalogVersion,
+    required String feedJson,
+    required DateTime checkedAt,
+    required DateTime updatedAt,
+    this.rowid = const Value.absent(),
+  }) : cacheKey = Value(cacheKey),
+       catalogVersion = Value(catalogVersion),
+       feedJson = Value(feedJson),
+       checkedAt = Value(checkedAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<GetBetterCatalogCache> custom({
+    Expression<String>? cacheKey,
+    Expression<String>? catalogVersion,
+    Expression<String>? feedJson,
+    Expression<DateTime>? checkedAt,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (cacheKey != null) 'cache_key': cacheKey,
+      if (catalogVersion != null) 'catalog_version': catalogVersion,
+      if (feedJson != null) 'feed_json': feedJson,
+      if (checkedAt != null) 'checked_at': checkedAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  GetBetterCatalogCachesCompanion copyWith({
+    Value<String>? cacheKey,
+    Value<String>? catalogVersion,
+    Value<String>? feedJson,
+    Value<DateTime>? checkedAt,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return GetBetterCatalogCachesCompanion(
+      cacheKey: cacheKey ?? this.cacheKey,
+      catalogVersion: catalogVersion ?? this.catalogVersion,
+      feedJson: feedJson ?? this.feedJson,
+      checkedAt: checkedAt ?? this.checkedAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (cacheKey.present) {
+      map['cache_key'] = Variable<String>(cacheKey.value);
+    }
+    if (catalogVersion.present) {
+      map['catalog_version'] = Variable<String>(catalogVersion.value);
+    }
+    if (feedJson.present) {
+      map['feed_json'] = Variable<String>(feedJson.value);
+    }
+    if (checkedAt.present) {
+      map['checked_at'] = Variable<DateTime>(checkedAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('GetBetterCatalogCachesCompanion(')
+          ..write('cacheKey: $cacheKey, ')
+          ..write('catalogVersion: $catalogVersion, ')
+          ..write('feedJson: $feedJson, ')
+          ..write('checkedAt: $checkedAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $GetBetterStoryProgressTable extends GetBetterStoryProgress
+    with TableInfo<$GetBetterStoryProgressTable, GetBetterStoryProgressData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $GetBetterStoryProgressTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _userIdMeta = const VerificationMeta('userId');
+  @override
+  late final GeneratedColumn<String> userId = GeneratedColumn<String>(
+    'user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _storyIdMeta = const VerificationMeta(
+    'storyId',
+  );
+  @override
+  late final GeneratedColumn<String> storyId = GeneratedColumn<String>(
+    'story_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _storyVersionMeta = const VerificationMeta(
+    'storyVersion',
+  );
+  @override
+  late final GeneratedColumn<int> storyVersion = GeneratedColumn<int>(
+    'story_version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(1),
+  );
+  static const VerificationMeta _openedMeta = const VerificationMeta('opened');
+  @override
+  late final GeneratedColumn<bool> opened = GeneratedColumn<bool>(
+    'opened',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("opened" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _savedMeta = const VerificationMeta('saved');
+  @override
+  late final GeneratedColumn<bool> saved = GeneratedColumn<bool>(
+    'saved',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("saved" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _completedMeta = const VerificationMeta(
+    'completed',
+  );
+  @override
+  late final GeneratedColumn<bool> completed = GeneratedColumn<bool>(
+    'completed',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("completed" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _lastOpenedAtMeta = const VerificationMeta(
+    'lastOpenedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> lastOpenedAt = GeneratedColumn<DateTime>(
+    'last_opened_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: currentDateAndTime,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    userId,
+    storyId,
+    storyVersion,
+    opened,
+    saved,
+    completed,
+    lastOpenedAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'get_better_story_progress';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<GetBetterStoryProgressData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('user_id')) {
+      context.handle(
+        _userIdMeta,
+        userId.isAcceptableOrUnknown(data['user_id']!, _userIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_userIdMeta);
+    }
+    if (data.containsKey('story_id')) {
+      context.handle(
+        _storyIdMeta,
+        storyId.isAcceptableOrUnknown(data['story_id']!, _storyIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_storyIdMeta);
+    }
+    if (data.containsKey('story_version')) {
+      context.handle(
+        _storyVersionMeta,
+        storyVersion.isAcceptableOrUnknown(
+          data['story_version']!,
+          _storyVersionMeta,
+        ),
+      );
+    }
+    if (data.containsKey('opened')) {
+      context.handle(
+        _openedMeta,
+        opened.isAcceptableOrUnknown(data['opened']!, _openedMeta),
+      );
+    }
+    if (data.containsKey('saved')) {
+      context.handle(
+        _savedMeta,
+        saved.isAcceptableOrUnknown(data['saved']!, _savedMeta),
+      );
+    }
+    if (data.containsKey('completed')) {
+      context.handle(
+        _completedMeta,
+        completed.isAcceptableOrUnknown(data['completed']!, _completedMeta),
+      );
+    }
+    if (data.containsKey('last_opened_at')) {
+      context.handle(
+        _lastOpenedAtMeta,
+        lastOpenedAt.isAcceptableOrUnknown(
+          data['last_opened_at']!,
+          _lastOpenedAtMeta,
+        ),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {userId, storyId};
+  @override
+  GetBetterStoryProgressData map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return GetBetterStoryProgressData(
+      userId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_id'],
+      )!,
+      storyId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}story_id'],
+      )!,
+      storyVersion: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}story_version'],
+      )!,
+      opened: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}opened'],
+      )!,
+      saved: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}saved'],
+      )!,
+      completed: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}completed'],
+      )!,
+      lastOpenedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}last_opened_at'],
+      ),
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $GetBetterStoryProgressTable createAlias(String alias) {
+    return $GetBetterStoryProgressTable(attachedDatabase, alias);
+  }
+}
+
+class GetBetterStoryProgressData extends DataClass
+    implements Insertable<GetBetterStoryProgressData> {
+  final String userId;
+  final String storyId;
+  final int storyVersion;
+  final bool opened;
+  final bool saved;
+  final bool completed;
+  final DateTime? lastOpenedAt;
+  final DateTime updatedAt;
+  const GetBetterStoryProgressData({
+    required this.userId,
+    required this.storyId,
+    required this.storyVersion,
+    required this.opened,
+    required this.saved,
+    required this.completed,
+    this.lastOpenedAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['user_id'] = Variable<String>(userId);
+    map['story_id'] = Variable<String>(storyId);
+    map['story_version'] = Variable<int>(storyVersion);
+    map['opened'] = Variable<bool>(opened);
+    map['saved'] = Variable<bool>(saved);
+    map['completed'] = Variable<bool>(completed);
+    if (!nullToAbsent || lastOpenedAt != null) {
+      map['last_opened_at'] = Variable<DateTime>(lastOpenedAt);
+    }
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  GetBetterStoryProgressCompanion toCompanion(bool nullToAbsent) {
+    return GetBetterStoryProgressCompanion(
+      userId: Value(userId),
+      storyId: Value(storyId),
+      storyVersion: Value(storyVersion),
+      opened: Value(opened),
+      saved: Value(saved),
+      completed: Value(completed),
+      lastOpenedAt: lastOpenedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastOpenedAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory GetBetterStoryProgressData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return GetBetterStoryProgressData(
+      userId: serializer.fromJson<String>(json['userId']),
+      storyId: serializer.fromJson<String>(json['storyId']),
+      storyVersion: serializer.fromJson<int>(json['storyVersion']),
+      opened: serializer.fromJson<bool>(json['opened']),
+      saved: serializer.fromJson<bool>(json['saved']),
+      completed: serializer.fromJson<bool>(json['completed']),
+      lastOpenedAt: serializer.fromJson<DateTime?>(json['lastOpenedAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'userId': serializer.toJson<String>(userId),
+      'storyId': serializer.toJson<String>(storyId),
+      'storyVersion': serializer.toJson<int>(storyVersion),
+      'opened': serializer.toJson<bool>(opened),
+      'saved': serializer.toJson<bool>(saved),
+      'completed': serializer.toJson<bool>(completed),
+      'lastOpenedAt': serializer.toJson<DateTime?>(lastOpenedAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  GetBetterStoryProgressData copyWith({
+    String? userId,
+    String? storyId,
+    int? storyVersion,
+    bool? opened,
+    bool? saved,
+    bool? completed,
+    Value<DateTime?> lastOpenedAt = const Value.absent(),
+    DateTime? updatedAt,
+  }) => GetBetterStoryProgressData(
+    userId: userId ?? this.userId,
+    storyId: storyId ?? this.storyId,
+    storyVersion: storyVersion ?? this.storyVersion,
+    opened: opened ?? this.opened,
+    saved: saved ?? this.saved,
+    completed: completed ?? this.completed,
+    lastOpenedAt: lastOpenedAt.present ? lastOpenedAt.value : this.lastOpenedAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  GetBetterStoryProgressData copyWithCompanion(
+    GetBetterStoryProgressCompanion data,
+  ) {
+    return GetBetterStoryProgressData(
+      userId: data.userId.present ? data.userId.value : this.userId,
+      storyId: data.storyId.present ? data.storyId.value : this.storyId,
+      storyVersion: data.storyVersion.present
+          ? data.storyVersion.value
+          : this.storyVersion,
+      opened: data.opened.present ? data.opened.value : this.opened,
+      saved: data.saved.present ? data.saved.value : this.saved,
+      completed: data.completed.present ? data.completed.value : this.completed,
+      lastOpenedAt: data.lastOpenedAt.present
+          ? data.lastOpenedAt.value
+          : this.lastOpenedAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('GetBetterStoryProgressData(')
+          ..write('userId: $userId, ')
+          ..write('storyId: $storyId, ')
+          ..write('storyVersion: $storyVersion, ')
+          ..write('opened: $opened, ')
+          ..write('saved: $saved, ')
+          ..write('completed: $completed, ')
+          ..write('lastOpenedAt: $lastOpenedAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    userId,
+    storyId,
+    storyVersion,
+    opened,
+    saved,
+    completed,
+    lastOpenedAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is GetBetterStoryProgressData &&
+          other.userId == this.userId &&
+          other.storyId == this.storyId &&
+          other.storyVersion == this.storyVersion &&
+          other.opened == this.opened &&
+          other.saved == this.saved &&
+          other.completed == this.completed &&
+          other.lastOpenedAt == this.lastOpenedAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class GetBetterStoryProgressCompanion
+    extends UpdateCompanion<GetBetterStoryProgressData> {
+  final Value<String> userId;
+  final Value<String> storyId;
+  final Value<int> storyVersion;
+  final Value<bool> opened;
+  final Value<bool> saved;
+  final Value<bool> completed;
+  final Value<DateTime?> lastOpenedAt;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const GetBetterStoryProgressCompanion({
+    this.userId = const Value.absent(),
+    this.storyId = const Value.absent(),
+    this.storyVersion = const Value.absent(),
+    this.opened = const Value.absent(),
+    this.saved = const Value.absent(),
+    this.completed = const Value.absent(),
+    this.lastOpenedAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  GetBetterStoryProgressCompanion.insert({
+    required String userId,
+    required String storyId,
+    this.storyVersion = const Value.absent(),
+    this.opened = const Value.absent(),
+    this.saved = const Value.absent(),
+    this.completed = const Value.absent(),
+    this.lastOpenedAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : userId = Value(userId),
+       storyId = Value(storyId);
+  static Insertable<GetBetterStoryProgressData> custom({
+    Expression<String>? userId,
+    Expression<String>? storyId,
+    Expression<int>? storyVersion,
+    Expression<bool>? opened,
+    Expression<bool>? saved,
+    Expression<bool>? completed,
+    Expression<DateTime>? lastOpenedAt,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (userId != null) 'user_id': userId,
+      if (storyId != null) 'story_id': storyId,
+      if (storyVersion != null) 'story_version': storyVersion,
+      if (opened != null) 'opened': opened,
+      if (saved != null) 'saved': saved,
+      if (completed != null) 'completed': completed,
+      if (lastOpenedAt != null) 'last_opened_at': lastOpenedAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  GetBetterStoryProgressCompanion copyWith({
+    Value<String>? userId,
+    Value<String>? storyId,
+    Value<int>? storyVersion,
+    Value<bool>? opened,
+    Value<bool>? saved,
+    Value<bool>? completed,
+    Value<DateTime?>? lastOpenedAt,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return GetBetterStoryProgressCompanion(
+      userId: userId ?? this.userId,
+      storyId: storyId ?? this.storyId,
+      storyVersion: storyVersion ?? this.storyVersion,
+      opened: opened ?? this.opened,
+      saved: saved ?? this.saved,
+      completed: completed ?? this.completed,
+      lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (userId.present) {
+      map['user_id'] = Variable<String>(userId.value);
+    }
+    if (storyId.present) {
+      map['story_id'] = Variable<String>(storyId.value);
+    }
+    if (storyVersion.present) {
+      map['story_version'] = Variable<int>(storyVersion.value);
+    }
+    if (opened.present) {
+      map['opened'] = Variable<bool>(opened.value);
+    }
+    if (saved.present) {
+      map['saved'] = Variable<bool>(saved.value);
+    }
+    if (completed.present) {
+      map['completed'] = Variable<bool>(completed.value);
+    }
+    if (lastOpenedAt.present) {
+      map['last_opened_at'] = Variable<DateTime>(lastOpenedAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('GetBetterStoryProgressCompanion(')
+          ..write('userId: $userId, ')
+          ..write('storyId: $storyId, ')
+          ..write('storyVersion: $storyVersion, ')
+          ..write('opened: $opened, ')
+          ..write('saved: $saved, ')
+          ..write('completed: $completed, ')
+          ..write('lastOpenedAt: $lastOpenedAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $GetBetterEventOutboxTable extends GetBetterEventOutbox
+    with TableInfo<$GetBetterEventOutboxTable, GetBetterEventOutboxData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $GetBetterEventOutboxTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _eventIdMeta = const VerificationMeta(
+    'eventId',
+  );
+  @override
+  late final GeneratedColumn<String> eventId = GeneratedColumn<String>(
+    'event_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _userIdMeta = const VerificationMeta('userId');
+  @override
+  late final GeneratedColumn<String> userId = GeneratedColumn<String>(
+    'user_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _eventTypeMeta = const VerificationMeta(
+    'eventType',
+  );
+  @override
+  late final GeneratedColumn<String> eventType = GeneratedColumn<String>(
+    'event_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _storyIdMeta = const VerificationMeta(
+    'storyId',
+  );
+  @override
+  late final GeneratedColumn<String> storyId = GeneratedColumn<String>(
+    'story_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _storyVersionMeta = const VerificationMeta(
+    'storyVersion',
+  );
+  @override
+  late final GeneratedColumn<int> storyVersion = GeneratedColumn<int>(
+    'story_version',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _occurredAtMeta = const VerificationMeta(
+    'occurredAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> occurredAt = GeneratedColumn<DateTime>(
+    'occurred_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    eventId,
+    userId,
+    eventType,
+    storyId,
+    storyVersion,
+    occurredAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'get_better_event_outbox';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<GetBetterEventOutboxData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('event_id')) {
+      context.handle(
+        _eventIdMeta,
+        eventId.isAcceptableOrUnknown(data['event_id']!, _eventIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_eventIdMeta);
+    }
+    if (data.containsKey('user_id')) {
+      context.handle(
+        _userIdMeta,
+        userId.isAcceptableOrUnknown(data['user_id']!, _userIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_userIdMeta);
+    }
+    if (data.containsKey('event_type')) {
+      context.handle(
+        _eventTypeMeta,
+        eventType.isAcceptableOrUnknown(data['event_type']!, _eventTypeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_eventTypeMeta);
+    }
+    if (data.containsKey('story_id')) {
+      context.handle(
+        _storyIdMeta,
+        storyId.isAcceptableOrUnknown(data['story_id']!, _storyIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_storyIdMeta);
+    }
+    if (data.containsKey('story_version')) {
+      context.handle(
+        _storyVersionMeta,
+        storyVersion.isAcceptableOrUnknown(
+          data['story_version']!,
+          _storyVersionMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_storyVersionMeta);
+    }
+    if (data.containsKey('occurred_at')) {
+      context.handle(
+        _occurredAtMeta,
+        occurredAt.isAcceptableOrUnknown(data['occurred_at']!, _occurredAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_occurredAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {eventId};
+  @override
+  GetBetterEventOutboxData map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return GetBetterEventOutboxData(
+      eventId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}event_id'],
+      )!,
+      userId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}user_id'],
+      )!,
+      eventType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}event_type'],
+      )!,
+      storyId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}story_id'],
+      )!,
+      storyVersion: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}story_version'],
+      )!,
+      occurredAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}occurred_at'],
+      )!,
+    );
+  }
+
+  @override
+  $GetBetterEventOutboxTable createAlias(String alias) {
+    return $GetBetterEventOutboxTable(attachedDatabase, alias);
+  }
+}
+
+class GetBetterEventOutboxData extends DataClass
+    implements Insertable<GetBetterEventOutboxData> {
+  final String eventId;
+  final String userId;
+  final String eventType;
+  final String storyId;
+  final int storyVersion;
+  final DateTime occurredAt;
+  const GetBetterEventOutboxData({
+    required this.eventId,
+    required this.userId,
+    required this.eventType,
+    required this.storyId,
+    required this.storyVersion,
+    required this.occurredAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['event_id'] = Variable<String>(eventId);
+    map['user_id'] = Variable<String>(userId);
+    map['event_type'] = Variable<String>(eventType);
+    map['story_id'] = Variable<String>(storyId);
+    map['story_version'] = Variable<int>(storyVersion);
+    map['occurred_at'] = Variable<DateTime>(occurredAt);
+    return map;
+  }
+
+  GetBetterEventOutboxCompanion toCompanion(bool nullToAbsent) {
+    return GetBetterEventOutboxCompanion(
+      eventId: Value(eventId),
+      userId: Value(userId),
+      eventType: Value(eventType),
+      storyId: Value(storyId),
+      storyVersion: Value(storyVersion),
+      occurredAt: Value(occurredAt),
+    );
+  }
+
+  factory GetBetterEventOutboxData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return GetBetterEventOutboxData(
+      eventId: serializer.fromJson<String>(json['eventId']),
+      userId: serializer.fromJson<String>(json['userId']),
+      eventType: serializer.fromJson<String>(json['eventType']),
+      storyId: serializer.fromJson<String>(json['storyId']),
+      storyVersion: serializer.fromJson<int>(json['storyVersion']),
+      occurredAt: serializer.fromJson<DateTime>(json['occurredAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'eventId': serializer.toJson<String>(eventId),
+      'userId': serializer.toJson<String>(userId),
+      'eventType': serializer.toJson<String>(eventType),
+      'storyId': serializer.toJson<String>(storyId),
+      'storyVersion': serializer.toJson<int>(storyVersion),
+      'occurredAt': serializer.toJson<DateTime>(occurredAt),
+    };
+  }
+
+  GetBetterEventOutboxData copyWith({
+    String? eventId,
+    String? userId,
+    String? eventType,
+    String? storyId,
+    int? storyVersion,
+    DateTime? occurredAt,
+  }) => GetBetterEventOutboxData(
+    eventId: eventId ?? this.eventId,
+    userId: userId ?? this.userId,
+    eventType: eventType ?? this.eventType,
+    storyId: storyId ?? this.storyId,
+    storyVersion: storyVersion ?? this.storyVersion,
+    occurredAt: occurredAt ?? this.occurredAt,
+  );
+  GetBetterEventOutboxData copyWithCompanion(
+    GetBetterEventOutboxCompanion data,
+  ) {
+    return GetBetterEventOutboxData(
+      eventId: data.eventId.present ? data.eventId.value : this.eventId,
+      userId: data.userId.present ? data.userId.value : this.userId,
+      eventType: data.eventType.present ? data.eventType.value : this.eventType,
+      storyId: data.storyId.present ? data.storyId.value : this.storyId,
+      storyVersion: data.storyVersion.present
+          ? data.storyVersion.value
+          : this.storyVersion,
+      occurredAt: data.occurredAt.present
+          ? data.occurredAt.value
+          : this.occurredAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('GetBetterEventOutboxData(')
+          ..write('eventId: $eventId, ')
+          ..write('userId: $userId, ')
+          ..write('eventType: $eventType, ')
+          ..write('storyId: $storyId, ')
+          ..write('storyVersion: $storyVersion, ')
+          ..write('occurredAt: $occurredAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    eventId,
+    userId,
+    eventType,
+    storyId,
+    storyVersion,
+    occurredAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is GetBetterEventOutboxData &&
+          other.eventId == this.eventId &&
+          other.userId == this.userId &&
+          other.eventType == this.eventType &&
+          other.storyId == this.storyId &&
+          other.storyVersion == this.storyVersion &&
+          other.occurredAt == this.occurredAt);
+}
+
+class GetBetterEventOutboxCompanion
+    extends UpdateCompanion<GetBetterEventOutboxData> {
+  final Value<String> eventId;
+  final Value<String> userId;
+  final Value<String> eventType;
+  final Value<String> storyId;
+  final Value<int> storyVersion;
+  final Value<DateTime> occurredAt;
+  final Value<int> rowid;
+  const GetBetterEventOutboxCompanion({
+    this.eventId = const Value.absent(),
+    this.userId = const Value.absent(),
+    this.eventType = const Value.absent(),
+    this.storyId = const Value.absent(),
+    this.storyVersion = const Value.absent(),
+    this.occurredAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  GetBetterEventOutboxCompanion.insert({
+    required String eventId,
+    required String userId,
+    required String eventType,
+    required String storyId,
+    required int storyVersion,
+    required DateTime occurredAt,
+    this.rowid = const Value.absent(),
+  }) : eventId = Value(eventId),
+       userId = Value(userId),
+       eventType = Value(eventType),
+       storyId = Value(storyId),
+       storyVersion = Value(storyVersion),
+       occurredAt = Value(occurredAt);
+  static Insertable<GetBetterEventOutboxData> custom({
+    Expression<String>? eventId,
+    Expression<String>? userId,
+    Expression<String>? eventType,
+    Expression<String>? storyId,
+    Expression<int>? storyVersion,
+    Expression<DateTime>? occurredAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (eventId != null) 'event_id': eventId,
+      if (userId != null) 'user_id': userId,
+      if (eventType != null) 'event_type': eventType,
+      if (storyId != null) 'story_id': storyId,
+      if (storyVersion != null) 'story_version': storyVersion,
+      if (occurredAt != null) 'occurred_at': occurredAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  GetBetterEventOutboxCompanion copyWith({
+    Value<String>? eventId,
+    Value<String>? userId,
+    Value<String>? eventType,
+    Value<String>? storyId,
+    Value<int>? storyVersion,
+    Value<DateTime>? occurredAt,
+    Value<int>? rowid,
+  }) {
+    return GetBetterEventOutboxCompanion(
+      eventId: eventId ?? this.eventId,
+      userId: userId ?? this.userId,
+      eventType: eventType ?? this.eventType,
+      storyId: storyId ?? this.storyId,
+      storyVersion: storyVersion ?? this.storyVersion,
+      occurredAt: occurredAt ?? this.occurredAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (eventId.present) {
+      map['event_id'] = Variable<String>(eventId.value);
+    }
+    if (userId.present) {
+      map['user_id'] = Variable<String>(userId.value);
+    }
+    if (eventType.present) {
+      map['event_type'] = Variable<String>(eventType.value);
+    }
+    if (storyId.present) {
+      map['story_id'] = Variable<String>(storyId.value);
+    }
+    if (storyVersion.present) {
+      map['story_version'] = Variable<int>(storyVersion.value);
+    }
+    if (occurredAt.present) {
+      map['occurred_at'] = Variable<DateTime>(occurredAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('GetBetterEventOutboxCompanion(')
+          ..write('eventId: $eventId, ')
+          ..write('userId: $userId, ')
+          ..write('eventType: $eventType, ')
+          ..write('storyId: $storyId, ')
+          ..write('storyVersion: $storyVersion, ')
+          ..write('occurredAt: $occurredAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
   late final $ChatSessionsTable chatSessions = $ChatSessionsTable(this);
   late final $ChatMessagesTable chatMessages = $ChatMessagesTable(this);
   late final $ChatSyncJobsTable chatSyncJobs = $ChatSyncJobsTable(this);
+  late final $GetBetterCatalogCachesTable getBetterCatalogCaches =
+      $GetBetterCatalogCachesTable(this);
+  late final $GetBetterStoryProgressTable getBetterStoryProgress =
+      $GetBetterStoryProgressTable(this);
+  late final $GetBetterEventOutboxTable getBetterEventOutbox =
+      $GetBetterEventOutboxTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2098,6 +3442,9 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     chatSessions,
     chatMessages,
     chatSyncJobs,
+    getBetterCatalogCaches,
+    getBetterStoryProgress,
+    getBetterEventOutbox,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -3308,6 +4655,746 @@ typedef $$ChatSyncJobsTableProcessedTableManager =
       ChatSyncJob,
       PrefetchHooks Function()
     >;
+typedef $$GetBetterCatalogCachesTableCreateCompanionBuilder =
+    GetBetterCatalogCachesCompanion Function({
+      required String cacheKey,
+      required String catalogVersion,
+      required String feedJson,
+      required DateTime checkedAt,
+      required DateTime updatedAt,
+      Value<int> rowid,
+    });
+typedef $$GetBetterCatalogCachesTableUpdateCompanionBuilder =
+    GetBetterCatalogCachesCompanion Function({
+      Value<String> cacheKey,
+      Value<String> catalogVersion,
+      Value<String> feedJson,
+      Value<DateTime> checkedAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$GetBetterCatalogCachesTableFilterComposer
+    extends Composer<_$AppDatabase, $GetBetterCatalogCachesTable> {
+  $$GetBetterCatalogCachesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get cacheKey => $composableBuilder(
+    column: $table.cacheKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get catalogVersion => $composableBuilder(
+    column: $table.catalogVersion,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get feedJson => $composableBuilder(
+    column: $table.feedJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get checkedAt => $composableBuilder(
+    column: $table.checkedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$GetBetterCatalogCachesTableOrderingComposer
+    extends Composer<_$AppDatabase, $GetBetterCatalogCachesTable> {
+  $$GetBetterCatalogCachesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get cacheKey => $composableBuilder(
+    column: $table.cacheKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get catalogVersion => $composableBuilder(
+    column: $table.catalogVersion,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get feedJson => $composableBuilder(
+    column: $table.feedJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get checkedAt => $composableBuilder(
+    column: $table.checkedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$GetBetterCatalogCachesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $GetBetterCatalogCachesTable> {
+  $$GetBetterCatalogCachesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get cacheKey =>
+      $composableBuilder(column: $table.cacheKey, builder: (column) => column);
+
+  GeneratedColumn<String> get catalogVersion => $composableBuilder(
+    column: $table.catalogVersion,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get feedJson =>
+      $composableBuilder(column: $table.feedJson, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get checkedAt =>
+      $composableBuilder(column: $table.checkedAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$GetBetterCatalogCachesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $GetBetterCatalogCachesTable,
+          GetBetterCatalogCache,
+          $$GetBetterCatalogCachesTableFilterComposer,
+          $$GetBetterCatalogCachesTableOrderingComposer,
+          $$GetBetterCatalogCachesTableAnnotationComposer,
+          $$GetBetterCatalogCachesTableCreateCompanionBuilder,
+          $$GetBetterCatalogCachesTableUpdateCompanionBuilder,
+          (
+            GetBetterCatalogCache,
+            BaseReferences<
+              _$AppDatabase,
+              $GetBetterCatalogCachesTable,
+              GetBetterCatalogCache
+            >,
+          ),
+          GetBetterCatalogCache,
+          PrefetchHooks Function()
+        > {
+  $$GetBetterCatalogCachesTableTableManager(
+    _$AppDatabase db,
+    $GetBetterCatalogCachesTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$GetBetterCatalogCachesTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$GetBetterCatalogCachesTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$GetBetterCatalogCachesTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> cacheKey = const Value.absent(),
+                Value<String> catalogVersion = const Value.absent(),
+                Value<String> feedJson = const Value.absent(),
+                Value<DateTime> checkedAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => GetBetterCatalogCachesCompanion(
+                cacheKey: cacheKey,
+                catalogVersion: catalogVersion,
+                feedJson: feedJson,
+                checkedAt: checkedAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String cacheKey,
+                required String catalogVersion,
+                required String feedJson,
+                required DateTime checkedAt,
+                required DateTime updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => GetBetterCatalogCachesCompanion.insert(
+                cacheKey: cacheKey,
+                catalogVersion: catalogVersion,
+                feedJson: feedJson,
+                checkedAt: checkedAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$GetBetterCatalogCachesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $GetBetterCatalogCachesTable,
+      GetBetterCatalogCache,
+      $$GetBetterCatalogCachesTableFilterComposer,
+      $$GetBetterCatalogCachesTableOrderingComposer,
+      $$GetBetterCatalogCachesTableAnnotationComposer,
+      $$GetBetterCatalogCachesTableCreateCompanionBuilder,
+      $$GetBetterCatalogCachesTableUpdateCompanionBuilder,
+      (
+        GetBetterCatalogCache,
+        BaseReferences<
+          _$AppDatabase,
+          $GetBetterCatalogCachesTable,
+          GetBetterCatalogCache
+        >,
+      ),
+      GetBetterCatalogCache,
+      PrefetchHooks Function()
+    >;
+typedef $$GetBetterStoryProgressTableCreateCompanionBuilder =
+    GetBetterStoryProgressCompanion Function({
+      required String userId,
+      required String storyId,
+      Value<int> storyVersion,
+      Value<bool> opened,
+      Value<bool> saved,
+      Value<bool> completed,
+      Value<DateTime?> lastOpenedAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+typedef $$GetBetterStoryProgressTableUpdateCompanionBuilder =
+    GetBetterStoryProgressCompanion Function({
+      Value<String> userId,
+      Value<String> storyId,
+      Value<int> storyVersion,
+      Value<bool> opened,
+      Value<bool> saved,
+      Value<bool> completed,
+      Value<DateTime?> lastOpenedAt,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$GetBetterStoryProgressTableFilterComposer
+    extends Composer<_$AppDatabase, $GetBetterStoryProgressTable> {
+  $$GetBetterStoryProgressTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get storyId => $composableBuilder(
+    column: $table.storyId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get storyVersion => $composableBuilder(
+    column: $table.storyVersion,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get opened => $composableBuilder(
+    column: $table.opened,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get saved => $composableBuilder(
+    column: $table.saved,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get completed => $composableBuilder(
+    column: $table.completed,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get lastOpenedAt => $composableBuilder(
+    column: $table.lastOpenedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$GetBetterStoryProgressTableOrderingComposer
+    extends Composer<_$AppDatabase, $GetBetterStoryProgressTable> {
+  $$GetBetterStoryProgressTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get storyId => $composableBuilder(
+    column: $table.storyId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get storyVersion => $composableBuilder(
+    column: $table.storyVersion,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get opened => $composableBuilder(
+    column: $table.opened,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get saved => $composableBuilder(
+    column: $table.saved,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get completed => $composableBuilder(
+    column: $table.completed,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get lastOpenedAt => $composableBuilder(
+    column: $table.lastOpenedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$GetBetterStoryProgressTableAnnotationComposer
+    extends Composer<_$AppDatabase, $GetBetterStoryProgressTable> {
+  $$GetBetterStoryProgressTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get userId =>
+      $composableBuilder(column: $table.userId, builder: (column) => column);
+
+  GeneratedColumn<String> get storyId =>
+      $composableBuilder(column: $table.storyId, builder: (column) => column);
+
+  GeneratedColumn<int> get storyVersion => $composableBuilder(
+    column: $table.storyVersion,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get opened =>
+      $composableBuilder(column: $table.opened, builder: (column) => column);
+
+  GeneratedColumn<bool> get saved =>
+      $composableBuilder(column: $table.saved, builder: (column) => column);
+
+  GeneratedColumn<bool> get completed =>
+      $composableBuilder(column: $table.completed, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get lastOpenedAt => $composableBuilder(
+    column: $table.lastOpenedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$GetBetterStoryProgressTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $GetBetterStoryProgressTable,
+          GetBetterStoryProgressData,
+          $$GetBetterStoryProgressTableFilterComposer,
+          $$GetBetterStoryProgressTableOrderingComposer,
+          $$GetBetterStoryProgressTableAnnotationComposer,
+          $$GetBetterStoryProgressTableCreateCompanionBuilder,
+          $$GetBetterStoryProgressTableUpdateCompanionBuilder,
+          (
+            GetBetterStoryProgressData,
+            BaseReferences<
+              _$AppDatabase,
+              $GetBetterStoryProgressTable,
+              GetBetterStoryProgressData
+            >,
+          ),
+          GetBetterStoryProgressData,
+          PrefetchHooks Function()
+        > {
+  $$GetBetterStoryProgressTableTableManager(
+    _$AppDatabase db,
+    $GetBetterStoryProgressTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$GetBetterStoryProgressTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$GetBetterStoryProgressTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$GetBetterStoryProgressTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> userId = const Value.absent(),
+                Value<String> storyId = const Value.absent(),
+                Value<int> storyVersion = const Value.absent(),
+                Value<bool> opened = const Value.absent(),
+                Value<bool> saved = const Value.absent(),
+                Value<bool> completed = const Value.absent(),
+                Value<DateTime?> lastOpenedAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => GetBetterStoryProgressCompanion(
+                userId: userId,
+                storyId: storyId,
+                storyVersion: storyVersion,
+                opened: opened,
+                saved: saved,
+                completed: completed,
+                lastOpenedAt: lastOpenedAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String userId,
+                required String storyId,
+                Value<int> storyVersion = const Value.absent(),
+                Value<bool> opened = const Value.absent(),
+                Value<bool> saved = const Value.absent(),
+                Value<bool> completed = const Value.absent(),
+                Value<DateTime?> lastOpenedAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => GetBetterStoryProgressCompanion.insert(
+                userId: userId,
+                storyId: storyId,
+                storyVersion: storyVersion,
+                opened: opened,
+                saved: saved,
+                completed: completed,
+                lastOpenedAt: lastOpenedAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$GetBetterStoryProgressTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $GetBetterStoryProgressTable,
+      GetBetterStoryProgressData,
+      $$GetBetterStoryProgressTableFilterComposer,
+      $$GetBetterStoryProgressTableOrderingComposer,
+      $$GetBetterStoryProgressTableAnnotationComposer,
+      $$GetBetterStoryProgressTableCreateCompanionBuilder,
+      $$GetBetterStoryProgressTableUpdateCompanionBuilder,
+      (
+        GetBetterStoryProgressData,
+        BaseReferences<
+          _$AppDatabase,
+          $GetBetterStoryProgressTable,
+          GetBetterStoryProgressData
+        >,
+      ),
+      GetBetterStoryProgressData,
+      PrefetchHooks Function()
+    >;
+typedef $$GetBetterEventOutboxTableCreateCompanionBuilder =
+    GetBetterEventOutboxCompanion Function({
+      required String eventId,
+      required String userId,
+      required String eventType,
+      required String storyId,
+      required int storyVersion,
+      required DateTime occurredAt,
+      Value<int> rowid,
+    });
+typedef $$GetBetterEventOutboxTableUpdateCompanionBuilder =
+    GetBetterEventOutboxCompanion Function({
+      Value<String> eventId,
+      Value<String> userId,
+      Value<String> eventType,
+      Value<String> storyId,
+      Value<int> storyVersion,
+      Value<DateTime> occurredAt,
+      Value<int> rowid,
+    });
+
+class $$GetBetterEventOutboxTableFilterComposer
+    extends Composer<_$AppDatabase, $GetBetterEventOutboxTable> {
+  $$GetBetterEventOutboxTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get eventId => $composableBuilder(
+    column: $table.eventId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get eventType => $composableBuilder(
+    column: $table.eventType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get storyId => $composableBuilder(
+    column: $table.storyId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get storyVersion => $composableBuilder(
+    column: $table.storyVersion,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get occurredAt => $composableBuilder(
+    column: $table.occurredAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$GetBetterEventOutboxTableOrderingComposer
+    extends Composer<_$AppDatabase, $GetBetterEventOutboxTable> {
+  $$GetBetterEventOutboxTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get eventId => $composableBuilder(
+    column: $table.eventId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get userId => $composableBuilder(
+    column: $table.userId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get eventType => $composableBuilder(
+    column: $table.eventType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get storyId => $composableBuilder(
+    column: $table.storyId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get storyVersion => $composableBuilder(
+    column: $table.storyVersion,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get occurredAt => $composableBuilder(
+    column: $table.occurredAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$GetBetterEventOutboxTableAnnotationComposer
+    extends Composer<_$AppDatabase, $GetBetterEventOutboxTable> {
+  $$GetBetterEventOutboxTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get eventId =>
+      $composableBuilder(column: $table.eventId, builder: (column) => column);
+
+  GeneratedColumn<String> get userId =>
+      $composableBuilder(column: $table.userId, builder: (column) => column);
+
+  GeneratedColumn<String> get eventType =>
+      $composableBuilder(column: $table.eventType, builder: (column) => column);
+
+  GeneratedColumn<String> get storyId =>
+      $composableBuilder(column: $table.storyId, builder: (column) => column);
+
+  GeneratedColumn<int> get storyVersion => $composableBuilder(
+    column: $table.storyVersion,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get occurredAt => $composableBuilder(
+    column: $table.occurredAt,
+    builder: (column) => column,
+  );
+}
+
+class $$GetBetterEventOutboxTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $GetBetterEventOutboxTable,
+          GetBetterEventOutboxData,
+          $$GetBetterEventOutboxTableFilterComposer,
+          $$GetBetterEventOutboxTableOrderingComposer,
+          $$GetBetterEventOutboxTableAnnotationComposer,
+          $$GetBetterEventOutboxTableCreateCompanionBuilder,
+          $$GetBetterEventOutboxTableUpdateCompanionBuilder,
+          (
+            GetBetterEventOutboxData,
+            BaseReferences<
+              _$AppDatabase,
+              $GetBetterEventOutboxTable,
+              GetBetterEventOutboxData
+            >,
+          ),
+          GetBetterEventOutboxData,
+          PrefetchHooks Function()
+        > {
+  $$GetBetterEventOutboxTableTableManager(
+    _$AppDatabase db,
+    $GetBetterEventOutboxTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$GetBetterEventOutboxTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$GetBetterEventOutboxTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$GetBetterEventOutboxTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> eventId = const Value.absent(),
+                Value<String> userId = const Value.absent(),
+                Value<String> eventType = const Value.absent(),
+                Value<String> storyId = const Value.absent(),
+                Value<int> storyVersion = const Value.absent(),
+                Value<DateTime> occurredAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => GetBetterEventOutboxCompanion(
+                eventId: eventId,
+                userId: userId,
+                eventType: eventType,
+                storyId: storyId,
+                storyVersion: storyVersion,
+                occurredAt: occurredAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String eventId,
+                required String userId,
+                required String eventType,
+                required String storyId,
+                required int storyVersion,
+                required DateTime occurredAt,
+                Value<int> rowid = const Value.absent(),
+              }) => GetBetterEventOutboxCompanion.insert(
+                eventId: eventId,
+                userId: userId,
+                eventType: eventType,
+                storyId: storyId,
+                storyVersion: storyVersion,
+                occurredAt: occurredAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$GetBetterEventOutboxTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $GetBetterEventOutboxTable,
+      GetBetterEventOutboxData,
+      $$GetBetterEventOutboxTableFilterComposer,
+      $$GetBetterEventOutboxTableOrderingComposer,
+      $$GetBetterEventOutboxTableAnnotationComposer,
+      $$GetBetterEventOutboxTableCreateCompanionBuilder,
+      $$GetBetterEventOutboxTableUpdateCompanionBuilder,
+      (
+        GetBetterEventOutboxData,
+        BaseReferences<
+          _$AppDatabase,
+          $GetBetterEventOutboxTable,
+          GetBetterEventOutboxData
+        >,
+      ),
+      GetBetterEventOutboxData,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -3318,4 +5405,16 @@ class $AppDatabaseManager {
       $$ChatMessagesTableTableManager(_db, _db.chatMessages);
   $$ChatSyncJobsTableTableManager get chatSyncJobs =>
       $$ChatSyncJobsTableTableManager(_db, _db.chatSyncJobs);
+  $$GetBetterCatalogCachesTableTableManager get getBetterCatalogCaches =>
+      $$GetBetterCatalogCachesTableTableManager(
+        _db,
+        _db.getBetterCatalogCaches,
+      );
+  $$GetBetterStoryProgressTableTableManager get getBetterStoryProgress =>
+      $$GetBetterStoryProgressTableTableManager(
+        _db,
+        _db.getBetterStoryProgress,
+      );
+  $$GetBetterEventOutboxTableTableManager get getBetterEventOutbox =>
+      $$GetBetterEventOutboxTableTableManager(_db, _db.getBetterEventOutbox);
 }

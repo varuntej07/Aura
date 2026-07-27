@@ -14,6 +14,8 @@ import '../../data/services/chat_service_provider.dart';
 import '../../data/services/chat_backup_service.dart';
 import '../../data/services/chat_session_manager.dart';
 import '../../data/services/feedback_service.dart';
+import '../../data/services/get_better_image_cache.dart';
+import '../../data/repositories/get_better_repository.dart';
 import '../../data/services/notification_service.dart';
 import '../../data/services/posthog_analytics_service.dart';
 import '../../core/network/connectivity_service.dart';
@@ -29,13 +31,19 @@ import '../../presentation/screens/settings/settings_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
 import '../../presentation/viewmodels/auth_viewmodel.dart';
 import '../../presentation/viewmodels/briefing_viewmodel.dart';
+import '../../presentation/viewmodels/get_better_viewmodel.dart';
 import '../../presentation/viewmodels/text_chat_viewmodel.dart';
+
 GoRouter buildRouter(
   AuthViewModel authViewModel,
   PostHogAnalyticsService postHogAnalyticsService,
 ) {
-  final rootRouteObserver = AppRouteObserver(postHogAnalyticsService: postHogAnalyticsService);
-  final shellRouteObserver = AppRouteObserver(postHogAnalyticsService: postHogAnalyticsService);
+  final rootRouteObserver = AppRouteObserver(
+    postHogAnalyticsService: postHogAnalyticsService,
+  );
+  final shellRouteObserver = AppRouteObserver(
+    postHogAnalyticsService: postHogAnalyticsService,
+  );
 
   return GoRouter(
     initialLocation: '/home',
@@ -69,19 +77,28 @@ GoRouter buildRouter(
       // Authenticated and left login - route to onboarding or home.
       if (isLoggedIn && isOnLogin) {
         final dest = needsOnboarding ? '/onboarding' : '/home';
-        AppLogger.info('Router: -> $dest (authenticated, leaving login)', tag: 'Router');
+        AppLogger.info(
+          'Router: -> $dest (authenticated, leaving login)',
+          tag: 'Router',
+        );
         return dest;
       }
 
       // Authenticated but hasn't completed onboarding, enforce the flow.
       if (isLoggedIn && needsOnboarding && !isOnOnboarding) {
-        AppLogger.info('Router: -> /onboarding (onboarding incomplete)', tag: 'Router');
+        AppLogger.info(
+          'Router: -> /onboarding (onboarding incomplete)',
+          tag: 'Router',
+        );
         return '/onboarding';
       }
 
       // If onboarding is complete, then /onboarding is no longer valid.
       if (isLoggedIn && !needsOnboarding && isOnOnboarding) {
-        AppLogger.info('Router: -> /home (onboarding already complete)', tag: 'Router');
+        AppLogger.info(
+          'Router: -> /home (onboarding already complete)',
+          tag: 'Router',
+        );
         return '/home';
       }
 
@@ -133,8 +150,10 @@ GoRouter buildRouter(
                 feedbackService: context.read<FeedbackService>(),
                 connectivityService: context.read<ConnectivityService>(),
                 chatSessionManager: context.read<ChatSessionManager>(),
-                postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
-                suggestionPillsRepository: context.read<AgentSuggestionPillsRepository>(),
+                postHogAnalyticsService: context
+                    .read<PostHogAnalyticsService>(),
+                suggestionPillsRepository: context
+                    .read<AgentSuggestionPillsRepository>(),
                 buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
                 sessionConsolidator: context.read<SessionConsolidator>(),
               ),
@@ -167,8 +186,36 @@ GoRouter buildRouter(
       GoRoute(
         path: '/get-better',
         name: 'Get Better',
-        pageBuilder: (context, state) =>
-            _slidePage(state, const GetBetterScreen()),
+        pageBuilder: (context, state) => _modalSheetPage(
+          state,
+          MultiProvider(
+            providers: [
+              ChangeNotifierProvider(
+                create: (_) => GetBetterViewModel(
+                  repository: context.read<GetBetterRepository>(),
+                  imageCache: GetBetterImageCache(),
+                ),
+              ),
+              ChangeNotifierProvider(
+                create: (_) => TextChatViewModel(
+                  backendService: context.read<ChatServiceProvider>(),
+                  chatRepository: context.read<ChatRepository>(),
+                  chatBackupService: context.read<ChatBackupService>(),
+                  feedbackService: context.read<FeedbackService>(),
+                  connectivityService: context.read<ConnectivityService>(),
+                  chatSessionManager: context.read<ChatSessionManager>(),
+                  postHogAnalyticsService: context
+                      .read<PostHogAnalyticsService>(),
+                  suggestionPillsRepository: context
+                      .read<AgentSuggestionPillsRepository>(),
+                  buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
+                  sessionConsolidator: context.read<SessionConsolidator>(),
+                ),
+              ),
+            ],
+            child: const GetBetterScreen(),
+          ),
+        ),
       ),
 
       // Full-screen: Daily briefing - opened from the drawer or a briefing push.
@@ -185,7 +232,8 @@ GoRouter buildRouter(
               ChangeNotifierProvider(
                 create: (_) => BriefingViewModel(
                   backendApiService: context.read<BackendApiService>(),
-                  postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
+                  postHogAnalyticsService: context
+                      .read<PostHogAnalyticsService>(),
                 ),
               ),
               ChangeNotifierProvider(
@@ -196,9 +244,10 @@ GoRouter buildRouter(
                   feedbackService: context.read<FeedbackService>(),
                   connectivityService: context.read<ConnectivityService>(),
                   chatSessionManager: context.read<ChatSessionManager>(),
-                  postHogAnalyticsService: context.read<PostHogAnalyticsService>(),
-                  suggestionPillsRepository:
-                      context.read<AgentSuggestionPillsRepository>(),
+                  postHogAnalyticsService: context
+                      .read<PostHogAnalyticsService>(),
+                  suggestionPillsRepository: context
+                      .read<AgentSuggestionPillsRepository>(),
                   buddyPillsRefresher: context.read<BuddyPillsRefresher>(),
                   sessionConsolidator: context.read<SessionConsolidator>(),
                 ),
@@ -221,14 +270,38 @@ CustomTransitionPage<void> _slidePage(GoRouterState state, Widget child) {
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
       const begin = Offset(1.0, 0.0);
       const end = Offset.zero;
-      final tween = Tween(begin: begin, end: end).chain(
-        CurveTween(curve: Curves.easeInOutCubic),
+      final tween = Tween(
+        begin: begin,
+        end: end,
+      ).chain(CurveTween(curve: Curves.easeInOutCubic));
+      return SlideTransition(position: animation.drive(tween), child: child);
+    },
+    transitionDuration: const Duration(milliseconds: 300),
+  );
+}
+
+/// A full-height modal route that rises from the bottom and reverses smoothly
+/// back down for the system back gesture, the close button, and the sheet handle.
+CustomTransitionPage<void> _modalSheetPage(GoRouterState state, Widget child) {
+  return CustomTransitionPage<void>(
+    key: state.pageKey,
+    name: state.name,
+    child: child,
+    transitionDuration: const Duration(milliseconds: 420),
+    reverseTransitionDuration: const Duration(milliseconds: 340),
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
       );
       return SlideTransition(
-        position: animation.drive(tween),
+        position: Tween<Offset>(
+          begin: const Offset(0, 1),
+          end: Offset.zero,
+        ).animate(curved),
         child: child,
       );
     },
-    transitionDuration: const Duration(milliseconds: 300),
   );
 }

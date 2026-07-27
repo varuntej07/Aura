@@ -8,8 +8,9 @@ import 'dart:async' as _i3;
 import 'package:aura/core/network/api_response.dart' as _i4;
 import 'package:aura/data/models/chat_attachment.dart' as _i6;
 import 'package:aura/data/models/daily_briefing.dart' as _i7;
+import 'package:aura/data/models/get_better_feed.dart' as _i8;
 import 'package:aura/data/services/backend_api_service.dart' as _i2;
-import 'package:aura/data/services/posthog_analytics_service.dart' as _i8;
+import 'package:aura/data/services/posthog_analytics_service.dart' as _i9;
 import 'package:mockito/mockito.dart' as _i1;
 import 'package:mockito/src/dummies.dart' as _i5;
 
@@ -342,13 +343,42 @@ class MockBackendApiService extends _i1.Mock implements _i2.BackendApiService {
             returnValueForMissingStub: _i3.Future<_i7.DailyBriefing?>.value(),
           )
           as _i3.Future<_i7.DailyBriefing?>);
+
+  @override
+  _i3.Future<_i8.GetBetterCatalogSync?> syncGetBetterCatalog({
+    String? knownCatalogVersion,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#syncGetBetterCatalog, [], {
+              #knownCatalogVersion: knownCatalogVersion,
+            }),
+            returnValue: _i3.Future<_i8.GetBetterCatalogSync?>.value(),
+            returnValueForMissingStub:
+                _i3.Future<_i8.GetBetterCatalogSync?>.value(),
+          )
+          as _i3.Future<_i8.GetBetterCatalogSync?>);
+
+  @override
+  _i3.Future<bool> sendGetBetterActivityBatch({
+    required String? batchId,
+    required List<_i8.GetBetterActivityEvent>? events,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#sendGetBetterActivityBatch, [], {
+              #batchId: batchId,
+              #events: events,
+            }),
+            returnValue: _i3.Future<bool>.value(false),
+            returnValueForMissingStub: _i3.Future<bool>.value(false),
+          )
+          as _i3.Future<bool>);
 }
 
 /// A class which mocks [PostHogAnalyticsService].
 ///
 /// See the documentation for Mockito's code generation for more information.
 class MockPostHogAnalyticsService extends _i1.Mock
-    implements _i8.PostHogAnalyticsService {
+    implements _i9.PostHogAnalyticsService {
   @override
   _i3.Future<void> trackEvent(
     String? event, {

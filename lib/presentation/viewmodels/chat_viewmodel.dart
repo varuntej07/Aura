@@ -678,6 +678,37 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     await sendMessage(question, _currentUserId!);
   }
 
+  /// Starts a new Buddy conversation inside the Get Better sheet. [contextMessage]
+  /// is stored as the first visible assistant bubble, so the ideas remain part of
+  /// the saved conversation and Buddy receives them through ordinary chat history.
+  Future<void> startGetBetterConversation({
+    required String contextMessage,
+    required String firstUserMessage,
+  }) async {
+    final question = firstUserMessage.trim();
+    if (question.isEmpty || _currentUserId == null) return;
+
+    if (_messages.isNotEmpty) {
+      await _openFreshSession();
+    }
+
+    if (contextMessage.trim().isNotEmpty) {
+      await _persistMessage(
+        ChatMessageModel(
+          id: _uuid.v4(),
+          text: contextMessage,
+          isUser: false,
+          timestamp: DateTime.now(),
+          channel: ChatMessageChannel.text,
+          sessionId: _currentSessionId,
+        ),
+      );
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+    await sendMessage(question, _currentUserId!);
+  }
+
   /// Pre-loads the opener from a topic-tracker live-update notification tap. Seeds
   /// Buddy's update as the first bubble. v1 has no funnel attribution for trackers,
   /// so unlike the other notification origins this only seeds the opener.

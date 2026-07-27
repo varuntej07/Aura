@@ -1,0 +1,617 @@
+{
+  "catalog_version": "2026-07-26.v1",
+  "published_at": "2026-07-26T00:00:00Z",
+  "headline": "Pick something that could make life a little better",
+  "intro": "These are small stories about ordinary problems. Open one that feels useful, read it slowly, and take only the part that fits.",
+  "stories": [
+    {
+      "id": "weigh_a_big_decision",
+      "title": "Weigh a big decision",
+      "category": "Clarity",
+      "summary": "A simple way to compare two choices without asking for a perfect answer.",
+      "why_it_fits": "A decision becomes easier when you can see what each choice gives, costs, and protects.",
+      "steps": [
+        "Write the two choices in plain words.",
+        "Name one gift and one cost for each choice.",
+        "Choose the cost you are more willing to carry."
+      ],
+      "chat_prompt": "Help me think through a big decision without telling me what to choose.",
+      "image_key": "calm",
+      "personalized": false,
+      "minutes": 12,
+      "story_version": 1,
+      "narrative": "Maya had two good choices. She could stay in a job she knew, or take a new job in another city. Every time she tried to pick, her mind asked, “Which choice is perfect?” That question made her feel stuck.\n\nHer uncle gave her a sheet of paper. On one side, Maya wrote what staying would give her and what it would cost. On the other side, she did the same for leaving. Neither side was perfect. Staying gave her comfort but less adventure. Leaving gave her growth but meant missing familiar people.\n\nMaya still felt nervous, but the choice was no longer a fog. She was not choosing between good and bad. She was choosing which gift mattered more and which cost she could accept.",
+      "what_it_means": "Big decisions often stay hard because both choices contain something valuable. The goal is not to remove every risk. It is to see the tradeoff clearly.",
+      "try_this": "Draw two columns. Give each choice one honest gift, one honest cost, and one thing it protects.",
+      "related_story_ids": [
+        "ask_a_better_question",
+        "follow_the_work_that_gives_energy",
+        "make_the_next_step_tiny"
+      ],
+      "card_type": "hero",
+      "display_order": 0,
+      "featured": true,
+      "status": "published"
+    },
+    {
+      "id": "talk_to_someone_you_like",
+      "title": "Talk to someone you like",
+      "category": "Relationships",
+      "summary": "Start a real conversation without trying to sound impressive.",
+      "why_it_fits": "Warm curiosity creates a better connection than a perfect opening line.",
+      "steps": [
+        "Notice something real around both of you.",
+        "Ask one easy question about it.",
+        "Listen for something you honestly want to know more about."
+      ],
+      "chat_prompt": "Help me start a natural conversation with someone I like.",
+      "image_key": "relationships",
+      "personalized": false,
+      "minutes": 5,
+      "story_version": 1,
+      "narrative": "Noah wanted to talk to Sam, but he kept searching for a brilliant first sentence. Each idea sounded strange in his head, so he said nothing.\n\nOne afternoon, they were both waiting for a school event to begin. Noah noticed that Sam was drawing tiny faces on the corner of a notebook. He said, “Those are funny. Do you draw when you are bored?” Sam laughed and showed him the rest of the page.\n\nThe conversation was not magical because Noah said something clever. It worked because he noticed something real and cared about the answer. He stopped performing and started paying attention. That gave both of them an easy place to begin.",
+      "what_it_means": "You do not need a perfect line. A good conversation can begin with one honest observation and one question whose answer you actually want to hear.",
+      "try_this": "Use the sentence, “I noticed ____. What do you think about it?” Then listen instead of planning your next line.",
+      "related_story_ids": [
+        "send_the_warm_message",
+        "be_a_good_friend_on_a_hard_day",
+        "make_someone_feel_special"
+      ],
+      "card_type": "wide",
+      "display_order": 1,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "have_a_more_productive_morning",
+      "title": "Have a more productive morning",
+      "category": "Routines",
+      "summary": "Give the first part of your day one clear job instead of ten competing jobs.",
+      "why_it_fits": "A small prepared start reduces the number of decisions your sleepy brain has to make.",
+      "steps": [
+        "Choose tomorrow morning's first useful action tonight.",
+        "Put what you need where you can see it.",
+        "Finish that action before checking optional messages."
+      ],
+      "chat_prompt": "Help me design one simple first step for tomorrow morning.",
+      "image_key": "routines",
+      "personalized": false,
+      "minutes": 10,
+      "story_version": 1,
+      "narrative": "Every morning, Eli woke up with a giant plan. He wanted to exercise, answer messages, clean his room, study, and make a perfect breakfast. He usually spent twenty minutes deciding where to start, then picked up his phone and lost more time.\n\nOne night, Eli put his notebook and a glass of water on the table. He wrote one sentence on a sticky note: “Read two pages before anything else.” The next morning, he did not need to build a whole plan. He drank the water and read the pages.\n\nTwo pages did not change his entire life. They did something smaller and more useful. They gave the morning a clear beginning. After that, the next choice felt easier.",
+      "what_it_means": "A productive morning does not require a long routine. It needs a first action that is already chosen and easy to begin.",
+      "try_this": "Prepare one visible first action tonight. Make it small enough to finish before the day becomes noisy.",
+      "related_story_ids": [
+        "get_more_focused",
+        "reset_the_room_not_your_life",
+        "make_the_next_step_tiny"
+      ],
+      "card_type": "square",
+      "display_order": 2,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "understand_your_own_mind",
+      "title": "Understand your own mind",
+      "category": "Learning",
+      "summary": "Notice a thought without treating it as an order or a fact.",
+      "why_it_fits": "Naming a thought creates a little space between what appears in your mind and what you choose next.",
+      "steps": [
+        "Pause when a strong thought appears.",
+        "Say, “I am having the thought that...”",
+        "Check what you know, what you guess, and what you want to do."
+      ],
+      "chat_prompt": "Help me look at a strong thought without getting pulled around by it.",
+      "image_key": "learning",
+      "personalized": false,
+      "minutes": 6,
+      "story_version": 1,
+      "narrative": "Priya sent a message to a friend. An hour passed with no reply. Her mind quickly said, “They are upset with me.” Her body felt tight, and she started writing a long apology.\n\nBefore sending it, Priya stopped. She changed the sentence to, “I am having the thought that they are upset with me.” The new sentence did not prove the thought wrong. It simply reminded her that a thought is something the mind makes, not always something the world has confirmed.\n\nPriya listed what she knew: she had sent a kind message, and her friend had not replied yet. Everything else was a guess. She waited. Later, her friend answered and said they had been taking a nap.",
+      "what_it_means": "Your mind tries to explain uncertain moments quickly. You can respect the warning without treating the first explanation as a proven fact.",
+      "try_this": "Add “I am having the thought that...” before one stressful belief. Then separate the facts from the guesses.",
+      "related_story_ids": [
+        "ask_a_better_question",
+        "make_space_for_calm",
+        "handle_a_mistake_without_hiding"
+      ],
+      "card_type": "square",
+      "display_order": 3,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "start_saving_money",
+      "title": "Start saving money",
+      "category": "Money",
+      "summary": "Begin with a small repeatable amount instead of waiting until you can save a lot.",
+      "why_it_fits": "A tiny automatic habit can become steady before the amount becomes large.",
+      "steps": [
+        "Choose a small amount you will not need this week.",
+        "Move it to a separate savings place.",
+        "Repeat on the same day next week and review after one month."
+      ],
+      "chat_prompt": "Help me choose a small and realistic way to begin saving.",
+      "image_key": "money",
+      "personalized": false,
+      "minutes": 8,
+      "story_version": 1,
+      "narrative": "Lena wanted to save money, but she thought saving only counted if the amount was big. At the end of every month, there was never a big amount left, so she saved nothing.\n\nHer brother suggested a smaller experiment. Every Friday, Lena moved five dollars into a separate savings space. Five dollars did not feel impressive. That was why it worked. She could do it without making the rest of the week scary.\n\nAfter a month, Lena had twenty dollars and, more importantly, proof that she could repeat the action. She looked at her budget and decided whether five dollars still felt safe. The habit began with an amount small enough to survive ordinary life.",
+      "what_it_means": "The first job of saving is to build a repeatable action, not to impress yourself with the amount. Your essential needs still come first.",
+      "try_this": "Choose the smallest amount that feels safe, move it once, and schedule a calm review after four weeks.",
+      "related_story_ids": [
+        "have_a_money_date_without_judgment",
+        "make_the_next_step_tiny",
+        "collect_evidence_that_you_can"
+      ],
+      "card_type": "wide",
+      "display_order": 4,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "become_a_founder",
+      "title": "Try being a founder",
+      "category": "Career",
+      "summary": "Test whether people need your idea before building the biggest version of it.",
+      "why_it_fits": "A small real test teaches more than months spent polishing a private plan.",
+      "steps": [
+        "Name one person with the problem.",
+        "Make the smallest useful version you can show them.",
+        "Watch what they do and ask what they would miss if it disappeared."
+      ],
+      "chat_prompt": "Help me turn an idea into a small test with a real person.",
+      "image_key": "career",
+      "personalized": false,
+      "minutes": 30,
+      "story_version": 1,
+      "narrative": "Amara wanted to build an app for people who forgot household chores. Her first plan had calendars, rewards, family accounts, and colorful charts. It would take months.\n\nBefore building it, she talked to Jordan, who shared an apartment with two friends. Jordan did not want charts. The painful part was simply knowing whose turn it was to take out the trash.\n\nAmara made a tiny shared page with three names and one rotating task. Jordan and the roommates used it for a week. They complained when it stopped working. That complaint was useful. It showed that the small tool had become part of their real life. Amara now knew what deserved to be built next.",
+      "what_it_means": "Founding begins with finding a real problem and testing the smallest useful answer. A large feature list is not proof that people need it.",
+      "try_this": "Choose one real person and one painful moment. Build or describe the smallest thing that improves only that moment.",
+      "related_story_ids": [
+        "make_something_badly_on_purpose",
+        "learn_one_layer_deeper",
+        "follow_the_work_that_gives_energy"
+      ],
+      "card_type": "square",
+      "display_order": 5,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "get_more_focused",
+      "title": "Get more focused",
+      "category": "Focus",
+      "summary": "Protect one short block for one outcome and give distractions somewhere else to go.",
+      "why_it_fits": "Focus improves when the task and the stopping point are both clear.",
+      "steps": [
+        "Write one outcome for the next twenty minutes.",
+        "Silence optional alerts and close unrelated tabs.",
+        "Write distracting thoughts on paper instead of following them."
+      ],
+      "chat_prompt": "Help me choose one outcome for a short focus block.",
+      "image_key": "focus",
+      "personalized": false,
+      "minutes": 20,
+      "story_version": 1,
+      "narrative": "Marcus sat down to finish a report. He also had messages to answer, a video to watch, and three small tasks he suddenly remembered. Each task pulled at him, so he moved between all of them and finished none.\n\nHe set a timer for twenty minutes and wrote one outcome: “Finish the first page.” Beside the keyboard, he placed a sheet called “Not now.” When he remembered another task, he wrote it there instead of opening a new tab.\n\nThe distractions did not disappear. Marcus simply stopped asking his brain to hold them. When the timer ended, the first page was done. He could choose another block or stop without pretending that he had to focus perfectly all day.",
+      "what_it_means": "Focus is easier when one task has a short protected space and every other thought has a safe place to wait.",
+      "try_this": "Choose one visible result for twenty minutes. Keep a “not now” list beside you and capture distractions there.",
+      "related_story_ids": [
+        "have_a_more_productive_morning",
+        "make_the_next_step_tiny",
+        "reset_the_room_not_your_life"
+      ],
+      "card_type": "square",
+      "display_order": 6,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "make_someone_feel_special",
+      "title": "Make someone feel special",
+      "category": "Relationships",
+      "summary": "Use one specific memory or detail to show someone that you truly notice them.",
+      "why_it_fits": "People often feel cared for when the kindness is personal, not expensive.",
+      "steps": [
+        "Think of one detail the person cares about.",
+        "Choose a small act that connects to that detail.",
+        "Tell them simply why it made you think of them."
+      ],
+      "chat_prompt": "Help me think of a small personal way to make someone feel valued.",
+      "image_key": "relationships",
+      "personalized": false,
+      "minutes": 10,
+      "story_version": 1,
+      "narrative": "Sofia wanted to do something kind for her grandmother. She searched for expensive gifts, but none of them felt right.\n\nThen Sofia remembered a story her grandmother often told about yellow flowers that grew near her childhood home. On the way to visit, Sofia found a small bunch of yellow flowers at a market. She brought them with a note: “These made me think of the place you always tell me about.”\n\nHer grandmother smiled and told the old story again. The flowers were not special because they cost a lot. They were special because Sofia had listened, remembered, and connected the gift to a piece of her grandmother’s life.",
+      "what_it_means": "A thoughtful act says, “I notice who you are.” Specific attention often matters more than size, price, or performance.",
+      "try_this": "Choose one detail the person has shared with you. Send a photo, note, snack, song, or tiny gift connected to it.",
+      "related_story_ids": [
+        "send_the_warm_message",
+        "be_a_good_friend_on_a_hard_day",
+        "talk_to_someone_you_like"
+      ],
+      "card_type": "wide",
+      "display_order": 7,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "make_the_next_step_tiny",
+      "title": "Make the next step tiny",
+      "category": "Momentum",
+      "summary": "Shrink one stuck task until beginning feels almost too easy.",
+      "why_it_fits": "Starting creates useful information without asking you to finish everything.",
+      "steps": [
+        "Name the thing that feels stuck.",
+        "Choose an action that takes less than two minutes.",
+        "Stop after that step unless continuing feels natural."
+      ],
+      "chat_prompt": "Help me make the next step on something feel tiny.",
+      "image_key": "momentum",
+      "personalized": false,
+      "minutes": 2,
+      "story_version": 1,
+      "narrative": "Ben needed to clean a crowded desk. In his mind, the job included sorting every paper, finding homes for cables, wiping the surface, and organizing the drawers. The task felt so large that he avoided the desk for a week.\n\nOne evening, Ben changed the job. He decided to throw away one piece of obvious trash. That took ten seconds. While standing there, he put two pens in a cup. Then he stopped.\n\nThe desk was not clean, but the task had changed. It was no longer a giant wall. It was a place where one small action had already happened. The next day, Ben chose another two-minute step. Tiny steps did not make him lazy. They made starting possible.",
+      "what_it_means": "When a task feels impossible, the first step is probably still too large. Make beginning so small that your brain has little reason to fight it.",
+      "try_this": "Change the task into one action that takes less than two minutes. Give yourself honest permission to stop afterward.",
+      "related_story_ids": [
+        "get_more_focused",
+        "reset_the_room_not_your_life",
+        "collect_evidence_that_you_can"
+      ],
+      "card_type": "challenge",
+      "display_order": 8,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "send_the_warm_message",
+      "title": "Send the warm message",
+      "category": "Relationships",
+      "summary": "Reach out without waiting for the perfect reason or the perfect words.",
+      "why_it_fits": "Small bids for connection can matter more than polished catch-ups.",
+      "steps": [
+        "Choose one person who crossed your mind.",
+        "Say what reminded you of them.",
+        "Leave the message easy to answer."
+      ],
+      "chat_prompt": "Help me write a warm, low-pressure message.",
+      "image_key": "relationships",
+      "personalized": false,
+      "minutes": 5,
+      "story_version": 1,
+      "narrative": "Kai often thought about an old friend named Luis. Each time, Kai planned to send a long message explaining the silence and asking for a full update. The message felt like work, so it never got sent.\n\nOne day, Kai passed the bakery where they used to buy cinnamon rolls. He took a photo and wrote, “Walked past this place and thought of you. Hope your week is treating you kindly.” Then he put the phone away.\n\nLuis answered later with a joke and a photo from his own day. They did not repair every month of silence in one conversation. They simply opened the door again. The small message worked because it carried warmth without creating a big job for either person.",
+      "what_it_means": "Connection does not always need a long explanation. A simple, specific message can say, “You matter to me,” without demanding an immediate deep conversation.",
+      "try_this": "Send: “I saw ____, and it made me think of you. No pressure to reply quickly. I just wanted to say hi.”",
+      "related_story_ids": [
+        "talk_to_someone_you_like",
+        "make_someone_feel_special",
+        "be_a_good_friend_on_a_hard_day"
+      ],
+      "card_type": "prompt",
+      "display_order": 9,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "reset_the_room_not_your_life",
+      "title": "Reset the room, not your life",
+      "category": "Routines",
+      "summary": "Make one visible space calmer instead of demanding a complete life reset.",
+      "why_it_fits": "A small environmental change can lower friction without requiring a huge burst of energy.",
+      "steps": [
+        "Pick the surface you see most.",
+        "Remove five things that do not belong.",
+        "Place the next useful object within easy reach."
+      ],
+      "chat_prompt": "Help me choose a quick room reset that will actually help.",
+      "image_key": "routines",
+      "personalized": false,
+      "minutes": 8,
+      "story_version": 1,
+      "narrative": "Nia looked around her room and decided everything had to change. Clothes needed sorting, books needed shelves, and every drawer seemed wrong. The size of the job made her sit on the bed and scroll instead.\n\nShe chose one smaller target: the chair beside her desk. Nia hung up one jacket, moved two books, threw away a receipt, and placed her headphones on the desk. The chair became empty.\n\nNothing else in the room changed, but the empty chair gave her somewhere to sit and put on her shoes the next morning. One useful space reduced one repeated annoyance. Nia did not need to become a perfectly organized person. She only needed the room to help her a little more.",
+      "what_it_means": "You do not have to fix an entire environment to feel a difference. One visible, useful area can make the next hour or next morning easier.",
+      "try_this": "Choose one surface, chair, or floor patch. Remove five misplaced things and stop when that small space works again.",
+      "related_story_ids": [
+        "have_a_more_productive_morning",
+        "make_the_next_step_tiny",
+        "get_more_focused"
+      ],
+      "card_type": "square",
+      "display_order": 10,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "learn_one_layer_deeper",
+      "title": "Learn one layer deeper",
+      "category": "Learning",
+      "summary": "Turn a broad interest into one question you can explore and explain.",
+      "why_it_fits": "A precise question gives curiosity a direction and makes the answer easier to remember.",
+      "steps": [
+        "Name the thing you want to understand.",
+        "Turn it into one concrete question.",
+        "Explain the answer back in three simple sentences."
+      ],
+      "chat_prompt": "Help me turn something I am curious about into a useful question.",
+      "image_key": "learning",
+      "personalized": false,
+      "minutes": 15,
+      "story_version": 1,
+      "narrative": "Omar said he wanted to learn about space. He opened videos, articles, and pictures, but each one led to ten more. After an hour, he had seen many facts and could explain almost none of them.\n\nHe changed the goal from “learn space” to one question: “Why does the Moon seem to change shape?” Omar found an explanation, drew the Sun, Earth, and Moon, and then told the answer to his younger cousin in three sentences.\n\nThe small question did not make space less interesting. It gave Omar a door he could actually walk through. Once he understood that layer, he had better questions for the next one.",
+      "what_it_means": "A huge topic can create endless browsing. One clear question turns information into something you can investigate, test, and explain.",
+      "try_this": "Complete this sentence: “After fifteen minutes, I want to be able to explain why or how ____.”",
+      "related_story_ids": [
+        "understand_your_own_mind",
+        "become_a_founder",
+        "ask_a_better_question"
+      ],
+      "card_type": "square",
+      "display_order": 11,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "make_space_for_calm",
+      "title": "Make space for calm",
+      "category": "Wellbeing",
+      "summary": "Use a brief sensory pause before deciding what the moment needs.",
+      "why_it_fits": "A calmer body can make the next choice easier to see without pretending every problem is solved.",
+      "steps": [
+        "Put both feet on the floor.",
+        "Take five breaths slower than usual.",
+        "Name the strongest need you notice right now."
+      ],
+      "chat_prompt": "Talk me through a short reset and help me choose what comes next.",
+      "image_key": "wellbeing",
+      "personalized": false,
+      "minutes": 3,
+      "story_version": 1,
+      "narrative": "Zoe had three messages waiting, a late assignment, and a loud argument playing again in her mind. She tried to solve all of it at once. Her thoughts moved faster, but no answer became clearer.\n\nZoe placed both feet on the floor. She noticed the chair under her, the cool air near the window, and the sound of a fan. She took five slower breaths. Then she asked, “What is the loudest need right now?”\n\nThe answer was not a perfect plan. She needed water and ten quiet minutes before replying to anyone. Meeting that small need did not erase the assignment or the argument. It gave Zoe enough steadiness to choose what to handle first.",
+      "what_it_means": "Calm is not the same as solving everything. Sometimes it is the small amount of space you need before making the next decision.",
+      "try_this": "Notice three things you can feel or hear, take five slower breaths, and name one need without judging it.",
+      "related_story_ids": [
+        "understand_your_own_mind",
+        "ask_a_better_question",
+        "handle_a_mistake_without_hiding"
+      ],
+      "card_type": "wide",
+      "display_order": 12,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "collect_evidence_that_you_can",
+      "title": "Collect evidence that you can",
+      "category": "Confidence",
+      "summary": "Build confidence from specific moments you handled, learned, or kept going.",
+      "why_it_fits": "Real examples are easier to trust than a vague command to believe in yourself.",
+      "steps": [
+        "List three recent moments that were not easy.",
+        "Name what you did in each moment.",
+        "Circle the strength or skill that appears more than once."
+      ],
+      "chat_prompt": "Help me find real evidence of what I am getting better at.",
+      "image_key": "confidence",
+      "personalized": false,
+      "minutes": 7,
+      "story_version": 1,
+      "narrative": "Theo had to give a short presentation. Before it began, he told himself, “I am terrible at speaking.” His teacher did not answer with a pep talk. She asked him to remember three times he had explained something clearly.\n\nTheo remembered helping his sister with a game, asking a useful question in class, and telling a funny story at lunch. None of those moments was a formal speech. They still showed that he could organize an idea and help another person follow it.\n\nTheo remained nervous during the presentation. Confidence did not arrive as a fearless feeling. It arrived as evidence: he had explained things before, and he could use the same skill again.",
+      "what_it_means": "Confidence can exist beside fear. It grows when you collect honest evidence about actions you have already taken and skills you can use again.",
+      "try_this": "Write three small examples of handling something difficult. Look for the action or strength that repeats.",
+      "related_story_ids": [
+        "handle_a_mistake_without_hiding",
+        "make_something_badly_on_purpose",
+        "make_the_next_step_tiny"
+      ],
+      "card_type": "square",
+      "display_order": 13,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "make_something_badly_on_purpose",
+      "title": "Make something badly on purpose",
+      "category": "Creativity",
+      "summary": "Create a rough first version before asking whether it is good.",
+      "why_it_fits": "Lowering the quality bar makes experimentation possible and gives you something real to improve.",
+      "steps": [
+        "Choose a tiny thing to make.",
+        "Set a twelve-minute timer.",
+        "Finish one rough version before judging it."
+      ],
+      "chat_prompt": "Give me a small creative challenge with no pressure to make it good.",
+      "image_key": "creativity",
+      "personalized": false,
+      "minutes": 12,
+      "story_version": 1,
+      "narrative": "Iris wanted to draw a comic, but every first sketch looked worse than the pictures in her imagination. She erased so much that the paper became thin.\n\nHer friend gave her a strange challenge: make the worst six-panel comic she could in twelve minutes. Iris drew crooked people, a confused cat, and a door that changed size in every panel. She laughed and finished before the timer rang.\n\nThe comic was not polished, but it existed. Iris noticed that the confused cat was actually funny. She redrew that part and kept going. Making something badly did not lower her ability. It removed the gate that had stopped her from practicing.",
+      "what_it_means": "A first version is allowed to be rough. Its job is to exist, teach you something, and reveal the part worth improving.",
+      "try_this": "Make one deliberately rough version in twelve minutes. Do not erase. When time ends, choose only one part to keep.",
+      "related_story_ids": [
+        "become_a_founder",
+        "collect_evidence_that_you_can",
+        "learn_one_layer_deeper"
+      ],
+      "card_type": "challenge",
+      "display_order": 14,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "follow_the_work_that_gives_energy",
+      "title": "Follow the work that gives energy",
+      "category": "Career",
+      "summary": "Notice which parts of work leave you curious, useful, or ready to continue.",
+      "why_it_fits": "Energy patterns can reveal a direction before you have a complete career plan.",
+      "steps": [
+        "List three recent work or school moments.",
+        "Mark which moments gave energy and which drained it.",
+        "Name one ingredient you want to seek more often."
+      ],
+      "chat_prompt": "Help me run a simple career energy check.",
+      "image_key": "career",
+      "personalized": false,
+      "minutes": 10,
+      "story_version": 1,
+      "narrative": "Daniel thought he needed to choose a perfect career title. He read long lists of jobs, but the names did not tell him what an ordinary Tuesday would feel like.\n\nInstead, Daniel reviewed the past month. Writing reports drained him. Helping a new teammate understand a tool made him lose track of time. Fixing a confusing process felt satisfying. The pattern was not a job title. It was a kind of work: explaining systems and making them easier for people.\n\nDaniel used that clue to ask for a small training project at work. He did not discover his entire future. He found an ingredient that could guide the next experiment.",
+      "what_it_means": "Career direction often appears first as repeated moments of energy, curiosity, usefulness, or pride. Look for ingredients before demanding a final title.",
+      "try_this": "Review three recent moments and ask, “What was I doing when I felt most useful or alive?”",
+      "related_story_ids": [
+        "weigh_a_big_decision",
+        "become_a_founder",
+        "collect_evidence_that_you_can"
+      ],
+      "card_type": "prompt",
+      "display_order": 15,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "plan_a_micro_adventure",
+      "title": "Plan a micro-adventure",
+      "category": "Adventure",
+      "summary": "Put one unfamiliar place or experience into the next seven days.",
+      "why_it_fits": "A small amount of novelty can make a normal week feel larger without requiring a major trip.",
+      "steps": [
+        "Choose a distance you can reach easily.",
+        "Find one place or activity you have never tried.",
+        "Pick a specific day, time, and simple way home."
+      ],
+      "chat_prompt": "Help me plan a small realistic adventure this week.",
+      "image_key": "adventure",
+      "personalized": false,
+      "minutes": 10,
+      "story_version": 1,
+      "narrative": "Jules wanted life to feel less repetitive, but every idea involved a plane ticket or a free weekend. Neither was available.\n\nOn Saturday, Jules took a bus three stops past the usual stop and visited a small public garden. The trip lasted two hours. Jules found a bright blue bench, watched a family feed birds, and tried a pastry from a nearby shop.\n\nNothing about the day was enormous. That was the point. Adventure did not have to wait for perfect timing or a distant country. A small unfamiliar place was enough to interrupt the pattern and create a new memory.",
+      "what_it_means": "Novelty can be local and short. An adventure is simply a safe step outside your usual pattern with enough attention to notice something new.",
+      "try_this": "Pick one unfamiliar place within an easy trip. Decide when you will go and how you will return before leaving.",
+      "related_story_ids": [
+        "make_something_badly_on_purpose",
+        "learn_one_layer_deeper",
+        "collect_evidence_that_you_can"
+      ],
+      "card_type": "wide",
+      "display_order": 16,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "ask_a_better_question",
+      "title": "Ask a better question",
+      "category": "Clarity",
+      "summary": "Replace a huge worried question with one that points toward a useful next action.",
+      "why_it_fits": "The shape of a question changes what your mind searches for.",
+      "steps": [
+        "Write the question that is making you spin.",
+        "Remove words like always, never, everything, and perfect.",
+        "Ask what one useful action or piece of information would help next."
+      ],
+      "chat_prompt": "Help me turn a worried question into a useful one.",
+      "image_key": "calm",
+      "personalized": false,
+      "minutes": 8,
+      "story_version": 1,
+      "narrative": "Ari kept asking, “How do I stop failing at everything?” The question felt important, but it was too large to answer. It also treated one difficult week as proof about Ari’s whole life.\n\nA coach helped Ari make the question smaller: “What made yesterday’s math test difficult, and what could I try before the next one?” Now Ari could name two facts. The practice problems had been rushed, and one type of question was still confusing.\n\nThe new question did not pretend the test felt fine. It gave the problem edges. Ari could ask the teacher about that question type and schedule twenty minutes of slower practice.",
+      "what_it_means": "A useful question is specific enough to answer and kind enough to avoid turning one problem into a judgment about your whole self.",
+      "try_this": "Change “Why am I bad at this?” into “What part is hard, what do I know, and what would help me test the next step?”",
+      "related_story_ids": [
+        "weigh_a_big_decision",
+        "understand_your_own_mind",
+        "make_space_for_calm"
+      ],
+      "card_type": "prompt",
+      "display_order": 17,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "have_a_money_date_without_judgment",
+      "title": "Have a money date without judgment",
+      "category": "Money",
+      "summary": "Look at one week of spending to learn, not to punish yourself.",
+      "why_it_fits": "A short factual check-in builds awareness without turning money into a shame story.",
+      "steps": [
+        "Open only the last seven days of transactions.",
+        "Mark one expense that felt worth it and one surprise.",
+        "Choose one small adjustment for the coming week."
+      ],
+      "chat_prompt": "Help me do a calm ten-minute money check-in.",
+      "image_key": "money",
+      "personalized": false,
+      "minutes": 10,
+      "story_version": 1,
+      "narrative": "Mei avoided checking her bank account because she expected to feel guilty. The longer she waited, the scarier the account became in her imagination.\n\nShe set a ten-minute timer and looked only at the past seven days. Mei noticed that lunch with a friend had felt worth the cost. She also found three delivery fees she had barely noticed. She did not create a giant budget or promise never to spend money again.\n\nFor the next week, Mei decided to pick up one order instead of paying for delivery. The check-in gave her one useful fact and one manageable choice. Money became information she could use, not a report card on whether she was a good person.",
+      "what_it_means": "Looking at money works better when the goal is to notice patterns and make one safe adjustment, not to shame yourself or fix everything at once.",
+      "try_this": "Review seven days for ten minutes. Find one expense you value, one surprise, and one change that will not threaten essential needs.",
+      "related_story_ids": [
+        "start_saving_money",
+        "ask_a_better_question",
+        "make_the_next_step_tiny"
+      ],
+      "card_type": "wide",
+      "display_order": 18,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "handle_a_mistake_without_hiding",
+      "title": "Handle a mistake without hiding",
+      "category": "Confidence",
+      "summary": "Tell the truth, repair what you can, and learn without turning the mistake into your identity.",
+      "why_it_fits": "Owning a mistake early usually protects trust better than hiding it and hoping nobody notices.",
+      "steps": [
+        "State what happened without excuses or dramatic labels.",
+        "Name who or what was affected.",
+        "Offer one repair and one change that reduces a repeat."
+      ],
+      "chat_prompt": "Help me own a mistake clearly and make a repair.",
+      "image_key": "confidence",
+      "personalized": false,
+      "minutes": 10,
+      "story_version": 1,
+      "narrative": "Ravi forgot to add an important page to a group project. When the team noticed, his first idea was to say the file had disappeared. He was afraid they would think he was careless.\n\nRavi took a breath and said, “I missed the page when I combined the files. That is my mistake. I can add it now and send the corrected version in fifteen minutes.” He also made a short checklist for the next submission.\n\nThe team was annoyed, but the problem was repaired quickly. Ravi learned that admitting a mistake did not mean calling himself a failure. It meant giving other people the truth they needed and taking responsibility for the next action.",
+      "what_it_means": "You are responsible for your actions, but one mistake is not your whole identity. Clear ownership includes truth, impact, repair, and prevention.",
+      "try_this": "Use: “I did ____. It affected ____. I can repair it by ____. Next time I will ____.”",
+      "related_story_ids": [
+        "collect_evidence_that_you_can",
+        "understand_your_own_mind",
+        "be_a_good_friend_on_a_hard_day"
+      ],
+      "card_type": "square",
+      "display_order": 19,
+      "featured": false,
+      "status": "published"
+    },
+    {
+      "id": "be_a_good_friend_on_a_hard_day",
+      "title": "Be a good friend on a hard day",
+      "category": "Relationships",
+      "summary": "Offer steady company without rushing to fix a feeling you do not fully understand.",
+      "why_it_fits": "People often need to feel heard before advice becomes useful.",
+      "steps": [
+        "Ask whether they want listening, help, or company.",
+        "Reflect the main feeling or problem you heard.",
+        "Offer one specific small form of support."
+      ],
+      "chat_prompt": "Help me support a friend without saying the wrong thing.",
+      "image_key": "relationships",
+      "personalized": false,
+      "minutes": 8,
+      "story_version": 1,
+      "narrative": "Tara’s friend called after a painful argument. Tara wanted to help, so she quickly listed solutions. Her friend became quiet.\n\nTara stopped and asked, “Do you want ideas, or do you want me to listen for a while?” Her friend chose listening. Tara said, “It sounds like you feel left out and tired of guessing where you stand.” Her friend sighed and said, “Yes. That is it.”\n\nLater, Tara offered to bring dinner and sit together. She did not solve the relationship or promise that everything would be fine. She made the hard evening less lonely by listening carefully and offering one real form of support.",
+      "what_it_means": "Support is not always advice. Asking what kind of help is wanted protects the other person’s choice and helps your care land more gently.",
+      "try_this": "Ask, “Would listening, ideas, or a little company help most right now?” Then follow the answer.",
+      "related_story_ids": [
+        "send_the_warm_message",
+        "make_someone_feel_special",
+        "handle_a_mistake_without_hiding"
+      ],
+      "card_type": "square",
+      "display_order": 20,
+      "featured": false,
+      "status": "published"
+    }
+  ]
+}

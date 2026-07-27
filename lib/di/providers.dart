@@ -9,6 +9,7 @@ import '../data/local/app_database.dart';
 import '../data/repositories/agent_suggestion_pills_repository.dart';
 import '../data/repositories/auth_repository.dart';
 import '../data/repositories/chat_repository.dart';
+import '../data/repositories/get_better_repository.dart';
 import '../data/repositories/memory_repository.dart';
 import '../data/repositories/onboarding_repository.dart';
 import '../data/repositories/reminder_repository.dart';
@@ -68,8 +69,16 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
 
   // Remote services
   final backendApiService = BackendApiService(apiClient: apiClient);
-  final buddyPillsRefresher = BuddyPillsRefresher(backendApiService: backendApiService);
-  final sessionConsolidator = SessionConsolidator(backendApiService: backendApiService);
+  final getBetterRepository = GetBetterRepository(
+    database: appDatabase,
+    backendApiService: backendApiService,
+  );
+  final buddyPillsRefresher = BuddyPillsRefresher(
+    backendApiService: backendApiService,
+  );
+  final sessionConsolidator = SessionConsolidator(
+    backendApiService: backendApiService,
+  );
   final ChatServiceProvider chatServiceProvider = Environment.hasConfiguredApi
       ? backendApiService
       : StubChatServiceProvider();
@@ -134,21 +143,24 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     // Remote services
     Provider<NotificationService>.value(value: notificationService),
     Provider<BackendApiService>.value(value: backendApiService),
+    Provider<GetBetterRepository>.value(value: getBetterRepository),
     Provider<BuddyPillsRefresher>.value(value: buddyPillsRefresher),
     Provider<SessionConsolidator>.value(value: sessionConsolidator),
     Provider<ChatServiceProvider>.value(value: chatServiceProvider),
-    Provider<ConnectorsService>.value(
-      value: connectorsService,
-    ),
+    Provider<ConnectorsService>.value(value: connectorsService),
     Provider<VoiceSessionService>.value(value: voiceSessionService),
     Provider<WakeWordService>.value(value: wakeWordService),
-    ChangeNotifierProvider<SubscriptionService>.value(value: subscriptionService),
+    ChangeNotifierProvider<SubscriptionService>.value(
+      value: subscriptionService,
+    ),
 
     // Domain repositories
     Provider<AuthRepository>.value(value: authRepository),
     Provider<MemoryRepository>.value(value: memoryRepository),
     Provider<ReminderRepository>.value(value: reminderRepository),
-    Provider<AgentSuggestionPillsRepository>.value(value: agentSuggestionPillsRepository),
+    Provider<AgentSuggestionPillsRepository>.value(
+      value: agentSuggestionPillsRepository,
+    ),
     Provider<OnboardingRepository>.value(value: onboardingRepository),
 
     // ViewModels
@@ -179,9 +191,10 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     ),
     ChangeNotifierProvider<ConnectorsViewModel>(
       create: (_) => ConnectorsViewModel(connectorService: connectorsService),
-      ),
+    ),
     ChangeNotifierProvider<SubscriptionViewModel>(
-      create: (_) => SubscriptionViewModel(subscriptionService: subscriptionService),
+      create: (_) =>
+          SubscriptionViewModel(subscriptionService: subscriptionService),
     ),
     ChangeNotifierProvider<RemindersViewModel>(
       create: (_) => RemindersViewModel(repository: reminderRepository),

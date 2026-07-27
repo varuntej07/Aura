@@ -66,3 +66,14 @@ def reset_openai_chat_fallback_client():
     openai_chat_fallback._client = None
     yield
     openai_chat_fallback._client = None
+
+
+@pytest.fixture(autouse=True)
+def clear_get_better_catalog_cache():
+    """Keep the process-level Get Better catalog cache isolated per test."""
+
+    from src.services.get_better.catalog import clear_catalog_cache_for_testing
+
+    clear_catalog_cache_for_testing()
+    yield
+    clear_catalog_cache_for_testing()
