@@ -2,7 +2,7 @@ name: aura
 description: "Aura - Voice-first personal AI companion"
 publish_to: 'none'
 
-version: 2.2.0+12
+version: 2.3.0+13
 
 environment:
   sdk: ^3.10.7
@@ -31,7 +31,7 @@ dependencies:
   flutter_timezone:
   livekit_client: ^2.5.4  # >=2.5.4 required for PreConnectAudioBuffer
   image_picker:
-  file_picker: 11.0.0
+  file_selector: ^1.1.0
   flutter_image_compress:
   permission_handler:
   drift:

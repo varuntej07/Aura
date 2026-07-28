@@ -410,6 +410,12 @@
       ]
     },
     {
+      "collectionGroup": "outbox",
+      "fieldPath": "expires_at",
+      "ttl": true,
+      "indexes": []
+    },
+    {
       "collectionGroup": "meetings",
       "fieldPath": "expires_at",
       "ttl": true,

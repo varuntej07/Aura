@@ -1,8 +1,25 @@
 # Changelog
 
-All notable production release changes are recorded here. The app version at
-the time of this entry is `2.2.0+11`; use a new, unused Google Play version
-code for the next upload.
+All notable production release changes are recorded here. The current release
+version is `2.3.0+13`.
+
+## 2.3.0+13 - 2026-07-27
+
+### Added
+
+- Added the Get Better library with 21 curated stories, a featured story, and
+  related stories to explore.
+- Added options to save stories, mark them complete, share them, and discuss
+  them with Buddy.
+
+### Changed
+
+- Get Better stories now load from a stable, locally cached catalog for a
+  faster and more reliable experience.
+- Improved Android 15 edge-to-edge display handling.
+- Reduced memory risk when selecting file attachments.
+- Enabled optimized Android release shrinking for better app size and
+  performance.
 
 ## Unreleased - Android billing cleanup
 

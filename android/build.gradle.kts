@@ -44,6 +44,11 @@ subprojects {
     afterEvaluate {
         val androidExtension = extensions.findByName("android") as? BaseExtension
             ?: return@afterEvaluate
+        // AGP 9 validates every Android library's compile SDK against its
+        // dependency metadata. Keep Flutter plugins aligned with the app's SDK
+        // because older plugin manifests can still declare 34 while depending
+        // on AndroidX libraries that require 36.
+        androidExtension.compileSdkVersion(36)
         androidExtension.compileOptions {
             sourceCompatibility = JavaVersion.VERSION_17
             targetCompatibility = JavaVersion.VERSION_17
