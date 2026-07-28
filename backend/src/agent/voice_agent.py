@@ -29,10 +29,9 @@ import re
 import time
 from datetime import UTC, datetime
 
-from livekit.agents import JobContext, JobProcess, WorkerOptions, cli
+from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, inference
 from livekit.agents import llm as lk_llm
 from livekit.agents.voice import room_io
-from livekit.agents import inference
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -43,8 +42,14 @@ from .voice.auth import mint_firebase_id_token
 from .voice.bridge_handover import BRIDGE_CONTROL_TYPES, BridgeHandoverCoordinator
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
-from .voice.greeting import start_opener_task
-from .voice.guide_mode import GUIDE_MODE_TYPE, GuideCoordinator
+from .voice.guide_default_profile import GenericGuideProfile
+from .voice.guide_mode import (
+    GUIDE_HEARTBEAT_TYPE,
+    GUIDE_MODE_TYPE,
+    GuideCoordinator,
+)
+from .voice.guide_provider_adapter import AuraGuideDecisionProvider
+from .voice.guide_task_runtime import GuideTaskRuntime
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -205,9 +210,13 @@ async def _connect_to_room(ctx: JobContext, candidate_user_id: str) -> bool:
         )
         return False
     except Exception as exc:
-        logger.exception("VoiceAgent: room connect failed", {
-            "room": ctx.room.name, "error": str(exc),
-        })
+        logger.exception(
+            "VoiceAgent: room connect failed",
+            {
+                "room": ctx.room.name,
+                "error": str(exc),
+            },
+        )
         log_voice_failure(
             code="room_connect_failed",
             user_id=candidate_user_id,
@@ -232,12 +241,17 @@ def _build_sonic3_controls(
         sonic3_controls["speed"] = voice_speed
     if voice_emotion is not None:
         sonic3_controls["emotion"] = voice_emotion
-    logger.info("VoiceSession: voice controls", {
-        "session_id": session_id, "user_id": user_id,
-        "speed": voice_speed, "emotion": voice_emotion,
-        "source_tone": dominant_tone,
-        "source_emotion": dominant_emotion,
-    })
+    logger.info(
+        "VoiceSession: voice controls",
+        {
+            "session_id": session_id,
+            "user_id": user_id,
+            "speed": voice_speed,
+            "emotion": voice_emotion,
+            "source_tone": dominant_tone,
+            "source_emotion": dominant_emotion,
+        },
+    )
     return sonic3_controls
 
 
@@ -251,9 +265,13 @@ async def entrypoint(ctx: JobContext) -> None:
 
     user_id = candidate_user_id
     if not _FIREBASE_UID_RE.match(user_id):
-        logger.error("VoiceAgent: invalid uid in room name", {
-            "room": ctx.room.name, "extracted_uid": user_id,
-        })
+        logger.error(
+            "VoiceAgent: invalid uid in room name",
+            {
+                "room": ctx.room.name,
+                "extracted_uid": user_id,
+            },
+        )
         return
 
     followup_session_id: str | None = None
@@ -280,14 +298,6 @@ async def entrypoint(ctx: JobContext) -> None:
         session_context = await gather_session_context(user_id, session_id)
         context_vars = session_context.prompt_context_vars
 
-        # Memory-seeded opener, raced against the static greeting: it runs in
-        # parallel with the pipeline build below, and on_enter waits at most
-        # VOICE_GREETING_SEED_BUDGET_S for it before falling back to a static
-        # casual line (sub-1s first-audio feel preserved).
-        opener_task = start_opener_task(
-            session_context, session_id=session_id, user_id=user_id
-        )
-
         # Where the call was launched from. Baked into the prompt once here (the prompt is
         # built once per session in BuddyAgent), so a keyboard tap stays short and
         # task-focused for the whole session, not just the first turn.
@@ -310,21 +320,38 @@ async def entrypoint(ctx: JobContext) -> None:
         context_vars["surface"] = render_surface_note(surface)
         context_vars["screen_sight"] = render_screen_sight_note(surface)
         if persisted_surface is None:
-            logger.warn("voice_run_missing_surface", {
-                "session_id": session_id, "user_id": user_id,
-            })
+            logger.warn(
+                "voice_run_missing_surface",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                },
+            )
         if not conversation_id:
-            logger.warn("voice_run_missing_conversation_id", {
-                "session_id": session_id, "user_id": user_id,
-            })
+            logger.warn(
+                "voice_run_missing_conversation_id",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                },
+            )
         if surface != "app":
-            logger.info("VoiceSession: launch surface", {
-                "session_id": session_id, "user_id": user_id, "surface": surface,
-            })
+            logger.info(
+                "VoiceSession: launch surface",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "surface": surface,
+                },
+            )
         if voice_mode == "guide":
-            logger.info("VoiceSession: Guide Mode launch", {
-                "session_id": session_id, "user_id": user_id,
-            })
+            logger.info(
+                "VoiceSession: Guide Mode launch",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                },
+            )
 
         # memory_summary is already injected once via the {memory_summary} slot in
         # VOICE_PROMPT (see context.prompt_context_vars). We deliberately do NOT add a
@@ -371,12 +398,16 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_detector = build_turn_detector()
         except Exception as exc:
             turn_detector = None
-            logger.warn("VoiceSession: turn detector unavailable, degrading to "
-                        "VAD-based endpointing", {
-                            "code": "turn_detector_unavailable",
-                            "user_id": user_id, "room": ctx.room.name,
-                            "session_id": session_id, "error": str(exc),
-                        })
+            logger.warn(
+                "VoiceSession: turn detector unavailable, degrading to VAD-based endpointing",
+                {
+                    "code": "turn_detector_unavailable",
+                    "user_id": user_id,
+                    "room": ctx.room.name,
+                    "session_id": session_id,
+                    "error": str(exc),
+                },
+            )
 
         session = build_agent_session(
             stt=stt_pipeline,
@@ -393,13 +424,16 @@ async def entrypoint(ctx: JobContext) -> None:
         # stream can only carry frames from this room's participant.
         screen_frames = ScreenFrameStore(session_id=session_id, user_id=user_id)
         try:
-            ctx.room.register_byte_stream_handler(
-                SCREEN_FRAME_TOPIC, screen_frames.handle_stream
-            )
+            ctx.room.register_byte_stream_handler(SCREEN_FRAME_TOPIC, screen_frames.handle_stream)
         except Exception as exc:
-            logger.warn("VoiceSession: screen frame handler registration failed", {
-                "session_id": session_id, "user_id": user_id, "error": str(exc),
-            })
+            logger.warn(
+                "VoiceSession: screen frame handler registration failed",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "error": str(exc),
+                },
+            )
 
         # "there" is fetch_user_profile's no-name fallback (see voice/context.py),
         # not a real name; Buddy Drafts must never sign an email with it.
@@ -416,7 +450,6 @@ async def entrypoint(ctx: JobContext) -> None:
             user_tier=session_context.user_tier,
             display_name=draft_display_name,
             launch_surface=surface,
-            opener_task=opener_task,
             bridged=bridged,
         )
 
@@ -432,12 +465,37 @@ async def entrypoint(ctx: JobContext) -> None:
             else None
         )
 
+        guide_runtime = GuideTaskRuntime(
+            user_id=user_id,
+            voice_session_id=session_id,
+            screen_frames=screen_frames,
+            room=ctx.room,
+            session=session,
+            # Application-neutral by default: Guide adapts to whatever task the
+            # user asks by trusting the planner's own steps. CapCutExampleProfile
+            # stays an isolated example skill for a future task-profile registry.
+            profile=GenericGuideProfile(),
+            decision_provider=AuraGuideDecisionProvider(),
+        )
+        logger.info(
+            "GuideTrace",
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                **guide_runtime.diagnostic_state(),
+                "stage": "execution",
+                "outcome": "succeeded",
+                "reason": "guide_runtime_configured",
+            },
+        )
+        buddy.bind_guide_runtime(guide_runtime)
         guide = GuideCoordinator(
             session=session,
             buddy=buddy,
             room=ctx.room,
             session_id=session_id,
             user_id=user_id,
+            task_runtime=guide_runtime,
         )
         screen_frames.set_frame_listener(guide.submit_frame)
 
@@ -483,43 +541,51 @@ async def entrypoint(ctx: JobContext) -> None:
                 return
             if msg_type == GUIDE_MODE_TYPE:
                 guide.apply_control(msg, participant_identity)
+            elif msg_type == GUIDE_HEARTBEAT_TYPE:
+                guide.apply_heartbeat(msg, participant_identity)
             elif msg_type == SCREEN_CONTEXT_TYPE:
                 if screen_context_fired:
                     return
                 screen_context_fired = True
-                context_tasks.append(asyncio.create_task(
-                    deliver_screen_context(
-                        session,
-                        context_before=str(msg.get("context_before", "")),
-                        field_type=msg.get("field_type"),
-                        app=msg.get("app"),
-                        session_id=session_id,
-                        user_id=user_id,
-                    ),
-                    name=f"voice-screen-ctx-{session_id[:8]}",
-                ))
+                context_tasks.append(
+                    asyncio.create_task(
+                        deliver_screen_context(
+                            session,
+                            context_before=str(msg.get("context_before", "")),
+                            field_type=msg.get("field_type"),
+                            app=msg.get("app"),
+                            session_id=session_id,
+                            user_id=user_id,
+                        ),
+                        name=f"voice-screen-ctx-{session_id[:8]}",
+                    )
+                )
             elif msg_type == OCR_CONTEXT_TYPE:
-                context_tasks.append(asyncio.create_task(
-                    deliver_screen_context(
-                        session,
-                        context_before=str(msg.get("text", "")),
-                        field_type=None,
-                        app=None,
-                        session_id=session_id,
-                        user_id=user_id,
-                    ),
-                    name=f"voice-ocr-ctx-{session_id[:8]}",
-                ))
+                context_tasks.append(
+                    asyncio.create_task(
+                        deliver_screen_context(
+                            session,
+                            context_before=str(msg.get("text", "")),
+                            field_type=None,
+                            app=None,
+                            session_id=session_id,
+                            user_id=user_id,
+                        ),
+                        name=f"voice-ocr-ctx-{session_id[:8]}",
+                    )
+                )
             elif msg_type == TEXT_INPUT_TYPE:
-                context_tasks.append(asyncio.create_task(
-                    deliver_typed_message(
-                        session,
-                        text=str(msg.get("text", "")),
-                        session_id=session_id,
-                        user_id=user_id,
-                    ),
-                    name=f"voice-text-input-{session_id[:8]}",
-                ))
+                context_tasks.append(
+                    asyncio.create_task(
+                        deliver_typed_message(
+                            session,
+                            text=str(msg.get("text", "")),
+                            session_id=session_id,
+                            user_id=user_id,
+                        ),
+                        name=f"voice-text-input-{session_id[:8]}",
+                    )
+                )
 
         def _on_data_received(packet) -> None:
             try:
@@ -657,17 +723,20 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    logger.info("VoiceWorker: starting", {
-        "pid": os.getpid(),
-        "livekit_url": settings.LIVEKIT_URL,
-        "livekit_configured": settings.livekit_configured,
-        "deepgram_configured": bool(settings.DEEPGRAM_API_KEY),
-        "cartesia_configured": bool(settings.CARTESIA_API_KEY),
-        "anthropic_configured": bool(settings.ANTHROPIC_API_KEY),
-        "firebase_web_api_key_configured": bool(settings.FIREBASE_WEB_API_KEY),
-        "backend_internal_url": settings.BACKEND_INTERNAL_URL,
-        **worker_revision_fields(),
-    })
+    logger.info(
+        "VoiceWorker: starting",
+        {
+            "pid": os.getpid(),
+            "livekit_url": settings.LIVEKIT_URL,
+            "livekit_configured": settings.livekit_configured,
+            "deepgram_configured": bool(settings.DEEPGRAM_API_KEY),
+            "cartesia_configured": bool(settings.CARTESIA_API_KEY),
+            "anthropic_configured": bool(settings.ANTHROPIC_API_KEY),
+            "firebase_web_api_key_configured": bool(settings.FIREBASE_WEB_API_KEY),
+            "backend_internal_url": settings.BACKEND_INTERNAL_URL,
+            **worker_revision_fields(),
+        },
+    )
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,

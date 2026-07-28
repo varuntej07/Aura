@@ -27,14 +27,23 @@ from ..notifications.queue_store import drop_if_active, proposal_id_for
 from . import cost_cap, guardrails, inbox, lease, policy, reconcile
 from .agent import UserContext
 from .envelope import run_agent
-from .events import EVENT_INTENT_DUE
+from .events import EVENT_INTENT_DUE, Event
 from .intent_store import subject_id as _subject_id
 from .registry import get_agent_registry
 
 
-async def run_orchestrate(user_id: str) -> dict[str, object]:
+async def run_orchestrate(
+    user_id: str,
+    *,
+    transient_events: list[Event] | None = None,
+) -> dict[str, object]:
     """Run one orchestrate pass for a user. Coalesces the user's pending events,
-    reconciles, decides, dispatches agents, and routes proposals to the funnel."""
+    reconciles, decides, dispatches agents, and routes proposals to the funnel.
+
+    ``transient_events`` carries durable Cloud Task payloads such as the hourly
+    clock tick. They intentionally bypass the Firestore inbox because Cloud Tasks
+    already owns their retry lifecycle.
+    """
     token = await lease.acquire(user_id)
     if token is None:
         logger.info("orchestrate: lease held, dropping (events stay for the holder)", {
@@ -43,7 +52,10 @@ async def run_orchestrate(user_id: str) -> dict[str, object]:
         return {"skipped": "lease_held"}
 
     try:
-        return await _drain_and_dispatch(user_id)
+        return await _drain_and_dispatch(
+            user_id,
+            transient_events=transient_events,
+        )
     except Exception as exc:
         logger.exception("orchestrate: unhandled error", {"user_id": user_id, "error": str(exc)})
         return {"error": str(exc)}
@@ -51,13 +63,17 @@ async def run_orchestrate(user_id: str) -> dict[str, object]:
         await lease.release(user_id, token)
 
 
-async def _drain_and_dispatch(user_id: str) -> dict[str, object]:
-    drained = await inbox.drain(user_id)
-    if not drained:
-        return {"events": 0}
-
+async def _drain_and_dispatch(
+    user_id: str,
+    *,
+    transient_events: list[Event] | None = None,
+) -> dict[str, object]:
+    drained = [] if transient_events is not None else await inbox.drain(user_id)
     refs = [ref for ref, _ in drained]
     events = [event for _, event in drained]
+    events.extend(transient_events or [])
+    if not events:
+        return {"events": 0}
 
     # Dispatch is at-least-once: a crash before mark_consumed re-drains these events
     # next sweep. We do NOT claim-then-skip per event — that would LOSE a notification

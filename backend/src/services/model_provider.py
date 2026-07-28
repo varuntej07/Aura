@@ -43,6 +43,57 @@ from .analytics.llm_telemetry import (
 
 T = TypeVar("T")
 
+# Anthropic strict structured output (``output_config`` json_schema) rejects two
+# things pydantic's ``model_json_schema()`` produces: any ``object`` node without
+# ``additionalProperties: false``, and any JSON Schema validation keyword
+# (``pattern``, ``min/maxLength``, ``min/maxItems``, ``minimum/maximum``,
+# ``format``, ...). A raw schema therefore 400s ("additionalProperties must be
+# false", then "'maxItems' is not supported"). ``_anthropic_strict_schema``
+# rewrites the schema to satisfy strict mode WITHOUT weakening validation: the
+# constraints stay on the pydantic model (still enforced when the reply is parsed
+# in ``_parse_response``), and each stripped keyword is folded into the field
+# ``description`` so the model still receives the rule. Every object with
+# properties gets ``additionalProperties: false`` and all keys marked required
+# (strict mode lists every property; pydantic-optional fields already carry a
+# nullable type, so requiring them is safe).
+_STRICT_SCHEMA_HINTS = {
+    "pattern": lambda v: f"must match regex {v}",
+    "minLength": lambda v: f"min length {v}",
+    "maxLength": lambda v: f"max length {v}",
+    "minItems": lambda v: f"min {v} items",
+    "maxItems": lambda v: f"max {v} items",
+    "minimum": lambda v: f">= {v}",
+    "maximum": lambda v: f"<= {v}",
+    "exclusiveMinimum": lambda v: f"> {v}",
+    "exclusiveMaximum": lambda v: f"< {v}",
+    "format": lambda v: f"format {v}",
+    "multipleOf": lambda v: f"multiple of {v}",
+}
+
+
+def _anthropic_strict_schema(node: Any) -> Any:
+    """Rewrite a pydantic JSON Schema so Anthropic strict structured output accepts it."""
+    if isinstance(node, dict):
+        hints: list[str] = []
+        result: dict[str, Any] = {}
+        for key, value in node.items():
+            hint = _STRICT_SCHEMA_HINTS.get(key)
+            if hint is not None:
+                hints.append(hint(value))
+                continue
+            result[key] = _anthropic_strict_schema(value)
+        if hints:
+            existing = result.get("description", "")
+            joined = "; ".join(hints)
+            result["description"] = f"{existing} ({joined})" if existing else f"({joined})"
+        if "properties" in result:
+            result["additionalProperties"] = False
+            result["required"] = list(result["properties"].keys())
+        return result
+    if isinstance(node, list):
+        return [_anthropic_strict_schema(item) for item in node]
+    return node
+
 _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0           # Anthropic backoff: 1s, 2s, 4s
 _GEMINI_BASE_DELAY_S = 5.0    # Gemini backoff: 5s, 10s, 20s — background tasks, 503s need time to clear
@@ -842,7 +893,7 @@ class ModelProvider:
             kwargs["output_config"] = {
                 "format": {
                     "type": "json_schema",
-                    "schema": response_model.model_json_schema(),
+                    "schema": _anthropic_strict_schema(response_model.model_json_schema()),
                 }
             }
 

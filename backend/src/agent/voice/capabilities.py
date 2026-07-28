@@ -36,6 +36,7 @@ class Capability(StrEnum):
     SCREEN_SAVE = "screen_save"
     OUTBOUND_DRAFT = "outbound_draft"
     VISIBLE_ARTIFACT = "visible_artifact"
+    GUIDE_CONTROL = "guide_control"
 
 
 ALL_SURFACES = frozenset(VoiceSurface)
@@ -195,6 +196,19 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             complex_eligible=True,
             required=("kind", "title", "content"),
             skill="visible_artifact",
+        ),
+        _tool(
+            # Requests the desktop arm/disarm Guide Mode. No frame needed: arming
+            # only asks; the desktop stays the sole arming authority (it pins the
+            # cursor's monitor and checks the signed-in session). enable is a bool,
+            # not required-empty-checked (False is a valid, non-empty value).
+            "set_guide_mode",
+            Capability.GUIDE_CONTROL,
+            ToolEffect.WRITE,
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            required=("enable",),
+            skill="guide_control",
         ),
     )
 }

@@ -19,6 +19,7 @@ import uuid
 from livekit.agents import get_job_context
 
 from ...lib.logger import logger
+from .artifact_contract import artifact_ready_event, new_request_id
 
 ARTIFACT_KINDS: frozenset[str] = frozenset(
     {"command", "code", "config", "prompt", "steps", "checklist", "note"}
@@ -54,21 +55,19 @@ def build_visible_artifact_event(
     if artifact_kind not in ARTIFACT_KINDS or not artifact_title or not artifact_content.strip():
         return None, "invalid_request"
 
-    payload = {
-        "draft_id": uuid.uuid4().hex,
-        "revision": 1,
-        "channel": "snippet",
-        "length": "short",
-        "text": artifact_content,
-        "context_summary": "",
-        "recipient_hint": "",
-        "artifact_kind": artifact_kind,
-        "content_format": ("code" if artifact_kind in CODE_ARTIFACT_KINDS else "markdown"),
-        "title": artifact_title,
-        "language": _normalized_language(language),
-        "persisted": False,
-    }
-    event = {"type": "draft.created", "payload": payload}
+    event = artifact_ready_event(
+        request_id=new_request_id(),
+        artifact_id=uuid.uuid4().hex,
+        revision=1,
+        kind=artifact_kind,  # type: ignore[arg-type]
+        channel="snippet",
+        length="short",
+        title=artifact_title,
+        body=artifact_content,
+        content_format=("code" if artifact_kind in CODE_ARTIFACT_KINDS else "markdown"),
+        language=_normalized_language(language) or None,
+        persisted=False,
+    )
     encoded = json.dumps(event, ensure_ascii=False).encode("utf-8")
     if len(encoded) > MAX_EVENT_UTF8_BYTES:
         return None, "too_large"

@@ -52,6 +52,12 @@ from ...services.outbound_draft.drafter import (
     refine_outbound,
     writing_voice_lines,
 )
+from .artifact_contract import (
+    artifact_failed_event,
+    artifact_generating_event,
+    artifact_ready_event,
+    new_request_id,
+)
 from .screen_frames import ScreenFrameStore
 from .tool_filler import (
     DRAFT_FILLER_INTERVAL_S,
@@ -59,10 +65,7 @@ from .tool_filler import (
     DRAFT_STILL_WORKING_PHRASES,
 )
 
-# Time-box the async-tool acknowledgment: ctx.update only hands control back to
-# the LLM, so it should return fast; if it ever hangs, the draft must not wait
-# on it. Generous because a miss just means no spoken ack, not a failed draft.
-_CTX_UPDATE_TIMEOUT_S = 5.0
+_DIRECT_SPEECH_TIMEOUT_S = 5.0
 
 # What the model speaks when a call can't produce a draft. Each line is a
 # complete, natural sentence the TTS reads verbatim.
@@ -79,6 +82,7 @@ SPOKEN_QUOTA = (
     "tweak the one we've got instead?"
 )
 SPOKEN_FAILED = "I couldn't get that draft together, give it another go?"
+SPOKEN_DRAFT_STARTED = "Yeah, give me a second."
 SPOKEN_DRAFT_READY = "Done, it's on your screen. Want me to tweak anything?"
 SPOKEN_REFINE_READY = "Updated, take a look."
 
@@ -129,13 +133,12 @@ async def run_draft_tool(
     mid-voice-turn, so every failure degrades to speech plus a ``draft.failed``
     event the card can render.
 
-    ``run_ctx`` turns the slow new-draft path into an async tool: the first
-    ``ctx.update`` releases the LLM to acknowledge immediately (no dead air
-    while the expert vision call runs) and ``ctx.with_filler`` breaks any long
-    remaining silence. The refine path never calls ``ctx.update``, so it stays a
-    synchronous single-utterance turn. With a frame present, every new-draft
-    call now reaches this async path (no clarifying-question bounce), so the
-    desktop skeleton and the spoken "still on it" filler always show.
+    ``run_ctx`` lets the tool own its acknowledgement and filler speech without
+    sending draft lifecycle text back through the LLM. That is deliberate:
+    ``RunContext.update`` creates an immediate model reply and a later deferred
+    reply, which allowed conversational text to leak into the artifact flow.
+    With a frame present, every new-draft call reaches this path, so the desktop
+    skeleton and a short acknowledgement appear without a clarifying bounce.
     """
     channel = (channel or "").strip()
     length = (length or "").strip()
@@ -188,9 +191,12 @@ async def run_draft_tool(
             "error": str(exc),
         })
         await _publish_draft_event(
-            "draft.failed",
-            {"draft_id": state.current.draft_id if state.current else None,
-             "reason": "model_error"},
+            artifact_failed_event(
+                request_id=new_request_id(),
+                artifact_id=state.current.draft_id if state.current else None,
+                reason="model_error",
+                retryable=True,
+            ),
             state=state,
         )
         return SPOKEN_FAILED
@@ -206,6 +212,8 @@ async def _draft_new(
     intent: str,
     run_ctx: RunContext | None = None,
 ) -> str:
+    request_id = new_request_id()
+    draft_id = uuid.uuid4().hex
     frame = None
     if screen_frames is not None:
         try:
@@ -220,7 +228,13 @@ async def _draft_new(
         # hard stop. A snippet's spec is the spoken intent; the frame is a
         # best-effort bonus and its absence just means a text-only draft.
         await _publish_draft_event(
-            "draft.failed", {"draft_id": None, "reason": "no_frame"}, state=state
+            artifact_failed_event(
+                request_id=request_id,
+                artifact_id=draft_id,
+                reason="no_frame",
+                retryable=True,
+            ),
+            state=state,
         )
         return SPOKEN_NO_FRAME
 
@@ -238,7 +252,12 @@ async def _draft_new(
         )
         if not allowed:
             await _publish_draft_event(
-                "draft.failed", {"draft_id": None, "reason": "quota_exceeded"},
+                artifact_failed_event(
+                    request_id=request_id,
+                    artifact_id=draft_id,
+                    reason="quota_exceeded",
+                    retryable=False,
+                ),
                 state=state,
             )
             await capture_event(
@@ -252,30 +271,29 @@ async def _draft_new(
             })
             return SPOKEN_QUOTA
 
-    draft_id = uuid.uuid4().hex
     await _publish_draft_event(
-        "draft.generating",
-        {"draft_id": draft_id, "channel": channel, "length": length, "mode": "new"},
+        artifact_generating_event(
+            request_id=request_id,
+            artifact_id=draft_id,
+            channel=channel,
+            length=length,
+            mode="new",
+            kind="code" if channel == SNIPPET_CHANNEL else "outbound_message",
+            title="Snippet" if channel == SNIPPET_CHANNEL else "Draft",
+        ),
         state=state,
     )
 
-    # First update makes this an async tool: the LLM acknowledges in Buddy's
-    # voice right now (referencing the request) while the vision call runs, so
-    # there's no dead air. Strictly best-effort and time-boxed: an update
-    # failure OR hang must never cost the draft, so it degrades to old-style
-    # silence instead of falling into the tool's catch-all.
+    # The acknowledgement bypasses the LLM, so it cannot be folded into the
+    # generated draft or create a deferred assistant reply when generation ends.
     if run_ctx is not None:
         try:
             await asyncio.wait_for(
-                run_ctx.update(
-                    f"Started writing the {channel} draft; it will appear as a "
-                    "card on the user's screen when ready. Acknowledge in ONE "
-                    "short casual line and stop, no questions."
-                ),
-                timeout=_CTX_UPDATE_TIMEOUT_S,
+                run_ctx.session.say(SPOKEN_DRAFT_STARTED),
+                timeout=_DIRECT_SPEECH_TIMEOUT_S,
             )
         except Exception as exc:
-            logger.warn("draft_outbound: ctx.update failed or timed out", {
+            logger.warn("draft_outbound: acknowledgement failed", {
                 "user_id": state.user_id, "session_id": state.session_id,
                 "error": str(exc),
             })
@@ -324,7 +342,12 @@ async def _draft_new(
 
     if result.reason != REASON_OK:
         await _publish_draft_event(
-            "draft.failed", {"draft_id": draft_id, "reason": result.reason},
+            artifact_failed_event(
+                request_id=request_id,
+                artifact_id=draft_id,
+                reason=result.reason,
+                retryable=result.reason != "invalid_request",
+            ),
             state=state,
         )
         return SPOKEN_FAILED
@@ -338,19 +361,26 @@ async def _draft_new(
         recipient_hint=recipient_hint,
         revision=1,
     )
-    await _publish_draft_event(
-        "draft.created",
-        {
-            "draft_id": draft_id,
-            "revision": 1,
-            "channel": channel,
-            "length": length,
-            "text": result.text,
-            "context_summary": result.context_summary,
-            "recipient_hint": recipient_hint,
-        },
+    delivered = await _publish_draft_event(
+        artifact_ready_event(
+            request_id=request_id,
+            artifact_id=draft_id,
+            revision=1,
+            kind="code" if channel == SNIPPET_CHANNEL else "outbound_message",
+            channel=channel,
+            length=length,
+            title="Snippet" if channel == SNIPPET_CHANNEL else "Draft",
+            body=result.text,
+            content_format="code" if channel == SNIPPET_CHANNEL else "plain_text",
+            language=None,
+            persisted=channel != SNIPPET_CHANNEL,
+            context_summary=result.context_summary,
+            recipient_hint=recipient_hint,
+        ),
         state=state,
     )
+    if not delivered:
+        return SPOKEN_FAILED
     # Persist AFTER the publish so the card never waits on Firestore. The
     # store never raises; a lost write costs a dashboard row, not the draft.
     await draft_store.create_draft(
@@ -385,14 +415,17 @@ async def _refine_current(
 ) -> str:
     current = state.current
     assert current is not None  # guarded by the caller
+    request_id = new_request_id()
     await _publish_draft_event(
-        "draft.generating",
-        {
-            "draft_id": current.draft_id,
-            "channel": current.channel,
-            "length": current.length,
-            "mode": "refine",
-        },
+        artifact_generating_event(
+            request_id=request_id,
+            artifact_id=current.draft_id,
+            channel=current.channel,
+            length=current.length,
+            mode="refine",
+            kind="code" if current.channel == SNIPPET_CHANNEL else "outbound_message",
+            title="Snippet" if current.channel == SNIPPET_CHANNEL else "Draft",
+        ),
         state=state,
     )
 
@@ -408,24 +441,36 @@ async def _refine_current(
     )
     if result.reason != REASON_OK:
         await _publish_draft_event(
-            "draft.failed",
-            {"draft_id": current.draft_id, "reason": result.reason},
+            artifact_failed_event(
+                request_id=request_id,
+                artifact_id=current.draft_id,
+                reason=result.reason,
+                retryable=result.reason != "invalid_request",
+            ),
             state=state,
         )
         return SPOKEN_FAILED
 
     current.text = result.text
     current.revision += 1
-    await _publish_draft_event(
-        "draft.updated",
-        {
-            "draft_id": current.draft_id,
-            "revision": current.revision,
-            "length": current.length,
-            "text": current.text,
-        },
+    delivered = await _publish_draft_event(
+        artifact_ready_event(
+            request_id=request_id,
+            artifact_id=current.draft_id,
+            revision=current.revision,
+            kind="code" if current.channel == SNIPPET_CHANNEL else "outbound_message",
+            channel=current.channel,
+            length=current.length,
+            title="Snippet" if current.channel == SNIPPET_CHANNEL else "Draft",
+            body=current.text,
+            content_format="code" if current.channel == SNIPPET_CHANNEL else "plain_text",
+            language=None,
+            persisted=current.channel != SNIPPET_CHANNEL,
+        ),
         state=state,
     )
+    if not delivered:
+        return SPOKEN_FAILED
     # Update-only: if the user deleted this draft from the dashboard mid-call
     # (or its create write failed), the store logs and skips - never resurrects.
     await draft_store.update_draft_text(
@@ -466,22 +511,25 @@ async def _voice_lines(state: DraftOutboundSession) -> list[str]:
 
 
 async def _publish_draft_event(
-    event_type: str, payload: dict, *, state: DraftOutboundSession
-) -> None:
+    event: dict, *, state: DraftOutboundSession
+) -> bool:
     """Push a draft event down the data channel for the desktop card. Fail-soft,
     exactly like screen_saves' publisher: a lost event costs a card update,
     never the spoken reply. Log lines carry ids and lengths, never text."""
     try:
         room = get_job_context().room
-        data = json.dumps({"type": event_type, "payload": payload}).encode("utf-8")
+        data = json.dumps(event, ensure_ascii=False).encode("utf-8")
         await room.local_participant.publish_data(data, reliable=True)
+        payload = event.get("payload") or {}
         logger.info("draft_outbound: event published", {
             "session_id": state.session_id, "user_id": state.user_id,
-            "event": event_type, "draft_id": payload.get("draft_id"),
+            "event": event.get("type"), "draft_id": payload.get("draft_id"),
             "text_chars": len(payload.get("text") or ""),
         })
+        return True
     except Exception as exc:
         logger.warn("draft_outbound: event publish failed", {
             "session_id": state.session_id, "user_id": state.user_id,
-            "event": event_type, "error": str(exc),
+            "event": event.get("type"), "error": str(exc),
         })
+        return False

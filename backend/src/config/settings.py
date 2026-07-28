@@ -53,6 +53,18 @@ class Settings(BaseSettings):
     # to a static casual greeting (protects the sub-1s first-audio feel).
     VOICE_GREETING_SEED_BUDGET_S: float = 0.9
     VOICE_TOKEN_MINT_TIMEOUT_S: float = 5.0  # Firebase ID token mint budget before first audio
+    # Guide decisions are separate typed requests behind the same BuddyAgent.
+    # The first provider gets the first-attempt budget, then one fallback may use
+    # only the remaining overall deadline. Sized to MEASURED structured-output
+    # latency, not the aspirational SLO: a structured Haiku visual decision with a
+    # screenshot runs ~3-4s and a structured plan runs ~8-9s. The earlier 1.2/2.0
+    # and 1.8/3.0 budgets timed out on every real call, so Guide never planned or
+    # decided. Planning is once per task (latency-tolerant); the visual decision is
+    # the per-turn hot path, kept as tight as the model realistically allows.
+    GUIDE_VISUAL_FIRST_ATTEMPT_TIMEOUT_S: float = 7.0
+    GUIDE_VISUAL_DECISION_DEADLINE_S: float = 11.0
+    GUIDE_PLANNING_FIRST_ATTEMPT_TIMEOUT_S: float = 18.0
+    GUIDE_PLANNING_DEADLINE_S: float = 24.0
     # Chat tool timeout — longer than voice because text chat can tolerate a Google Calendar sync
     CHAT_TOOL_TIMEOUT_S: float = 20.0
 

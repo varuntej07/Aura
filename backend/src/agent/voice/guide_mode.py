@@ -34,10 +34,14 @@ from livekit.agents import llm as lk_llm
 from ...lib.logger import logger
 from ...services.guide_usage_store import record_guide_usage
 from .guide_prompt import GUIDE_INSTRUCTIONS
+from .guide_task_runtime import GuideTaskRuntime
 from .screen_frames import ScreenFrame, strip_stale_images
 
 GUIDE_MODE_TYPE = "guide.mode"
+GUIDE_HEARTBEAT_TYPE = "guide.heartbeat"
 GUIDE_STEP_TYPE = "guide.step"
+GUIDE_FRAME_ACK_TYPE = "guide.frame_ack"
+GUIDE_MODE_ACK_TYPE = "guide.mode_ack"
 
 _GUIDE_SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 _GUIDE_FRAME_RE = re.compile(r"^([0-9a-f]{32}):(\d+)$")
@@ -63,6 +67,8 @@ class GuideBuddy(Protocol):
 
     async def apply_guide_persona(self, active: bool) -> None: ...
 
+    def is_guide_active(self) -> bool: ...
+
 
 class GuideCoordinator:
     """Ack frames fast, fire terse change-driven nudges, and roll up usage."""
@@ -75,13 +81,16 @@ class GuideCoordinator:
         room,
         session_id: str,
         user_id: str,
+        task_runtime: GuideTaskRuntime,
     ) -> None:
         self._session = session
         self._buddy = buddy
         self._room = room
         self._session_id = session_id
         self._user_id = user_id
+        self._task_runtime = task_runtime
         self._active = False
+        self._protocol_version = 1
         self._guide_session_id = ""
         self._generation = -1
         self._latest_frame: ScreenFrame | None = None
@@ -93,7 +102,9 @@ class GuideCoordinator:
         self._last_proactive_at = 0.0
         self._last_user_turn_at = 0.0
         self._task: asyncio.Task | None = None
+        self._control_task: asyncio.Task | None = None
         self._closed = False
+        self._task_runtime.bind_failure_handler(self.fail_closed)
         # Per-guide-session usage the worker alone can see (model/TTFT/tools/last
         # turn). The recorder forwards every turn's metrics/tools/transcript here;
         # note_* ignore them unless a guide session is active, so only the armed
@@ -113,6 +124,8 @@ class GuideCoordinator:
 
     def start(self) -> None:
         if self._task is None and not self._closed:
+            self._session.on("user_state_changed", self._on_user_state)
+            self._session.on("agent_state_changed", self._on_agent_state)
             self._task = asyncio.create_task(
                 self._run(), name=f"voice-guide-{self._session_id[:8]}"
             )
@@ -131,6 +144,14 @@ class GuideCoordinator:
                 pass
         self._active = False
         self._wake.set()
+        if self._control_task is not None:
+            self._control_task.cancel()
+            try:
+                await self._control_task
+            except asyncio.CancelledError:
+                pass
+            self._control_task = None
+        await self._task_runtime.close()
         if self._task is None:
             return
         self._task.cancel()
@@ -149,17 +170,32 @@ class GuideCoordinator:
                     "session_id": self._session_id,
                     "user_id": self._user_id,
                     "participant": participant_identity,
+                    "stage": "execution",
+                    "outcome": "rejected",
+                    "reason": "participant_identity_mismatch",
                 },
             )
             return False
         active = message.get("active")
         generation = message.get("generation")
         guide_session_id = message.get("guide_session_id")
+        protocol_version = message.get("protocol_version", 1)
+        resume_task_id = message.get("resume_task_id")
         if (
             not isinstance(active, bool)
             or isinstance(generation, bool)
             or not isinstance(generation, int)
             or generation < 0
+            or isinstance(protocol_version, bool)
+            or not isinstance(protocol_version, int)
+            or protocol_version not in (1, 2)
+            or (
+                resume_task_id is not None
+                and (
+                    not isinstance(resume_task_id, str)
+                    or re.fullmatch(r"^[0-9a-f]{32}$", resume_task_id) is None
+                )
+            )
         ):
             return False
         if active and (
@@ -173,22 +209,17 @@ class GuideCoordinator:
         previous_guide_session_id = self._guide_session_id
         self._generation = generation
         self._active = active
+        self._protocol_version = protocol_version
         self._guide_session_id = guide_session_id if active else ""
         self._step_index = 0
         self._pending_nudge = False
         self._inflight_frame_id = ""
         self._last_acked_frame_id = ""
-        # Swap the whole agent to the guide skill (no tools) while armed, and back to
-        # the companion persona on disarm. Async, so schedule it; it takes effect
-        # before the next generation.
-        asyncio.create_task(
-            self._buddy.apply_guide_persona(active),
-            name=f"guide-persona-{self._session_id[:8]}",
-        )
         if active:
             self._last_proactive_at = 0.0
             self._reset_usage()
         if not active:
+            self._interrupt_guide_speech()
             self._latest_frame = None
             self._wake.clear()
             if previous_guide_session_id:
@@ -196,6 +227,14 @@ class GuideCoordinator:
                     self._flush_usage(previous_guide_session_id),
                     name=f"guide-usage-{self._session_id[:8]}",
                 )
+        self._schedule_control_transition(
+            active=active,
+            generation=generation,
+            guide_session_id=self._guide_session_id,
+            protocol_version=protocol_version,
+            resume_task_id=resume_task_id,
+            reason=None,
+        )
         logger.info(
             "VoiceSession: Guide Mode changed",
             {
@@ -204,38 +243,304 @@ class GuideCoordinator:
                 "active": active,
                 "generation": generation,
                 "guide_session_id": self._guide_session_id,
+                "protocol_version": protocol_version,
+                "resume_task_id": resume_task_id,
             },
         )
         return True
+
+    def fail_closed(self, reason: str) -> None:
+        """Turn off the exact active generation after an unrecoverable Guide failure."""
+        if not self._active or self._closed:
+            return
+        guide_session_id = self._guide_session_id
+        self._active = False
+        self._pending_nudge = False
+        self._inflight_frame_id = ""
+        self._latest_frame = None
+        self._wake.clear()
+        self._interrupt_guide_speech()
+        self._schedule_control_transition(
+            active=False,
+            generation=self._generation,
+            guide_session_id=guide_session_id,
+            protocol_version=self._protocol_version,
+            resume_task_id=None,
+            reason=reason,
+        )
+        logger.warn(
+            "VoiceSession: Guide Mode failed closed",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "generation": self._generation,
+                "guide_session_id": guide_session_id,
+                "reason": reason,
+                "stage": "planning",
+                "outcome": "failed",
+            },
+        )
+
+    def _interrupt_guide_speech(self) -> None:
+        self._task_runtime.cancel_generation()
+        if not self._task_runtime.speech_in_progress:
+            return
+        try:
+            self._session.interrupt(force=True)
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: Guide teardown interruption failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "error": str(exc),
+                    "stage": "speech",
+                    "outcome": "failed",
+                    "reason": "teardown_interruption_failed",
+                },
+            )
+
+    def _schedule_control_transition(
+        self,
+        *,
+        active: bool,
+        generation: int,
+        guide_session_id: str,
+        protocol_version: int,
+        resume_task_id: str | None,
+        reason: str | None,
+    ) -> None:
+        if self._control_task is not None:
+            self._control_task.cancel()
+        self._control_task = asyncio.create_task(
+            self._apply_control_transition(
+                active=active,
+                generation=generation,
+                guide_session_id=guide_session_id,
+                protocol_version=protocol_version,
+                resume_task_id=resume_task_id,
+                reason=reason,
+            ),
+            name=f"guide-control-{self._session_id[:8]}-{generation}",
+        )
+
+    async def _apply_control_transition(
+        self,
+        *,
+        active: bool,
+        generation: int,
+        guide_session_id: str,
+        protocol_version: int,
+        resume_task_id: str | None,
+        reason: str | None,
+    ) -> None:
+        try:
+            if active:
+                await self._buddy.apply_guide_persona(True)
+                if (
+                    self._closed
+                    or generation != self._generation
+                    or not self._active
+                    or guide_session_id != self._guide_session_id
+                ):
+                    return
+                if not self._buddy.is_guide_active():
+                    self._active = False
+                    await self._task_runtime.deactivate(cancelled=True)
+                    await self._publish_mode_ack(
+                        active=False,
+                        generation=generation,
+                        guide_session_id=guide_session_id,
+                        protocol_version=protocol_version,
+                        reason="persona_unavailable",
+                    )
+                    return
+                self._task_runtime.activate(
+                    guide_session_id=guide_session_id,
+                    protocol_version=protocol_version,
+                    resume_task_id=resume_task_id,
+                )
+            else:
+                await self._task_runtime.deactivate(cancelled=reason is None)
+                await self._buddy.apply_guide_persona(False)
+                if self._closed or generation != self._generation:
+                    return
+            await self._publish_mode_ack(
+                active=active,
+                generation=generation,
+                guide_session_id=guide_session_id,
+                protocol_version=protocol_version,
+                reason=reason,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: Guide control transition failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "generation": generation,
+                    "active": active,
+                    "error_type": type(exc).__name__,
+                    "stage": "execution",
+                    "outcome": "failed",
+                    "reason": "control_transition_failed",
+                },
+            )
+            if active and generation == self._generation:
+                self._active = False
+                await self._publish_mode_ack(
+                    active=False,
+                    generation=generation,
+                    guide_session_id=guide_session_id,
+                    protocol_version=protocol_version,
+                    reason="activation_failed",
+                )
+        finally:
+            if self._control_task is asyncio.current_task():
+                self._control_task = None
+
+    async def _publish_mode_ack(
+        self,
+        *,
+        active: bool,
+        generation: int,
+        guide_session_id: str,
+        protocol_version: int,
+        reason: str | None,
+    ) -> None:
+        if protocol_version < 2:
+            return
+        payload = json.dumps(
+            {
+                "type": GUIDE_MODE_ACK_TYPE,
+                "payload": {
+                    "active": active,
+                    "generation": generation,
+                    "guide_session_id": guide_session_id,
+                    "protocol_version": protocol_version,
+                    "reason": reason,
+                },
+            }
+        ).encode("utf-8")
+        try:
+            await self._room.local_participant.publish_data(payload, reliable=True)
+            logger.info(
+                "GuideTrace",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "guide_session_id": guide_session_id,
+                    "generation": generation,
+                    "protocol_version": protocol_version,
+                    "active": active,
+                    "stage": "execution",
+                    "outcome": "succeeded",
+                    "reason": "mode_ack_published",
+                },
+            )
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: Guide mode acknowledgement failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "generation": generation,
+                    "active": active,
+                    "error_type": type(exc).__name__,
+                    "stage": "execution",
+                    "outcome": "failed",
+                    "reason": "mode_ack_publish_failed",
+                },
+            )
 
     def submit_frame(self, frame: ScreenFrame) -> None:
         """Ack every accepted frame; a ``change:"1"`` frame also wakes a nudge."""
         if frame.attributes.get("mode") != "guide":
             self._log_frame_drop(frame, "wrong_mode")
+            self._reject_frame(frame, "wrong_mode")
             return
         match = _GUIDE_FRAME_RE.fullmatch(frame.frame_id)
         if match is None:
             self._log_frame_drop(frame, "invalid_frame_id")
+            self._reject_frame(frame, "invalid_frame_id")
             return
         if not self._active:
             self._log_frame_drop(frame, "inactive_session")
+            self._reject_frame(frame, "inactive_session")
             return
         if match.group(1) != self._guide_session_id:
             self._log_frame_drop(frame, "wrong_session")
+            self._reject_frame(frame, "wrong_session")
             return
         self._latest_frame = frame
         if frame.frame_id == self._last_acked_frame_id:
             # A re-delivery of a frame we already acked (desktop response retry);
             # never double-ack or re-nudge it.
             self._log_frame_drop(frame, "already_acked")
+            asyncio.create_task(self._ack_frame(frame), name=f"guide-reack-{self._session_id[:8]}")
             return
         # Ack fast and decoupled from replying so the desktop handshake never stalls.
-        asyncio.create_task(
-            self._ack_frame(frame), name=f"guide-ack-{self._session_id[:8]}"
-        )
-        if frame.attributes.get("change") == "1":
+        asyncio.create_task(self._ack_frame(frame), name=f"guide-ack-{self._session_id[:8]}")
+        self._task_runtime.note_activity()
+        if frame.attributes.get("change") == "1" or frame.attributes.get("capture_reason") in {
+            "verification_timeout",
+            "resume",
+            "explicit_look",
+            "app_window_change",
+            "geometry_change",
+        }:
             self._pending_nudge = True
             self._wake.set()
+
+    def apply_heartbeat(self, message: dict, participant_identity: str) -> bool:
+        if participant_identity != self._user_id or not self._active:
+            return False
+        if message.get("guide_session_id") != self._guide_session_id:
+            return False
+        return True
+
+    def _reject_frame(self, frame: ScreenFrame, reason: str) -> None:
+        if self._protocol_version < 2:
+            return
+        asyncio.create_task(
+            self._publish_frame_ack(frame, accepted=False, reason=reason),
+            name=f"guide-reject-{self._session_id[:8]}",
+        )
+
+    def _on_user_state(self, event) -> None:
+        if not self._active or str(getattr(event, "new_state", "")) != "speaking":
+            return
+        self._pending_nudge = False
+        self._wake.clear()
+        asyncio.create_task(
+            self._task_runtime.on_user_speech_start(),
+            name=f"guide-interrupt-{self._session_id[:8]}",
+        )
+        try:
+            self._session.interrupt(force=True)
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: Guide interruption failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "error": str(exc),
+                    "stage": "speech",
+                    "outcome": "failed",
+                    "reason": "user_interruption_failed",
+                },
+            )
+
+    def _on_agent_state(self, event) -> None:
+        if not self._active:
+            return
+        state = str(getattr(event, "new_state", ""))
+        asyncio.create_task(
+            self._task_runtime.on_agent_state(state),
+            name=f"guide-agent-state-{self._session_id[:8]}",
+        )
 
     def _frame_matches_active_session(self, frame: ScreenFrame | None) -> bool:
         if frame is None or not self._active:
@@ -286,12 +591,15 @@ class GuideCoordinator:
             self._last_user_turn_at = time.monotonic()
 
     def _log_frame_drop(self, frame: ScreenFrame, reason: str) -> None:
-        logger.info("VoiceSession: Guide Mode frame dropped", {
-            "session_id": self._session_id,
-            "user_id": self._user_id,
-            "frame_id": frame.frame_id,
-            "reason": reason,
-        })
+        logger.info(
+            "VoiceSession: Guide Mode frame dropped",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "frame_id": frame.frame_id,
+                "reason": reason,
+            },
+        )
 
     async def _flush_usage(self, guide_session_id: str) -> None:
         """Merge the worker-only fields for one guide session into the user rollup.
@@ -417,6 +725,11 @@ class GuideCoordinator:
                         "user_id": self._user_id,
                         "frame_id": frame.frame_id,
                         "error": str(exc),
+                        "stage": "speech",
+                        "outcome": "failed",
+                        "reason": "proactive_speech_failed",
+                        "trace_id": frame.attributes.get("trace_id") or None,
+                        "event_id": frame.attributes.get("event_id") or None,
                     },
                 )
             finally:
@@ -439,8 +752,10 @@ class GuideCoordinator:
         match = _GUIDE_FRAME_RE.fullmatch(frame.frame_id)
         if match is None or not self._active:
             return
-        # Optimistic: mark acked before publish so a racing re-delivery dedups. On a
-        # publish failure the desktop times out and releases the frame locally.
+        if self._protocol_version >= 2:
+            await self._publish_frame_ack(frame, accepted=True, reason=None)
+            return
+        # Protocol v1 preserves the legacy guide.step transport acknowledgement.
         self._last_acked_frame_id = frame.frame_id
         self._step_index += 1
         payload = json.dumps(
@@ -465,5 +780,52 @@ class GuideCoordinator:
                     "user_id": self._user_id,
                     "frame_id": frame.frame_id,
                     "error": str(exc),
+                    "stage": "execution",
+                    "outcome": "failed",
+                    "reason": "legacy_frame_ack_publish_failed",
+                },
+            )
+
+    async def _publish_frame_ack(
+        self,
+        frame: ScreenFrame,
+        *,
+        accepted: bool,
+        reason: str | None,
+    ) -> None:
+        match = _GUIDE_FRAME_RE.fullmatch(frame.frame_id)
+        sequence = int(match.group(2)) if match else frame.sequence
+        newest = self._latest_frame.frame_id if self._latest_frame else ""
+        payload = json.dumps(
+            {
+                "type": GUIDE_FRAME_ACK_TYPE,
+                "payload": {
+                    "frame_id": frame.frame_id,
+                    "frame_seq": sequence,
+                    "accepted": accepted,
+                    "rejection_reason": reason,
+                    "newest_frame_id": newest,
+                },
+            }
+        ).encode("utf-8")
+        try:
+            await self._room.local_participant.publish_data(payload, reliable=True)
+            if accepted and self._last_acked_frame_id != frame.frame_id:
+                self._last_acked_frame_id = frame.frame_id
+                self._step_index += 1
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: Guide frame acknowledgement failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "frame_id": frame.frame_id,
+                    "accepted": accepted,
+                    "error": str(exc),
+                    "stage": "execution",
+                    "outcome": "failed",
+                    "reason": "frame_ack_publish_failed",
+                    "trace_id": frame.attributes.get("trace_id") or None,
+                    "event_id": frame.attributes.get("event_id") or None,
                 },
             )

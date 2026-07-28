@@ -75,6 +75,10 @@ class ScreenFrame:
         return self.attributes.get("frame_id", "")
 
     @property
+    def sequence(self) -> int | None:
+        return self.attribute_int("frame_seq")
+
+    @property
     def width_px(self) -> int | None:
         return self.attribute_int("jpeg_width_px")
 
@@ -85,6 +89,46 @@ class ScreenFrame:
     @property
     def age_seconds(self) -> float:
         return time.monotonic() - self.received_at_monotonic
+
+    @property
+    def active_process(self) -> str:
+        return self.attributes.get("active_process", "")
+
+    @property
+    def active_window_id(self) -> str:
+        return self.attributes.get("active_window_id", "")
+
+    @property
+    def geometry_revision(self) -> int | None:
+        return self.attribute_int("geometry_revision")
+
+    @property
+    def semantic_metadata(self) -> dict[str, str | int | None]:
+        return {
+            "guide_session_id": self.attributes.get("guide_session_id", ""),
+            "task_id": self.attributes.get("task_id", ""),
+            "frame_id": self.frame_id,
+            "frame_seq": self.sequence,
+            "captured_at_ms": self.attribute_int("captured_at_ms"),
+            "captured_monotonic_ms": self.attribute_int("captured_monotonic_ms"),
+            "capture_reason": self.attributes.get("capture_reason", ""),
+            "change": self.attributes.get("change", ""),
+            "active_process": self.active_process,
+            "active_window_id": self.active_window_id,
+            "active_window_title": self.attributes.get("active_window_title", ""),
+            "geometry_revision": self.geometry_revision,
+            "frame_hash": self.attributes.get("frame_hash", ""),
+            "predecessor_hash": self.attributes.get("predecessor_hash", ""),
+            "trace_id": self.attributes.get("trace_id", ""),
+            "event_id": self.attributes.get("event_id", ""),
+            "parent_event_id": self.attributes.get("parent_event_id", ""),
+            "jpeg_width_px": self.width_px,
+            "jpeg_height_px": self.height_px,
+            "monitor_left_px": self.attribute_int("monitor_left_px"),
+            "monitor_top_px": self.attribute_int("monitor_top_px"),
+            "monitor_width_px": self.attribute_int("monitor_width_px"),
+            "monitor_height_px": self.attribute_int("monitor_height_px"),
+        }
 
 
 class ScreenFrameStore:
@@ -132,55 +176,110 @@ class ScreenFrameStore:
     async def _assemble_frame(self, reader, participant_identity: str) -> None:
         self._inflight_count += 1
         self._frame_landed.clear()
+        attributes = dict(getattr(reader.info, "attributes", None) or {})
+        trace_fields = {
+            "trace_id": attributes.get("trace_id") or None,
+            "event_id": attributes.get("event_id") or None,
+            "parent_event_id": attributes.get("parent_event_id") or None,
+            "stage": "capture",
+        }
         try:
             chunks = bytearray()
             async for chunk in reader:
                 chunks.extend(chunk)
                 if len(chunks) > _MAX_FRAME_BYTES:
-                    logger.warn("VoiceSession: screen frame over size cap, dropped", {
-                        "session_id": self._session_id,
-                        "user_id": self._user_id,
-                        "participant": participant_identity,
-                        "bytes_so_far": len(chunks),
-                        "cap": _MAX_FRAME_BYTES,
-                    })
+                    logger.warn(
+                        "VoiceSession: screen frame over size cap, dropped",
+                        {
+                            "session_id": self._session_id,
+                            "user_id": self._user_id,
+                            "participant": participant_identity,
+                            "bytes_so_far": len(chunks),
+                            "cap": _MAX_FRAME_BYTES,
+                            "outcome": "failed",
+                            "reason": "frame_size_limit_exceeded",
+                            **trace_fields,
+                        },
+                    )
                     return
             if not chunks:
-                logger.warn("VoiceSession: empty screen frame stream, dropped", {
-                    "session_id": self._session_id, "user_id": self._user_id,
-                })
+                logger.warn(
+                    "VoiceSession: empty screen frame stream, dropped",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "outcome": "failed",
+                        "reason": "empty_frame_stream",
+                        **trace_fields,
+                    },
+                )
                 return
-            attributes = dict(getattr(reader.info, "attributes", None) or {})
-            self._latest = ScreenFrame(
+            incoming = ScreenFrame(
                 jpeg_bytes=bytes(chunks),
                 attributes=attributes,
                 received_at_monotonic=time.monotonic(),
             )
+            latest_sequence = self._latest.sequence if self._latest else None
+            if (
+                incoming.sequence is not None
+                and latest_sequence is not None
+                and incoming.sequence < latest_sequence
+            ):
+                logger.info(
+                    "VoiceSession: out-of-order screen frame dropped",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "frame_id": incoming.frame_id,
+                        "newest_frame_id": self._latest.frame_id if self._latest else "",
+                    },
+                )
+                return
+            self._latest = incoming
             self._frame_count += 1
-            logger.info("VoiceSession: screen frame received", {
-                "session_id": self._session_id,
-                "user_id": self._user_id,
-                "bytes": len(chunks),
-                "frame_id": self._latest.frame_id,
-                "jpeg_px": f"{self._latest.width_px}x{self._latest.height_px}",
-            })
+            logger.info(
+                "VoiceSession: screen frame received",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "bytes": len(chunks),
+                    "frame_id": self._latest.frame_id,
+                    "jpeg_px": f"{self._latest.width_px}x{self._latest.height_px}",
+                    "stage": "capture",
+                    "outcome": "succeeded",
+                    **trace_fields,
+                },
+            )
             if self._frame_listener is not None:
                 try:
                     self._frame_listener(self._latest)
                 except Exception as exc:
-                    logger.warn("VoiceSession: screen frame listener failed", {
-                        "session_id": self._session_id,
-                        "user_id": self._user_id,
-                        "error": str(exc),
-                    })
+                    logger.warn(
+                        "VoiceSession: screen frame listener failed",
+                        {
+                            "session_id": self._session_id,
+                            "user_id": self._user_id,
+                            "error": str(exc),
+                            "outcome": "failed",
+                            "reason": "frame_listener_failed",
+                            **trace_fields,
+                        },
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warn("VoiceSession: screen frame assembly failed", {
-                "session_id": self._session_id,
-                "user_id": self._user_id,
-                "error": str(exc),
-            })
+            logger.warn(
+                "VoiceSession: screen frame assembly failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "error": str(exc),
+                    "outcome": "failed",
+                    "reason": "frame_assembly_failed",
+                    "error_type": type(exc).__name__,
+                    **trace_fields,
+                },
+            )
         finally:
             self._inflight_count -= 1
             self._frame_landed.set()
@@ -190,20 +289,21 @@ class ScreenFrameStore:
         in-flight transfer so a frame racing the turn boundary isn't missed."""
         if self._inflight_count > 0:
             try:
-                await asyncio.wait_for(
-                    self._frame_landed.wait(), timeout=_INFLIGHT_FRAME_WAIT_S
-                )
+                await asyncio.wait_for(self._frame_landed.wait(), timeout=_INFLIGHT_FRAME_WAIT_S)
             except TimeoutError:
                 pass
         frame = self._latest
         if frame is None:
             return None
         if frame.age_seconds > _FRAME_MAX_AGE_S:
-            logger.info("VoiceSession: screen frame too stale, not injected", {
-                "session_id": self._session_id,
-                "user_id": self._user_id,
-                "age_s": round(frame.age_seconds, 1),
-            })
+            logger.info(
+                "VoiceSession: screen frame too stale, not injected",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "age_s": round(frame.age_seconds, 1),
+                },
+            )
             return None
         return frame
 
@@ -264,33 +364,45 @@ async def attach_screen_frame_to_turn(
         frame = await store.fresh_frame()
         if frame is None:
             if stripped:
-                logger.info("VoiceSession: stale screenshots stripped, none injected", {
-                    "session_id": session_id, "user_id": user_id, "stripped": stripped,
-                })
+                logger.info(
+                    "VoiceSession: stale screenshots stripped, none injected",
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "stripped": stripped,
+                    },
+                )
             return None
 
-        data_url = (
-            "data:image/jpeg;base64,"
-            + base64.b64encode(frame.jpeg_bytes).decode("ascii")
-        )
+        data_url = "data:image/jpeg;base64," + base64.b64encode(frame.jpeg_bytes).decode("ascii")
         # The label string changes new_message.text_content, which deliberately
         # invalidates the speculative imageless reply (see module docstring).
         new_message.content.append(_frame_label(frame))
-        new_message.content.append(
-            lk_llm.ImageContent(image=data_url, mime_type="image/jpeg")
+        new_message.content.append(lk_llm.ImageContent(image=data_url, mime_type="image/jpeg"))
+        logger.info(
+            "VoiceSession: screen frame injected into turn",
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                "frame_id": frame.frame_id,
+                "frame_age_s": round(frame.age_seconds, 1),
+                "stripped_stale": stripped,
+            },
         )
-        logger.info("VoiceSession: screen frame injected into turn", {
-            "session_id": session_id,
-            "user_id": user_id,
-            "frame_id": frame.frame_id,
-            "frame_age_s": round(frame.age_seconds, 1),
-            "stripped_stale": stripped,
-        })
         return frame
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.warn("VoiceSession: screen frame injection failed", {
-            "session_id": session_id, "user_id": user_id, "error": str(exc),
-        })
+        logger.warn(
+            "VoiceSession: screen frame injection failed",
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                "error": str(exc),
+                "stage": "capture",
+                "outcome": "failed",
+                "reason": "frame_injection_failed",
+                "error_type": type(exc).__name__,
+            },
+        )
         return None

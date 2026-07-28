@@ -33,18 +33,13 @@ from .text_sanitizer import strip_nonverbal_cues
 # Slow-tool filler phrases moved to voice/tool_filler.py, triggered from
 # BuddyAgent.llm_node (the only pre-execution tool signal on this stack).
 
-# Two-tier silence presence, both LLM-framed so the line lands fresh each time
-# (an earlier prescriptive version converged on the same stock "you still there?
-# no rush" phrasing every session). Tier 1 fires on LiveKit's away event
-# (settings.VOICE_AWAY_FIRST_NUDGE_S); tier 2 is an escalation timer that fires
-# at settings.VOICE_AWAY_SECOND_NUDGE_S total silence if the user is still away.
+# One silence-presence line, LLM-framed so it lands fresh each time. It fires
+# on LiveKit's away event after settings.VOICE_AWAY_FIRST_NUDGE_S.
 #
-# Both fire AT MOST ONCE per continuous silence. LiveKit re-emits "away" after
-# every agent turn while the user stays quiet, so tier 1 is gated behind a
+# It fires AT MOST ONCE per continuous silence. LiveKit re-emits "away" after
+# every agent turn while the user stays quiet, so it is gated behind a
 # `_away_nudged` latch that is only released when a real final user transcript
-# arrives. Without it, each re-emitted "away" fired a fresh nudge and re-armed
-# tier 2, so Buddy talked over and over during a single silence (the "why do you
-# keep talking" loop).
+# arrives. Without it, Buddy talks repeatedly during one silence span.
 
 FIRST_AWAY_NUDGE_SCREEN_INSTRUCTIONS = (
     "The user has gone quiet for a bit, and a recent screenshot of their screen is "
@@ -147,7 +142,6 @@ class VoiceSessionRecorder:
         self.action_receipts: list[dict[str, Any]] = []
         self.done = asyncio.Event()
         self._followup_idle_task: asyncio.Task | None = None
-        self._second_away_nudge_task: asyncio.Task | None = None
         # Latched True once Buddy has checked in during the CURRENT silence span;
         # released only by a real final user transcript. Stops LiveKit's repeated
         # "away" re-emits (one per agent turn) from firing back-to-back nudges.
@@ -217,7 +211,6 @@ class VoiceSessionRecorder:
             # Note we do NOT release _away_nudged here — a brief listening blip
             # between agent turns is not the user actually returning. Only a final
             # transcript (_on_user_transcript) proves they spoke and re-opens nudging.
-            self._cancel_second_away_nudge()
             return
         # Guide Mode owns the conversation with terse, screen-driven steps; a chatty
         # companion-persona away nudge would break that flow, so suppress it.
@@ -243,32 +236,23 @@ class VoiceSessionRecorder:
 
         self._away_nudged = True
         asyncio.create_task(
-            self._speak_away_nudge(tier=1), name=f"away-nudge-{self._session_id[:8]}"
+            self._speak_away_nudge(), name=f"away-nudge-{self._session_id[:8]}"
         )
-        self._arm_second_away_nudge()
         logger.info("VoiceSession: away nudge", {
             "session_id": self._session_id, "user_id": self._user_id,
         })
 
-    async def _speak_away_nudge(self, *, tier: int) -> None:
-        """LLM-framed silence nudge. Tier 1 = light presence, tier 2 = re-engage.
-
-        The screen-aware variant is chosen only when a fresh desktop frame exists;
-        frames ride user turns, so a fresh frame implies the screenshot is already
-        in the chat context for the model to reference. Never raises.
-        """
+    async def _speak_away_nudge(self) -> None:
+        """Speak the one LLM-framed silence nudge. Never raises."""
         try:
-            instructions = (
-                SECOND_AWAY_NUDGE_INSTRUCTIONS if tier == 2
-                else FIRST_AWAY_NUDGE_INSTRUCTIONS
-            )
-            if tier == 1 and await self._has_fresh_screen_frame():
+            instructions = FIRST_AWAY_NUDGE_INSTRUCTIONS
+            if await self._has_fresh_screen_frame():
                 instructions = FIRST_AWAY_NUDGE_SCREEN_INSTRUCTIONS
             await self._session.generate_reply(instructions=instructions)
         except Exception as exc:
             logger.warn("VoiceSession: away nudge failed", {
                 "session_id": self._session_id, "user_id": self._user_id,
-                "tier": tier, "error": str(exc),
+                "error": str(exc),
             })
 
     async def _has_fresh_screen_frame(self) -> bool:
@@ -279,49 +263,12 @@ class VoiceSessionRecorder:
         except Exception:
             return False
 
-    def _arm_second_away_nudge(self) -> None:
-        """Escalate to the memory-pull nudge if the user stays away past tier 1.
-
-        Cancelled the moment the user does anything (state leaves away, or a
-        final transcript arrives). Re-checks away + listening at fire time so a
-        race with Buddy speaking can never stack a nudge on top of audio.
-        """
-        self._cancel_second_away_nudge()
-        delay_s = max(
-            0.0,
-            settings.VOICE_AWAY_SECOND_NUDGE_S - settings.VOICE_AWAY_FIRST_NUDGE_S,
-        )
-
-        async def _escalate() -> None:
-            try:
-                await asyncio.sleep(delay_s)
-            except asyncio.CancelledError:
-                return
-            if str(getattr(self._session, "user_state", "")) != "away":
-                return
-            if str(getattr(self._session, "agent_state", "")) != "listening":
-                return
-            logger.info("VoiceSession: second away nudge", {
-                "session_id": self._session_id, "user_id": self._user_id,
-            })
-            await self._speak_away_nudge(tier=2)
-
-        self._second_away_nudge_task = asyncio.create_task(
-            _escalate(), name=f"away-nudge-2-{self._session_id[:8]}"
-        )
-
-    def _cancel_second_away_nudge(self) -> None:
-        if self._second_away_nudge_task is not None:
-            self._second_away_nudge_task.cancel()
-            self._second_away_nudge_task = None
-
     def _on_user_transcript(self, ev) -> None:  # type: ignore[misc]
         logger.info("VoiceSession: STT transcript", {
             "session_id": self._session_id, "user_id": self._user_id,
             "text": ev.transcript, "is_final": ev.is_final,
         })
         if ev.is_final and ev.transcript:
-            self._cancel_second_away_nudge()
             # The user actually spoke: this silence span is over, re-open nudging
             # so the next quiet stretch can check in once again.
             self._away_nudged = False
@@ -524,7 +471,6 @@ class VoiceSessionRecorder:
         )
 
     def _on_close(self, ev) -> None:  # type: ignore[misc]
-        self._cancel_second_away_nudge()
         if self._followup_idle_task is not None:
             self._followup_idle_task.cancel()
         close_error = getattr(ev, "error", None)

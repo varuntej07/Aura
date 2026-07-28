@@ -87,8 +87,9 @@ VOICE_TOOL_SKILLS: dict[str, VoiceToolSkill] = {
                 "for runnable text, prompt for text they will paste into another AI, "
                 "and steps or checklist for multi-step guidance. Put the complete "
                 "useful content in the tool, never a summary or placeholder. Never put "
-                "an email reply or DM in this tool. After it succeeds, speak only a "
-                "short confirmation and never recite the artifact. A single simple "
+                "an email reply or DM in this tool. The tool owns acknowledgement and "
+                "completion speech. After calling it, emit no conversational text and "
+                "never recite, preview, or summarize the artifact. A single simple "
                 "action or a conversational explanation can stay spoken."
             ),
         ),
@@ -103,16 +104,38 @@ VOICE_TOOL_SKILLS: dict[str, VoiceToolSkill] = {
                 "a command, code, config, a script), that is present_visible_artifact, "
                 "not this tool. The verb does not decide it: \"draft me a prompt\" or "
                 "\"draft me a command\" is a visible artifact, never an outbound message. "
+                "A script or prompt the user will feed to another AI, a video or UGC "
+                "generator, or any creator tool is ALWAYS present_visible_artifact "
+                "(kind prompt), never this tool, even mid-conversation about a 'draft' "
+                "or after you already made one: it goes INTO a tool, it is not sent TO "
+                "a person. If it is not addressed to a human recipient who will send "
+                "it, it is not an outbound message. "
                 "You can see their screen, so read it to work out what is being asked and "
                 "follow their spoken instructions on tone, length, and content. Call it "
                 "right away with whatever they gave you; every argument is optional and "
                 "inferred from the screen. Never ask a clarifying question whose answer "
                 "is on the screen: never ask whether it's an email or a new message, and "
                 "never ask how long it should be. The text is written to their screen as "
-                "a card, so never speak the draft itself, not even a preview: say one "
-                "short line confirming it's there and offer to tweak it. A draft or card "
+                "a card, so never speak the draft itself, not even a preview. The tool "
+                "owns acknowledgement and completion speech; after calling it, emit no "
+                "conversational text. A draft or card "
                 "is never a substitute for a real action: if they ask you to create an "
                 "event, a reminder, or a tracker, call that action tool instead."
+            ),
+        ),
+        VoiceToolSkill(
+            name="guide_control",
+            instruction=(
+                "Use set_guide_mode to turn Guide Mode on or off when the user asks "
+                "for it ('start guide mode', 'turn on guide mode', 'stop guiding'): "
+                "call set_guide_mode(enable=true) to start it and "
+                "set_guide_mode(enable=false) to stop it. You do NOT control Guide "
+                "Mode any other way, so NEVER say you turned it on or off, flipped a "
+                "switch, or that it is now on, unless you actually called this tool "
+                "this turn and it returned success. It only REQUESTS the change; the "
+                "desktop arms it and shows a dot when it is truly watching. After the "
+                "call, say only the short line the tool returns, and do not claim it "
+                "is already active."
             ),
         ),
         VoiceToolSkill(
@@ -146,7 +169,7 @@ def instructions_for_skill_names(skill_names: list[str]) -> str:
         "succeeded before its tool returns success. "
         "The routing test for every request: does it change something in their real life "
         "(an event, reminder, tracker, memory)? Then it is an action tool. Is it text "
-        "they would scan or copy? Then it is a card, with one spoken summary line. "
+        "they would scan or copy? Then it is a card whose tool owns all lifecycle speech. "
         "Otherwise just talk. When a write tool's result includes a `say` field, that "
         "line is the truth of what happened: speak it in your own warm voice, never a "
         "grander claim than it makes. "

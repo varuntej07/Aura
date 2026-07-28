@@ -127,10 +127,8 @@ def build_agent_session(
         turn_detection=turn_detector if turn_detector is not None else NOT_GIVEN,
         preemptive_generation=True,
         mcp_servers=[mcp_server], 
-        # First silence-presence tier: LiveKit emits "away" after this much user
-        # silence, which recorder.py answers with the playful (screen-aware when
-        # a fresh frame exists) check-in; the deeper memory-pull tier fires at
-        # VOICE_AWAY_SECOND_NUDGE_S total (see voice/recorder.py).
+        # LiveKit emits "away" after this much user silence. recorder.py owns
+        # the one check-in allowed for that continuous silence span.
         user_away_timeout=settings.VOICE_AWAY_FIRST_NUDGE_S,
         turn_handling=TurnHandlingOptions(
             # MultilingualModel already guards turn finality semantically. Keep
