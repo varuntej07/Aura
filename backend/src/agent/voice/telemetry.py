@@ -46,7 +46,7 @@ def log_turn_metrics(
     role: str,
     metrics: dict,
     tier: str,
-) -> None:
+) -> dict:
     """Emit per-turn component latency from a ChatMessage.metrics report.
 
     LiveKit splits per-turn telemetry across two messages: user turns carry the
@@ -87,7 +87,7 @@ def log_turn_metrics(
         payload["tts_model"] = tts_meta.get("model_name")
         payload["tts_provider"] = tts_meta.get("model_provider")
     else:
-        return
+        return {}
 
     if role == "assistant" and all(
         payload.get(field) is None
@@ -101,6 +101,7 @@ def log_turn_metrics(
         })
 
     logger.info("VoiceSession: turn metrics", payload)
+    return payload
 
 
 @asynccontextmanager

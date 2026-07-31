@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..lib.logger import logger
+from ..prompts import memory_callback_prompt
 from ..services.firebase import admin_firestore
 from ..services.memory.graph_store import delete_node
 from ..services.model_provider import ModelProvider
@@ -128,23 +129,7 @@ async def _generate_line(uid: str, date: str, *, retry_count: int = 0) -> None:
         if not fresh:
             result = {"empty": True}
         else:
-            facts = "\n".join(f"- {k}: {v}" for k, v in fresh[:10])
-            prompt = (
-                "You are Buddy, a warm desktop companion, greeting a returning user "
-                "with ONE short opening line that proves you remember their life.\n\n"
-                "Known facts about them (from past conversations):\n"
-                f"{facts}\n\n"
-                "Rules, all hard:\n"
-                "- Reference only durable facts or ongoing projects. SKIP anything "
-                "task-like or reminder-like entirely (a stored 'wants to call mom' "
-                "must never become 'how was your call with mom?').\n"
-                "- Never presume an event happened or completed.\n"
-                "- One sentence, under 140 characters, conversational, no emoji, "
-                "no exclamation marks, never use an em dash.\n"
-                "- Rate your own line's specificity 0-100: 100 means it could only "
-                "be about this exact person; 0 means it fits anyone.\n"
-                "- If nothing specific and safe exists, return specificity 0."
-            )
+            prompt = memory_callback_prompt(fresh)
             provider = ModelProvider()
             scored = await provider.cheap(prompt, response_model=_CallbackLine, temperature=0.4)
             line = _sanitize_value(scored.line) if isinstance(scored, _CallbackLine) else ""

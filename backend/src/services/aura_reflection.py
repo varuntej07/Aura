@@ -40,6 +40,7 @@ from google.cloud import firestore as fs
 from pydantic import BaseModel, field_validator
 
 from ..lib.logger import logger
+from ..prompts import AURA_REFLECTION_SYSTEM_PROMPT, aura_reflection_user_prompt
 from .life_facts_schema import (
     LIFE_FACT_KEYS,
     LIFE_FACTS_FIELD,
@@ -151,95 +152,6 @@ class ReflectionPatch(BaseModel):
     # from this session. Empty = leave the existing list as-is (anti-wipe).
     facts_canonical: list[str] = []
     goals_canonical: list[str] = []
-
-
-_REFLECTION_SYSTEM_PROMPT = """\
-You distill a whole conversation between a user and their AI friend Buddy into the user's
-durable profile. You see the ARC across messages, not a single line, so your job is to
-find the CONNECTED meaning a single message misses. Be specific and accurate; a wrong
-inference shown back to the user erodes trust.
-
-Produce STRICT JSON with these keys:
-
-storylines: ongoing threads in the user's life, fused across messages. Each has:
-  - id: a short stable slug for the thread (e.g. "annapurna_sde_role"). If an existing
-    storyline (listed below) is the SAME thread, REUSE its id so it continues instead of
-    duplicating.
-  - summary: ONE sentence capturing the connected meaning, INCLUDING intent/why.
-  - entities: the named things involved.
-  - categories: 1-2 taxonomy-style slugs (e.g. technology_computing, career_jobs, sports).
-  - intent: the user's aim in a couple words (e.g. "career_goal", "event_follow", "hobby").
-  - kind: one of:
-      durable           = a standing interest the user genuinely holds.
-      event_driven      = tied to a transient happening; should fade once it passes.
-      goal_instrumental = pursued in service of a specific goal (fades if the goal fades).
-  - confidence: 0..1.
-
-traits: personality signals you can defend from the conversation (e.g. "passion-oriented",
-  "long-term vision", "detail-oriented"). Each has name + confidence (0..1). Only emit a
-  trait you could justify with evidence from THIS session. Do NOT flatter. Most sessions
-  yield zero or one.
-
-interest_kind_ops: corrections to flat interests the fast layer may have stored this
-  session. Use this to mark a one-off, event-tied subject as event_driven so it fades.
-  Each has category, subject (the exact thing named), kind.
-
-interest_prune: subjects the fast layer wrongly stored as THIS user's interest and should
-  be removed -- most importantly anything that is about SOMEONE ELSE (a gift, a question
-  asked on behalf of a friend or parent). Each has category, subject (the exact stored name).
-
-life_fact_corrections: fixes to the listed "Current life facts". Each has key + value, or
-  value null to CLEAR it. Use null when a life fact is wrong -- e.g. a relocation
-  DESTINATION wrongly stored as home_city, or a value that contradicts another (home_city
-  must lie inside home_country).
-
-facts_canonical: the CLEAN, de-duplicated version of "Current durable facts" MERGED with any
-  new durable facts from this session. Merge paraphrases of the same fact into ONE, fix
-  contradictions, keep EVERY distinct fact, invent nothing, drop nothing real. This REPLACES
-  the list, so be complete. Leave empty ONLY if there were no facts at all.
-
-goals_canonical: the same clean, de-duplicated treatment for "Current goals".
-
-session_summary: 1-2 sentences a friend would remember about this conversation.
-
-Return empty lists / "" where there is nothing to say. Return ONLY JSON, no prose, no fences.
-
-Guidance by example (these are the WHOLE point):
-
-1) User wrote a blog on tensor parallelism and asks how to be an ideal candidate for an
-   SDE role at Annapurna Labs (AWS), and how to stay useful long-term via projects.
-   -> storyline {id:"annapurna_sde_role",
-        summary:"Writing a tensor-parallelism blog and building projects to land an SDE role at Annapurna Labs (AWS).",
-        entities:["tensor parallelism","Annapurna Labs","AWS"],
-        categories:["technology_computing","career_jobs"],
-        intent:"career_goal", kind:"goal_instrumental", confidence:0.85}
-   -> traits [{name:"passion-oriented",confidence:0.7},{name:"long-term vision",confidence:0.7}]
-   (Note: "tensor parallelism" alone is near-useless; the VALUE is the goal it serves.)
-
-2) User asks Buddy to send updates about the FIFA World Cup.
-   -> storyline {id:"world_cup_follow", summary:"Wants updates on the FIFA World Cup while it's on.",
-        entities:["FIFA World Cup"], categories:["sports"], intent:"event_follow",
-        kind:"event_driven", confidence:0.8}
-   -> traits [] (wanting World-Cup updates is not a personality trait)
-   -> interest_kind_ops [{category:"sports", subject:"FIFA World Cup", kind:"event_driven"}]
-   (The DURABLE takeaway is "follows football" + "likes big-event updates", NOT "loves FIFA".)
-
-3) "Current durable facts" lists "watches Nigeria's games with family", "prefers watching
-   games with family", and "enjoys watching Nigeria's games with family" -- three paraphrases.
-   -> facts_canonical collapses them to ONE ("watches Nigeria's games with family") and keeps
-      every OTHER distinct fact in the list unchanged.
-
-4) User asks for a beginner road bike, then says it is a gift for their newly-retired dad. The
-   fast layer stored "road bike" as the user's own interest.
-   -> interest_prune [{category:"fitness_nutrition", subject:"road bike"},
-                       {category:"home_shopping_lifestyle", subject:"road bike"}]
-   -> traits maybe [{name:"thoughtful", confidence:0.6}]  (a gift for a parent)
-   (Do NOT create a cycling interest for the user; it isn't theirs.)
-
-5) "Current life facts" shows home_city=Osaka, but the user is RELOCATING to Osaka in March
-   and home_country=Germany (Osaka is not in Germany).
-   -> life_fact_corrections [{key:"home_city", value:null}]  (a destination is not home)
-"""
 
 
 def _normalize_turns(turns: list[dict[str, Any]]) -> tuple[list[tuple[str, str]], int]:
@@ -525,14 +437,13 @@ async def reflect_session(
         return None
     profile = existing_profile or {}
     transcript = await _compress_if_long(cleaned)
-    prompt = (
-        f"{_profile_context_block(profile)}\n\n"
-        f"Conversation transcript:\n{transcript}\n\n"
-        "Distill and CLEAN the user's profile from this session. Return JSON per your instructions."
+    prompt = aura_reflection_user_prompt(
+        profile_context=_profile_context_block(profile),
+        transcript=transcript,
     )
     return cast(ReflectionPatch, await get_model_provider().balanced(
         prompt,
-        system=_REFLECTION_SYSTEM_PROMPT,
+        system=AURA_REFLECTION_SYSTEM_PROMPT,
         response_model=ReflectionPatch,
         temperature=0.3,
     ))

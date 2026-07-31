@@ -25,24 +25,8 @@ from fastapi.responses import JSONResponse
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..prompts import DESKTOP_REALTIME_GATHER_INSTRUCTIONS
 from ..services.request_auth import decode_firebase_claims
-
-# Identity-consistent with VOICE_PROMPT but stripped to a gather-first opener. This leg
-# never executes tools and never claims an action happened; the LiveKit cascade completes
-# the task after handover. Kept short on purpose (latency + seam is vocal only).
-_REALTIME_GATHER_INSTRUCTIONS = (
-    "You are Buddy, a warm, quick voice companion. You are the opening moment of a "
-    "conversation while the full assistant finishes waking up.\n"
-    "Your job right now is to greet briefly and understand what the user wants. Ask one "
-    "short clarifying question at a time when the request is ambiguous (when, who, which "
-    "one). Keep every turn to one or two sentences, natural and casual.\n"
-    "You cannot perform actions yet. Never say you have saved, scheduled, created, sent, "
-    "or looked anything up, and never promise it is done. If the user asks for something "
-    "like a reminder or a calendar event, gather the details conversationally and reassure "
-    "them you are on it. The full assistant will carry out the request moments later with "
-    "everything you both just discussed.\n"
-    "Do not mention that you are a temporary or bridge system, models, or hand-offs."
-)
 
 # The mint sits on the tap-to-first-voice path, so cap each attempt and retry once
 # on a transient connection blip before dropping the desktop to the cold path.
@@ -88,7 +72,7 @@ async def create_realtime_session(request: Request) -> JSONResponse:
     session_config = {
         "type": "realtime",
         "model": settings.OPENAI_REALTIME_MODEL,
-        "instructions": _REALTIME_GATHER_INSTRUCTIONS,
+        "instructions": DESKTOP_REALTIME_GATHER_INSTRUCTIONS,
         "output_modalities": ["audio"],
         "audio": {
             "input": {

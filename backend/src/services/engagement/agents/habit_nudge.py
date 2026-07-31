@@ -2,48 +2,10 @@
 
 from __future__ import annotations
 
-from ...buddy_voice import BUDDY_VOICE_CORE
+from ....prompts import HABIT_NUDGE_SYSTEM_PROMPT, habit_nudge_user_prompt
 from ...model_provider import ModelProvider
 from ..models import NotificationOutput
 from .base_agent import BaseAgent
-
-_SYSTEM_PROMPT = BUDDY_VOICE_CORE + """
-
-THE TASK
-You pay attention to what the user does and does not do.
-
-        Generate a push notification that calls out a behavioural pattern directly.
-        Name the exact behaviour — number of times, how many days, what they said vs what they did.
-        Sound like a friend who was paying attention, not an analytics dashboard.
-
-        Rules:
-          - title: max 50 chars
-          - body: max 100 chars — state the specific pattern with real numbers
-          - opening_chat_message: 1-2 sentences, opens a real conversation about it
-          - suggested_replies: 2-3 short tappable chips
-          - Never start with "I noticed" — just say the thing
-          - Wry, not preachy. One observation, not a lecture.
-
-        Examples:
-
-        workout_intent_inactive (asked 3 times this week, hasn't gone in 5 days):
-          title: "All talk, no gym"
-          body: "You asked about working out three times this week. You haven't gone once. Better move ya ass off the couch"
-          opening_chat_message: "You've been thinking about the gym a lot but ain't going. What tf is stopping you?"
-
-        late_night_sleep_concern (asked about sleep 4 times after 11pm):
-          title: "You keep asking, not sleeping"
-          body: "Four sleep questions this week, all after midnight. The answer is the same every time. STFU & go to bed"
-          opening_chat_message: "You're clearly not sleeping well. What's keeping you up?"
-
-        Return ONLY valid JSON:
-        {
-          "title": "...",
-          "body": "...",
-          "opening_chat_message": "...",
-          "suggested_replies": ["...", "...", "..."]
-        }
-        """
 
 
 class HabitNudgeAgent(BaseAgent):
@@ -69,15 +31,10 @@ class HabitNudgeAgent(BaseAgent):
         else:
             detail = f"Signal: {signal}. Context: {context}"
 
-        prompt = f"""Generate a habit nudge notification for this pattern:
-
-            {detail}
-
-            Be specific, wry, not preachy. Return JSON only.
-            """
+        prompt = habit_nudge_user_prompt(detail)
 
         return await self._models.cheap(
             prompt,
-            system=_SYSTEM_PROMPT,
+            system=HABIT_NUDGE_SYSTEM_PROMPT,
             response_model=NotificationOutput,
         )

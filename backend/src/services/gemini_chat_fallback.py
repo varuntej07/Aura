@@ -19,7 +19,6 @@ are dropped (with a log line) rather than translated.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -201,6 +200,7 @@ async def stream_gemini_chat_fallback(
             "tools": len(tools),
         })
 
+        limit_exhausted = False
         for _ in range(_MAX_TURNS):
             turn_text_buffer: list[str] = []
             buffered_chars = 0
@@ -278,7 +278,9 @@ async def stream_gemini_chat_fallback(
                     logger.exception("Gemini fallback: tool error", {"tool": fc.name, "error": str(exc)})
                     return (fc.name, None, exc)
 
-            results = await asyncio.gather(*[_run_tool(fc) for fc in function_calls])
+            results = []
+            for function_call in function_calls:
+                results.append(await _run_tool(function_call))
 
             # Clarification sentinel — same contract as the Anthropic loop.
             clarification = next(
@@ -318,10 +320,20 @@ async def stream_gemini_chat_fallback(
                 response_parts.append(types.Part.from_function_response(name=name, response=payload))
             contents.append(types.Content(role="user", parts=response_parts))
         else:
+            limit_exhausted = True
             logger.warn("Gemini fallback: max turns exceeded", {"tools_used": names_used})
+            yield {
+                "type": "text_delta",
+                "delta": (
+                    "I reached my safe action limit before I could finish that. "
+                    "Please send the request once more."
+                ),
+            }
 
         reminder_data = next((d["data"] for d in captured if d["tool"] == "set_reminder"), None)
         metadata = {"tool_names": names_used}
+        if limit_exhausted:
+            metadata["termination_reason"] = "max_tool_turns"
         if reminder_data:
             metadata["reminder"] = reminder_data
         yield {"type": "done", "metadata": metadata}

@@ -144,17 +144,26 @@ async def _drain_and_dispatch(
 
     # ROUTE: hand proposals to the funnel (the surface-aware Delivery Arbiter).
     routed = 0
+    routing_failed = False
     for proposal in proposals:
         try:
             await funnel.submit(proposal)
             routed += 1
         except Exception as exc:
+            routing_failed = True
             logger.warn("orchestrate: funnel submit failed", {
                 "user_id": user_id, "source": proposal.source, "error": str(exc),
             })
 
-    # PERSIST: mark every drained event consumed (the fast-path skip next pass).
-    await inbox.mark_consumed(user_id, refs)
+    # PERSIST: consume only after every proposal was durably accepted. A failed
+    # funnel handoff leaves the source events available for the next sweep.
+    if not routing_failed:
+        await inbox.mark_consumed(user_id, refs)
+    else:
+        logger.warn(
+            "orchestrate: events retained for retry after routing failure",
+            {"user_id": user_id, "event_count": len(refs)},
+        )
 
     logger.info("orchestrate: dispatched", {
         "user_id": user_id,
@@ -168,4 +177,5 @@ async def _drain_and_dispatch(
         "reconciled": len(resolved_subjects),
         "tasks": len(tasks),
         "routed": routed,
+        "retry_pending": routing_failed,
     }

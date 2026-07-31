@@ -18,6 +18,10 @@ from typing import cast
 from pydantic import BaseModel
 
 from ...lib.logger import logger
+from ...prompts import (
+    REMINDER_WORTHINESS_SYSTEM_PROMPT,
+    reminder_worthiness_user_prompt,
+)
 from ..model_provider import get_model_provider
 from . import thread_store
 from .models import Thread, ThreadSource, ThreadStatus
@@ -52,35 +56,6 @@ class _ReminderWorthinessJudgment(BaseModel):
     reason: str = ""
 
 
-_WORTHINESS_SYSTEM = """\
-You are a filter deciding whether a reminder is worth Buddy following up on later out
-of genuine curiosity, the way a close friend would remember something you mentioned
-and ask about it afterward.
-
-Return ONLY JSON: {"worth_asking_about": true or false, "reason": "<=8 words"}
-
-Approve (true) when the reminder points at something personal or emotionally rich —
-a relationship, a decision, an event with stakes, a feeling — the kind of thing a
-friend would naturally wonder "how did that go?" about.
-
-Reject (false) when the reminder is a mundane routine or administrative task with
-nothing to be curious about: a bill, a call/text to schedule/confirm/renew/book
-something, a chore, a pickup, an errand. Nobody follows up on "did the plumber call
-you back" like a friend would.
-
-Examples:
-"call mom" -> false (a routine check-in call, no real hook to be curious about)
-"pay rent" -> false (administrative)
-"call the bank about the lease deposit" -> false (routine, nothing to ask about)
-"big presentation monday" -> true (something with stakes, worth checking in on)
-"date night with sarah" -> true (personal, relationship)
-"talk to my therapist about the job offer" -> true (emotionally rich, a real decision)
-"renew car registration" -> false (administrative)
-
-Be BALANCED: when in doubt, approve — a mediocre curiosity question is a minor cost,
-a silently-dropped genuine loop is the real one. Reject only when it's clearly rote."""
-
-
 async def _judge_worth_a_thread(message: str) -> tuple[bool, str]:
     """Semantic worthiness judge (CLAUDE.md: teach a category, never a keyword
     list).
@@ -97,8 +72,8 @@ async def _judge_worth_a_thread(message: str) -> tuple[bool, str]:
     try:
         result = await asyncio.wait_for(
             get_model_provider().cheap(
-                f'Reminder text: "{message}"\n\nIs this worth following up on?',
-                system=_WORTHINESS_SYSTEM,
+                reminder_worthiness_user_prompt(message),
+                system=REMINDER_WORTHINESS_SYSTEM_PROMPT,
                 response_model=_ReminderWorthinessJudgment,
                 temperature=0.0,
             ),

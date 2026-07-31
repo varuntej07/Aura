@@ -17,29 +17,13 @@ import json
 import re
 
 from ...lib.logger import logger
+from ...prompts import TAP_GATE_SYSTEM_PROMPT, tap_gate_user_prompt
 from ..model_provider import get_model_provider
 from .proposal import NotificationProposal
 
-# A judge that takes longer than this isn't worth blocking a send on — fail open.
-_TAP_GATE_TIMEOUT_S = 6.0
-
-_SYSTEM = """\
-You are the final quality gate for a push notification from Buddy, a warm AI companion \
-who is genuinely into this person's life. Decide if THIS notification is worth \
-interrupting them for.
-
-Return ONLY JSON: {"worthy": true or false, "reason": "<=8 words"}
-
-Approve (worthy=true) when the notification is specific, opens a genuine curiosity gap \
-or offers a clearly useful next step, and reads like a friend who knows this person.
-
-Reject (worthy=false) ONLY when it is generic filler, a bare headline with no hook, \
-vague, clickbait, or could be sent to literally anyone.
-
-Be BALANCED: if it's a reasonable, specific, on-topic message, APPROVE it. Reject only \
-clearly low-value sends — when unsure, approve. Silence is better than spam, but a good \
-message earning a tap is the goal."""
-
+# This runs in the background proactive drain, so allow enough headroom for a
+# cold Gemini request while keeping the gate bounded below the one-minute tick.
+_TAP_GATE_TIMEOUT_S = 15.0
 
 def _parse(raw: str) -> tuple[bool, str]:
     """Parse the judge JSON. Defaults to worthy=True on any malformed output — the
@@ -61,15 +45,16 @@ def _parse(raw: str) -> tuple[bool, str]:
 
 async def passes(proposal: NotificationProposal) -> tuple[bool, str]:
     """``(worthy, reason)`` for one proactive proposal. Fails OPEN on error/timeout."""
-    prompt = (
-        f"Title: {proposal.title}\n"
-        f"Body: {proposal.body}\n"
-        f"Notification kind: {proposal.source}\n\n"
-        "Is this worth a tap?"
+    prompt = tap_gate_user_prompt(
+        title=proposal.title,
+        body=proposal.body,
+        source=proposal.source,
     )
     try:
         raw = await asyncio.wait_for(
-            get_model_provider().cheap(prompt, system=_SYSTEM, temperature=0.0),
+            get_model_provider().cheap(
+                prompt, system=TAP_GATE_SYSTEM_PROMPT, temperature=0.0
+            ),
             timeout=_TAP_GATE_TIMEOUT_S,
         )
     except Exception as exc:

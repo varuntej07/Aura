@@ -2,33 +2,10 @@
 
 from __future__ import annotations
 
-from ...buddy_voice import BUDDY_VOICE_CORE
+from ....prompts import CALENDAR_PREP_SYSTEM_PROMPT, calendar_prep_user_prompt
 from ...model_provider import ModelProvider
 from ..models import NotificationOutput
 from .base_agent import BaseAgent
-
-_SYSTEM_PROMPT = BUDDY_VOICE_CORE + """
-
-          THE TASK
-          There's a meeting coming up for the user.
-
-          Generate a prep notification. Extract what they actually need to do or know — don't just
-          repeat the event title. If there's no description, keep it brief and time-aware.
-
-          Rules:
-            - title: max 50 chars, time-aware ("in 2h", "in 90 min")
-            - body: max 100 chars — the one thing they need to act on
-            - opening_chat_message: offer to help them prep (1-2 sentences)
-            - suggested_replies: 2-3 chips ("Help me prep", "I'm ready", "What should I ask?")
-
-          Return ONLY valid JSON:
-          {
-            "title": "...",
-            "body": "...",
-            "opening_chat_message": "...",
-            "suggested_replies": ["...", "...", "..."]
-          }
-        """
 
 
 class CalendarPrepAgent(BaseAgent):
@@ -45,17 +22,15 @@ class CalendarPrepAgent(BaseAgent):
         mins = minutes % 60
         time_str = f"{hours}h {mins}min" if hours else f"{mins} min"
 
-        prompt = f"""Generate a calendar prep notification.
-
-Event: {title}
-Time until event: {time_str}
-Description: {description or "(none)"}
-Attendees: {", ".join(attendees[:5]) or "(none listed)"}
-
-Return JSON only."""
+        prompt = calendar_prep_user_prompt(
+            title=title,
+            time_until=time_str,
+            description=description,
+            attendees=attendees,
+        )
 
         return await self._models.cheap(
             prompt,
-            system=_SYSTEM_PROMPT,
+            system=CALENDAR_PREP_SYSTEM_PROMPT,
             response_model=NotificationOutput,
         )

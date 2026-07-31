@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..prompts import VOICE_ARCHIVE_SYNTHESIS_PROMPT, VOICE_SESSION_SUMMARY_PROMPT
 from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
 from . import voice_session_fields as vf
@@ -28,24 +29,6 @@ from .aura_reflection import consolidate_session
 from .user_aura_extractor import extract_and_update_user_aura
 from .voice_history_store import delete_voice_run_data
 from .voice_transcript_reconciliation import reconcile_voice_transcript
-
-_SESSION_SUMMARY_PROMPT = """\
-Extract compact conversational memory from this voice transcript. Return only the
-requested JSON object. Be specific and concrete. Do not infer that any reminder,
-calendar event, message, or other side effect happened from transcript wording. Action
-truth is added separately from runtime receipts and is not part of your output.
-
-Transcript:
-{transcript}
-
-recap: one or two friendly sentences suitable for a history list.
-open_loops: specific unfinished threads.
-decisions: choices or commitments the user made, not tool actions.
-emotional_context: one compact sentence, or empty.
-facts: stable facts learned about the user's life.
-follow_up: one natural question Buddy can ask next time, or empty.
-"""
-
 
 class VoiceSessionMemory(BaseModel):
     recap: str = ""
@@ -61,41 +44,6 @@ class VoiceSessionMemory(BaseModel):
             ensure_ascii=False,
             separators=(",", ":"),
         )
-
-_ARCHIVE_SYNTHESIS_PROMPT = """\
-You are building a long-term memory profile from {n} past voice conversation
-summaries between a user and their AI friend Buddy. Each summary is from one
-session. Be specific and concrete. This context is injected into future sessions.
-
-PAST SESSION SUMMARIES (oldest to newest):
-{summaries}
-
-Categories:
-
-RECURRING THEMES
-Topics appearing in 3 or more sessions. How they evolved over time if visible.
-
-LONG-TERM GOALS
-Goals mentioned multiple times. Note progress across sessions if visible.
-
-LIFE FACTS
-Stable facts about the user: job, relationships, health conditions, location,
-routines. Only include things mentioned consistently across multiple sessions.
-
-BEHAVIORAL PATTERNS
-How this user tends to behave. What motivates them, what they worry about,
-how they handle stress, patterns consistent with ADHD if evident.
-
-RESOLVED THREADS
-Things that were open loops in early sessions and appear resolved later.
-
-PERSISTENT OPEN LOOPS
-Things the user keeps mentioning across sessions but has not resolved.
-
-BUDDY-USER RELATIONSHIP
-Key moments in the relationship. Running references or inside jokes.
-Things that landed well. Things that caused friction or fell flat.
-"""
 
 _ACTIVE_SESSION_THRESHOLD = 30
 _ARCHIVE_BATCH_SIZE = 25
@@ -120,7 +68,7 @@ async def _generate_session_summary(turns: list[dict]) -> VoiceSessionMemory:
     if not transcript_lines:
         return VoiceSessionMemory()
     transcript = "\n".join(transcript_lines)
-    prompt = _SESSION_SUMMARY_PROMPT.format(transcript=transcript)
+    prompt = VOICE_SESSION_SUMMARY_PROMPT.format(transcript=transcript)
     provider = get_model_provider()
     result = await provider.cheap(
         prompt,
@@ -303,7 +251,7 @@ async def _synthesize_archive(
         if existing_archive.strip()
         else ""
     )
-    prompt = _ARCHIVE_SYNTHESIS_PROMPT.format(
+    prompt = VOICE_ARCHIVE_SYNTHESIS_PROMPT.format(
         n=len(session_summaries),
         summaries=prior_section + new_summaries_text,
     )

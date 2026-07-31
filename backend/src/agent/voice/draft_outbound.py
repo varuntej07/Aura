@@ -42,9 +42,7 @@ from ...services.chat_completion.prompt_builder import fetch_cached_aura_data
 from ...services.drafts import store as draft_store
 from ...services.entitlement import check_and_increment_daily_outbound_draft_usage
 from ...services.outbound_draft.drafter import (
-    CHANNELS,
     DEFAULT_CHANNEL,
-    LENGTHS,
     REASON_OK,
     SNIPPET_CHANNEL,
     OutboundDraftResult,
@@ -82,6 +80,9 @@ SPOKEN_QUOTA = (
     "tweak the one we've got instead?"
 )
 SPOKEN_FAILED = "I couldn't get that draft together, give it another go?"
+SPOKEN_NO_CURRENT_DRAFT = (
+    "There isn't a current draft to revise. Ask me to create a new draft first."
+)
 SPOKEN_DRAFT_STARTED = "Yeah, give me a second."
 SPOKEN_DRAFT_READY = "Done, it's on your screen. Want me to tweak anything?"
 SPOKEN_REFINE_READY = "Updated, take a look."
@@ -121,11 +122,8 @@ async def run_draft_tool(
     state: DraftOutboundSession,
     screen_frames: ScreenFrameStore | None,
     *,
-    channel: str,
-    length: str,
-    recipient_hint: str,
-    intent: str,
-    refine_instruction: str,
+    operation: str,
+    transcript: str,
     run_ctx: RunContext | None = None,
 ) -> str:
     """Produce or refine the session's draft; returns ONLY the sentence Buddy
@@ -140,47 +138,23 @@ async def run_draft_tool(
     With a frame present, every new-draft call reaches this path, so the desktop
     skeleton and a short acknowledgement appear without a clarifying bounce.
     """
-    channel = (channel or "").strip()
-    length = (length or "").strip()
-    recipient_hint = (recipient_hint or "").strip()
-    intent = (intent or "").strip()
-    refine_instruction = (refine_instruction or "").strip()
-
     try:
-        # Refining the draft we already made this call: no frame, no quota.
-        if refine_instruction and state.current is not None:
-            return await _refine_current(state, refine_instruction)
-
-        # A refine request with nothing to refine is really a new-draft ask.
-        if refine_instruction and not intent:
-            intent = refine_instruction
-
-        # No channel (or an unrecognized one) means "just write what's on my
-        # screen": fall back to the adaptive on_screen channel instead of asking
-        # which kind it is. The drafter reads the frame to decide.
-        if channel not in CHANNELS:
-            channel = DEFAULT_CHANNEL
-        if channel == SNIPPET_CHANNEL:
-            # Snippets have no length ladder; "short" keeps the shared
-            # DraftState/store/refine contract satisfied and is ignored by the
-            # snippet prompt.
-            length = "short"
-        elif length not in LENGTHS:
-            # email_reply / cold_dm want a ladder length. on_screen infers its
-            # real length from the field/context, but it STILL needs a wire-valid
-            # enum: draft.created ships this value and the desktop drops any draft
-            # whose length is not short/medium/detailed (an empty on_screen length
-            # was parsed as malformed and left the card stuck on its skeleton).
-            # Default rather than ask, so a missing length never bounces the draft.
-            length = "medium"
+        if operation == "refine":
+            if state.current is None:
+                return SPOKEN_NO_CURRENT_DRAFT
+            return await _refine_current(state, transcript)
+        if operation != "new" or not transcript.strip():
+            return SPOKEN_FAILED
 
         return await _draft_new(
             state,
             screen_frames,
-            channel=channel,
-            length=length,
-            recipient_hint=recipient_hint,
-            intent=intent,
+            channel=DEFAULT_CHANNEL,
+            # The desktop event contract still requires a valid enum. The
+            # adaptive on_screen prompt ignores this storage-only default.
+            length="medium",
+            recipient_hint="",
+            intent=transcript,
             run_ctx=run_ctx,
         )
     except Exception as exc:

@@ -6,6 +6,7 @@ Used by the text /chat endpoint. The LiveKit voice agent uses livekit-plugins-an
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from collections.abc import AsyncIterator
@@ -18,6 +19,7 @@ from ..lib.logger import logger
 from ..shared.tool_thinking_phrases import pick_tool_thinking_phrase
 from ..shared.tools import claude_tool_definitions
 from .analytics.llm_telemetry import anthropic_usage_tokens, start_llm_generation
+from .chat_completion import tool_idempotency as _tool_idempotency
 from .chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from .gemini_chat_fallback import stream_gemini_chat_fallback
 from .tool_executor import ToolExecutor
@@ -327,6 +329,7 @@ class ClaudeClient:
         })
 
         try:
+            limit_exhausted = False
             for turn in range(_MAX_TURNS):
                 response = None
 
@@ -498,7 +501,23 @@ class ClaudeClient:
                         })
                         return (block.id, block.name, None, exc)
 
-                tool_results_raw = await asyncio.gather(*[_run_tool(b) for b in tool_use_blocks])
+                # Read-only tools may run together, but externally visible writes are
+                # serialized in model order. This prevents one model turn from racing
+                # conflicting creates, cancels, emails, or calendar changes.
+                tool_results_by_id: dict[str, tuple[str, str, Any, Exception | None]] = {}
+                read_blocks = [
+                    block
+                    for block in tool_use_blocks
+                    if block.name not in _tool_idempotency.SIDE_EFFECTING_TOOLS
+                ]
+                if read_blocks:
+                    read_results = await asyncio.gather(*[_run_tool(block) for block in read_blocks])
+                    tool_results_by_id.update({result[0]: result for result in read_results})
+                for block in tool_use_blocks:
+                    if block.name in _tool_idempotency.SIDE_EFFECTING_TOOLS:
+                        result = await _run_tool(block)
+                        tool_results_by_id[result[0]] = result
+                tool_results_raw = [tool_results_by_id[block.id] for block in tool_use_blocks]
                 for _, name, _, _ in tool_results_raw:
                     tool_names_used.append(name)
 
@@ -538,7 +557,7 @@ class ClaudeClient:
                     else:
                         if tool_name == "set_reminder" and isinstance(result, dict) and "error" not in result:
                             all_captured_tool_data.append({"tool": tool_name, "data": result})
-                        content = str(result)
+                        content = json.dumps(result, default=str, separators=(",", ":"))
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_id,
@@ -548,13 +567,23 @@ class ClaudeClient:
                 messages.append({"role": "assistant", "content": response.content})  # type: ignore[arg-type]
                 messages.append({"role": "user", "content": tool_results})
             else:
+                limit_exhausted = True
                 logger.warn("Claude stream: max turns exceeded", {"tools_used": tool_names_used})
+                yield {
+                    "type": "text_delta",
+                    "delta": (
+                        "I reached my safe action limit before I could finish that. "
+                        "Please send the request once more."
+                    ),
+                }
 
             reminder_data = next(
                 (d["data"] for d in all_captured_tool_data if d["tool"] == "set_reminder"),
                 None,
             )
             metadata = {"tool_names": tool_names_used}
+            if limit_exhausted:
+                metadata["termination_reason"] = "max_tool_turns"
             if reminder_data:
                 metadata["reminder"] = reminder_data
             yield {"type": "done", "metadata": metadata}

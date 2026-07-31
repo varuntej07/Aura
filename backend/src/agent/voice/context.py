@@ -53,7 +53,7 @@ class SessionContext:
 
     @property
     def prompt_context_vars(self) -> dict[str, str]:
-        """The substitution map the voice system prompt is formatted with."""
+        """The values rendered once in the voice prompt's final session block."""
         timezone = self.profile["timezone"]
         return {
             "name": self.profile["name"],
@@ -63,7 +63,6 @@ class SessionContext:
             "memory_summary": self.memory_summary or "(nothing yet — first conversation)",
             "graph_context": self.graph_context,
             "last_session_context": self.last_session_summary,
-            "last_session_at": self.last_session_at,
             "archive_context": self.archive_context,
             "user_aura_profile": self.aura_summary,
         }

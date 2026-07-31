@@ -12,24 +12,13 @@ reply endpoint always has something to show in the notification shade.
 from __future__ import annotations
 
 from ...lib.logger import logger
+from ...prompts import THREAD_RESPONDER_SYSTEM_PROMPT, thread_responder_user_prompt
 from ..model_provider import ModelProvider
 from .models import Thread
 
 # Buddy replies in the notification shade, so keep it tight — a long reply gets
 # truncated by the OS anyway.
 RESPONSE_MAX_CHARS = 220
-
-_RESPONDER_SYSTEM_PROMPT = """\
-You are Buddy, the user's close friend. You asked them a small, curious question
-and they just answered it. React like a friend would: warm, genuine, brief.
-
-Rules, all hard:
-- One or two short sentences. This shows in a phone notification, not an essay.
-- React to what they actually said, then optionally ask ONE light follow-up.
-- Never coach, never grade, never say "good job" or "let me know if". Just talk.
-- Never use em-dashes, en-dashes, or double hyphens. Lowercase is fine.
-- Plain text only. No markdown, no quotes around the whole thing.
-"""
 
 
 def _fallback(reply: str) -> str:
@@ -47,14 +36,13 @@ async def generate_thread_reply(
     user_reply: str,
 ) -> str:
     """One LLM call continuing the thread. Returns a safe fallback on failure."""
-    prompt = f"""\
-You earlier asked them: "{question}"
-They mentioned this originally: "{thread.trigger_text}"
-They just replied: "{user_reply}"
-
-Reply as Buddy, one or two short sentences."""
+    prompt = thread_responder_user_prompt(
+        question=question,
+        original_mention=thread.trigger_text,
+        user_reply=user_reply,
+    )
     try:
-        result = await models.cheap(prompt, system=_RESPONDER_SYSTEM_PROMPT, temperature=0.7)
+        result = await models.cheap(prompt, system=THREAD_RESPONDER_SYSTEM_PROMPT, temperature=0.7)
         text = (result if isinstance(result, str) else str(result)).strip()
         return (text or _fallback(user_reply))[:RESPONSE_MAX_CHARS]
     except Exception as exc:

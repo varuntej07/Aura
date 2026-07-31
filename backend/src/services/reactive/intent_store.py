@@ -180,9 +180,7 @@ async def schedule_intent(
                 # A never-fired intent still gets reaped: its TTL is well past its fire time.
                 FIELD_EXPIRES_AT: fire_at + INTENT_TTL,
             }
-            if session_id and (
-                settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND
-            ):
+            if session_id:
                 intent_data[FIELD_SESSION_ID] = session_id
             txn.set(intent_ref, intent_data)
             return intent_id

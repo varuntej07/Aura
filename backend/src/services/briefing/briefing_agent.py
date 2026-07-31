@@ -22,7 +22,7 @@ from typing import Any, cast
 from pydantic import BaseModel, Field
 
 from ...lib.logger import logger
-from ..buddy_voice import BUDDY_VOICE_CORE
+from ...prompts import BRIEFING_SYSTEM_PROMPT, briefing_user_prompt
 from ..firebase import admin_firestore
 from ..model_provider import ModelProvider
 from ..signal_engine.notification_framer import (
@@ -35,8 +35,8 @@ from ..user_aura_schema import (
     category_label,
     top_interest_subjects,
 )
-from .candidate_selector import SelectedItem, select_briefing_items
 from .briefing_store import BriefingTargeting
+from .candidate_selector import SelectedItem, select_briefing_items
 from .world_region import resolve_region
 
 ITEM_BLURB_MAX_CHARS = 320
@@ -84,56 +84,6 @@ class BriefingDraft(BaseModel):
     push_body: str = Field(default="", description="Push body, <=100 chars, opens a curiosity loop.")
 
 
-_BRIEFING_SYSTEM_PROMPT = f"""\
-        {BUDDY_VOICE_CORE}
-
-        THE TASK
-        You are writing this person's daily news briefing: a quick scan of what is buzzing in
-        the world today, in your own voice, like a friend catching them up over coffee. You are
-        GIVEN a numbered list of real, current items across several categories. Write up the
-        ones worth knowing as short separate blurbs.
-
-        HARD GROUNDING RULES (these stop you making things up):
-        - Use ONLY facts present in the given item. Never invent a score, number, quote, name,
-        date, or outcome that is not in the item text.
-        - Write one blurb per item you include, each keyed to that item's number.
-        - Drop any item with no real substance (e.g. only engagement counts, no article text)
-        and any you cannot write honestly from its text. Keep the strong ones.
-
-        VOICE AND FORMAT (per blurb):
-        - 2 to 3 short lines. React like a friend who finds it interesting, do not relay a raw
-        headline. Do NOT start with a dash, bullet, number, or the source name.
-        - Never name the source or platform (no "Hacker News", "Google News", "arXiv").
-        - No em-dashes, en-dashes, or double hyphens. No exclamation marks. No emoji pile-ons.
-
-        chat_seed_message: one or two sentences (<=250 chars) naming a few items concretely
-        ("the Verstappen win, that small-model paper, and the cricket chase") and inviting them
-        to go deeper. Do NOT end with "thoughts?" or "what do you think?".
-
-        push_title (<=50 chars) and push_body (<=100 chars): DO NOT bundle or list items ("a look
-        at X and Y" names nothing and kills the tap). Pick the SINGLE most striking item and build
-        the push on that ONE concrete hook, a name, a number, a turn. Tease it; never resolve it.
-        Same NEVER rules (no source names, no exclamation marks, no em-dashes).
-
-        GOOD (items include India chasing 320 in the final over + a small AI medical model):
-            push_title: India did NOT make that easy
-            push_body:  woahh!! it came down to the very last over and the finish is a little ridiculous. seen that?
-        BAD (never do this, it names nothing specific):
-            push_title: AI in medicine and a big win
-            push_body:  a quick look at AI's latest use and a country's historic sports moment
-
-        Output ONLY valid JSON matching the schema. No markdown fences, no prose.
-
-        Schema:
-        {{
-        "items": [{{"source_index": 1, "blurb": "string"}}],
-        "chat_seed_message": "string",
-        "push_title": "string",
-        "push_body": "string"
-        }}
-    """
-
-
 def _build_user_context(
     aura: dict[str, Any],
     targeting: BriefingTargeting,
@@ -156,27 +106,17 @@ def _build_user_context(
 
 
 def _build_prompt(items: list[SelectedItem], ctx: _BriefingUserContext) -> str:
-    interest_kind = (
-        "specific subjects they care about"
-        if ctx.has_specific_interests
-        else "broad areas they picked at signup, no specific subjects learned yet"
+    return briefing_user_prompt(
+        name=ctx.name,
+        interests=ctx.top_interests,
+        has_specific_interests=ctx.has_specific_interests,
+        language=ctx.language,
+        time_band=ctx.local_time_band,
+        items=[
+            (item.category, item.title, (item.body or "").strip()[:ITEM_BODY_CHARS])
+            for item in items
+        ],
     )
-    interests_line = ", ".join(ctx.top_interests[:5]) if ctx.top_interests else "none recorded yet"
-    lines = [
-        "USER CONTEXT",
-        f"name: {ctx.name or 'unknown'}",
-        f"top_interests ({interest_kind}): {interests_line}",
-        f"language: {ctx.language}",
-        f"local_time_band: {ctx.local_time_band}",
-        "",
-        "ITEMS (numbered; write up the ones worth knowing, drop the rest):",
-    ]
-    for i, item in enumerate(items, start=1):
-        body = (item.body or "").strip()[:ITEM_BODY_CHARS]
-        lines.append(f"{i}. category: {item.category} | title: {item.title}\n   body: {body}")
-    lines.append("")
-    lines.append("Write the briefing now. JSON only.")
-    return "\n".join(lines)
 
 
 async def _read_user_aura(user_id: str) -> dict[str, Any]:
@@ -245,7 +185,7 @@ async def generate(
 
     try:
         result = await asyncio.wait_for(
-            models.cheap(prompt, system=_BRIEFING_SYSTEM_PROMPT, response_model=BriefingDraft, temperature=0.6),
+            models.cheap(prompt, system=BRIEFING_SYSTEM_PROMPT, response_model=BriefingDraft, temperature=0.6),
             timeout=15.0,
         )
         draft = cast(BriefingDraft, result)

@@ -23,6 +23,11 @@ import re
 from datetime import UTC, datetime, timedelta
 
 from ...lib.logger import logger
+from ...prompts import (
+    TRACKING_KNOWN_FIXTURES_INSTRUCTION,
+    tracking_fixtures_followup_prompt,
+    tracking_topic_research_prompt,
+)
 from ..model_provider import ModelProvider, get_model_provider
 from . import fields as f
 from .models import Fixture, ResearchedFixture, TopicResearch, _coerce_datetime
@@ -49,71 +54,10 @@ _VALID_KINDS = {
     f.TOPIC_KIND_OPEN_INTEREST,
 }
 
-_SCHEMA_INSTRUCTION = """\
-You are setting up a live "keep me posted" tracker for a user. Research the topic on
-the web and return ONLY a single JSON object (no prose, no markdown fences) with:
-
-{
-  "topic_key": "stable kebab-case slug identifying the PUBLIC event/topic, e.g. \
-\"fifa-world-cup-2026\" or \"india-general-election-2026\" (NOT user-specific)",
-  "title": "short human title, e.g. \"USA at the FIFA World Cup 2026\"",
-  "kind": "one of: bounded_event (has a clear end) | recurring_season (a league/\
-season with many sub-events) | open_interest (a team/person, no natural end)",
-  "research_query": "the best short web-search query to track this going forward",
-  "end_condition": "plain text describing when updates should STOP, e.g. \"when the \
-tournament final is played or the user's team is eliminated\"",
-  "starts_at": "ISO 8601 UTC when the topic/event begins, or null",
-  "ends_at": "ISO 8601 UTC when it is expected to end, or null",
-  "timezone": "IANA timezone most relevant to the event, or \"UTC\"",
-  "country": "ISO 3166-1 alpha-2 country code where this topic is mainly followed, e.g. \
-\"IN\", \"BR\", \"GB\", \"JP\"; use \"US\" only when it is genuinely US-centric or global",
-  "language": "ISO 639-1 code of the language this topic is mostly covered in, e.g. \
-\"hi\", \"pt\", \"te\", \"ja\"; \"en\" if mainly English",
-  "confidence": 0.0-1.0 (how sure you are about the schedule),
-  "idle_poll_minutes": how often to check the web on a day with NOTHING scheduled, in \
-minutes — pick by how fast the topic moves (live tournament between match-days ~180-360; \
-a slow legal case ~720-1440; a fast-breaking story ~60-120),
-  "notify_start_hour": local hour 0-23 it is OK to START sending pushes (default 8),
-  "notify_end_hour": local hour 0-23 to STOP sending pushes overnight (default 23),
-  "awaiting_date": true ONLY if this is a real future event whose DATE is not announced \
-yet (e.g. an IPO with no set date) — then leave "fixtures" empty; the daily re-check catches the date,
-  "fixtures": [
-    {"label": "ONE specific upcoming fixture, e.g. \"USA vs Australia\" or \"SpaceX IPO opens\"",
-     "kind": "span (has duration, e.g. a match) | point (instantaneous, e.g. a verdict, \
-a product launch, a result announcement)",
-     "start_at": "ISO 8601 UTC start/kickoff time",
-     "end_at": "ISO 8601 UTC end time, or null (only spans have an end)",
-     "lead_minutes": how long before start to send the heads-up, e.g. 30 (15-120),
-     "wake_override": true ONLY for a can't-miss moment (a final, a championship decider, \
-a verdict) that may notify outside the notify window; false for routine fixtures}
-  ]
-}
-
-Rules: all datetimes ISO 8601 with a UTC offset. List the SOONEST upcoming individual \
-fixtures you can date, nearest first, each as its OWN entry — if a day has three matches, \
-return three fixtures with their own kickoff times; NEVER lump many games into one "round" \
-entry. You do NOT need to enumerate an entire long season or tournament: list only the \
-nearest ones you are confident of (roughly the next 20), and the tracker re-checks daily \
-to pick up later fixtures as they approach — a short, reliable list beats a giant one. Omit \
-speculative/undated ones. If the topic has no scheduled fixtures (a person, a company, a \
-developing story), return an empty fixtures array — it is still followed by the recurring \
-heartbeat at idle_poll_minutes. Return the JSON object and nothing else."""
-
 # Appended to the schema when re-researching a topic that already has stored fixtures.
 # The model ECHOES the id of any fixture it recognizes — the primary defense against a
 # reworded label forking a parallel series ("Match 98" resolving to "Spain vs Belgium"
 # is a label update on the SAME id, a connection only the bracket structure knows).
-_KNOWN_FIXTURES_INSTRUCTION = """\
-
-KNOWN FIXTURES already being tracked (id | start UTC | label):
-{fixture_lines}
-
-For each fixture in your answer, ALSO include "fixture_id": the id from this list when it
-is the same real-world fixture (even if the teams/label/time have since changed or been
-confirmed — a bracket slot like "Winner A vs Winner B" that has resolved into real team
-names is still the SAME fixture), or "new" when it is genuinely not in the list."""
-
-
 def _known_fixtures_block(existing_fixtures: list[Fixture] | None) -> str:
     """The KNOWN FIXTURES prompt section for a re-research pass, or "" when there is
     nothing stored to match against (provision, or a topic with no fixtures yet).
@@ -125,7 +69,7 @@ def _known_fixtures_block(existing_fixtures: list[Fixture] | None) -> str:
         f"  {fx.id} | {fx.start_at.isoformat()} | {fx.label}"
         for fx in sorted(existing_fixtures, key=lambda fx: fx.start_at)
     )
-    return _KNOWN_FIXTURES_INSTRUCTION.format(fixture_lines=lines)
+    return TRACKING_KNOWN_FIXTURES_INSTRUCTION.format(fixture_lines=lines)
 
 
 def _slugify(text: str, *, fallback: str) -> str:
@@ -308,18 +252,6 @@ def _parse_research(text: str, *, now: datetime, request: str) -> TopicResearch 
     )
 
 
-_FIXTURES_FOLLOWUP_INSTRUCTION = """\
-List the specific scheduled fixtures for this topic happening in the NEXT 10 DAYS, each as
-its OWN entry with an exact date and UTC time. Return ONLY a JSON array (no prose, no
-markdown fences) of objects:
-[{"label": "ONE specific fixture, e.g. \\"United States vs Australia\\"",
-  "kind": "span (has duration, e.g. a match) | point (instantaneous, e.g. a verdict/launch)",
-  "start_at": "ISO 8601 UTC", "end_at": "ISO 8601 UTC or null",
-  "lead_minutes": heads-up before start, e.g. 30,
-  "wake_override": true only for a can't-miss moment}]
-If there are genuinely no dated fixtures in the next 10 days, return []."""
-
-
 def _parse_fixtures_array(text: str, *, now: datetime) -> list[ResearchedFixture]:
     """Parse the follow-up pass's bare JSON array of fixtures (tolerant of fences/truncation)."""
     if not text:
@@ -342,9 +274,9 @@ async def _research_fixtures_followup(
     """One focused grounded pass for JUST the nearest fixtures, used when the primary research
     came back with zero fixtures for a topic that clearly has a live schedule. Narrow + small,
     so the model reliably enumerates them where the broad prompt punted. Never raises."""
-    prompt = (
-        f"{_FIXTURES_FOLLOWUP_INSTRUCTION}\n\nTopic: {title or request}\n"
-        f"Current time (UTC): {now.isoformat()}"
+    prompt = tracking_fixtures_followup_prompt(
+        topic=title or request,
+        now=now.isoformat(),
     )
     try:
         grounded = await models.grounded(prompt)
@@ -416,7 +348,11 @@ async def research_topic(
     models = models or get_model_provider()
     now = now or datetime.now(UTC)
 
-    prompt = f"{_SCHEMA_INSTRUCTION}{_known_fixtures_block(existing_fixtures)}\n\nTopic to track: {request}\nCurrent time (UTC): {now.isoformat()}"
+    prompt = tracking_topic_research_prompt(
+        request=request,
+        now=now.isoformat(),
+        known_fixtures_block=_known_fixtures_block(existing_fixtures),
+    )
 
     # Primary: grounded live search + synthesis.
     try:
@@ -442,8 +378,12 @@ async def research_topic(
     context = fetched.text if fetched.ok else "(no web context available)"
     try:
         raw = await models.cheap(
-            f"{_SCHEMA_INSTRUCTION}{_known_fixtures_block(existing_fixtures)}\n\nTopic to track: {request}\n"
-            f"Current time (UTC): {now.isoformat()}\n\nWeb context:\n{context}",
+            tracking_topic_research_prompt(
+                request=request,
+                now=now.isoformat(),
+                known_fixtures_block=_known_fixtures_block(existing_fixtures),
+                web_context=context,
+            ),
             temperature=0.3,
         )
         research = _parse_research(str(raw), now=now, request=request)

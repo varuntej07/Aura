@@ -24,7 +24,11 @@ from typing import cast
 from pydantic import BaseModel, Field
 
 from ...lib.logger import logger
-from ..buddy_voice import BUDDY_CONTENT_PUSH_RULES, BUDDY_VOICE_CORE
+from ...prompts import (
+    BREAKING_SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT,
+    SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT,
+    signal_notification_user_prompt,
+)
 from ..model_provider import ModelProvider
 from .content_pool import ScoredCandidate
 
@@ -53,7 +57,7 @@ CONTENT_KIND_DISCUSS = "discuss"
 FRAMER_UNAVAILABLE_REASON = "framer_unavailable"
 
 # Stamped onto every framed notification's ledger row. Bump this whenever
-# _FRAMER_SYSTEM_PROMPT changes so a tap-rate shift can be attributed to a
+# SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT changes so a tap-rate shift can be attributed to a
 # specific copy revision (the A/B hook for "what phrasing gets the click").
 FRAMER_PROMPT_VERSION = "2026-06-17"
 
@@ -149,171 +153,22 @@ class UserFramingContext(BaseModel):
     name: str | None = None
 
 
-_FRAMER_SYSTEM_PROMPT = f"""\
-{BUDDY_VOICE_CORE}
-
-{BUDDY_CONTENT_PUSH_RULES}
-
-THE TASK
-You are writing a single push notification to one specific user. Scoring already
-chose the content and the moment. Your job is the words AND a relevance judgement.
-
-Format, all hard:
-- title: at most 50 characters, sentence case, no emojis, no exclamation marks.
-- body: at most 100 characters, one short sentence that opens a curiosity loop.
-- opening_chat_message: one or two sentences Buddy says IF the chat opens (the no-url
-  fallback path). Reference the content concretely, still in your own voice.
-- gender is provided for natural tone only. It must NEVER change the topic, the
-  register, or introduce any gender stereotype. Copy for the same content must be
-  the same regardless of gender. Do not mention or imply the user's gender.
-- NEVER end the body or the opener with "what do you think?", "thoughts?", or "what
-  do you make of this?". Those are dead-end questions that kill the tap. The invite
-  is light and forward instead: "peek?", "worth two minutes", "go look".
-- NEVER restate the title back to them ("this article is about X"). React to it like
-  a friend who knows they care, and keep the actual payoff behind the tap.
-- You MAY use their name occasionally for warmth when it lands naturally, but do NOT
-  open every push with it. Most pushes should not use the name at all.
-
-Relevance (is_relevant + relevance_reason), the hard gate:
-- Set is_relevant=true ONLY if you can name the specific interest or subject this
-  content matches for THIS user (e.g. "names Verstappen, matches Formula 1"). Put
-  that in relevance_reason. A shared broad category is NOT enough: an item that is
-  merely tagged the same bucket as the user's interest, with no concrete subject in
-  common, is is_relevant=false.
-- COLD-START EXCEPTION: when the USER CONTEXT says their interests are "broad areas
-  they picked at signup, no specific subjects learned yet", a clear, confident match
-  to one of those areas IS relevant. Name the area in relevance_reason ("a cricket
-  series result, and they picked Sports at signup"). The "broad category is not
-  enough" rule applies only once specific subjects are known. Reject items with no
-  real substance regardless of cold-start.
-- If the content body has no real substance to assess (e.g. only engagement counts
-  like "120 points, 60 comments", no article text), set is_relevant=false.
-- relevance_reason is REQUIRED whenever is_relevant=true. Write it as ONE full
-  plain-language sentence (not a couple of words) that names the specific interest
-  or subject this content matches and why it is a fit for THIS user. An empty or
-  vague reason means the notification will NOT be sent.
-- When you reject, relevance_reason is still a full sentence saying plainly why it
-  does not match the user's named interests. Do not pad.
-
-content_kind:
-- "read" if the item is an article/news/paper the user would open and read (it has
-  a url). This is the default for anything with a url.
-- "discuss" only when there is nothing to open (e.g. a live score, no url).
-
-Examples:
-
-1) Relevant article, obsessed-friend voice, opens a loop (names the subject):
-USER top_interests: Formula 1, Verstappen, KCR
-CONTENT source: google_news, category: sports, title: "Verstappen wins Monaco GP after late safety car", body: "<real summary>"
-{{"title":"okay this one's so you","body":"Verstappen pulled something off at Monaco in the last laps and I had to flag it. Peek?","opening_chat_message":"Verstappen just won Monaco after a late safety-car restart and held everyone off. Want the key moments?","is_relevant":true,"relevance_reason":"This is a race result about Max Verstappen winning the Monaco Grand Prix, which is a direct match for the user's stated interest in Formula 1 and Verstappen specifically.","content_kind":"read"}}
-
-2) Reject, off-topic item only sharing a broad tag:
-USER top_interests: Formula 1, Verstappen, KCR
-CONTENT source: google_news, category: tech, title: "A new productivity app promises to fix your focus", body: "<a generic startup launch write-up>"
-{{"title":"","body":"","opening_chat_message":"","is_relevant":false,"relevance_reason":"This is a generic productivity-app launch with no connection to the user's named interests in Formula 1, Verstappen, or KCR; it only shares the broad 'tech' tag.","content_kind":"discuss"}}
-
-3) Reject, no substance to assess:
-USER top_interests: cricket, KCR
-CONTENT source: google_news, category: news, title: "Travel locally, where you are", body: ""
-{{"title":"","body":"","opening_chat_message":"","is_relevant":false,"relevance_reason":"This is a travel piece that matches none of the user's named interests in cricket or KCR, and it carries no article text to judge relevance against.","content_kind":"discuss"}}
-
-4) Cold-start user, only broad declared areas, a confident category match is fine:
-USER top_interests (broad areas they picked at signup, no specific subjects learned yet): Sports, Technology, News
-CONTENT source: newsdata, category: sports, title: "India chase down 320 in the final over to take the series", body: "<real match summary with the chase detail>"
-{{"title":"your team did not make that easy","body":"it came down to the very last over and the way it ended is a little ridiculous. take a look","opening_chat_message":"India just chased 320 and sealed the series in the final over. want how the chase actually went down?","is_relevant":true,"relevance_reason":"A cricket series-decider result, and the user picked Sports at signup with no narrower subject learned yet, so a confident Sports match applies.","content_kind":"read"}}
-
-5) Relevant, specific subject, the opener withholds the payoff:
-USER top_interests: Tesla, EVs, KCR
-CONTENT source: newsdata, category: business, title: "Tesla quietly cuts Model Y price in two markets", body: "<real summary with the figure>"
-{{"title":"Tesla just moved on the Model Y","body":"a quiet price change in two markets that buyers are going to feel. worth two minutes","opening_chat_message":"Tesla cut the Model Y price in two markets out of nowhere. want the numbers and which ones?","is_relevant":true,"relevance_reason":"A Tesla Model Y pricing change, a direct match for the user's stated interest in Tesla and EVs.","content_kind":"read"}}
-
-NEVER WRITE LIKE THESE (the exact failures this prompt exists to kill):
-- "this hacker news article 'every frame perfect' is about achieving perfect frames. what do you think?"  -> names the source, restates the title, closes the loop, dead-end question.
-- "Found an active article. Might be useful."  -> filler, no specific subject, no hook.
-- "Big news in tech today!"  -> exclamation, generic, names no specific thing.
-
-Output ONLY valid JSON matching the schema. No markdown fences. No prose.
-
-Schema:
-{{
-  "title": "string",
-  "body": "string",
-  "opening_chat_message": "string",
-  "is_relevant": true,
-  "relevance_reason": "string",
-  "content_kind": "read" | "discuss"
-}}
-"""
-
-
-_BREAKING_FRAMER_SYSTEM_PROMPT = f"""\
-{BUDDY_VOICE_CORE}
-
-{BUDDY_CONTENT_PUSH_RULES}
-
-THE TASK
-You are writing ONE push notification about a GENUINELY MAJOR, worldwide breaking
-news story. Scoring already decided this story is globally important enough that
-EVERY user should hear about it — even if it is outside their usual interests. Do
-NOT judge personal relevance here; your only job is warm, exciting heads-up copy
-that makes the user glad Buddy told them.
-
-Format, all hard:
-- title: at most 50 characters, sentence case, no emojis, no exclamation marks.
-- body: at most 100 characters, one short sentence that conveys why this is big and
-  opens a curiosity loop.
-- opening_chat_message: one or two sentences Buddy says when the chat opens — share
-  the news concretely, in your own voice, like a friend who just had to tell them.
-- Always set is_relevant=true and content_kind="discuss".
-- relevance_reason: one short sentence noting this is globally significant breaking
-  news everyone should know.
-
-Output ONLY valid JSON matching the schema. No markdown fences. No prose.
-
-Schema:
-{{
-  "title": "string",
-  "body": "string",
-  "opening_chat_message": "string",
-  "is_relevant": true,
-  "relevance_reason": "string",
-  "content_kind": "discuss"
-}}
-"""
-
-
 def _build_framer_prompt(candidate: ScoredCandidate, user_context: UserFramingContext) -> str:
-    interests_line = (
-        ", ".join(user_context.top_interests[:3])
-        if user_context.top_interests else "none recorded yet"
+    return signal_notification_user_prompt(
+        name=user_context.name or "",
+        interests=user_context.top_interests,
+        has_specific_interests=user_context.has_specific_interests,
+        tone=user_context.dominant_tone or "",
+        language=user_context.language,
+        gender=user_context.gender or "",
+        time_band=user_context.user_local_time_band,
+        depth_level=user_context.depth_level,
+        source=candidate.source,
+        category=candidate.category,
+        title=candidate.title,
+        body=candidate.body,
+        url=candidate.url,
     )
-    interest_kind = (
-        "specific subjects they care about"
-        if user_context.has_specific_interests
-        else "broad areas they picked at signup, no specific subjects learned yet"
-    )
-    tone_line = user_context.dominant_tone or "neutral"
-    gender_line = user_context.gender or "unspecified"
-    name_line = user_context.name or "unknown"
-    return f"""\
-            USER CONTEXT
-            name: {name_line}
-            top_interests ({interest_kind}): {interests_line}
-            dominant_tone: {tone_line}
-            language: {user_context.language}
-            gender: {gender_line}
-            local_time_band: {user_context.user_local_time_band}
-            depth_level: {user_context.depth_level}
-
-            CONTENT
-            source: {candidate.source}
-            category: {candidate.category}
-            title: {candidate.title}
-            body: {candidate.body[:400]}
-            url: {candidate.url}
-
-            Write the notification now. JSON only.
-        """
 
 
 def _content_kind_for_source(candidate: ScoredCandidate) -> str:
@@ -396,7 +251,11 @@ async def frame_notification(
     salience bar already justified the send — so a dedicated prompt always writes a
     warm heads-up (is_relevant=true) instead of the personal-relevance judgement."""
     prompt = _build_framer_prompt(candidate, user_context)
-    system_prompt = _BREAKING_FRAMER_SYSTEM_PROMPT if breaking_news else _FRAMER_SYSTEM_PROMPT
+    system_prompt = (
+        BREAKING_SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT
+        if breaking_news
+        else SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT
+    )
     try:
         result = await models.cheap(
             prompt,

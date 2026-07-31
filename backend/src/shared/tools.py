@@ -1,47 +1,227 @@
-"""
-Tool definitions for the Claude text chat endpoint (Anthropic SDK format).
-The LiveKit voice agent uses @function_tool decorated methods on BuddyAgent instead.
+"""Canonical tool contracts. ONE description per tool, for every surface.
+
+Each entry's ``description`` is the single place selection guidance lives: what the
+tool does, when to use it, when NOT to, and what the server will do with each
+argument. Text chat reads these directly; the voice worker's MCP layer overwrites
+FastMCP's docstring-derived metadata with them (see handlers/mcp.py).
+
+WHY the description and not the system prompt. OpenAI's GPT-4.1 prompting guide,
+section "1. Agentic Workflows" -> "Tool Calls", is explicit:
+
+    "We encourage developers to exclusively use the tools field to pass tools,
+     rather than manually injecting tool descriptions into your prompt and writing
+     a separate parser for tool calls, as some have reported doing in the past."
+
+    https://developers.openai.com/cookbook/examples/gpt4-1_prompting_guide
+
+The stated reason is that the tools field keeps the model in distribution during
+tool-calling trajectories, and the guide reports a 2% SWE-bench Verified gain over
+embedding schemas in the system prompt. The function-calling guide defines
+``description`` as the place for "when and how to use the function":
+
+    https://developers.openai.com/api/docs/guides/function-calling
+
+Consequence for this file: guidance here is NOT duplicated into any prompt. A voice
+system prompt that also explains a tool gives gpt-4.1-mini two sources for one
+decision, and 4.1 follows instructions more literally than its predecessors, so it
+acts on the conflict rather than smoothing over it.
+
+``strict: True`` opts a tool into structural guarantees. The same function-calling
+guide requires, for strict schemas, that ``additionalProperties`` is false and that
+every property appears in ``required`` (optional values are expressed as a nullable
+type). Strict guarantees argument SHAPE only; it never guarantees the model chose
+the right tool or a semantically correct value. That is why every time-bearing
+argument is natural language resolved server-side rather than an ISO string the
+model would have to compute without a clock.
 """
 
+from copy import deepcopy
 from typing import Any
+
+# The one list of memory categories. tool_executor._store_memory reads it from here
+# rather than restating it: the two copies had already drifted from the Flutter
+# client's MemoryCategory enum, and a category the client cannot parse fails its
+# whole memories list read.
+#
+# lifestyle and interests exist because a companion app has to hold things that are
+# neither a habit nor a health fact. "Loves smoking weed" had no home in the
+# original five, so store_memory hard-rejected it mid-call and Buddy ended up
+# explaining its own category schema out loud to the user.
+MEMORY_CATEGORIES: list[str] = [
+    "preferences",
+    "facts",
+    "habits",
+    "health",
+    "routines",
+    "lifestyle",
+    "interests",
+]
 
 # Canonical tool specs
 
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
-    {
-        "name": "set_reminder",
-        "description": "Schedule a reminder for the user at a specific date and time.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "message": {"type": "string", "description": "What to remind the user about."},
-                # Include the timezone offset so the server can normalize to UTC correctly.
-                "scheduled_at": {
-                    "type": "string",
-                    "description": (
-                        "When to send the reminder, as an ISO 8601 datetime string with timezone "
-                        "offset (e.g. '2026-06-02T09:00:00+05:30'). Use the current date and "
-                        "timezone from your system context to compute this."
-                    ),
-                },
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "normal", "urgent"],
-                    "default": "normal",
-                },
+SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
+    "name": "set_reminder",
+    "description": (
+        "Create one new reminder. Use when the user asks to create or change a "
+        "reminder, or when their current turn answers, refines, or corrects your "
+        "immediately preceding reminder question. Do NOT use to read existing "
+        "reminders (use list_reminders) or to cancel one (use cancel_reminder). "
+        "When the user hands you the decision ('you decide', 'whatever works'), fill "
+        "every fillable detail from the conversation and act; ask only when a detail "
+        "is genuinely unknowable, and then exactly one short question, never a stack. "
+        "Never invent a date or time. Pass the time as natural language; the server "
+        "resolves it against the user's current local date, time, and timezone, and "
+        "rejects or clarifies what it cannot resolve safely."
+    ),
+    "strict": True,
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "message": {"type": "string", "description": "What to remind the user about."},
+            "when": {
+                "type": "string",
+                "description": (
+                    "When the user wants the reminder, in natural language, for example "
+                    "'tomorrow at 9 AM' or 'in 45 minutes'. Include an exact time."
+                ),
             },
-            "required": ["message", "scheduled_at"],
         },
+        "required": ["message", "when"],
+        "additionalProperties": False,
     },
+}
+
+CREATE_CALENDAR_EVENT_TOOL_DEFINITION: dict[str, Any] = {
+    "name": "create_calendar_event",
+    "description": (
+        "Create a Google Calendar event only when the user asks to create or schedule "
+        "a calendar event. Do not use for calendar reads, availability questions, or "
+        "reminders, and never for a change to an event that already exists "
+        "(update_calendar_event owns that). Never invent a date, a time, or an "
+        "attendee: if the user did not say it, ask one short question first. Pass the "
+        "time as natural language; the server resolves it against their local clock."
+    ),
+    "strict": True,
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Short name for the calendar event.",
+            },
+            "when": {
+                "type": "string",
+                "description": (
+                    "The user's natural-language start time and any duration or ending "
+                    "time they supplied, such as 'tomorrow at 9 AM for 45 minutes' or "
+                    "'Friday from 2 PM to 3:30 PM'. If the user supplied no duration or "
+                    "ending time, omit one from this string; the server uses a 60-minute "
+                    "duration. Never use ISO 8601."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": "Event notes, or an empty string when omitted.",
+            },
+            "location": {
+                "type": "string",
+                "description": "Event location, or an empty string when omitted.",
+            },
+            "attendees": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Guest email addresses to invite, or an empty array when omitted."
+                ),
+            },
+        },
+        "required": ["title", "when", "description", "location", "attendees"],
+        "additionalProperties": False,
+    },
+}
+
+UPDATE_CALENDAR_EVENT_TOOL_DEFINITION: dict[str, Any] = {
+    "name": "update_calendar_event",
+    "description": (
+        "Change an event that already exists on the user's calendar. Use this "
+        "whenever they adjust an event rather than ask for a new one: adding or "
+        "removing a guest, moving the time, renaming it, setting a location. "
+        "Follow-ups that build on an event you JUST created are updates, not new "
+        "events. 'and invite sarah@example.com', 'make it an hour later', 'actually "
+        "call it dinner with the team' all mean update the event you just made, "
+        "never create a second one. Requires an event_id that came from a real "
+        "create_calendar_event or get_upcoming_events result in this conversation; "
+        "never invent one, and read the calendar first if you do not have one. "
+        "Every field except event_id is optional: send an empty string or empty "
+        "array for anything the user did not change, and it is left alone. "
+        "Attendees are ADDED to whoever is already invited."
+    ),
+    "strict": True,
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "event_id": {
+                "type": "string",
+                "description": (
+                    "ID of the event to change, from an earlier tool result."
+                ),
+            },
+            "title": {
+                "type": "string",
+                "description": "New name, or an empty string to leave it unchanged.",
+            },
+            "when": {
+                "type": "string",
+                "description": (
+                    "The new natural-language start time and any duration or ending "
+                    "time, such as 'Friday at 8 PM for 90 minutes'. Empty string "
+                    "leaves the existing time alone. Never use ISO 8601."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": "New notes, or an empty string to leave them unchanged.",
+            },
+            "location": {
+                "type": "string",
+                "description": "New location, or an empty string to leave it unchanged.",
+            },
+            "attendees": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Guest emails to ADD to the event, or an empty array when the "
+                    "guest list is not changing. Existing guests are kept."
+                ),
+            },
+        },
+        "required": [
+            "event_id",
+            "title",
+            "when",
+            "description",
+            "location",
+            "attendees",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    SET_REMINDER_TOOL_DEFINITION,
     {
         "name": "list_reminders",
-        "description": "List the user's reminders.",
+        "description": (
+            "Read the user's existing reminders. Use when they ask what reminders "
+            "they have, or to review or manage ones already set. Never turn a read "
+            "request into a new reminder."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "status_filter": {
                     "type": "string",
-                    "enum": ["pending", "fired", "all"],
+                    "enum": ["pending", "fired", "dismissed", "all"],
                     "default": "pending",
                 },
             },
@@ -49,7 +229,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "cancel_reminder",
-        "description": "Cancel (dismiss) a pending reminder.",
+        "description": (
+            "Cancel one pending reminder the user asked to remove. Requires a "
+            "reminder id that came from a real list_reminders result in this "
+            "conversation; never invent or guess an id. Use only for cancelling, "
+            "never to create or reschedule (use set_reminder for those)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -58,37 +243,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["reminder_id"],
         },
     },
-    {
-        "name": "create_calendar_event",
-        "description": "Create an event on the user's Google Calendar.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "start_time": {"type": "string", "description": "ISO 8601 datetime string."},
-                "end_time": {"type": "string", "description": "ISO 8601 datetime string. Defaults to 30 min after start."},
-                "description": {"type": "string"},
-                "location": {"type": "string"},
-                "attendees": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Guest email addresses to invite. Google emails each one a calendar "
-                        "invitation. Include only when the user names people to invite."
-                    ),
-                },
-            },
-            "required": ["title", "start_time"],
-        },
-    },
+    CREATE_CALENDAR_EVENT_TOOL_DEFINITION,
+    UPDATE_CALENDAR_EVENT_TOOL_DEFINITION,
     {
         "name": "get_upcoming_events",
         "description": (
-            "Retrieve the user's cached Google Calendar events. "
-            "Use whenever the user asks about their schedule, meetings, "
-            "appointments, or what they have today, tomorrow, or this week. "
-            "Prefer range='today', range='tomorrow', or range='this_week'. "
-            "Use custom start_time/end_time only when the user gives an explicit time range."
+            "Read the user's calendar. Use whenever they ask about their schedule, "
+            "meetings, appointments, availability, or what they have today, tomorrow, "
+            "or this week. Never create an event from a read request; "
+            "create_calendar_event owns that. Prefer range='today', range='tomorrow', "
+            "or range='this_week'. Use start_time/end_time only when the user gives an "
+            "explicit range."
         ),
         "inputSchema": {
             "type": "object",
@@ -98,7 +263,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "description": (
                         "Named range interpreted in the connected calendar's timezone."
                     ),
-                    "enum": ["today", "tomorrow", "this_week"],
+                    "enum": ["recent", "today", "tomorrow", "this_week"],
                     "default": "today",
                 },
                 "start_time": {
@@ -122,10 +287,50 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
-    # list_emails / read_email are disabled: they require the gmail.readonly restricted
-    # scope, which would force the OAuth app into an annual paid CASA security assessment.
-    # Only send_email (gmail.send, a free "sensitive" scope) is exposed. Restore these two
-    # definitions together with GMAIL_READONLY_SCOPE in gmail_connector.py if you take on CASA.
+    {
+        "name": "list_emails",
+        "description": (
+            "List recent messages from the user's connected Gmail account. Use when "
+            "the user asks what email they received, wants to find an email, or wants "
+            "a mailbox summary. This returns message metadata and snippets; use "
+            "read_email with a returned message_id when the full message is needed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Optional Gmail search query, or an empty string for recent mail."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 25,
+                    "default": 10,
+                },
+            },
+        },
+    },
+    {
+        "name": "read_email",
+        "description": (
+            "Read one Gmail message after list_emails returned its message_id. Use "
+            "only when the user asks to open, read, summarize, or answer that message. "
+            "Never invent or guess a message_id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "Message ID returned by list_emails.",
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
     {
         "name": "send_email",
         "description": (
@@ -144,7 +349,16 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "store_memory",
-        "description": "Persist a fact, preference, or habit about the user for future context.",
+        "description": (
+            "Remember something lasting about the user: a fact, preference, habit, "
+            "routine, or part of their lifestyle. Use when they tell you something "
+            "true about themselves that should still matter next week. Storing an "
+            "existing key overwrites it, which is how a correction is applied. Do "
+            "NOT use for something to do at a time (that is set_reminder), for a "
+            "calendar event, or to remove a memory (that is delete_memory). Pick the "
+            "closest category; nothing the user says about themselves is unstorable."
+        ),
+        "strict": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -152,7 +366,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "value": {"type": "string", "description": "Value to store."},
                 "category": {
                     "type": "string",
-                    "enum": ["preferences", "facts", "habits", "health", "routines"],
+                    "enum": list(MEMORY_CATEGORIES),
                 },
             },
             "required": ["key", "value", "category"],
@@ -160,18 +374,50 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "name": "query_memory",
-        "description": "Search the user's stored memories.",
+        "description": (
+            "Search what is already stored about the user, scoped to one subject "
+            "they asked about ('what do you know about my diet'). Use this rather "
+            "than get_user_context when the question is about one topic; "
+            "get_user_context is the whole snapshot. Returning no matches means "
+            "nothing is stored on that subject, never that the search broke."
+        ),
+        "strict": True,
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search string."},
                 "category_filter": {
                     "type": "string",
-                    "enum": ["preferences", "facts", "habits", "health", "routines", "all"],
+                    "enum": [*MEMORY_CATEGORIES, "all"],
                     "default": "all",
+                    "description": "Restrict the search to one category, or 'all'.",
                 },
             },
-            "required": ["query"],
+            "required": ["query", "category_filter"],
+        },
+    },
+    {
+        "name": "delete_memory",
+        "description": (
+            "Forget one stored memory for good. Use when the user retracts something "
+            "or asks you to erase, drop, or forget it. Overwriting it with a denial "
+            "is NOT forgetting: 'I'm not actually allergic to peanuts, erase that' "
+            "means delete the memory, not store that they are not allergic. Requires "
+            "a memory_id from a real query_memory or get_user_context result in this "
+            "conversation; never invent one. When they correct a fact rather than "
+            "retract it, use store_memory with the same key instead."
+        ),
+        "strict": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "ID of the memory to delete, from an earlier tool result.",
+                },
+            },
+            "required": ["memory_id"],
+            "additionalProperties": False,
         },
     },
     {
@@ -193,6 +439,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "Use when the user asks about recent events, live data, or topics that benefit from up-to-date sources. "
             "Do NOT use for things you already know or for the user's own data (other tools handle that)."
         ),
+        "strict": True,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -204,7 +451,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "description": "'fresh' biases toward today's sources (news, scores, prices). 'any' for stable lookups.",
                 },
             },
-            "required": ["query"],
+            "required": ["query", "recency"],
         },
     },
     {
@@ -369,6 +616,133 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 # Claude (Anthropic SDK) format
+
+
+def _close_object_schemas(schema: dict[str, Any]) -> None:
+    if schema.get("type") == "object":
+        schema.setdefault("additionalProperties", False)
+        for child in schema.get("properties", {}).values():
+            if isinstance(child, dict):
+                _close_object_schemas(child)
+    if schema.get("type") == "array":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            _close_object_schemas(items)
+
+
+for _tool_definition in TOOL_DEFINITIONS:
+    _close_object_schemas(_tool_definition["inputSchema"])
+
+
+_TOOL_INPUT_SCHEMAS = {
+    tool_definition["name"]: tool_definition["inputSchema"]
+    for tool_definition in TOOL_DEFINITIONS
+}
+
+
+def tool_definition(tool_name: str) -> dict[str, Any] | None:
+    """Return an isolated copy of one canonical tool contract."""
+    definition = next(
+        (tool for tool in TOOL_DEFINITIONS if tool["name"] == tool_name),
+        None,
+    )
+    return deepcopy(definition) if definition is not None else None
+
+
+def openai_function_definition(tool_name: str) -> dict[str, Any] | None:
+    """Return the canonical OpenAI function body for a tool."""
+    definition = tool_definition(tool_name)
+    if definition is None:
+        return None
+    return {
+        "name": definition["name"],
+        "description": definition["description"],
+        "parameters": definition["inputSchema"],
+        **({"strict": True} if definition.get("strict") is True else {}),
+    }
+
+
+def validate_and_coerce_tool_input(tool_name: str, value: dict[str, Any]) -> None:
+    """Validate model/MCP input against the shared schema, coercing what is salvageable.
+
+    Mutates ``value`` in place, which is why this is not named ``validate_``.
+
+    The coercion rule: an off-enum value on a property that declares a ``default``
+    is replaced by that default instead of raising. A default is the schema author
+    saying there is a safe fallback, so rejecting the whole call over it trades a
+    slightly-wrong answer for no answer at all. That is a bad trade anywhere and a
+    terrible one mid-voice-call, where the rejection surfaces as Buddy audibly
+    failing. web_surf('trending news', recency='today') used to die here and take
+    the whole turn with it, even though tool_executor already had a clamp for
+    exactly that case which validation ran too early to ever reach.
+
+    Enum mismatches on properties WITHOUT a default still raise. Those are real
+    discriminators (store_memory.category decides where a memory lands), and
+    silently picking one for the model would write the wrong thing to Firestore.
+    """
+    schema = _TOOL_INPUT_SCHEMAS.get(tool_name)
+    if schema is None:
+        return
+
+    def _validate(candidate: Any, rule: dict[str, Any], path: str) -> None:
+        expected = rule.get("type")
+        type_matches = {
+            "object": isinstance(candidate, dict),
+            "array": isinstance(candidate, list),
+            "string": isinstance(candidate, str),
+            "integer": isinstance(candidate, int) and not isinstance(candidate, bool),
+            "boolean": isinstance(candidate, bool),
+            "number": isinstance(candidate, (int, float)) and not isinstance(candidate, bool),
+        }
+        if expected in type_matches and not type_matches[expected]:
+            raise ValueError(f"{path} must be {expected}")
+        if "enum" in rule and candidate not in rule["enum"]:
+            raise ValueError(f"{path} has an unsupported value")
+        if isinstance(candidate, dict):
+            properties = rule.get("properties", {})
+            missing = [
+                field
+                for field in rule.get("required", [])
+                if field not in candidate
+            ]
+            if missing:
+                raise ValueError(f"Missing required field: {missing[0]}")
+            if rule.get("additionalProperties") is False:
+                unknown = sorted(set(candidate) - set(properties))
+                if unknown:
+                    raise ValueError(f"Unknown field: {unknown[0]}")
+            for field, child_rule in properties.items():
+                if (
+                    field in candidate
+                    and isinstance(child_rule, dict)
+                    and "default" in child_rule
+                    and "enum" in child_rule
+                    and candidate[field] not in child_rule["enum"]
+                ):
+                    candidate[field] = child_rule["default"]
+            for field, child in candidate.items():
+                child_rule = properties.get(field)
+                if isinstance(child_rule, dict):
+                    _validate(child, child_rule, f"{path}.{field}")
+        elif isinstance(candidate, list):
+            minimum = rule.get("minItems")
+            maximum = rule.get("maxItems")
+            if isinstance(minimum, int) and len(candidate) < minimum:
+                raise ValueError(f"{path} has too few items")
+            if isinstance(maximum, int) and len(candidate) > maximum:
+                raise ValueError(f"{path} has too many items")
+            item_rule = rule.get("items")
+            if isinstance(item_rule, dict):
+                for index, item in enumerate(candidate):
+                    _validate(item, item_rule, f"{path}[{index}]")
+        elif isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+            if "minimum" in rule and candidate < rule["minimum"]:
+                raise ValueError(f"{path} is below the minimum")
+            if "maximum" in rule and candidate > rule["maximum"]:
+                raise ValueError(f"{path} exceeds the maximum")
+
+    _validate(value, schema, tool_name)
+
 
 def claude_tool_definitions() -> list[dict[str, Any]]:
     """Format tool definitions for the Anthropic messages API."""

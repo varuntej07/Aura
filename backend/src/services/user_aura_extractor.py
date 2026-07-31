@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError, field_validator
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..prompts import USER_AURA_EXTRACTION_SYSTEM_PROMPT, user_aura_extraction_user_prompt
 from .life_facts_schema import (
     LIFE_FACT_DESCRIPTIONS,
     LIFE_FACT_KEYS,
@@ -30,6 +31,8 @@ from .life_facts_schema import (
     apply_life_fact,
     remove_life_fact,
 )
+from .memory.atom_store import AtomInput, upsert_atoms
+from .memory.fields import ATOM_TYPE_FACT, ATOM_TYPE_INTEREST_SUBJECT
 from .model_provider import get_model_provider
 from .user_aura_schema import (
     CATEGORY_LABELS,
@@ -41,8 +44,6 @@ from .user_aura_schema import (
     category_count,
 )
 from .user_aura_schema import sanitize_firestore_key as _sanitize_firestore_key
-from .memory.atom_store import AtomInput, upsert_atoms
-from .memory.fields import ATOM_TYPE_FACT, ATOM_TYPE_INTEREST_SUBJECT
 
 _MAX_INFERRED_GOALS = 10
 _MAX_EXPLICIT_FACTS = 20          # cap on stored durable facts per user
@@ -150,189 +151,6 @@ _CATEGORY_REFERENCE = "\n".join(
 _LIFE_FACT_REFERENCE = "\n".join(
     f" - {key}: {LIFE_FACT_DESCRIPTIONS[key]}" for key in LIFE_FACT_KEYS
 )
-
-_EXTRACTION_SYSTEM_PROMPT = f"""\
-            You are the insight extractor for a personal AI assistant called Aura.
-            Everything you extract becomes the user's "UserAura" profile, which directly powers
-            two things: (1) how Aura tailors its chat and voice replies to this user, and
-            (2) which notifications we send them and how we word them. Accuracy here is the
-            difference between generic and genuinely personal -- extract carefully.
-
-            Rules:
-            - Extract only signals you are highly confident about.
-            - Use null for optional string fields and empty lists where there is no clear signal.
-            - If you cannot confidently extract meaningful preferences from the current message alone,
-            use the provided previous query as additional context. Set used_prev_query_context to true.
-            - Always prefer the current message. Use the previous query only to resolve ambiguity or fill gaps.
-            - Set extraction_skipped to true ONLY for pure acknowledgments with zero informational content
-            such as standalone "ok", "thanks", "yes", "no", "sure", "got it" with nothing else attached.
-
-            INTERESTS (the most important part):
-            For each message produce up to 3 interest signals. Each signal has two parts:
-              * category: map the message to EXACTLY ONE category from the fixed list below. If
-                nothing fits, use "other". Never invent a category outside this list.
-              * subject: the SPECIFIC person, place, organisation, product, event, or topic the user
-                actually named. Specificity is the whole point -- if the user asks about KCR, return
-                category "politics_governance" with subject "KCR", NOT just "politics", because knowing
-                it is *KCR* lets us personalise ("KCR is in the news today") instead of a flat
-                "politics update". Set subject to null only when the message has no concrete subject
-                (e.g. "what does this word mean", "convert 5km to miles").
-
-            Categories (slug: meaning):
-{_CATEGORY_REFERENCE}
-
-            Interest examples:
-
-            "Who is the CM of Telangana right now?"
-            interests: [{{"category": "politics_governance", "subject": "KCR"}},
-                        {{"category": "regional_local_affairs", "subject": "Telangana"}}]
-            primary_intent: information_lookup, domain: unclear
-
-            "Give me a tweet for the RCB vs MI match"
-            interests: [{{"category": "sports", "subject": "RCB vs MI"}},
-                        {{"category": "technology_computing", "subject": "tweet writing"}}]
-            primary_intent: task_request, domain: entertainment, tone: casual
-
-            "Is Triton and CUDA the same but in different languages?"
-            interests: [{{"category": "technology_computing", "subject": "CUDA"}}]
-            question_type: comparison, domain: technical
-
-            "What is the on-road price of the XUV 3XO?"
-            interests: [{{"category": "automotive", "subject": "XUV 3XO"}}]
-            primary_intent: information_lookup
-
-            "explain SGEMM"
-            interests: [{{"category": "technology_computing", "subject": "SGEMM"}}]
-            domain: technical, question_type: what_is
-
-            "convert 100 euros to rupees"
-            interests: [{{"category": "personal_finance", "subject": null}}]
-            primary_intent: information_lookup
-
-            explicit_facts captures DURABLE facts about the user -- who they are and their stable
-            preferences -- never transient task parameters. Keep identity, relationships, location,
-            job, and standing likes/dislikes. Drop reminder times, dates, deadlines, and one-off
-            scheduling details: those belong to the task being requested, not the user's profile.
-
-            "remind me to take a shower tomorrow night, want it done before 4, after lunch around 1 PM"
-            explicit_facts: []   (every detail here is a reminder parameter, not a fact about the user)
-            primary_intent: task_request, domain: personal
-
-            "I don't like taking a shower early in the morning"
-            explicit_facts: ["dislikes showering early in the morning"]
-            domain: personal
-
-            "I just got rejected after 8 rounds of interviews, 6 hours of it in person"
-            explicit_facts: ["was rejected after an 8-round interview that included a 6-hour onsite"]
-            emotional_state: sad, domain: work
-
-            LIFE FACTS (sparse, high-value — usually empty):
-            Separately from explicit_facts, extract life_facts ONLY when the user states a
-            durable fact that fits one of the fixed keys below. Each life fact is a (key, value)
-            pair: pick EXACTLY ONE key from the list, and put the concrete detail in value.
-            Emit a life fact only when you are highly confident and the detail is durable (not a
-            one-off). Most messages produce NO life facts -- return an empty list then. Never
-            invent a key outside this list.
-
-            The fact MUST be about the user themselves, stated in the first person (their own
-            pet, home, job, habit). NEVER store a fact about another person -- "my friend's dog",
-            "my sister is a doctor", "my roommate has a cat" produce NO life fact. When unsure
-            whose fact it is, emit nothing.
-
-            If the user DENIES or corrects a fact ("I don't have a dog", "I never said I was
-            married", "I moved out of Hyderabad"), emit that key with "negated": true and no
-            value, so the stored fact is cleared. Use negated only for an explicit denial.
-
-            Life fact keys (key: meaning):
-{_LIFE_FACT_REFERENCE}
-
-            Life fact examples:
-
-            "my dog Bruno keeps chewing my shoes"
-            life_facts: [{{"key": "has_pet", "value": "dog named Bruno"}}]
-
-            "I'm based in Hyderabad and usually take the metro to work"
-            life_facts: [{{"key": "home_city", "value": "Hyderabad"}},
-                         {{"key": "commute_mode", "value": "takes the metro"}}]
-
-            "what's a good protein intake" (no durable fact stated)
-            life_facts: []
-
-            "my friend's dog keeps chewing my shoes" (the dog is not the user's)
-            life_facts: []
-
-            "actually I don't have a dog" (explicit denial -> clear the fact)
-            life_facts: [{{"key": "has_pet", "negated": true}}]
-
-            Turn Scoring (apply when a previous assistant response is provided):
-            The current user message is the "next-state signal" -- it reveals how well Buddy responded.
-            Set signal_type to one of the following based on how the current message relates to the previous response:
-            - re_query: user asks the same or very similar question again -> turn_score -1
-            - correction: user says the answer was wrong, uses "I meant", "no actually",
-              "that's not right", "you should have" -> turn_score -1
-            - clarification: user asks what something means, "can you explain", "what do you mean" -> turn_score -1
-            - acknowledgement: user builds on the answer without complaint, says "ok", "got it",
-              "makes sense", continues the task naturally -> turn_score 1
-            - praise: "perfect", "exactly", "thanks that's what I needed", "great" -> turn_score 1
-            - none: no previous assistant response was provided -> turn_score 0
-
-            Set directive_hint only when signal_type is "correction" or "re_query" AND the user message
-            contains a concrete, actionable instruction about what Buddy should have done differently
-            (e.g. "you should have checked the file first", "I wanted the short version not a list").
-            Set to null for vague dissatisfaction without a clear directive.
-
-            Return ONLY valid JSON. No explanation, no markdown fences.
-            """
-
-
-def _build_extraction_prompt(
-    message: str,
-    prev_user_query: str | None,
-    prev_buddy_response: str | None,
-) -> str:
-    prev_query_block = (
-        f"Previous user query (use only if current message is ambiguous): {prev_user_query}\n\n"
-        if prev_user_query
-        else ""
-    )
-    prev_response_block = (
-        f"Previous assistant response (for turn scoring only): {prev_buddy_response[:500]}\n\n"
-        if prev_buddy_response
-        else ""
-    )
-    turn_scoring_note = (
-        "Score the previous assistant response using the current message as the next-state signal. "
-        "Populate turn_score, signal_type, and directive_hint per your instructions.\n\n"
-        if prev_buddy_response
-        else 'No previous assistant response. Set turn_score to 0, signal_type to "none", directive_hint to null.\n\n'
-    )
-    return (
-        f"{prev_query_block}"
-        f"{prev_response_block}"
-        f"Current message: {message}\n\n"
-        f"{turn_scoring_note}"
-        "Extract insights as JSON:\n"
-        "{\n"
-        '  "primary_intent": "task_request|seeking_advice|information_lookup|casual_chat|venting|complaint|gratitude|follow_up_only",\n'
-        '  "secondary_intent": "string or null",\n'
-        '  "interests": [{"category": "one slug from the category list", "subject": "specific subject or null"}],\n'
-        '  "life_facts": [{"key": "one key from the life fact list", "value": "concrete value or null", "negated": false}],\n'
-        '  "domain": "work|health|finance|learning|social|entertainment|personal|technical|unclear",\n'
-        '  "tone": "casual|terse|verbose|formal|playful",\n'
-        '  "emotional_state": "neutral|anxious|frustrated|excited|anticipatory|curious|sad or null",\n'
-        '  "urgency": "none|low|medium|high",\n'
-        '  "response_depth_preference": "wants_brief|wants_detailed|wants_step_by_step|wants_examples|wants_opinion or null",\n'
-        '  "question_type": "how_to|what_is|opinion_request|recommendation|comparison|troubleshooting or null",\n'
-        '  "explicit_facts": ["durable identity/preference facts only -- no reminder times, dates, or task params"],\n'
-        '  "inferred_goal_hints": ["high-confidence goals -- max 3"],\n'
-        '  "used_prev_query_context": true or false,\n'
-        '  "extraction_skipped": true or false,\n'
-        '  "turn_score": 1 or -1 or 0,\n'
-        '  "signal_type": "re_query|correction|clarification|acknowledgement|praise|none",\n'
-        '  "directive_hint": "concise actionable instruction or null"\n'
-        "}"
-    )
-
 
 def _sanitize_firestore_key(key: str) -> str:
     """
@@ -684,18 +502,17 @@ async def _write_graph_turn_provenance(
     if not session_id:
         return
     resolved_turn_id = turn_id or str(uuid.uuid4())
-    if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
-        from .session_followup.lifecycle import session_lifecycle_service
+    from .session_followup.lifecycle import session_lifecycle_service
 
-        await session_lifecycle_service.note_user_turn(
-            uid,
-            session_id,
-            surface=surface,
-            turn_id=resolved_turn_id,
-            turn_index=max(0, int(turn_index or 0)),
-            text=message,
-            entity_keys=_insight_entity_keys(insight),
-        )
+    await session_lifecycle_service.note_user_turn(
+        uid,
+        session_id,
+        surface=surface,
+        turn_id=resolved_turn_id,
+        turn_index=max(0, int(turn_index or 0)),
+        text=message,
+        entity_keys=_insight_entity_keys(insight),
+    )
     # The old GRAPH_BUILD-gated `write_turn_provenance` call that lived here was
     # dead code: the symbol never existed in memory.graph_store, and the flag
     # being off hid the broken import. Removed 2026-07-20 when the graph went
@@ -814,10 +631,14 @@ async def extract_and_update_user_aura(
         profile = await _read_user_aura_profile(uid)
         prev_query: str | None = profile.get("prev_user_query")
 
-        prompt = _build_extraction_prompt(message, prev_query, prev_buddy_response)
+        prompt = user_aura_extraction_user_prompt(
+            message=message,
+            previous_query=prev_query or "",
+            previous_response=prev_buddy_response or "",
+        )
         insight = cast(MessageInsight, await get_model_provider().cheap(
             prompt,
-            system=_EXTRACTION_SYSTEM_PROMPT,
+            system=USER_AURA_EXTRACTION_SYSTEM_PROMPT,
             response_model=MessageInsight,
             temperature=_EXTRACTION_TEMPERATURE,
             model=settings.TIER_EXTRACTION,

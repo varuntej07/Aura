@@ -35,9 +35,11 @@ _REGEN_EXCLUDED_TOOLS = frozenset({"send_email"})
 _TOOL_CONFIRMATIONS: dict[str, str] = {
     "set_reminder": "All set, I locked that reminder in for you.",
     "create_calendar_event": "Done, I added that to your calendar.",
+    "update_calendar_event": "Done, I updated that event for you.",
     "send_email": "Sent that email for you.",
     "track_topic": "Got it, I'll keep an eye on that and ping you with updates.",
     "store_memory": "Noted, I'll hold onto that.",
+    "delete_memory": "Done, I forgot that one.",
     "cancel_reminder": "Done, I cleared that reminder.",
     "cancel_tracker": "Done, I stopped tracking that one.",
     "report_feedback": "Thanks, I passed that along.",

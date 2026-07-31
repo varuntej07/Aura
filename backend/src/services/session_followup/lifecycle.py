@@ -1,4 +1,4 @@
-"""Single owner of session lifecycle state and session-finalized events."""
+"""Single owner of session lifecycle state."""
 
 from __future__ import annotations
 
@@ -11,12 +11,9 @@ from uuid import uuid4
 
 from google.cloud import firestore as fs
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..memory import graph_fields as GF
-from ..reactive import event_bus
-from ..reactive.events import EVENT_SESSION_FINALIZED
 from . import fields as F
 
 _LEXICAL_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{2,}", re.IGNORECASE)
@@ -69,8 +66,6 @@ class SessionLifecycleService:
         now: datetime | None = None,
     ) -> str:
         """Create a session root or resume a requested voice session inside grace."""
-        if not F.feature_enabled(settings):
-            return session_id or ""
         when = now or datetime.now(UTC)
         resolved_id = session_id or f"sess_{uuid4().hex}"
         if surface == F.SURFACE_VOICE and not session_id:
@@ -82,6 +77,10 @@ class SessionLifecycleService:
             ref = self._session_ref(uid, resolved_id)
             snap = ref.get()
             current = (snap.to_dict() or {}) if snap.exists else {}
+            # A finalized session has already been evaluated. Reviving it would mint a
+            # second candidate for the same conversation off a bumped input_revision.
+            if current.get("state") == F.STATE_FINALIZED:
+                return
             data = {
                 "session_id": resolved_id,
                 "surface": surface,
@@ -157,7 +156,7 @@ class SessionLifecycleService:
         now: datetime | None = None,
     ) -> None:
         """Write one immutable turn and update the mutable session root transactionally."""
-        if not F.feature_enabled(settings) or not uid or not session_id or not turn_id:
+        if not uid or not session_id or not turn_id:
             return
         when = now or datetime.now(UTC)
         clean_text = text.strip()
@@ -186,6 +185,20 @@ class SessionLifecycleService:
                 session = (session_snap.to_dict() or {}) if session_snap.exists else {}
                 turn_snap = turn_ref.get(transaction=txn)
                 is_new = not turn_snap.exists
+                # Keep the turn for provenance, but never resurrect a session the
+                # evaluator has already consumed: the write below would flip it back
+                # to active and bump input_revision, which mints a second candidate
+                # id for the same conversation and double-notifies. A late turn on a
+                # finalized session belongs to the next session, not this one.
+                if session.get("state") == F.STATE_FINALIZED:
+                    if is_new:
+                        txn.create(turn_ref, {
+                            "turn_index": max(0, int(turn_index)),
+                            "role": "user",
+                            "created_at": when,
+                            "after_finalization": True,
+                        })
+                    return
                 if is_new:
                     txn.create(turn_ref, {
                         "turn_index": max(0, int(turn_index)),
@@ -244,22 +257,47 @@ class SessionLifecycleService:
     async def note_voice_disconnect(
         self, uid: str, session_id: str, *, now: datetime | None = None
     ) -> None:
-        if not F.feature_enabled(settings):
+        when = now or datetime.now(UTC)
+        await self._enter_grace(uid, session_id, when, F.VOICE_DISCONNECT_GRACE)
+
+    async def note_client_background(
+        self, uid: str, session_id: str, *, now: datetime | None = None
+    ) -> None:
+        """The chat client backgrounded. Start the grace clock, do not finalize."""
+        if not uid or not session_id:
             return
         when = now or datetime.now(UTC)
+        await self._enter_grace(uid, session_id, when, F.CHAT_BACKGROUND_GRACE)
 
+    async def _enter_grace(
+        self, uid: str, session_id: str, when: datetime, grace
+    ) -> None:
+        """Arm the grace clock the idle sweep already honours. Never finalizes here.
+
+        A turn arriving inside the window clears this through ``note_user_turn``,
+        so a user who glances at another app and comes back loses nothing.
+        """
         def _write() -> None:
             ref = self._session_ref(uid, session_id)
             snap = ref.get()
-            if snap.exists and (snap.to_dict() or {}).get("state") == F.STATE_FINALIZED:
+            if not snap.exists:
+                return
+            if (snap.to_dict() or {}).get("state") == F.STATE_FINALIZED:
                 return
             ref.set({
                 "state": F.STATE_DISCONNECT_GRACE,
                 "last_activity_at": when,
-                "disconnect_grace_until": when + F.VOICE_DISCONNECT_GRACE,
+                "disconnect_grace_until": when + grace,
             }, merge=True)
 
-        await asyncio.to_thread(_write)
+        try:
+            await asyncio.to_thread(_write)
+        except Exception as exc:
+            logger.warn("session_followup: grace write failed open", {
+                "user_id": uid,
+                "session_id": session_id,
+                "error": str(exc),
+            })
 
     async def finalize_session(
         self,
@@ -269,9 +307,7 @@ class SessionLifecycleService:
         reason: str,
         now: datetime | None = None,
     ) -> bool:
-        """Finalize once and atomically stage the sole session-finalized event."""
-        if not F.feature_enabled(settings):
-            return False
+        """Finalize once, then evaluate the finalized session directly."""
         when = now or datetime.now(UTC)
 
         def _finalize() -> bool:
@@ -286,22 +322,6 @@ class SessionLifecycleService:
                 session = snap.to_dict() or {}
                 if session.get("state") == F.STATE_FINALIZED:
                     return False
-                revision = max(1, int(session.get("input_revision", 1) or 1))
-                payload = {
-                    "uid": uid,
-                    "session_id": session_id,
-                    "surface": str(session.get("surface") or "unknown"),
-                    "origin": str(session.get("origin") or F.ORIGIN_ORGANIC),
-                    "input_revision": revision,
-                }
-                event = event_bus.build_event(
-                    uid,
-                    EVENT_SESSION_FINALIZED,
-                    payload,
-                    source=F.SOURCE_SESSION_FOLLOWUP,
-                    dedup_id=f"session-finalized:{session_id}:{revision}",
-                    ts=when,
-                )
                 txn.set(session_ref, {
                     "state": F.STATE_FINALIZED,
                     "finalized_at": when,
@@ -311,7 +331,6 @@ class SessionLifecycleService:
                         "reason": reason,
                     },
                 }, merge=True)
-                event_bus.stage_event(txn, event)
                 return True
 
             return _apply(transaction)
@@ -333,8 +352,6 @@ class SessionLifecycleService:
 
     async def sweep_idle_sessions(self, *, now: datetime | None = None) -> int:
         """Finalize globally due chat, voice-idle, and expired-grace sessions."""
-        if not F.feature_enabled(settings):
-            return 0
         when = now or datetime.now(UTC)
         discovery_cutoff = when - F.VOICE_DISCONNECT_GRACE
 

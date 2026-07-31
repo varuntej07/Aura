@@ -35,6 +35,7 @@ import anthropic
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..prompts import STRUCTURED_OUTPUT_RETRY_INSTRUCTION
 from .analytics.llm_telemetry import (
     anthropic_usage_tokens,
     gemini_usage_tokens,
@@ -536,8 +537,7 @@ class ModelProvider:
                     "schema": response_model.__name__,
                 })
                 generation_prompt = (
-                    f"{prompt}\n\nYour previous response violated the required schema. "
-                    "Regenerate the answer as valid JSON matching the supplied schema exactly."
+                    f"{prompt}\n\n{STRUCTURED_OUTPUT_RETRY_INSTRUCTION}"
                 )
         raise RuntimeError("ModelProvider: structured retry loop exited unexpectedly")
 

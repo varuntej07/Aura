@@ -42,6 +42,7 @@ import httpx
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from ...prompts import tracking_grounded_fetch_prompt
 from .fields import TIER_BRAVE, TIER_GROUNDED, TIER_NEWSDATA, TIER_NONE, TIER_RSS
 
 # ── Per-tier timeouts + retries (sized so the chain is bounded even all-failing) ─
@@ -383,11 +384,7 @@ async def _fetch_grounded(query: str, locale: Locale) -> tuple[str, list[dict[st
     uniform tier signature; grounded search is already multilingual, so it is unused."""
     from ..model_provider import get_model_provider
 
-    prompt = (
-        "Search the web and report the very latest factual update on this topic. "
-        "Be concise and lead with the most recent concrete facts (scores, times, "
-        f"outcomes, status). Topic: {query}"
-    )
+    prompt = tracking_grounded_fetch_prompt(query)
     try:
         result = await get_model_provider().grounded(prompt)
     except Exception as exc:

@@ -16,7 +16,8 @@ from livekit.agents import llm as lk_llm
 
 from .capabilities import VOICE_TOOL_REGISTRY, Capability, ToolEffect, VoiceSurface
 
-ACTION_POLICY_VERSION = "2026-07-19.1"
+ACTION_POLICY_VERSION = "2026-07-28.1"
+UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,9 +72,7 @@ def derive_turn_policy(
     if not finalized_turn:
         reasons.append("turn_not_finalized")
 
-    capabilities = frozenset(
-        VOICE_TOOL_REGISTRY[name].capability for name in allowed
-    )
+    capabilities = frozenset(VOICE_TOOL_REGISTRY[name].capability for name in allowed)
     return TurnCapabilityPolicy(
         capabilities=capabilities,
         allowed_tools=frozenset(allowed),
@@ -107,7 +106,13 @@ def tool_output_succeeded(output: lk_llm.FunctionCallOutput) -> bool:
             parsed = literal_eval(output.output)
         except (ValueError, SyntaxError):
             return True
-    return not (isinstance(parsed, dict) and parsed.get("error") is True)
+    if not isinstance(parsed, dict):
+        return True
+    if parsed.get("ok") is False or parsed.get("error") is True:
+        return False
+    if parsed.get("configured") is False or parsed.get("approval_required") is True:
+        return False
+    return True
 
 
 def evaluate_execution(
@@ -117,7 +122,6 @@ def evaluate_execution(
     chat_ctx: lk_llm.ChatContext,
 ) -> ExecutionDecision:
     """Validate a model-emitted call without interpreting user language."""
-    del chat_ctx
     registration = VOICE_TOOL_REGISTRY.get(tool_name)
     if registration is None:
         return ExecutionDecision(False, "unregistered_voice_tool")
@@ -125,6 +129,10 @@ def evaluate_execution(
         return ExecutionDecision(False, "tool_not_exposed_for_turn")
     if registration.effect is not ToolEffect.READ and not policy.finalized_turn:
         return ExecutionDecision(False, "stale_turn_side_effect")
+    if registration.effect is not ToolEffect.READ:
+        recent_results = completed_tool_results(chat_ctx)
+        if any(name in UNTRUSTED_READ_TOOLS for name in recent_results):
+            return ExecutionDecision(False, "fresh_turn_required_after_untrusted_read")
     try:
         parsed = json.loads(arguments or "{}")
     except (TypeError, json.JSONDecodeError):
@@ -132,7 +140,12 @@ def evaluate_execution(
     if not isinstance(parsed, dict):
         return ExecutionDecision(False, "invalid_tool_arguments")
     if any(
-        field_name not in parsed or parsed[field_name] in (None, "")
+        field_name not in parsed
+        or parsed[field_name] is None
+        or (
+            parsed[field_name] == ""
+            and field_name not in registration.empty_allowed_fields
+        )
         for field_name in registration.required_fields
     ):
         return ExecutionDecision(False, "missing_required_tool_field")

@@ -1,3 +1,4 @@
+
 """Deterministic markdown -> speech sanitizer for the voice TTS path.
 
 The LLM (gpt-4.1-mini) frequently emits markdown (bold, bullet lists, headers,

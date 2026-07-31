@@ -18,7 +18,7 @@ from typing import cast
 from pydantic import BaseModel, Field
 
 from ...lib.logger import logger
-from ..buddy_voice import BUDDY_CONTENT_PUSH_RULES, BUDDY_VOICE_CORE
+from ...prompts import ICEBREAKER_SYSTEM_PROMPT, icebreaker_user_prompt
 from ..model_provider import ModelProvider
 from ..signal_engine.notification_framer import (
     strip_long_dashes,
@@ -61,60 +61,6 @@ class IcebreakerOpener(BaseModel):
     )
 
 
-_ICEBREAKER_SYSTEM_PROMPT = BUDDY_VOICE_CORE + "\n\n" + BUDDY_CONTENT_PUSH_RULES + """
-
-THE TASK
-You are sending ONE short check-in message to this person, like a friend who
-noticed something about their day and reached out.
-
-You are given a CONTEXT packet about the person's world right now (their region,
-the weather, a few fresh headlines tied to their interests, a few durable facts
-you know about them, and their interests) plus the TOPICS of messages you have
-ALREADY sent them before.
-
-Your job:
-1. Pick the SINGLE most natural hook from the context — the one a real friend
-   would actually mention today (a hot day, their dog, a story they follow, their
-   team playing). Prefer something personal (a known life fact) over something
-   generic when both fit.
-2. Write a short, warm opener about it.
-3. Decide if it is genuinely worth sending.
-
-Hard rules:
-- title: at most 50 characters, sentence case, no emojis, no exclamation marks.
-- body: at most 100 characters, one short sentence, like a text from a friend.
-- opening_chat_message: one or two sentences Buddy says when the chat opens.
-- NEVER repeat or rephrase any topic in the "already sent" list. If your best idea
-  is too close to one you already sent, set is_send_worthy=false.
-- Only reference a life fact that is in the CONTEXT (do not invent a pet/city).
-- A headline in the CONTEXT is already matched to something they follow, but do
-  not just relay the news — react to it the way a friend who knows they care
-  would. Never open with a headline that reads like a news bulletin.
-- If the context has no genuinely good, fresh hook, set is_send_worthy=false with
-  a one-sentence reason. A boring or forced message is worse than no message.
-
-is_send_worthy + reason (the gate):
-- is_send_worthy=true ONLY when you have a specific, fresh, non-repeated hook.
-  Put the hook in reason as ONE full sentence (e.g. "It is the first hot day of
-  the week in his region, a natural ice-cream / stay-cool opener.").
-- When false, reason is still one full sentence saying plainly why nothing is
-  worth sending today.
-- topic is a few-word label of the hook, stored to avoid repeats later.
-
-Output ONLY valid JSON matching the schema. No markdown fences. No prose.
-
-Schema:
-{
-  "title": "string",
-  "body": "string",
-  "opening_chat_message": "string",
-  "topic": "string",
-  "is_send_worthy": true,
-  "reason": "string"
-}
-"""
-
-
 def _format_life_facts(facts: dict[str, str]) -> str:
     if not facts:
         return "none known yet"
@@ -122,29 +68,19 @@ def _format_life_facts(facts: dict[str, str]) -> str:
 
 
 def _build_prompt(context: IcebreakerContext) -> str:
-    weather = context.weather or "unknown"
-    headlines = "\n".join(f"  - {h}" for h in context.headlines) or "  - none"
-    interests = ", ".join(context.interest_subjects) or "none recorded yet"
-    already_sent = "\n".join(f"  - {t}" for t in context.recent_opener_topics) or "  - (none yet)"
-    return f"""\
-            CONTEXT
-            region_country: {context.region_country or 'unknown'}
-            language: {context.language}
-            weekday: {context.weekday}
-            local_date: {context.local_date}
-            time_of_day: {context.time_band}
-            season: {context.season or 'unknown'}
-            weather_today: {weather}
-            headlines_they_follow:
-{headlines}
-            known_life_facts: {_format_life_facts(context.life_facts)}
-            their_interests: {interests}
-
-            ALREADY SENT (never repeat or rephrase these):
-{already_sent}
-
-            Write the opener now. JSON only.
-        """
+    return icebreaker_user_prompt(
+        region=context.region_country,
+        language=context.language,
+        weekday=context.weekday,
+        local_date=context.local_date,
+        time_band=context.time_band,
+        season=context.season,
+        weather=context.weather,
+        headlines=context.headlines,
+        life_facts=_format_life_facts(context.life_facts),
+        interests=context.interest_subjects,
+        recent_topics=context.recent_opener_topics,
+    )
 
 
 def _normalise(opener: IcebreakerOpener) -> IcebreakerOpener:
@@ -192,7 +128,7 @@ async def generate_opener(
     try:
         result = await models.cheap(
             prompt,
-            system=_ICEBREAKER_SYSTEM_PROMPT,
+            system=ICEBREAKER_SYSTEM_PROMPT,
             response_model=IcebreakerOpener,
             temperature=0.7,
         )

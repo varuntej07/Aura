@@ -21,13 +21,13 @@ dropped (with a log line) rather than translated.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..shared.tools import openai_function_definition
 from .analytics.llm_telemetry import openai_usage_tokens, start_llm_generation
 from .chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from .tool_executor import ToolExecutor
@@ -81,13 +81,15 @@ def _block_field(block: Any, key: str) -> Any:
 
 def _anthropic_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate Anthropic tool defs ({name, description, input_schema}) into OpenAI's
-    function-tool shape. Anthropic's input_schema is already a plain JSON schema, and
-    OpenAI's default (non-strict) function calling accepts that directly, so no
-    schema sanitiser is needed here either (same finding as the Gemini hop)."""
+    function-tool shape. The set_reminder contract is strict on the OpenAI surface."""
     result: list[dict[str, Any]] = []
     for tool in tools:
         name = tool.get("name")
         if not name:
+            continue
+        canonical = openai_function_definition(name)
+        if canonical and canonical.get("strict") is True:
+            result.append({"type": "function", "function": canonical})
             continue
         result.append({
             "type": "function",
@@ -226,6 +228,7 @@ async def stream_openai_chat_fallback(
             "tools": len(tools),
         })
 
+        limit_exhausted = False
         for _ in range(_MAX_TURNS):
             turn_text_buffer: list[str] = []
             buffered_chars = 0
@@ -326,7 +329,9 @@ async def stream_openai_chat_fallback(
                     })
                     return (call["id"], call["name"], None, exc)
 
-            results = await asyncio.gather(*[_run_tool(call) for call in ordered_calls])
+            results = []
+            for ordered_call in ordered_calls:
+                results.append(await _run_tool(ordered_call))
 
             # Clarification sentinel — same contract as the Anthropic/Gemini loops.
             clarification = next(
@@ -370,10 +375,20 @@ async def stream_openai_chat_fallback(
                     "content": json.dumps(payload, default=str),
                 })
         else:
+            limit_exhausted = True
             logger.warn("OpenAI fallback: max turns exceeded", {"tools_used": names_used})
+            yield {
+                "type": "text_delta",
+                "delta": (
+                    "I reached my safe action limit before I could finish that. "
+                    "Please send the request once more."
+                ),
+            }
 
         reminder_data = next((d["data"] for d in captured if d["tool"] == "set_reminder"), None)
         metadata = {"tool_names": names_used}
+        if limit_exhausted:
+            metadata["termination_reason"] = "max_tool_turns"
         if reminder_data:
             metadata["reminder"] = reminder_data
         yield {"type": "done", "metadata": metadata}

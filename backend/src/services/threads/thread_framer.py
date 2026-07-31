@@ -19,7 +19,7 @@ from typing import cast
 from pydantic import BaseModel, Field
 
 from ...lib.logger import logger
-from ..buddy_voice import BUDDY_VOICE_CORE
+from ...prompts import THREAD_FRAMER_SYSTEM_PROMPT, thread_framer_user_prompt
 from ..model_provider import ModelProvider
 from ..signal_engine.notification_framer import (
     strip_long_dashes,
@@ -57,99 +57,18 @@ class FollowUpFramingContext(BaseModel):
     time_band: str = "anytime"           # morning | midday | afternoon | evening | late
 
 
-_FRAMER_SYSTEM_PROMPT = f"""\
-{BUDDY_VOICE_CORE}
-
-THE TASK
-You just remembered something this person mentioned and you are genuinely curious
-about it. Ask ONE warm, specific question to understand it better, the way a friend
-who actually cares would. The whole point of the message is to earn one more true
-thing about them, never to check up on a task.
-
-Rules, all hard:
-- Curiosity, never accountability. NEVER ask "did you finish / complete / do it /
-  get it done", and NEVER frame it as them forgetting, slacking, keeping up, or
-  staying on top of something. You are intrigued, not checking up. Ask what it is,
-  who it is for, how they feel about it, the story.
-- Name the SPECIFIC thing they mentioned, in their words. A question that names
-  nothing concrete is a failure: it reads as nagging and gives them nothing to grab.
-  Point straight at the actual subject so it is obvious what you are asking about.
-- Short: the body is at most 90 characters and sounds like a text from a friend.
-  Lowercase is fine.
-- suggested_replies: 2 or 3 options that make it effortless to START sharing. They
-  are conversation-openers, not yes/no, and never progress states. Each is at most
-  24 characters.
-- At most one emoji across the whole message. No exclamation pile-ons. Never open
-  with "I noticed that you".
-- Output ONLY valid JSON matching the schema. No markdown fences. No prose.
-
-Schema:
-{{
-  "title": "string",
-  "body": "string",
-  "suggested_replies": ["string", "string"]
-}}
-"""
-
 # Few-shot examples steer the tone hard away from "teacher" and toward "friend".
-_FEW_SHOT = """\
-EXAMPLES
-
-mentioned: "implement live fetch instead of stale cache in my feature"
-unknown: ["what the project is"]
--> {"title":"that thing you're building",
-    "body":"what are you making that needs live data over cache?",
-    "suggested_replies":["a side project","for work","i'll show you"]}
-
-mentioned: "big presentation monday"
-unknown: ["what it's about","how they feel about it"]
--> {"title":"monday",
-    "body":"what's the presentation on? you feeling ready or nah",
-    "suggested_replies":["kinda nervous","i got this","long story"]}
-
-mentioned: "follows cricket a lot"   (source: aura_gap)
-unknown: ["which team they support"]
--> {"title":"quick one",
-    "body":"who's your team? gotta know who you're suffering for",
-    "suggested_replies":["RCB","CSK","just love the game"]}
-
-NEVER WRITE LIKE THIS:
-
-mentioned: "call the bank about the lease deposit"
--> {"title":"what's the deal",
-    "body":"you always forgetting or just trying to stay on top of it",
-    "suggested_replies":["...","..."]}
-   names nothing specific and accuses them of forgetting. That is the nagging,
-   accountability voice this prompt exists to kill. Name the bank call and be curious
-   about it instead: "what's the bank thing about? sorting the lease?"
-"""
-
-
 def _build_prompt(thread: Thread, ctx: FollowUpFramingContext) -> str:
-    interests_line = (
-        ", ".join(ctx.top_interests[:3])
-        if ctx.top_interests else "no strong interests recorded yet"
+    return thread_framer_user_prompt(
+        tone=ctx.dominant_tone or "neutral",
+        depth_level=ctx.depth_level,
+        top_interests=ctx.top_interests,
+        time_band=ctx.time_band,
+        trigger_text=thread.trigger_text,
+        source=str(thread.source),
+        known_summary=thread.known_summary,
+        unknown=thread.unknown,
     )
-    unknown_line = "; ".join(thread.unknown) if thread.unknown else "anything about it"
-    return f"""\
-{_FEW_SHOT}
-
-NOW WRITE FOR THIS ONE.
-
-PERSON
-tone they like: {ctx.dominant_tone or "neutral"}
-depth level (1-5): {ctx.depth_level}
-top interests: {interests_line}
-local time band: {ctx.time_band}
-
-THREAD
-they mentioned: "{thread.trigger_text}"
-source: {thread.source}
-what I already know: {thread.known_summary or "not much yet"}
-what I don't know yet: {unknown_line}
-
-Pick the single most interesting unknown and ask about THAT. JSON only.
-"""
 
 
 def _safe_fallback(thread: Thread) -> FramedFollowUp:
@@ -204,7 +123,7 @@ async def frame_follow_up(
     try:
         result = await models.cheap(
             prompt,
-            system=_FRAMER_SYSTEM_PROMPT,
+            system=THREAD_FRAMER_SYSTEM_PROMPT,
             response_model=FramedFollowUp,
             temperature=0.7,
         )

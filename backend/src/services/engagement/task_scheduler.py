@@ -18,8 +18,10 @@ pending re-engagement tasks can be cancelled when the user responds.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from ...config.settings import settings
@@ -74,6 +76,65 @@ class TaskScheduler:
         )
         logger.info("TaskScheduler: orchestrate enqueued", {
             "user_id": user_id,
+            "task_name": task_name,
+        })
+        return task_name
+
+    def schedule_reactive_tick(self, user_id: str, *, tick_at: datetime) -> str:
+        """Enqueue one durable, non-Firestore reactive tick for a user.
+
+        The task name is deterministic per user and UTC hour. A Cloud Scheduler
+        retry therefore reuses the same logical task instead of duplicating the
+        agent run. The event travels in the authenticated Cloud Task payload, so a
+        clock signal never creates an outbox row that must later be read, updated,
+        and deleted.
+        """
+        from google.api_core.exceptions import AlreadyExists  # type: ignore
+
+        from ..reactive.events import EVENT_TICK, Event
+        from ..reactive.fields import FIELD_TS
+
+        when = tick_at if tick_at.tzinfo else tick_at.replace(tzinfo=UTC)
+        hour = when.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
+        hour_key = hour.strftime("%Y%m%d%H")
+        event_id = f"tick:{hour_key}"
+        event = Event(
+            uid=user_id,
+            type=EVENT_TICK,
+            source="scheduler",
+            event_id=event_id,
+            dedup_id=event_id,
+            ts=hour,
+        )
+        event_payload = event.to_dict()
+        event_payload[FIELD_TS] = hour.isoformat()
+
+        user_key = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:20]
+        task_id = f"reactive-tick-{user_key}-{hour_key}"
+        try:
+            task_name = self._enqueue(
+                payload={"user_id": user_id, "transient_event": event_payload},
+                delay_seconds=0,
+                url_path="/internal/orchestrate",
+                task_id=task_id,
+            )
+        except AlreadyExists:
+            task_name = self._get_client().task_path(
+                settings.CLOUD_TASKS_PROJECT,
+                settings.CLOUD_TASKS_LOCATION,
+                settings.CLOUD_TASKS_QUEUE,
+                task_id,
+            )
+            logger.info("TaskScheduler: duplicate reactive tick suppressed", {
+                "user_id": user_id,
+                "hour": hour.isoformat(),
+                "task_name": task_name,
+            })
+            return task_name
+
+        logger.info("TaskScheduler: reactive tick enqueued", {
+            "user_id": user_id,
+            "hour": hour.isoformat(),
             "task_name": task_name,
         })
         return task_name

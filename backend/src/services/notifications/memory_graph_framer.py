@@ -9,6 +9,10 @@ from typing import Any, cast
 from pydantic import BaseModel, Field
 
 from ...lib.logger import logger
+from ...prompts import (
+    MEMORY_GRAPH_NOTIFICATION_SYSTEM_PROMPT,
+    memory_graph_notification_user_prompt,
+)
 from ..model_provider import get_model_provider
 from ..signal_engine.notification_framer import strip_long_dashes, truncate_at_word_boundary
 
@@ -36,17 +40,6 @@ class FramedMemoryGraphNotification(BaseModel):
     title: str = Field(..., description="Invitational push title, at most 40 chars.")
     body: str = Field(..., description="Invitational push body, at most 110 chars.")
 
-
-_SYSTEM_PROMPT = """You frame one short notification from a structured value payload.
-
-Hard rules:
-- Use only facts present in VALUE_PAYLOAD. Do not infer from outside context.
-- The copy is invitational. Offer to help, explore, map, plan, or pick something up.
-- Never claim Buddy completed, prepared, built, drafted, found, or made anything.
-- Never use pressure, guilt, accountability language, or imply the user forgot.
-- Keep the title at most 40 characters and the body at most 110 characters.
-- Output only JSON matching {"title":"string","body":"string"}.
-"""
 
 
 def valid_phase4_payload(value_payload: Any) -> dict[str, Any] | None:
@@ -91,13 +84,15 @@ async def frame_memory_graph_notification(
     )
     if payload is None:
         return None
-    prompt = "VALUE_PAYLOAD\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    prompt = memory_graph_notification_user_prompt(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    )
     try:
         result = cast(
             FramedMemoryGraphNotification,
             await get_model_provider().cheap(
                 prompt,
-                system=_SYSTEM_PROMPT,
+                system=MEMORY_GRAPH_NOTIFICATION_SYSTEM_PROMPT,
                 response_model=FramedMemoryGraphNotification,
                 temperature=0.5,
             ),

@@ -23,6 +23,10 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ...lib.logger import logger
+from ...prompts import (
+    DORMANCY_REENGAGEMENT_SYSTEM_PROMPT,
+    dormancy_reengagement_user_prompt,
+)
 from ..analytics import posthog_client
 from ..model_provider import ModelProvider, get_model_provider
 from ..notification_service import NotificationResult
@@ -48,19 +52,6 @@ class ReengageTickSummary:
     enqueued: int = 0
     skipped_quiet_hours: int = 0
     skipped_claimed: int = 0
-
-
-_SYSTEM = """\
-You are Buddy, a warm AI companion who is genuinely into this person's life. They
-haven't opened the app in a few days. Write ONE short push that makes them WANT to come
-back — like a close friend who actually missed them. Warm and light, never guilt-trippy,
-never salesy, never "we noticed you've been inactive".
-
-Return ONLY JSON:
-{"title":"<=40 chars","body":"<=110 chars, warm, second person ('you')","opening_chat_message":"a friendly chat opener to greet them if they tap"}
-
-If a topic they care about is given, you may nod to it naturally; otherwise keep it warm
-and general. Output ONLY the JSON."""
 
 
 def _local_now(timezone_name: str) -> datetime:
@@ -105,10 +96,13 @@ def _parse(raw: str, top_interest: str) -> tuple[str, str, str]:
 async def _frame(models: ModelProvider, top_interest: str) -> tuple[str, str, str]:
     """One cheap LLM call for a warm win-back, with a deterministic warm fallback so a
     framer outage never blocks the win-back (the drain's tap-gate is the quality check)."""
-    prompt = f"Topic they care about: {top_interest or '(none)'}"
+    prompt = dormancy_reengagement_user_prompt(top_interest)
     try:
         raw = await asyncio.wait_for(
-            models.cheap(prompt, system=_SYSTEM, temperature=0.7), timeout=8.0
+            models.cheap(
+                prompt, system=DORMANCY_REENGAGEMENT_SYSTEM_PROMPT, temperature=0.7
+            ),
+            timeout=8.0,
         )
     except Exception as exc:
         logger.warn("reengagement: framer failed, using fallback", {"error": str(exc)})

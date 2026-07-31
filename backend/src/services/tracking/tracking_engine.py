@@ -42,6 +42,15 @@ from datetime import UTC, datetime, timedelta
 from google.cloud import firestore as fs
 
 from ...lib.logger import logger
+from ...prompts import (
+    TRACKING_FACT_EXTRACTION_SYSTEM_PROMPT,
+    TRACKING_PULSE_SYSTEM_PROMPT,
+    TRACKING_RESULT_SYSTEM_PROMPT,
+    tracking_fact_user_prompt,
+    tracking_moment_user_prompt,
+    tracking_pulse_user_prompt,
+    tracking_result_user_prompt,
+)
 from ..model_provider import ModelProvider, get_model_provider
 from ..notifications import orchestrator
 from ..notifications.proposal import (
@@ -160,51 +169,6 @@ class _ExtractedFacts:
 
 
 # ── LLM prompts ──────────────────────────────────────────────────────────────
-_EXTRACT_FACTS_SYSTEM = """\
-You extract STRUCTURED FACTS about one specific scheduled fixture from web search
-context. You are a fact extractor, not a writer — precision over completeness, and
-"I can't tell" is a valid answer. Return ONLY JSON:
-
-{"refers_to_this_fixture": true/false — true ONLY if the context contains information
-about THIS fixture (the named teams/parties at this date). Coverage of OTHER fixtures,
-earlier rounds, previews of a different day, or general tournament news is false,
-"status": "scheduled | live | finished | cancelled" — what the context shows for THIS
-fixture. "cancelled" covers postponed/called off. When the context doesn't clearly
-establish a status, use "scheduled",
-"score": "the current/final score if stated, e.g. \\"1-0\\", else \\"\\"",
-"winner": "the winner/advancing side ONLY if the fixture is finished and it is stated, else \\"\\"",
-"note": "one short extra fact worth carrying (e.g. \\"Merino scored 88'\\", \\"postponed to Saturday\\"), else \\"\\""}
-
-The current known state is given for reference — do NOT echo it back as if the web
-context confirmed it; report only what the context itself shows."""
-
-_COMPOSE_RESULT_SYSTEM = """\
-You are Buddy, a warm AI companion, writing ONE push notification about a fixture the
-user asked you to track. You are given verified facts — use ONLY them, never invent
-details. Return ONLY JSON:
-
-{"title":"<=45 char push title",
-"body":"1-2 warm sentences with the concrete outcome",
-"opening_chat_message":"a friendly chat opener continuing this update if the user taps",
-"summary":"<=100 char plain factual restatement, e.g. 'Spain beat Belgium 1-0, face France in semis'"}"""
-
-_COMPOSE_PULSE_SYSTEM = """\
-You are Buddy, a warm AI companion, checking whether there is ONE genuinely new
-development on a topic the user asked you to track. Return ONLY JSON:
-
-{"development_key":"a 3-8 word slug NAMING the concrete new fact (e.g.
-'semifinal draw spain france'), or \\"\\" if the web context contains nothing genuinely
-new versus the recent developments listed below",
-"title":"<=45 char push title",
-"body":"1-2 warm sentences with the concrete development",
-"opening_chat_message":"a friendly chat opener if the user taps",
-"summary":"<=100 char plain factual restatement"}
-
-A reworded version of a recent development is NOT new — return an empty
-development_key for it. Err toward empty whenever the context doesn't clearly move
-the story forward."""
-
-
 def _parse_json_object(raw: str) -> dict | None:
     cleaned = re.sub(r"^```(?:json)?\s*", "", (raw or "").strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.MULTILINE).strip()
@@ -240,18 +204,20 @@ async def _extract_facts(
     """Temp-0 structured extraction — the trust boundary between the open web and the
     fixture's fact state. Returns None when the model failed/unparseable (the caller
     re-arms; never guesses)."""
-    prompt = (
-        f"Fixture: {fixture.label}\n"
-        f"Scheduled start (UTC): {fixture.start_at.isoformat()}\n"
-        f"Now (UTC): {now.isoformat()}\n"
-        f"Current known state: status={fixture.status}"
-        f"{f', score={fixture.fact_score}' if fixture.fact_score else ''}"
-        f"{f', winner={fixture.fact_winner}' if fixture.fact_winner else ''}\n\n"
-        f"Web context:\n{context}"
+    prompt = tracking_fact_user_prompt(
+        fixture=fixture.label,
+        scheduled_start=fixture.start_at.isoformat(),
+        now=now.isoformat(),
+        status=fixture.status,
+        score=fixture.fact_score,
+        winner=fixture.fact_winner,
+        web_context=context,
     )
     try:
         raw = await asyncio.wait_for(
-            models.cheap(prompt, system=_EXTRACT_FACTS_SYSTEM, temperature=0.0),
+            models.cheap(
+                prompt, system=TRACKING_FACT_EXTRACTION_SYSTEM_PROMPT, temperature=0.0
+            ),
             timeout=_LLM_CALL_TIMEOUT_S,
         )
     except Exception as exc:
@@ -285,15 +251,15 @@ async def _compose_result_push(
         f"score: {seen.score}" if seen.score else "",
         seen.note,
     ) if bit]
-    prompt = (
-        f"Topic: {topic.title}\n"
-        f"Fixture: {fixture.label}\n"
-        f"What just happened: {transition.replace('->', ' -> ')}\n"
-        f"Verified facts: {'; '.join(outcome_bits) or 'no further detail available'}"
+    prompt = tracking_result_user_prompt(
+        topic=topic.title,
+        fixture=fixture.label,
+        transition=transition.replace("->", " -> "),
+        verified_facts=outcome_bits,
     )
     try:
         raw = await asyncio.wait_for(
-            models.cheap(prompt, system=_COMPOSE_RESULT_SYSTEM, temperature=0.4),
+            models.cheap(prompt, system=TRACKING_RESULT_SYSTEM_PROMPT, temperature=0.4),
             timeout=_LLM_CALL_TIMEOUT_S,
         )
         composed = _parse_push_copy(str(raw))
@@ -330,14 +296,14 @@ async def _compose_fixture_moment_push(
     else:
         situation = "is starting right now"
         fallback_body = f"{fixture.label} is underway!"
-    prompt = (
-        f"Topic: {topic.title}\n"
-        f"Fixture: {fixture.label}\n"
-        f"Moment: it {situation}."
+    prompt = tracking_moment_user_prompt(
+        topic=topic.title,
+        fixture=fixture.label,
+        situation=f"it {situation}",
     )
     try:
         raw = await asyncio.wait_for(
-            models.cheap(prompt, system=_COMPOSE_RESULT_SYSTEM, temperature=0.4),
+            models.cheap(prompt, system=TRACKING_RESULT_SYSTEM_PROMPT, temperature=0.4),
             timeout=_LLM_CALL_TIMEOUT_S,
         )
         composed = _parse_push_copy(str(raw))
@@ -774,17 +740,16 @@ async def _fire_pulse(
         summary.failed += 1
         return
 
-    recent_lines = "\n".join(f"  - {key}" for key in topic.recent_development_keys) or "  (none yet)"
-    prompt = (
-        f"Topic: {topic.title}\n"
-        f"Recent developments already sent (do NOT repeat these):\n{recent_lines}\n\n"
-        f"Web context:\n{fetched.text}"
+    prompt = tracking_pulse_user_prompt(
+        topic=topic.title,
+        recent_developments=topic.recent_development_keys,
+        web_context=fetched.text,
     )
     development_key = ""
     copy: _PushCopy | None = None
     try:
         raw = await asyncio.wait_for(
-            models.cheap(prompt, system=_COMPOSE_PULSE_SYSTEM, temperature=0.4),
+            models.cheap(prompt, system=TRACKING_PULSE_SYSTEM_PROMPT, temperature=0.4),
             timeout=_LLM_CALL_TIMEOUT_S,
         )
         data = _parse_json_object(str(raw))

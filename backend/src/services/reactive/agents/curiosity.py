@@ -34,6 +34,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel
 
 from ....lib.logger import logger
+from ....prompts import (
+    ACCOUNTABILITY_JUDGE_SYSTEM_PROMPT,
+    THREAD_FRAMER_REPLAN_INSTRUCTION,
+    THREAD_FRAMER_SYSTEM_PROMPT,
+    accountability_judge_user_prompt,
+)
 from ...analytics.funnel_events import NOTIFICATION_ORIGIN_THREAD_ENGINE
 from ...firebase import admin_firestore
 from ...model_provider import get_model_provider
@@ -46,7 +52,6 @@ from ...signal_engine.scoring import is_within_active_hours
 from ...threads import thread_store
 from ...threads.models import Thread
 from ...threads.thread_framer import (
-    _FRAMER_SYSTEM_PROMPT,
     FollowUpFramingContext,
     FramedFollowUp,
     _build_prompt,
@@ -83,31 +88,6 @@ class _AccountabilityVoiceJudgment(BaseModel):
     reason: str = ""
 
 
-_ACCOUNTABILITY_JUDGE_SYSTEM = """\
-You are a tone gate for a Buddy curiosity notification. Buddy is a close friend who
-remembered something and is genuinely curious — never a coach, never checking up on
-whether a task got done.
-
-Return ONLY JSON: {"is_accountability_voice": true or false, "reason": "<=8 words"}
-
-Flag true when the message reads as checking whether the person finished, completed,
-did, or is keeping up with something — any phrasing, however worded, that puts them
-on the spot about progress or follow-through (e.g. "did you get to it", "how's X
-coming along", "still need to X?", "on top of X?").
-
-Flag false when the message is purely curious about what the thing IS, who it's for,
-or how the person feels about it, with no progress-checking undertone.
-
-Examples:
-"how's calling your mom going?" -> true (progress-check on a task, reads as nagging)
-"what's the bank thing about, sorting the lease?" -> false (curious about the subject)
-"you finish reviewing the doc yet?" -> true (explicit accountability)
-"what's the presentation on, you feeling ready?" -> false (curious about content/feelings)
-
-Be BALANCED: only flag true when a reasonable friend would read it as checking up,
-not merely mentioning that a task exists."""
-
-
 async def _judge_accountability_voice(body: str) -> tuple[bool, str]:
     """Fails OPEN toward Verdict.ok() (ship it) on any error/timeout — no worse
     than the fixed phrase list it replaces (an outage there already meant a rare
@@ -116,8 +96,8 @@ async def _judge_accountability_voice(body: str) -> tuple[bool, str]:
     try:
         result = await asyncio.wait_for(
             get_model_provider().cheap(
-                f'Notification body: "{body}"\n\nIs this accountability voice?',
-                system=_ACCOUNTABILITY_JUDGE_SYSTEM,
+                accountability_judge_user_prompt(body),
+                system=ACCOUNTABILITY_JUDGE_SYSTEM_PROMPT,
                 response_model=_AccountabilityVoiceJudgment,
                 temperature=0.0,
             ),
@@ -130,14 +110,6 @@ async def _judge_accountability_voice(body: str) -> tuple[bool, str]:
         return False, "judge_unavailable"
     judgment = cast(_AccountabilityVoiceJudgment, result)
     return bool(judgment.is_accountability_voice), (judgment.reason or "").strip()[:60]
-
-
-_REPLAN_NUDGE = (
-    "\nSTRICT: your previous attempt slipped into checking whether they did or "
-    "finished the task. Do NOT mention finishing, completing, doing, or keeping up "
-    "with it. Ask purely out of curiosity about what the thing IS or how they feel "
-    "about it."
-)
 
 
 @dataclass
@@ -222,7 +194,7 @@ class CuriosityThreadFollowUpAgent:
         # fallback chain) so the envelope sees INFRA, instead of silently degrading.
         result = await get_model_provider().cheap(
             prompt,
-            system=_FRAMER_SYSTEM_PROMPT,
+            system=THREAD_FRAMER_SYSTEM_PROMPT,
             response_model=FramedFollowUp,
             temperature=0.7,
         )
@@ -254,7 +226,7 @@ class CuriosityThreadFollowUpAgent:
                 thread=cp.thread,
                 framing_ctx=cp.framing_ctx,
                 local_date=cp.local_date,
-                extra_instruction=cp.extra_instruction + _REPLAN_NUDGE,
+                extra_instruction=cp.extra_instruction + THREAD_FRAMER_REPLAN_INSTRUCTION,
             ))
         # EMPTY / anything else: nothing useful to broaden for a single-thread frame.
         return None

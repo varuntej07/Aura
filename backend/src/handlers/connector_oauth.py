@@ -27,7 +27,11 @@ from .connectors import _resolve_watch_url
 ATTEMPTS_COLLECTION = "connector_oauth_attempts"
 ATTEMPT_TTL_SECONDS = 10 * 60
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
-GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.send"
+GMAIL_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+)
+GMAIL_SCOPE = " ".join(GMAIL_SCOPES)
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 
 ConnectorName = Literal["google_calendar", "gmail"]

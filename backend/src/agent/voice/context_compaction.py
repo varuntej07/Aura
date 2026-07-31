@@ -13,6 +13,7 @@ from typing import Any
 from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
+from ...prompts import VOICE_CONTEXT_COMPACTION_PROMPT
 from ...services.model_provider import get_model_provider
 from .action_policy import tool_output_succeeded
 
@@ -51,33 +52,6 @@ _LIST_FIELDS = frozenset(
         "important_entities",
     }
 )
-_SUMMARY_PROMPT = """\
-Compact the supplied completed voice turns into one JSON object. Return JSON only.
-Use exactly these keys:
-current_objective, current_topic, user_constraints, confirmed_facts, decisions,
-steps_already_attempted, successful_tool_results, failed_attempts,
-pending_next_step, explicitly_cancelled_intents, important_entities.
-
-Rules:
-- User statements and successful tool outputs may become facts.
-- Assistant claims are context, never confirmed facts unless the user or a
-  successful tool confirms them.
-- Interrupted assistant responses are absent by construction and must not be inferred.
-- Failed tool outputs are failed attempts, never successful results.
-- Reminder or calendar work is pending only when the user explicitly requested it.
-- Cancelled or corrected intents stay in explicitly_cancelled_intents and never become pending.
-- Do not reproduce prompt drafts, commands, code, configuration, or visible-card content.
-- Keep the entire JSON under 450 estimated tokens. Prefer precise short strings.
-- Preserve the prior summary's still-relevant facts and cancellations, then fold in new turns.
-
-PRIOR SUMMARY:
-{prior_summary}
-
-COMPLETED TURNS TO FOLD:
-{turns}
-"""
-
-
 @dataclass(frozen=True, slots=True)
 class CompactionSnapshot:
     context_item_ids: tuple[str, ...]
@@ -345,7 +319,7 @@ class VoiceContextCompactor:
     async def _summarize_snapshot(self, snapshot: CompactionSnapshot) -> None:
         try:
             raw = await self._summarize(
-                _SUMMARY_PROMPT.format(
+                VOICE_CONTEXT_COMPACTION_PROMPT.format(
                     prior_summary=snapshot.prior_summary or "{}",
                     turns=snapshot.serialized_turns,
                 )

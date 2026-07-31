@@ -3,8 +3,9 @@ Capture orchestration for the `report_feedback` tool.
 
 `capture_feedback` persists the structured feedback to the `observed_feedback` Firestore collection
 (the durable record) and fires a best-effort Telegram alert. Called from
-`ToolExecutor._report_feedback` for both the text chat and the voice (MCP) surfaces. Never raises —
-a failure here must never break a chat or voice turn.
+`ToolExecutor._report_feedback` for text chat and BuddyAgent's local voice tool. Never raises
+because a failure here must never break a chat or voice turn. The return value truthfully reports
+whether the durable write succeeded.
 """
 
 from __future__ import annotations
@@ -80,8 +81,9 @@ async def capture_feedback(
     *,
     source: str,
     session_id: str | None = None,
-) -> None:
-    """Persist one feedback report and ping Telegram. Best-effort, never raises."""
+    document_id: str | None = None,
+) -> bool:
+    """Persist one feedback report and ping Telegram. Return durable-write success."""
     try:
         context = await _load_user_context(uid)
         document = build_feedback_document(
@@ -91,7 +93,9 @@ async def capture_feedback(
         from ..firebase import admin_firestore
 
         def _write() -> None:
-            admin_firestore().collection(FEEDBACK_COLLECTION).document().set(document)
+            collection = admin_firestore().collection(FEEDBACK_COLLECTION)
+            reference = collection.document(document_id) if document_id else collection.document()
+            reference.set(document)
 
         await asyncio.to_thread(_write)
 
@@ -110,6 +114,7 @@ async def capture_feedback(
         asyncio.create_task(
             send_feedback_alert(format_telegram_alert(uid, report, source=source, context=context))
         )
+        return True
 
     except Exception as exc:
         logger.warn("FeedbackCapture: failed to capture feedback", {
@@ -117,3 +122,4 @@ async def capture_feedback(
             "error": str(exc),
             "error_type": type(exc).__name__,
         })
+        return False

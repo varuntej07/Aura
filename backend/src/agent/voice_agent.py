@@ -5,7 +5,7 @@ Pipeline plugins:
   Deepgram Nova STT (with nova-3 -> nova-2 fallback)
   Anthropic Claude LLM (with Gemini Flash fallback)
   Cartesia TTS (sonic-3 -> sonic-2 fallback)
-  Silero VAD + LiveKit MultilingualModel turn detector
+  Silero VAD + LiveKit audio turn detector (inference.TurnDetector)
 
 Tools live in the FastAPI backend at POST /mcp and are pulled in via
 livekit.agents.mcp.MCPServerHTTP. The worker authenticates to /mcp with a
@@ -57,6 +57,7 @@ from .voice.pipelines import (
     build_stt_pipeline,
     build_tts_pipeline,
     build_turn_detector,
+    describe_llm_fallback_legs,
 )
 from .voice.recorder import VoiceSessionRecorder
 from .voice.revision import worker_revision_fields
@@ -67,10 +68,11 @@ from .voice.screen_context import (
     deliver_screen_context,
     deliver_typed_message,
 )
+from .voice.screen_context_stream import SCREEN_CONTEXT_TOPIC, StructuredContextStore
 from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.telemetry import log_voice_failure, voice_session_logger
+from .voice.turn_metrics import VoiceTurnMetrics
 from .voice.voice_controls import derive_voice_controls
-from .voice_prompt import render_screen_sight_note, render_surface_note
 
 # Firebase auto-issued UIDs are 28 alphanumeric chars.
 # We refuse anything else so a malformed room name can't drive a session.
@@ -274,19 +276,17 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         return
 
-    followup_session_id: str | None = None
-    if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
-        from ..services.session_followup.lifecycle import session_lifecycle_service
+    from ..services.session_followup.lifecycle import session_lifecycle_service
 
-        origin, origin_candidate_id, lineage_chain = _resolve_followup_metadata(ctx)
-        followup_session_id = await session_lifecycle_service.start_session(
-            user_id,
-            None,
-            surface="voice",
-            origin=origin,
-            origin_candidate_id=origin_candidate_id,
-            lineage_chain=lineage_chain,
-        )
+    origin, origin_candidate_id, lineage_chain = _resolve_followup_metadata(ctx)
+    followup_session_id: str | None = await session_lifecycle_service.start_session(
+        user_id,
+        None,
+        surface="voice",
+        origin=origin,
+        origin_candidate_id=origin_candidate_id,
+        lineage_chain=lineage_chain,
+    )
 
     async with voice_session_logger(
         user_id,
@@ -317,8 +317,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 "bridged": bridged,
             },
         )
-        context_vars["surface"] = render_surface_note(surface)
-        context_vars["screen_sight"] = render_screen_sight_note(surface)
         if persisted_surface is None:
             logger.warn(
                 "voice_run_missing_surface",
@@ -353,11 +351,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 },
             )
 
-        # memory_summary is already injected once via the {memory_summary} slot in
-        # VOICE_PROMPT (see context.prompt_context_vars). We deliberately do NOT add a
-        # second system-role copy here: a duplicate both wastes prompt tokens and can
-        # contradict the live slots (e.g. a stale "timezone: PST" memory vs the live
-        # {timezone}). The empty ChatContext is still passed so BuddyAgent owns its history.
+        # Session context is injected once in BuddyAgent's final context block. We
+        # deliberately do NOT add a second system-role copy here: a duplicate both
+        # wastes prompt tokens and can contradict the live values. The empty
+        # ChatContext is still passed so BuddyAgent owns its history.
         chat_ctx = lk_llm.ChatContext()
 
         # Mint a Firebase ID token so the MCP server can verify the worker.
@@ -388,12 +385,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
         stt_pipeline = build_stt_pipeline()
         llm_pipeline = build_llm_pipeline(user_id)
+        turn_metrics = VoiceTurnMetrics(
+            session_id=session_id,
+            fallback_legs=describe_llm_fallback_legs(llm_pipeline),
+            openai_api_key_present=bool(settings.OPENAI_API_KEY),
+        )
         tts_pipeline = build_tts_pipeline(sonic3_controls)
-        mcp_server = build_mcp_server(firebase_id_token)
+        mcp_server = build_mcp_server(firebase_id_token, session_id)
 
-        # Loaded inside the entrypoint (not prewarm): the model needs the job's
-        # inference executor, which only exists here. If construction fails the
-        # session still starts, degrading to VAD-based endpointing.
+        # Built inside the entrypoint (not prewarm): the detector binds to the
+        # job's inference executor, which only exists here. If construction
+        # fails the session still starts, degrading to VAD-based endpointing —
+        # build_agent_session() omits the turn_detection key in that case rather
+        # than passing None, which would disable end-of-turn detection outright.
+        #
+        # This is now the audio detector, so there is no local model load and no
+        # HuggingFace fetch to fail; the v1 -> v1-mini fallback is handled inside
+        # LiveKit. `turn_detector_unavailable` has not fired in production.
         try:
             turn_detector = build_turn_detector()
         except Exception as exc:
@@ -435,6 +443,25 @@ async def entrypoint(ctx: JobContext) -> None:
                 },
             )
 
+        # Structured UI Automation context from the desktop overlay, on its own
+        # byte-stream topic. Same registration rule as frames above: before
+        # session.start, because the desktop captures it while the user is still
+        # speaking and the whole latency win depends on it landing early.
+        screen_context = StructuredContextStore(session_id=session_id, user_id=user_id)
+        try:
+            ctx.room.register_byte_stream_handler(
+                SCREEN_CONTEXT_TOPIC, screen_context.handle_stream
+            )
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: screen context handler registration failed",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "error": str(exc),
+                },
+            )
+
         # "there" is fetch_user_profile's no-name fallback (see voice/context.py),
         # not a real name; Buddy Drafts must never sign an email with it.
         draft_display_name = context_vars.get("name", "")
@@ -446,11 +473,13 @@ async def entrypoint(ctx: JobContext) -> None:
             context_vars=context_vars,
             chat_ctx=chat_ctx,
             screen_frames=screen_frames,
+            screen_context=screen_context,
             session_id=session_id,
             user_tier=session_context.user_tier,
             display_name=draft_display_name,
             launch_surface=surface,
             bridged=bridged,
+            turn_metrics=turn_metrics,
         )
 
         bridge = (
@@ -498,6 +527,11 @@ async def entrypoint(ctx: JobContext) -> None:
             task_runtime=guide_runtime,
         )
         screen_frames.set_frame_listener(guide.submit_frame)
+        # Injects a structured snapshot into Buddy's persistent context the moment
+        # it assembles, which is normally while the user is still speaking. That
+        # is what lets a screen-aware turn keep its speculative reply instead of
+        # paying a cold round trip (see voice/speculation.py).
+        screen_context.set_context_listener(buddy.ingest_structured_context)
 
         recorder = VoiceSessionRecorder(
             session=session,
@@ -512,6 +546,7 @@ async def entrypoint(ctx: JobContext) -> None:
             voice_requested_at_ms=voice_requested_at_ms,
             voice_request_id=voice_request_id,
             surface=surface,
+            turn_metrics=turn_metrics,
         )
         recorder.attach()
 
@@ -556,6 +591,7 @@ async def entrypoint(ctx: JobContext) -> None:
                             app=msg.get("app"),
                             session_id=session_id,
                             user_id=user_id,
+                            on_instruction=turn_metrics.note_screen_text_context,
                         ),
                         name=f"voice-screen-ctx-{session_id[:8]}",
                     )
@@ -570,6 +606,7 @@ async def entrypoint(ctx: JobContext) -> None:
                             app=None,
                             session_id=session_id,
                             user_id=user_id,
+                            on_instruction=turn_metrics.note_screen_text_context,
                         ),
                         name=f"voice-ocr-ctx-{session_id[:8]}",
                     )
@@ -664,6 +701,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
 
             await recorder.done.wait()
+            await recorder.flush_action_receipts()
 
             if bridge is not None:
                 await bridge.aclose()
@@ -679,8 +717,8 @@ async def entrypoint(ctx: JobContext) -> None:
                     name=f"voice-budget-write-{session_id[:8]}",
                 )
 
-            asyncio.create_task(
-                run_post_session_pipeline(
+            try:
+                await run_post_session_pipeline(
                     user_id=user_id,
                     session_id=session_id,
                     conversation_id=conversation_id,
@@ -692,19 +730,25 @@ async def entrypoint(ctx: JobContext) -> None:
                     tool_calls=recorder.tool_calls,
                     action_receipts=recorder.action_receipts,
                     screen_sight_frame_count=screen_frames.frame_count,
-                ),
-                name=f"voice-post-session-{session_id[:8]}",
-            )
-            if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
-                from ..services.session_followup.lifecycle import session_lifecycle_service
-
-                asyncio.create_task(
-                    session_lifecycle_service.note_voice_disconnect(
-                        user_id,
-                        session_id,
-                    ),
-                    name=f"followup-voice-grace-{session_id[:8]}",
                 )
+            except Exception as exc:
+                logger.error(
+                    "VoiceSession: durable post-session finalization failed",
+                    {
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            from ..services.session_followup.lifecycle import session_lifecycle_service
+
+            asyncio.create_task(
+                session_lifecycle_service.note_voice_disconnect(
+                    user_id,
+                    session_id,
+                ),
+                name=f"followup-voice-grace-{session_id[:8]}",
+            )
         except Exception as exc:
             log_voice_failure(
                 code="session_start_failed",

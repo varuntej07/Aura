@@ -77,13 +77,18 @@ class VoiceActionTelemetry:
             },
         )
 
-    def execution(self, tool_name: str, *, success: bool) -> None:
+    def execution(self, tool_name: str, *, success: bool) -> int | None:
         started_at = None
         for index, (emitted_name, emitted_at) in enumerate(self._emitted):
             if emitted_name == tool_name:
                 started_at = emitted_at
                 self._emitted.pop(index)
                 break
+        latency_ms = (
+            round((time.monotonic() - started_at) * 1000)
+            if started_at is not None
+            else None
+        )
         logger.info(
             "VoiceAction: tool completed",
             {
@@ -92,13 +97,10 @@ class VoiceActionTelemetry:
                 "surface": self._surface,
                 "tool": tool_name,
                 "success": success,
-                "tool_completion_latency_ms": (
-                    round((time.monotonic() - started_at) * 1000)
-                    if started_at is not None
-                    else None
-                ),
+                "tool_completion_latency_ms": latency_ms,
             },
         )
+        return latency_ms
 
     def deferred(self, tool_name: str, reason: str) -> None:
         logger.info(

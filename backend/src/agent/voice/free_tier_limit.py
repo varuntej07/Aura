@@ -32,27 +32,10 @@ import time
 from livekit.agents import AgentSession, JobContext
 
 from ...lib.logger import logger
-
-# LLM-framed so each moment lands in Buddy's voice.
-FREE_TIER_VOICE_WARNING_INSTRUCTIONS = (
-    "The user is about a minute away from using up their free voice time for today. In Buddy's "
-    "warm, casual voice, slip in ONE short, low-pressure line letting them know there's about a "
-    "minute of free voice left together for today and that you'll have to wrap up when it runs "
-    "out, then keep the conversation going naturally. No guilt and no hard sell."
-)
-
-FREE_TIER_VOICE_WIND_DOWN_INSTRUCTIONS = (
-    "The user's free voice time for today just ran out, so this call is ending now. In Buddy's "
-    "warm, casual voice, say ONE short goodbye: today's free voice time is up, you're still right "
-    "there over text, voice is back tomorrow, and upgrading unlocks unlimited voice whenever they "
-    "want it. Two sentences at most, no guilt, no hard sell, end on a warm bye."
-)
-
-FREE_TIER_VOICE_OUT_OF_TIME_INSTRUCTIONS = (
-    "The user is already out of free voice time for today, so this call has to end right away. In "
-    "Buddy's warm, casual voice, say ONE short line: today's free voice minutes are used up, "
-    "they can still text you anytime, voice is back tomorrow, and upgrading unlocks unlimited "
-    "voice. Two sentences at most, no guilt, no hard sell, end on a warm bye."
+from ...prompts import (
+    FREE_TIER_VOICE_OUT_OF_TIME_INSTRUCTIONS,
+    FREE_TIER_VOICE_WARNING_INSTRUCTIONS,
+    FREE_TIER_VOICE_WIND_DOWN_INSTRUCTIONS,
 )
 
 # How long to wait for a turn boundary before speaking, so a line never lands on

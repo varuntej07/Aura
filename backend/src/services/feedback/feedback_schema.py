@@ -1,17 +1,16 @@
 """
 Feedback capture schema — single source of truth for the silent `report_feedback` tool.
 
-Buddy calls `report_feedback` (chat: defined in `shared/tools.py`; voice: wrapper in
-`handlers/mcp.py`) ONLY when a user's message contains product feedback. The structured arguments
-land here as a `FeedbackReport`, get persisted to the top-level `observed_feedback` Firestore
-collection, and trigger a best-effort Telegram alert. This module owns the closed taxonomies, the
-Firestore field names, and the formatting so the tool definition, the handler, and the tests all
-agree in one place (mirrors the `user_aura_schema` / `funnel_events` one-place-per-contract
-discipline).
+Buddy calls `report_feedback` only when a user's message contains product feedback. Text chat owns
+its public schema in `shared/tools.py`; voice owns a smaller local schema below because BuddyAgent
+derives the quote from the finalized transcript. Reports are persisted to the top-level
+`observed_feedback` Firestore collection and trigger a best-effort Telegram alert. This module owns
+the closed taxonomies, Firestore field names, voice contract, and formatting.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +42,48 @@ FEEDBACK_ABOUT_AREAS: list[str] = [
 ]
 FEEDBACK_SEVERITIES: list[str] = ["low", "medium", "high"]
 
+VOICE_FEEDBACK_TOOL_DEFINITION: dict[str, Any] = {
+    "name": FEEDBACK_TOOL_NAME,
+    "description": (
+        "Silently record feedback about Aura itself. Use for complaints, bugs, confusion, "
+        "feature requests, praise, or signs the user may stop using Aura, including when "
+        "the user explicitly asks you to report or file something. Do not use for "
+        "ordinary requests, factual questions, or conversation unrelated to the product. "
+        "Continue the spoken reply normally and never mention that feedback was recorded."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "category": {
+                "type": "string",
+                "enum": FEEDBACK_CATEGORIES,
+                "description": "The kind of product feedback.",
+            },
+            "about": {
+                "type": "string",
+                "enum": FEEDBACK_ABOUT_AREAS,
+                "description": "Which part of Aura the feedback concerns.",
+            },
+            "summary": {
+                "type": "string",
+                "description": (
+                    "One short founder-readable sentence capturing the feedback."
+                ),
+            },
+            "severity": {
+                "type": "string",
+                "enum": FEEDBACK_SEVERITIES,
+                "description": (
+                    "How strongly the user feels or how urgent the problem is."
+                ),
+            },
+        },
+        "required": ["category", "about", "summary", "severity"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
 _DEFAULT_CATEGORY = "other"
 _DEFAULT_ABOUT = "general"
 _DEFAULT_SEVERITY = "medium"
@@ -73,6 +114,18 @@ STATUS_NEW = "new"
 
 _MAX_SUMMARY_CHARS = 280
 _MAX_QUOTE_CHARS = 500
+
+
+def voice_feedback_document_id(
+    *,
+    uid: str,
+    session_id: str,
+    finalized_message_id: str,
+) -> str:
+    """Return the durable Firestore identity for one finalized voice message."""
+    identity = "\x1f".join((uid, session_id, finalized_message_id))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return f"voice_{digest}"
 
 
 class FeedbackReport(BaseModel):

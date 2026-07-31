@@ -25,6 +25,8 @@ handler answers ``{"briefing": null}`` so the screen shows its empty state.
 
 from __future__ import annotations
 
+from ...prompts import WORLD_BRIEFING_SYSTEM_PROMPT
+
 import re
 import time
 from dataclasses import dataclass, field
@@ -32,7 +34,6 @@ from typing import Any
 
 from ...config.settings import settings
 from ...lib.logger import logger
-from ..buddy_voice import BUDDY_VOICE_CORE
 from ..model_provider import ModelProvider, get_model_provider
 from .world_region import WorldRegion, resolve_region
 
@@ -64,48 +65,6 @@ class WorldBriefingResult:
     # short 2-3 line blurb; ``citation`` is the index into ``sources`` that grounds it
     # (or None). Lets the UI show a small per-item citation instead of a sources list.
     items: list[dict[str, Any]] = field(default_factory=list)
-
-
-_WORLD_BRIEFING_SYSTEM_PROMPT = f"""\
-{BUDDY_VOICE_CORE}
-
-THE TASK
-You are giving this person a quick "here is what is going on in the world right now"
-catch-up, like a friend who keeps up with the news and tells them the parts worth
-knowing. Use live web search to ground EVERYTHING in what is actually happening today.
-
-WHAT TO COVER
-- 2 to 3 of the biggest, genuinely buzzing GLOBAL stories happening right now.
-- If the user prompt names a local region, ALSO include exactly one notable, current
-  story from that region. If it says there is no region, give 3 to 4 global stories and
-  no local one.
-- Choose stories that matter or are genuinely interesting, not filler or celebrity noise.
-
-HARD GROUNDING RULES (these stop you making things up):
-- Use ONLY real, current facts from your search. Never invent a number, quote, name,
-  date, or outcome. If you are unsure of a detail, leave it out.
-- Only today's real events. Do not relay stale news as if it just happened.
-
-VOICE AND FORMAT:
-- Write each story as its OWN short item: 2 to 3 short lines each, with a BLANK LINE
-  between items. Do NOT merge them into one flowing paragraph, and do NOT start a line
-  with a bullet, dash, number, or the story's source.
-- React to each thing the way a friend who finds it interesting would, never relay a
-  raw headline as a bulletin.
-- Do NOT use this person's name (you do not have it here) and do NOT claim any story
-  ties to their specific interests; this is a general world catch-up.
-- Never name a source, publication, or platform. No em-dashes, en-dashes, or double
-  hyphens. No exclamation marks. No emoji.
-- Keep EACH item to 2 to 3 lines, and the whole thing under about 900 characters.
-
-THEN, on a NEW line, output exactly one line beginning with "{_CHAT_SEED_MARKER}" followed
-by one warm sentence that names the stories concretely and invites going deeper (it is
-what you say if they tap to chat about this). Do not end it with "thoughts?" or "what do
-you think?".
-
-Output the narrative, then the {_CHAT_SEED_MARKER} line. No JSON, no markdown headers,
-no preamble.
-"""
 
 
 def _build_user_prompt(region: WorldRegion) -> str:
@@ -201,7 +160,7 @@ async def _generate(models: ModelProvider, region: WorldRegion) -> WorldBriefing
     try:
         grounded = await models.grounded(
             _build_user_prompt(region),
-            system=_WORLD_BRIEFING_SYSTEM_PROMPT,
+            system=WORLD_BRIEFING_SYSTEM_PROMPT,
             temperature=0.6,
         )
     except Exception as exc:

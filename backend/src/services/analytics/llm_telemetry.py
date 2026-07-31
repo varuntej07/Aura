@@ -30,6 +30,7 @@ exposed for explicit drains (tests, shutdown hooks).
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from typing import Any
 
 from ...config.settings import settings
@@ -38,6 +39,23 @@ from ...lib.logger import logger
 # Memoised client. _init_attempted ensures we only try (and only log) once.
 _client: Any | None = None
 _init_attempted = False
+_trace_context: ContextVar[dict[str, str]] = ContextVar(
+    "llm_trace_context",
+    default={},
+)
+
+
+def bind_trace_context(**values: str | None) -> Token[dict[str, str]]:
+    """Bind non-sensitive correlation fields for the current async request."""
+    current = dict(_trace_context.get())
+    current.update(
+        {key: value for key, value in values.items() if isinstance(value, str) and value}
+    )
+    return _trace_context.set(current)
+
+
+def reset_trace_context(token: Token[dict[str, str]]) -> None:
+    _trace_context.reset(token)
 
 
 def _get_client() -> Any | None:
@@ -60,9 +78,12 @@ def _get_client() -> Any | None:
         )
         logger.info("llm_telemetry: initialised", {"host": settings.LANGFUSE_HOST})
     except Exception as exc:
-        logger.warn("llm_telemetry: init failed, LLM observability disabled", {
-            "error": str(exc),
-        })
+        logger.warn(
+            "llm_telemetry: init failed, LLM observability disabled",
+            {
+                "error": str(exc),
+            },
+        )
         _client = None
     return _client
 
@@ -151,7 +172,11 @@ def start_llm_generation(
     if client is None:
         return _NOOP_RECORDING
     try:
-        metadata: dict[str, Any] = {"provider": provider, "caller": caller}
+        metadata: dict[str, Any] = {
+            "provider": provider,
+            "caller": caller,
+            **_trace_context.get(),
+        }
         if uid:
             metadata["uid"] = uid
         observation = _start_observation(
@@ -179,7 +204,7 @@ def start_tool_span(
     if client is None:
         return _NOOP_RECORDING
     try:
-        metadata: dict[str, Any] = {"source": source}
+        metadata: dict[str, Any] = {"source": source, **_trace_context.get()}
         if uid:
             metadata["uid"] = uid
         observation = _start_observation(

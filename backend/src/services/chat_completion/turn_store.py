@@ -19,6 +19,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from google.api_core.exceptions import AlreadyExists
 from google.cloud import firestore as fs
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -27,14 +28,14 @@ from ..firebase import admin_firestore
 
 COLLECTION = "chat_turns"
 
-# Status lifecycle. generating -> (client_complete | regenerating). regenerating ->
-# (complete | failed). A terminal status (complete/client_complete/failed) is never
-# reopened, which is what makes the Cloud Task / backstop idempotent.
+# Status lifecycle. New foreground-complete turns are deleted; legacy records may still
+# contain client_complete. generating -> regenerating -> (complete | failed). A terminal
+# status is never reopened, which makes the Cloud Task / backstop idempotent.
 FIELD_STATUS = "status"
 STATUS_GENERATING = "generating"
 STATUS_REGENERATING = "regenerating"
 STATUS_COMPLETE = "complete"            # finished server-side (background), reply stored
-STATUS_CLIENT_COMPLETE = "client_complete"  # the foreground stream delivered it; nothing to do
+STATUS_CLIENT_COMPLETE = "client_complete"  # legacy foreground-complete record
 STATUS_FAILED = "failed"
 
 TERMINAL_STATUSES = frozenset({STATUS_COMPLETE, STATUS_CLIENT_COMPLETE, STATUS_FAILED})
@@ -62,6 +63,7 @@ TURN_TTL = timedelta(days=2)
 # A turn is regenerated at most this many times across all Cloud Task retries before we
 # give up and mark it failed — a hard backstop against a poison turn looping forever.
 MAX_ATTEMPTS = 2
+COMPLETION_CLAIM_LEASE = timedelta(minutes=4)
 
 # Defensive caps so a turn doc stays well under Firestore's 1 MB limit.
 _MAX_HISTORY_TURNS = 12
@@ -120,24 +122,29 @@ async def start_turn(
         return False
     now = now or datetime.now(UTC)
 
-    def _write() -> None:
-        _ref(user_id, cmid).set({
-            FIELD_STATUS: STATUS_GENERATING,
-            FIELD_SESSION_ID: session_id or "",
-            FIELD_MESSAGE: message[:_MAX_CONTENT_CHARS],
-            FIELD_HISTORY: _sanitize_history(history),
-            FIELD_HAS_ATTACHMENTS: bool(has_attachments),
-            FIELD_TIER: tier,
-            FIELD_NOTIFICATION_REASON: notification_reason,
-            FIELD_CREATED_AT: now,
-            FIELD_ATTEMPTS: 0,
-            FIELD_PUSHED: False,
-            FIELD_EXPIRES_AT: now + TURN_TTL,
-        })
+    def _write() -> bool:
+        try:
+            # create() is atomic and fails if the stable cmid already exists. It avoids
+            # the read-before-write transaction that every new turn previously paid for.
+            _ref(user_id, cmid).create({
+                FIELD_STATUS: STATUS_GENERATING,
+                FIELD_SESSION_ID: session_id or "",
+                FIELD_MESSAGE: message[:_MAX_CONTENT_CHARS],
+                FIELD_HISTORY: _sanitize_history(history),
+                FIELD_HAS_ATTACHMENTS: bool(has_attachments),
+                FIELD_TIER: tier,
+                FIELD_NOTIFICATION_REASON: notification_reason,
+                FIELD_CREATED_AT: now,
+                FIELD_ATTEMPTS: 0,
+                FIELD_PUSHED: False,
+                FIELD_EXPIRES_AT: now + TURN_TTL,
+            })
+            return True
+        except AlreadyExists:
+            return False
 
     try:
-        await asyncio.to_thread(_write)
-        return True
+        return await asyncio.to_thread(_write)
     except Exception as exc:
         logger.warn("turn_store: start_turn failed (live stream unaffected)", {
             "user_id": user_id, "cmid": cmid, "error": str(exc),
@@ -146,9 +153,12 @@ async def start_turn(
 
 
 async def mark_client_complete(user_id: str, cmid: str) -> None:
-    """The foreground stream finished and the client has the reply: flip generating ->
-    client_complete so the pending Cloud Task becomes a no-op. Only-if-generating, so it
-    never clobbers a background completion that already won the race. Fail-open."""
+    """Remove a foreground-delivered recovery checkpoint.
+
+    The conditional transaction deletes only ``generating`` records, so it never
+    clobbers a background completion that already won the claim race. A delayed task
+    that was not cancelled reads the missing document and becomes a no-op. Fail-open.
+    """
     if not cmid:
         return
 
@@ -163,7 +173,7 @@ async def mark_client_complete(user_id: str, cmid: str) -> None:
                 return
             if (snap.to_dict() or {}).get(FIELD_STATUS) != STATUS_GENERATING:
                 return
-            txn.update(ref, {FIELD_STATUS: STATUS_CLIENT_COMPLETE})
+            txn.delete(ref)
 
         _txn(transaction)
 
@@ -197,7 +207,13 @@ async def claim_for_completion(
             if not snap.exists:
                 return None
             data = snap.to_dict() or {}
-            if data.get(FIELD_STATUS) != STATUS_GENERATING:
+            status = data.get(FIELD_STATUS)
+            stale_regeneration = (
+                status == STATUS_REGENERATING
+                and isinstance(data.get(FIELD_CLAIMED_AT), datetime)
+                and data[FIELD_CLAIMED_AT] <= now - COMPLETION_CLAIM_LEASE
+            )
+            if status != STATUS_GENERATING and not stale_regeneration:
                 return None
             attempts = int(data.get(FIELD_ATTEMPTS, 0))
             if attempts >= MAX_ATTEMPTS:
@@ -240,6 +256,18 @@ async def mark_complete(
             FIELD_ANSWER_TEXT: answer_text,
             FIELD_PUSHED: pushed,
             FIELD_EXPIRES_AT: now + TURN_TTL,
+            # Once terminal, only the reply hydration fields need to survive. Removing
+            # the copied prompt/history in this same write keeps exceptional recovery
+            # records small without adding another billed operation.
+            FIELD_MESSAGE: fs.DELETE_FIELD,
+            FIELD_HISTORY: fs.DELETE_FIELD,
+            FIELD_HAS_ATTACHMENTS: fs.DELETE_FIELD,
+            FIELD_TIER: fs.DELETE_FIELD,
+            FIELD_NOTIFICATION_REASON: fs.DELETE_FIELD,
+            FIELD_CREATED_AT: fs.DELETE_FIELD,
+            FIELD_CLAIMED_AT: fs.DELETE_FIELD,
+            FIELD_ATTEMPTS: fs.DELETE_FIELD,
+            FIELD_TOOL_RECEIPTS: fs.DELETE_FIELD,
         }
         if completed_tools is not None:
             payload[FIELD_COMPLETED_TOOLS] = completed_tools
@@ -258,7 +286,18 @@ async def mark_complete(
 async def mark_failed(user_id: str, cmid: str) -> None:
     """Mark the turn failed (background completion could not produce an answer). Fail-open."""
     def _write() -> None:
-        _ref(user_id, cmid).set({FIELD_STATUS: STATUS_FAILED}, merge=True)
+        _ref(user_id, cmid).set({
+            FIELD_STATUS: STATUS_FAILED,
+            FIELD_MESSAGE: fs.DELETE_FIELD,
+            FIELD_HISTORY: fs.DELETE_FIELD,
+            FIELD_HAS_ATTACHMENTS: fs.DELETE_FIELD,
+            FIELD_TIER: fs.DELETE_FIELD,
+            FIELD_NOTIFICATION_REASON: fs.DELETE_FIELD,
+            FIELD_CREATED_AT: fs.DELETE_FIELD,
+            FIELD_CLAIMED_AT: fs.DELETE_FIELD,
+            FIELD_ATTEMPTS: fs.DELETE_FIELD,
+            FIELD_TOOL_RECEIPTS: fs.DELETE_FIELD,
+        }, merge=True)
 
     try:
         await asyncio.to_thread(_write)
@@ -309,19 +348,46 @@ async def list_stuck_turns(
 
     def _query() -> list[tuple[str, str, str]]:
         db = admin_firestore()
-        query = (
+        generating_query = (
             db.collection_group(COLLECTION)
             .where(filter=FieldFilter(FIELD_STATUS, "==", STATUS_GENERATING))
             .where(filter=FieldFilter(FIELD_CREATED_AT, "<=", older_than))
             .limit(limit)
         )
+        regenerating_query = (
+            db.collection_group(COLLECTION)
+            .where(filter=FieldFilter(FIELD_STATUS, "==", STATUS_REGENERATING))
+            .where(filter=FieldFilter(FIELD_CREATED_AT, "<=", older_than))
+            .limit(limit)
+        )
+        documents: list[fs.DocumentSnapshot] = []
+        try:
+            documents.extend(generating_query.stream())
+        except Exception as exc:
+            logger.error(
+                "turn_store: generating backstop query failed",
+                {"error": str(exc)},
+            )
+        try:
+            documents.extend(regenerating_query.stream())
+        except Exception as exc:
+            # Recovery of ordinary generating turns continues even if this
+            # secondary status query fails.
+            logger.error(
+                "turn_store: regenerating backstop query failed",
+                {"error": str(exc)},
+            )
+
         out: list[tuple[str, str, str]] = []
-        for doc in query.stream():
+        seen: set[str] = set()
+        for doc in documents:
             data = doc.to_dict() or {}
             # users/{uid}/chat_turns/{cmid}: parent is chat_turns, its parent is the user doc.
             user_doc = doc.reference.parent.parent
             uid = user_doc.id if user_doc else ""
-            if uid:
+            identity = f"{uid}:{doc.id}"
+            if uid and identity not in seen and len(out) < limit:
+                seen.add(identity)
                 out.append((uid, doc.id, str(data.get(FIELD_SESSION_ID) or "")))
         return out
 

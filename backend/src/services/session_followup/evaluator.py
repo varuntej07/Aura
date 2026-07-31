@@ -8,7 +8,6 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..memory import graph_fields as GF
@@ -397,8 +396,6 @@ async def evaluate_finalized_session(
     now: datetime | None = None,
 ) -> str | None:
     """Evaluate one finalized session. The exact evaluation tuple is a no-op."""
-    if not F.feature_enabled(settings):
-        return None
     when = now or datetime.now(UTC)
     session, turns, user = await _read_inputs(uid, session_id)
     if not session or session.get("state") != F.STATE_FINALIZED:
@@ -493,11 +490,7 @@ async def evaluate_finalized_session(
             input_revision=revision,
             evaluator_version=evaluator_version,
             lineage_chain=tuple([*lineage, topic["topic_id"]]),
-            initial_state=(
-                machine.STATE_SHADOW
-                if settings.FOLLOWUP_SHADOW
-                else machine.STATE_SCHEDULED
-            ),
+            initial_state=machine.STATE_SCHEDULED,
         )
         installed = await machine.install_candidate(uid, draft)
         if not installed:
@@ -511,21 +504,7 @@ async def evaluate_finalized_session(
         "candidate_id": candidate_id,
         "topics": evaluated_topics,
     })
-    if candidate_id is not None and settings.FOLLOWUP_SHADOW:
-        from .revalidator import revalidate_and_submit_followup
-
-        candidate = next(
-            topic
-            for topic in evaluated_topics
-            if topic["topic_id"] == best[1]["topic_id"]
-        )
-        fire_at = when + timedelta(
-            minutes=_jitter_minutes(session_id, candidate["topic_id"], revision, evaluator_version)
-        )
-        await revalidate_and_submit_followup(
-            uid,
-            candidate_id,
-            expected_fire_epoch=fire_at.timestamp(),
-            now=fire_at,
-        )
+    # The candidate is installed as scheduled and fires from the per-minute drain at
+    # its jittered fire_at. Nothing revalidates inline: the whole point of the delay
+    # is that the world may have changed by then.
     return candidate_id

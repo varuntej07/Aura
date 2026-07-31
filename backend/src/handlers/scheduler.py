@@ -100,41 +100,47 @@ async def _fan_out_daily_plans() -> None:
     logger.info("scheduler: daily plan fan-out complete", {"users": len(user_ids)})
 
 
-async def _emit_tick_events() -> None:
-    """Hourly reactive heartbeat: emit one ``tick`` event per active user so the
-    orchestrator wakes their time-based agents (curiosity, icebreaker).
+async def _enqueue_tick_tasks(*, tick_at: datetime) -> int:
+    """Enqueue one deterministic Cloud Task per active user for the hourly clock signal.
 
-    This is cron demoted to a single event source (§4.1). The agents self-gate on
-    cadence + consent, so most ticks dispatch nothing — the restraint is the
-    feature. The outbox relay turns each emitted event into one coalesced
-    orchestrate. Fire-and-forget; bounded + isolated, so it can never delay or fail
-    the reminder tick.
+    A tick has no business state to co-commit, so persisting it in Firestore's
+    transactional outbox only creates write/read/update/delete amplification. Cloud
+    Tasks already provides durable retry. This function is awaited by the scheduler
+    request; partial enqueue failure raises so Cloud Scheduler retries, while
+    deterministic task names absorb duplicates from that retry.
     """
-    from ..services.reactive import event_bus
-    from ..services.reactive.events import EVENT_TICK
+    from ..services.engagement.task_scheduler import get_task_scheduler
     from ..services.signal_engine.feature_store import list_active_user_ids
 
-    try:
-        user_ids = await list_active_user_ids()
-    except Exception as exc:
-        logger.error("scheduler: tick emit, failed to load active users", {"error": str(exc)})
-        return
+    user_ids = await list_active_user_ids()
     if not user_ids:
-        return
+        return 0
 
     semaphore = asyncio.Semaphore(10)
+    task_scheduler = get_task_scheduler()
+    failures: list[tuple[str, str]] = []
 
-    async def _emit_one(uid: str) -> None:
+    async def _enqueue_one(uid: str) -> None:
         async with semaphore:
             try:
-                await event_bus.emit(uid, EVENT_TICK, source="scheduler")
+                await asyncio.to_thread(
+                    task_scheduler.schedule_reactive_tick,
+                    uid,
+                    tick_at=tick_at,
+                )
             except Exception as exc:
-                logger.warn("scheduler: tick emit per-user failed", {
+                failures.append((uid, str(exc)))
+                logger.error("scheduler: reactive tick enqueue failed", {
                     "user_id": uid, "error": str(exc),
                 })
 
-    await asyncio.gather(*[_emit_one(uid) for uid in user_ids])
-    logger.info("scheduler: hourly tick events emitted", {"users": len(user_ids)})
+    await asyncio.gather(*[_enqueue_one(uid) for uid in user_ids])
+    if failures:
+        raise RuntimeError(
+            f"reactive tick enqueue failed for {len(failures)} of {len(user_ids)} users"
+        )
+    logger.info("scheduler: hourly reactive ticks enqueued", {"users": len(user_ids)})
+    return len(user_ids)
 
 
 async def _run_daily_briefing() -> None:
@@ -227,7 +233,10 @@ async def _run_proactive_drain() -> None:
     try:
         queued_user_ids = await list_user_ids_with_pending()
     except Exception as exc:
-        logger.error("scheduler: proactive drain, failed to discover queued users", {"error": str(exc)})
+        logger.error(
+            "scheduler: proactive drain, failed to discover queued users",
+            {"error": str(exc)},
+        )
         return
     if not queued_user_ids:
         return
@@ -272,12 +281,19 @@ async def _run_memory_graph_candidate_drain(*, now: datetime | None = None) -> i
     """Process due graph candidates through revalidation and the shared funnel."""
     if not settings.NOTIF_GRAPH:
         return 0
+    try:
+        from ..services.notifications.memory_graph_notifications import run_due_candidates
+
+        return await run_due_candidates(now=now)
+    except Exception as exc:
+        logger.error("scheduler: memory graph candidate drain failed open", {
+            "error": str(exc),
+        })
+        return 0
 
 
 async def _run_session_followup_lifecycle_sweep(*, now: datetime | None = None) -> int:
     """Finalize due sessions through the sole lifecycle owner."""
-    if not (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
-        return 0
     try:
         from ..services.session_followup.lifecycle import session_lifecycle_service
 
@@ -289,25 +305,14 @@ async def _run_session_followup_lifecycle_sweep(*, now: datetime | None = None) 
         return 0
 
 
-async def _run_session_followup_shadow_drain(*, now: datetime | None = None) -> int:
-    """Revalidate due source-D candidates; shadow records and never sends."""
-    if not (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
-        return 0
+async def _run_session_followup_drain(*, now: datetime | None = None) -> int:
+    """Revalidate due source-D candidates and submit the survivors."""
     try:
-        from ..services.session_followup.revalidator import run_due_shadow_followups
+        from ..services.session_followup.revalidator import run_due_followups
 
-        return await run_due_shadow_followups(now=now)
+        return await run_due_followups(now=now)
     except Exception as exc:
-        logger.error("scheduler: session followup shadow drain failed open", {
-            "error": str(exc),
-        })
-        return 0
-    try:
-        from ..services.notifications.memory_graph_notifications import run_due_candidates
-
-        return await run_due_candidates(now=now)
-    except Exception as exc:
-        logger.error("scheduler: memory graph candidate drain failed open", {
+        logger.error("scheduler: session followup drain failed open", {
             "error": str(exc),
         })
         return 0
@@ -329,9 +334,9 @@ async def _run_intent_sweep() -> None:
 
 async def _run_outbox_sweep() -> None:
     """Reactive event-bus relay: enqueue one coalesced /internal/orchestrate task
-    per user with unconsumed outbox events. Runs EVERY minute — it is the durability
-    backstop for the inline presence dispatch and the primary path for domain /
-    temporal events (≤60s latency). Cheap when empty (one indexed equality read).
+    per user with unconsumed outbox events. Runs every five minutes as the durable
+    recovery backstop for post-commit inline dispatch. Persisted events represent
+    real state-linked work; synthetic clock ticks use Cloud Tasks directly.
     Fire-and-forget and bounded inside the helper, so it can never delay or fail the
     reminder tick."""
     from ..services.reactive import event_bus
@@ -340,6 +345,37 @@ async def _run_outbox_sweep() -> None:
         await event_bus.dispatch_pending()
     except Exception as exc:
         logger.error("scheduler: outbox sweep failed", {"error": str(exc)})
+
+
+async def _run_meeting_job_sweep() -> None:
+    """Rediscover durable meeting jobs whose Cloud Tasks delivery was missed."""
+    from ..services.meetings import tasks as meeting_tasks
+
+    try:
+        result = await meeting_tasks.dispatch_pending(limit=50)
+        logger.info("scheduler: meeting durable-job sweep", {
+            **result,
+            "metric": "meeting_outbox_dispatch",
+        })
+    except Exception as exc:
+        logger.error("scheduler: meeting durable-job sweep failed", {
+            "error_code": "meeting_outbox_sweep_failed",
+            "error": str(exc),
+            "alert": True,
+        })
+
+
+async def _run_meeting_reconciliation() -> None:
+    from ..services.meetings.operations import reconciliation_snapshot
+
+    try:
+        await reconciliation_snapshot(limit=200)
+    except Exception as exc:
+        logger.error("scheduler: meeting reconciliation failed", {
+            "error_code": "meeting_reconciliation_failed",
+            "error": str(exc),
+            "alert": True,
+        })
 
 
 async def _run_reengagement() -> None:
@@ -454,12 +490,12 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         if now_utc.hour == 1 and now_minute == 30:
             asyncio.create_task(_fan_out_daily_plans())
 
-        # Hourly reactive heartbeat: emit one tick event per active user. The
-        # orchestrator wakes their time-based agents (curiosity, icebreaker) off it;
-        # each agent self-gates on cadence/consent. Replaces the old direct
-        # reflector (minute 0) + icebreaker (minute 15) cron passes. Fire-and-forget.
+        # Hourly reactive heartbeat: enqueue one deterministic Cloud Task per active
+        # user. Clock signals are transient and never touch Firestore. Await the
+        # fan-out so a partial Cloud Tasks failure returns 500 and Cloud Scheduler
+        # retries; deterministic task names suppress duplicates on that retry.
         if now_minute == 0:
-            asyncio.create_task(_emit_tick_events())
+            await _enqueue_tick_tasks(tick_at=now_utc)
 
         # Daily briefing fan-out, every 15 minutes at minutes 5/20/35/50 — offset
         # from the thread reflector (minute 0) and icebreaker (minute 15) so the LLM
@@ -513,10 +549,19 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # forget; cheap when nothing is due; atomic claims make overlapping ticks safe.
         asyncio.create_task(_run_intent_sweep())
 
-        # Reactive event-bus outbox relay, EVERY minute. Dispatches one coalesced
-        # /internal/orchestrate task per user with unconsumed events, and is the backstop
-        # for the inline presence dispatch. Fire-and-forget; bounded + isolated.
-        asyncio.create_task(_run_outbox_sweep())
+        # Reactive event-bus outbox relay every five minutes. All current persisted
+        # producers also dispatch inline after commit; this slower sweep is their
+        # durable recovery path, not a polling path for synthetic clock work.
+        if now_minute % 5 == 1:
+            asyncio.create_task(_run_outbox_sweep())
+
+        # Firestore meeting jobs are authoritative; Cloud Tasks is only the
+        # delivery hint. This is the commit/dispatch crash recovery path.
+        if now_minute % 5 == 2:
+            asyncio.create_task(_run_meeting_job_sweep())
+
+        if now_minute == 27:
+            asyncio.create_task(_run_meeting_reconciliation())
 
         # Proactive notification queue drain, EVERY minute. The producers (thread /
         # icebreaker / news / re-engage) only ENQUEUE; this is where their proposals are
@@ -531,11 +576,10 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                 asyncio.create_task(_run_memory_graph_sweep(now=now_utc))
             asyncio.create_task(_run_memory_graph_candidate_drain(now=now_utc))
 
-        # Source D remains completely absent from the scheduler when both flags
-        # are off. Shadow runs lifecycle, evaluation, and fire-time policy only.
-        if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
-            asyncio.create_task(_run_session_followup_lifecycle_sweep(now=now_utc))
-            asyncio.create_task(_run_session_followup_shadow_drain(now=now_utc))
+        # Source D: finalize idle sessions, then fire the candidates that came due.
+        # Both are every-minute because a follow-up's value decays with its delay.
+        asyncio.create_task(_run_session_followup_lifecycle_sweep(now=now_utc))
+        asyncio.create_task(_run_session_followup_drain(now=now_utc))
 
         delivered = 0
 
@@ -547,7 +591,11 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             try:
                 # Atomically claim the reminder before any slow work (model call, FCM).
                 # If another scheduler tick already claimed it, skip — prevents duplicate fires.
-                claimed = await asyncio.to_thread(claim_reminder_for_processing, user_id, reminder_id)
+                claimed = await asyncio.to_thread(
+                    claim_reminder_for_processing,
+                    user_id,
+                    reminder_id,
+                )
                 if not claimed:
                     logger.info("Reminder already claimed by concurrent tick, skipping", {
                         "user_id": user_id,
@@ -578,7 +626,8 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                             "created_via": str(data.get("created_via", "voice")),
                         },
                         notification_type="reminder",
-                        # Collapse prevents duplicate banners if the scheduler fires more than once before the user dismisses.
+                        # Collapse prevents duplicate banners if overlapping scheduler
+                        # ticks fire before the user dismisses the first notification.
                         collapse_key=f"reminder_{reminder_id}",
                         apns_category="BUDDY_REMINDER",
                     )

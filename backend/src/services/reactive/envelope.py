@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from ...lib.logger import logger
 from . import agent_runs
 from .agent import Agent, UserContext, Verdict, VerdictKind
-from .idempotency import idempotent
+from .idempotency import idempotent, release
 
 if TYPE_CHECKING:
     from ..notifications.proposal import NotificationProposal
@@ -104,9 +104,10 @@ async def run_agent(
 
     # Idempotency claim BEFORE a side-effecting act (the shared primitive). A lost
     # claim means a duplicate delivery already did the work — skip.
-    if plan.idempotency_key:
-        if not await idempotent(plan.idempotency_key, scope=ctx.user_id):
-            trace.add_step("duplicate", key=plan.idempotency_key)
+    claimed_key = plan.idempotency_key
+    if claimed_key:
+        if not await idempotent(claimed_key, scope=ctx.user_id):
+            trace.add_step("duplicate", key=claimed_key)
             return await _finish(
                 trace,
                 EnvelopeOutcome(
@@ -145,7 +146,7 @@ async def run_agent(
 
         if verdict.is_ok:
             status = STATUS_RECOVERED if repairs > 0 else STATUS_OK
-            return await _finish(
+            outcome = await _finish(
                 trace,
                 EnvelopeOutcome(
                     agent.name, ctx.user_id, status, proposal=_proposal(last_raw),
@@ -153,11 +154,17 @@ async def run_agent(
                 ),
                 when,
             )
+            # The envelope only produces a proposal. Delivery has not committed
+            # yet, so keep the event retryable until the funnel's own durable
+            # deduplication accepts it.
+            if claimed_key:
+                await release(claimed_key, scope=ctx.user_id)
+            return outcome
 
         # A deliberate no-go: stand down cleanly, do NOT escalate.
         if verdict.kind == VerdictKind.POLICY:
             trace.add_step("policy_standdown", reason=verdict.reason)
-            return await _finish(
+            outcome = await _finish(
                 trace,
                 EnvelopeOutcome(
                     agent.name, ctx.user_id, STATUS_STOOD_DOWN, reason=verdict.reason,
@@ -165,6 +172,9 @@ async def run_agent(
                 ),
                 when,
             )
+            if claimed_key:
+                await release(claimed_key, scope=ctx.user_id)
+            return outcome
 
         # Bounded recovery, with a tighter cap on the expensive LLM re-plan path.
         is_replan = verdict.kind == VerdictKind.LOW_QUALITY
@@ -192,7 +202,7 @@ async def run_agent(
     reason = last_verdict.reason if last_verdict else "cap_reached"
     if degraded_raw is not None:
         trace.add_step("escalate_degraded", verdict=str(last_verdict.kind) if last_verdict else "")
-        return await _finish(
+        outcome = await _finish(
             trace,
             EnvelopeOutcome(
                 agent.name, ctx.user_id, STATUS_ESCALATED_DEGRADED,
@@ -201,9 +211,12 @@ async def run_agent(
             ),
             when, loud=True,
         )
+        if claimed_key:
+            await release(claimed_key, scope=ctx.user_id)
+        return outcome
 
     trace.add_step("escalate", verdict=str(last_verdict.kind) if last_verdict else "")
-    return await _finish(
+    outcome = await _finish(
         trace,
         EnvelopeOutcome(
             agent.name, ctx.user_id, STATUS_ESCALATED, reason=reason,
@@ -211,6 +224,9 @@ async def run_agent(
         ),
         when, loud=True,
     )
+    if claimed_key:
+        await release(claimed_key, scope=ctx.user_id)
+    return outcome
 
 
 async def _finish(
