@@ -259,7 +259,7 @@ def test_chat_graph_first_falls_back_to_legacy_when_graph_empty(monkeypatch):
     ))
     aura_suffix = prompt_builder.build_injected_system_prompt_suffix(profile, [], "u1")
     expected = prompt_builder.build_system_blocks(
-        prompt_builder.settings.BUDDY_CHAT_SYSTEM_PROMPT,
+        prompt_builder.MOBILE_TEXT_SYSTEM_PROMPT,
         aura_suffix,
         "Saturday, July 18, 2026 at 1:00 PM PDT",
         "because you asked",

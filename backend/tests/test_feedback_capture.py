@@ -9,6 +9,7 @@ the fail-safe behaviour (never raises, no-op when unconfigured).
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 from src.config.settings import settings
 from src.services.feedback import feedback_capture, telegram_client
@@ -115,7 +116,12 @@ def test_build_document_has_all_fields():
 
 
 def test_build_document_carries_user_context():
-    report = FeedbackReport(category="praise", about="voice", summary="loves it", verbatim_quote="great")
+    report = FeedbackReport(
+        category="praise",
+        about="voice",
+        summary="loves it",
+        verbatim_quote="great",
+    )
     context = FeedbackUserContext(
         username="Varun",
         timezone="Asia/Kolkata",
@@ -133,7 +139,12 @@ def test_build_document_carries_user_context():
 
 def test_build_document_defaults_context_to_empty():
     # No context (e.g. profile read failed) → enrichment fields present but empty, never missing.
-    report = FeedbackReport(category="bug", about="chat", summary="broke", verbatim_quote="it broke")
+    report = FeedbackReport(
+        category="bug",
+        about="chat",
+        summary="broke",
+        verbatim_quote="it broke",
+    )
     doc = build_feedback_document("uid-7", report, source="text", session_id=None)
     assert doc[FIELD_USERNAME] == ""
     assert doc[FIELD_REGION] == ""
@@ -156,7 +167,7 @@ class _FakeCollection:
         self._sink = sink
 
     def document(self, doc_id: str | None = None):
-        del doc_id  # signature parity with firestore's .document(id); the fake ignores the id
+        self._sink["doc_id"] = doc_id
         return _FakeDoc(self._sink)
 
 
@@ -187,15 +198,46 @@ async def test_capture_persists_and_schedules_alert(monkeypatch):
         verbatim_quote="why did I get this, I don't like it",
         severity="medium",
     )
-    await feedback_capture.capture_feedback("uid-9", report, source="voice", session_id=None)
+    captured = await feedback_capture.capture_feedback(
+        "uid-9", report, source="voice", session_id=None
+    )
     await asyncio.sleep(0)  # let the detached alert task run
 
+    assert captured is True
     assert sink["collection"] == FEEDBACK_COLLECTION
     assert sink["doc"][FIELD_UID] == "uid-9"
     assert sink["doc"][FIELD_CATEGORY] == "complaint"
     assert sink["doc"][FIELD_SOURCE] == "voice"
     assert len(alerts) == 1
     assert "why did I get this" in alerts[0]
+
+
+async def test_capture_uses_supplied_deterministic_document_identity(monkeypatch):
+    sink: dict = {}
+    monkeypatch.setattr("src.services.firebase.admin_firestore", lambda: _FakeDB(sink))
+    monkeypatch.setattr(
+        feedback_capture,
+        "send_feedback_alert",
+        AsyncMock(return_value=None),
+    )
+    report = FeedbackReport(
+        category="bug",
+        about="voice",
+        summary="Voice stopped.",
+        verbatim_quote="It stopped again!",
+        severity="high",
+    )
+
+    captured = await feedback_capture.capture_feedback(
+        "uid-9",
+        report,
+        source="voice",
+        session_id="session-4",
+        document_id="voice_deterministic_id",
+    )
+
+    assert captured is True
+    assert sink["doc_id"] == "voice_deterministic_id"
 
 
 class _ProfileSnap:
@@ -259,9 +301,12 @@ async def test_capture_enriches_alert_and_doc_from_profile(monkeypatch):
         verbatim_quote="can the voice be softer",
         severity="low",
     )
-    await feedback_capture.capture_feedback("uid-42", report, source="voice", session_id=None)
+    captured = await feedback_capture.capture_feedback(
+        "uid-42", report, source="voice", session_id=None
+    )
     await asyncio.sleep(0)
 
+    assert captured is True
     doc = sink["doc"]
     assert doc[FIELD_USERNAME] == "Varun"
     assert doc[FIELD_TIMEZONE] == "Asia/Kolkata"
@@ -295,10 +340,18 @@ async def test_capture_enrichment_failure_still_persists_and_pings(monkeypatch):
 
     monkeypatch.setattr(feedback_capture, "send_feedback_alert", _fake_alert)
 
-    report = FeedbackReport(category="bug", about="chat", summary="broke", verbatim_quote="it broke")
-    await feedback_capture.capture_feedback("uid-1", report, source="text", session_id=None)
+    report = FeedbackReport(
+        category="bug",
+        about="chat",
+        summary="broke",
+        verbatim_quote="it broke",
+    )
+    captured = await feedback_capture.capture_feedback(
+        "uid-1", report, source="text", session_id=None
+    )
     await asyncio.sleep(0)
 
+    assert captured is True
     assert sink["doc"][FIELD_UID] == "uid-1"
     assert sink["doc"][FIELD_USERNAME] == ""  # enrichment skipped, field still present
     assert len(alerts) == 1
@@ -317,10 +370,18 @@ async def test_capture_never_raises_on_firestore_error(monkeypatch):
 
     monkeypatch.setattr(feedback_capture, "send_feedback_alert", _fake_alert)
 
-    report = FeedbackReport(category="bug", about="chat", summary="broke", verbatim_quote="it broke")
+    report = FeedbackReport(
+        category="bug",
+        about="chat",
+        summary="broke",
+        verbatim_quote="it broke",
+    )
     # Must not raise — a capture failure can never break a chat/voice turn.
-    await feedback_capture.capture_feedback("uid-1", report, source="text", session_id=None)
+    captured = await feedback_capture.capture_feedback(
+        "uid-1", report, source="text", session_id=None
+    )
     await asyncio.sleep(0)
+    assert captured is False
     # Alert is only scheduled after a successful write, so a failed write means no ping.
     assert called == []
 

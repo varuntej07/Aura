@@ -17,6 +17,8 @@ def test_command_event_is_legacy_compatible_and_ephemeral():
     )
     assert reason is None and event is not None
     payload = event["payload"]
+    assert event["schema_version"] == 2
+    assert event["event"] == "overlay.artifact.ready"
     assert event["type"] == "draft.created"
     assert payload["channel"] == "snippet"
     assert payload["length"] == "short"
@@ -25,6 +27,9 @@ def test_command_event_is_legacy_compatible_and_ephemeral():
     assert payload["content_format"] == "code"
     assert payload["persisted"] is False
     assert len(payload["draft_id"]) == 32
+    assert payload["artifact"]["body"] == payload["text"]
+    assert payload["artifact"]["copy_mode"] == "exact"
+    assert "speech" not in payload["artifact"]
 
 
 def test_prompt_and_steps_use_markdown_without_duplicate_display_copy():
@@ -97,6 +102,7 @@ async def test_publish_success_sends_one_reliable_packet(monkeypatch):
     assert len(published) == 1 and published[0][1] is True
     event = json.loads(published[0][0])
     assert event["payload"]["text"] == "# Task\nFind the root cause."
+    assert event["payload"]["artifact"]["body"] == "# Task\nFind the root cause."
 
 
 async def test_publish_failure_never_claims_the_card_is_visible(monkeypatch):

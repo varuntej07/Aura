@@ -24,8 +24,7 @@ def test_normalized_salience_dampens_huge_components_and_gates_status():
 
 
 def test_voice_context_always_fetches_and_renders_graph_digest(monkeypatch):
-    """Graph read is always on (flags removed 2026-07-20): the digest is fetched
-    exactly once per session and rendered into the {graph_context} slot."""
+    """Graph read is always on and its digest renders once in session context."""
     graph_calls = 0
 
     async def _profile(_uid):
@@ -64,10 +63,8 @@ def test_voice_context_always_fetches_and_renders_graph_digest(monkeypatch):
     monkeypatch.setattr(context, "fetch_graph_digest", _graph)
 
     session_context = asyncio.run(context.gather_session_context("u1", "s1"))
-    rendered_prompt = voice_prompt.VOICE_PROMPT.format(
-        **session_context.prompt_context_vars,
-        surface="",
-        screen_sight="",
+    rendered_prompt = voice_prompt.render_voice_session_context(
+        session_context.prompt_context_vars
     )
 
     assert graph_calls == 1

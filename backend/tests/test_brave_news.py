@@ -33,6 +33,12 @@ class _FakeResp:
     def __init__(self, payload):
         self._payload = payload
         self.content = b"non-empty"
+        # The success path reports status_code to provider telemetry. A real
+        # httpx.Response always carries it, so a fake without it made every query
+        # raise AttributeError, which asyncio.gather then propagated as a whole-batch
+        # failure and the fetcher returned []. Keep this attribute in sync with the
+        # success-path telemetry contract.
+        self.status_code = 200
 
     def raise_for_status(self):
         return None

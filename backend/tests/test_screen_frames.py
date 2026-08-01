@@ -23,13 +23,14 @@ from types import SimpleNamespace
 
 from livekit.agents import llm as lk_llm
 
+from src.agent.buddy_agent import BuddyAgent
 from src.agent.voice import screen_frames
 from src.agent.voice.screen_frames import (
     ScreenFrame,
     ScreenFrameStore,
     attach_screen_frame_to_turn,
 )
-from src.agent.voice_prompt import VOICE_PROMPT, render_screen_sight_note
+from src.prompts import voice_system_prompt
 
 
 class _FakeReader:
@@ -263,20 +264,20 @@ async def test_hook_never_raises():
 # ---------------------------------------------------------------- prompt slot
 
 
-def test_screen_sight_note_renders_only_for_desktop():
-    note = render_screen_sight_note("desktop")
+def test_surface_prompt_renders_screen_policy_only_for_desktop():
+    note = voice_system_prompt("desktop")
     normalized = note.lower()
-    assert "control alt g" in normalized
-    assert "control alt s" not in normalized
+    assert "ctrl+alt+g" in normalized
+    assert "ctrl+alt+s" not in normalized
     assert "eye" not in normalized
     assert "screenshot" in note
     # The prompt-injection posture rides with the capability.
     assert "never" in note.lower() and "instructions" in note.lower()
-    assert render_screen_sight_note("app") == ""
-    assert render_screen_sight_note("keyboard") == ""
+    assert "screenshot" not in voice_system_prompt("app").lower()
+    assert "screenshot" not in voice_system_prompt("keyboard").lower()
 
 
-def test_voice_prompt_formats_with_screen_sight_slot():
+def test_buddy_prompt_includes_screen_sight_only_for_desktop():
     vars = {
         "name": "V",
         "timezone": "UTC",
@@ -285,14 +286,20 @@ def test_voice_prompt_formats_with_screen_sight_slot():
         "memory_summary": "",
         "graph_context": "",
         "last_session_context": "",
-        "last_session_at": "",
         "archive_context": "",
         "user_aura_profile": "",
-        "surface": "",
-        "screen_sight": render_screen_sight_note("desktop"),
     }
-    rendered = VOICE_PROMPT.format(**vars)
-    assert "# Seeing their screen" in rendered
-    vars["screen_sight"] = render_screen_sight_note("app")
-    rendered_mobile = VOICE_PROMPT.format(**vars)
-    assert "# Seeing their screen" not in rendered_mobile
+    desktop = BuddyAgent(
+        user_id="u",
+        context_vars=vars,
+        chat_ctx=lk_llm.ChatContext(),
+        launch_surface="desktop",
+    )
+    app = BuddyAgent(
+        user_id="u",
+        context_vars=vars,
+        chat_ctx=lk_llm.ChatContext(),
+        launch_surface="app",
+    )
+    assert "Current screen evidence" in desktop.instructions
+    assert "Current screen evidence" not in app.instructions

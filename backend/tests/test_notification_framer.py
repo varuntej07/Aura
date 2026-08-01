@@ -145,7 +145,7 @@ def test_gender_never_changes_content_or_register():
     # USER CONTEXT block, never the content or the writing instruction.
     assert _content_section(male_prompt) == _content_section(female_prompt)
 
-    from src.services.signal_engine.notification_framer import _FRAMER_SYSTEM_PROMPT
-    lowered = _FRAMER_SYSTEM_PROMPT.lower()
+    from src.prompts import SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT
+    lowered = SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT.lower()
     assert "stereotype" in lowered
     assert "regardless of gender" in lowered

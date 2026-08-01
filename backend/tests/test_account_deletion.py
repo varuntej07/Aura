@@ -61,11 +61,15 @@ def test_user_audio_cleanup_deletes_only_the_users_prefix(monkeypatch):
     class _Blob:
         def __init__(self, name: str):
             self.name = name
+            self.generation = 7
 
     class _Bucket:
-        def blob(self, name: str):
+        def blob(self, name: str, *, generation: int):
+            assert generation == 7
+
             class _DeleteRef:
-                def delete(self) -> None:
+                def delete(self, *, if_generation_match: int) -> None:
+                    assert if_generation_match == 7
                     deleted.append(name)
 
             return _DeleteRef()

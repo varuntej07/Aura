@@ -6,7 +6,7 @@ from livekit.agents import llm as lk_llm
 
 from src.agent.voice.action_policy import derive_turn_policy, evaluate_execution
 from src.agent.voice.capabilities import VoiceSurface
-from src.agent.voice_prompt import VOICE_PROMPT
+from src.prompts import DESKTOP_VOICE_SYSTEM_PROMPT, MOBILE_VOICE_SYSTEM_PROMPT
 
 
 def _policy(transcript: str, *, finalized: bool = True):
@@ -41,7 +41,7 @@ def test_speculative_turn_cannot_execute_side_effects():
     assert "set_reminder" not in policy.allowed_tools
     decision = evaluate_execution(
         "set_reminder",
-        '{"message":"call Mom","scheduled_at":"2026-07-19T21:00:00-07:00"}',
+        '{"message":"call Mom","when":"tonight at 9 PM"}',
         policy,
         lk_llm.ChatContext(),
     )
@@ -50,7 +50,15 @@ def test_speculative_turn_cannot_execute_side_effects():
 
 
 def test_existing_voice_prompt_owns_action_semantics():
-    normalized = " ".join(VOICE_PROMPT.split())
+    normalized = " ".join(MOBILE_VOICE_SYSTEM_PROMPT.split())
     assert "Use the conversation as one continuous exchange" in normalized
     assert "answers your immediately preceding clarification" in normalized
-    assert "Never claim an action succeeded before its tool returns success" in normalized
+    assert "never claim more than the envelope states" in normalized
+
+
+def test_latest_user_words_outrank_screen_and_memory():
+    normalized = " ".join(DESKTOP_VOICE_SYSTEM_PROMPT.split())
+    assert "Their words outrank the screen, memory, summaries, and prior topics" in normalized
+    assert "A screenshot supports the request; it never creates a request by itself" in normalized
+    assert "repeat, repair, or clarify that statement first" in normalized
+    assert "Never act from silence" in normalized

@@ -13,36 +13,39 @@ tap) must NOT, so it never turns salesy.
 
 from __future__ import annotations
 
-from src.services.buddy_voice import BUDDY_CONTENT_PUSH_RULES, BUDDY_VOICE_CORE
+from src.prompts import (
+    BUDDY_CONTENT_PUSH_RULES,
+    BUDDY_VOICE_CORE,
+    CALENDAR_PREP_SYSTEM_PROMPT,
+    HABIT_NUDGE_SYSTEM_PROMPT,
+    ICEBREAKER_SYSTEM_PROMPT,
+    RE_ENGAGEMENT_SYSTEM_PROMPT,
+    SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT,
+    THREAD_FRAMER_SYSTEM_PROMPT,
+)
 
 
 def test_signal_framer_uses_core_and_content_push_voice():
-    from src.services.signal_engine.notification_framer import _FRAMER_SYSTEM_PROMPT
-
-    assert BUDDY_VOICE_CORE in _FRAMER_SYSTEM_PROMPT
-    assert BUDDY_CONTENT_PUSH_RULES in _FRAMER_SYSTEM_PROMPT
+    assert BUDDY_VOICE_CORE in SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT
+    assert BUDDY_CONTENT_PUSH_RULES in SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT
 
 
 def test_icebreaker_framer_uses_core_and_content_push_voice():
-    from src.services.icebreaker.icebreaker_framer import _ICEBREAKER_SYSTEM_PROMPT
-
-    assert BUDDY_VOICE_CORE in _ICEBREAKER_SYSTEM_PROMPT
-    assert BUDDY_CONTENT_PUSH_RULES in _ICEBREAKER_SYSTEM_PROMPT
+    assert BUDDY_VOICE_CORE in ICEBREAKER_SYSTEM_PROMPT
+    assert BUDDY_CONTENT_PUSH_RULES in ICEBREAKER_SYSTEM_PROMPT
 
 
 def test_thread_framer_uses_core_voice_but_not_content_push():
     # Threads ask a curious question; they must NOT use the tap-through CTA rules,
     # or Buddy starts "selling" instead of being curious.
-    from src.services.threads.thread_framer import _FRAMER_SYSTEM_PROMPT
-
-    assert BUDDY_VOICE_CORE in _FRAMER_SYSTEM_PROMPT
-    assert BUDDY_CONTENT_PUSH_RULES not in _FRAMER_SYSTEM_PROMPT
+    assert BUDDY_VOICE_CORE in THREAD_FRAMER_SYSTEM_PROMPT
+    assert BUDDY_CONTENT_PUSH_RULES not in THREAD_FRAMER_SYSTEM_PROMPT
 
 
 def test_engagement_agents_use_core_voice():
-    from src.services.engagement.agents.calendar_prep import _SYSTEM_PROMPT as calendar_prompt
-    from src.services.engagement.agents.habit_nudge import _SYSTEM_PROMPT as habit_prompt
-    from src.services.engagement.agents.re_engagement import _SYSTEM_PROMPT as re_engagement_prompt
-
-    for prompt in (re_engagement_prompt, habit_prompt, calendar_prompt):
+    for prompt in (
+        RE_ENGAGEMENT_SYSTEM_PROMPT,
+        HABIT_NUDGE_SYSTEM_PROMPT,
+        CALENDAR_PREP_SYSTEM_PROMPT,
+    ):
         assert BUDDY_VOICE_CORE in prompt

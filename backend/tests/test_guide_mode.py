@@ -7,7 +7,7 @@ import time
 from livekit.agents import llm as lk_llm
 
 from src.agent.voice.guide_mode import GuideCoordinator
-from src.agent.voice.guide_prompt import GUIDE_INSTRUCTIONS
+from src.prompts import GUIDE_INSTRUCTIONS
 from src.agent.voice.screen_frames import ScreenFrame
 
 GUIDE_SESSION_ID = "a" * 32
@@ -25,6 +25,15 @@ class _Session:
         self.user_state = "listening"
         self.calls: list[dict] = []
         self.says: list[str] = []
+        self.handlers: dict[str, list] = {}
+        self.interrupts = 0
+
+    def on(self, event: str, handler) -> None:
+        self.handlers.setdefault(event, []).append(handler)
+
+    def interrupt(self, *, force: bool) -> None:
+        assert force
+        self.interrupts += 1
 
     def generate_reply(self, **kwargs):
         self.calls.append(kwargs)
@@ -53,6 +62,7 @@ class _Buddy:
     def __init__(self) -> None:
         self._chat_ctx = lk_llm.ChatContext()
         self.frames: list[str] = []
+        self.frame_scales: list[float] = []
         self.updates = 0
         self.guide_active: bool | None = None
 
@@ -64,11 +74,48 @@ class _Buddy:
         self._chat_ctx = chat_ctx
         self.updates += 1
 
-    def set_guide_frame(self, frame_id: str) -> None:
+    def set_guide_frame(self, frame_id: str, model_scale: float = 1.0) -> None:
         self.frames.append(frame_id)
+        self.frame_scales.append(model_scale)
 
     async def apply_guide_persona(self, active: bool) -> None:
         self.guide_active = active
+
+    def is_guide_active(self) -> bool:
+        return self.guide_active is True
+
+
+class _TaskRuntime:
+    def __init__(self) -> None:
+        self.activations: list[dict] = []
+        self.deactivations: list[bool] = []
+        self.failure_handler = None
+        self.cancelled = 0
+        self.speech_in_progress = False
+
+    def bind_failure_handler(self, handler) -> None:
+        self.failure_handler = handler
+
+    def activate(self, **kwargs) -> None:
+        self.activations.append(kwargs)
+
+    def cancel_generation(self) -> None:
+        self.cancelled += 1
+
+    async def deactivate(self, *, cancelled: bool) -> None:
+        self.deactivations.append(cancelled)
+
+    async def close(self) -> None:
+        return None
+
+    def note_activity(self) -> None:
+        return None
+
+    async def on_user_speech_start(self) -> None:
+        return None
+
+    async def on_agent_state(self, _state: str) -> None:
+        return None
 
 
 def _frame(
@@ -93,22 +140,31 @@ def _coordinator():
     session = _Session()
     buddy = _Buddy()
     room = _Room()
+    task_runtime = _TaskRuntime()
     guide = GuideCoordinator(
         session=session,
         buddy=buddy,
         room=room,
         session_id="voice-session",
         user_id=USER_ID,
+        task_runtime=task_runtime,
     )
-    return guide, session, buddy, room
+    return guide, session, buddy, room, task_runtime
 
 
-def _control(*, active: bool = True, generation: int = 1, session_id=GUIDE_SESSION_ID):
+def _control(
+    *,
+    active: bool = True,
+    generation: int = 1,
+    session_id=GUIDE_SESSION_ID,
+    protocol_version: int = 1,
+):
     return {
         "type": "guide.mode",
         "active": active,
         "guide_session_id": session_id if active else None,
         "generation": generation,
+        "protocol_version": protocol_version,
     }
 
 
@@ -122,7 +178,7 @@ def _acks(room: _Room) -> list[dict]:
 
 
 async def test_control_requires_authenticated_participant_and_valid_session_id():
-    guide, _, buddy, _ = _coordinator()
+    guide, _, buddy, _, _ = _coordinator()
     assert not guide.apply_control(_control(), "someone-else")
     assert not guide.apply_control(_control(session_id="bad"), USER_ID)
     assert guide.apply_control(_control(), USER_ID)
@@ -132,8 +188,66 @@ async def test_control_requires_authenticated_participant_and_valid_session_id()
     assert buddy.guide_active is True
 
 
+async def test_protocol_v2_ack_is_published_only_after_persona_and_runtime_activate():
+    guide, _, buddy, room, runtime = _coordinator()
+    assert guide.apply_control(_control(protocol_version=2), USER_ID)
+    assert room.local_participant.published == []
+
+    await _settle()
+
+    assert buddy.guide_active is True
+    assert runtime.activations == [
+        {
+            "guide_session_id": GUIDE_SESSION_ID,
+            "protocol_version": 2,
+            "resume_task_id": None,
+        }
+    ]
+    assert _acks(room) == [
+        {
+            "type": "guide.mode_ack",
+            "payload": {
+                "active": True,
+                "generation": 1,
+                "guide_session_id": GUIDE_SESSION_ID,
+                "protocol_version": 2,
+                "reason": None,
+            },
+        }
+    ]
+
+
+async def test_runtime_failure_fails_closed_and_acknowledges_the_same_generation():
+    guide, session, buddy, room, runtime = _coordinator()
+    assert guide.apply_control(_control(protocol_version=2), USER_ID)
+    await _settle()
+    room.local_participant.published.clear()
+    runtime.speech_in_progress = True
+
+    assert runtime.failure_handler is not None
+    runtime.failure_handler("planning_unavailable")
+    await _settle()
+
+    assert not guide.is_active()
+    assert buddy.guide_active is False
+    assert runtime.cancelled >= 1
+    assert session.interrupts == 1
+    assert _acks(room) == [
+        {
+            "type": "guide.mode_ack",
+            "payload": {
+                "active": False,
+                "generation": 1,
+                "guide_session_id": GUIDE_SESSION_ID,
+                "protocol_version": 2,
+                "reason": "planning_unavailable",
+            },
+        }
+    ]
+
+
 async def test_changed_frame_fires_one_terse_pointed_nudge():
-    guide, session, buddy, room = _coordinator()
+    guide, session, buddy, room, _ = _coordinator()
     assert guide.apply_control(_control(), USER_ID)
     guide.start()
     guide.submit_frame(_frame(8, change="1"))
@@ -167,7 +281,7 @@ async def test_changed_frame_fires_one_terse_pointed_nudge():
 
 
 async def test_forced_static_frame_is_acked_but_not_spoken():
-    guide, session, _, room = _coordinator()
+    guide, session, _, room, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     guide.submit_frame(_frame(5, change="0"))
@@ -181,7 +295,7 @@ async def test_forced_static_frame_is_acked_but_not_spoken():
 
 
 async def test_every_accepted_frame_is_acked():
-    guide, _, _, room = _coordinator()
+    guide, _, _, room, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     guide.submit_frame(_frame(1, change="0"))
@@ -195,7 +309,7 @@ async def test_every_accepted_frame_is_acked():
 
 
 async def test_non_guide_and_wrong_session_frames_are_ignored():
-    guide, session, _, room = _coordinator()
+    guide, session, _, room, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     normal = _frame(1)
@@ -209,8 +323,8 @@ async def test_non_guide_and_wrong_session_frames_are_ignored():
     assert room.local_participant.published == []
 
 
-async def test_redelivered_frame_is_not_acked_or_spoken_twice():
-    guide, session, _, room = _coordinator()
+async def test_redelivered_frame_is_reacked_without_speaking_twice():
+    guide, session, _, room, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     frame = _frame(3, change="1")
@@ -221,11 +335,11 @@ async def test_redelivered_frame_is_not_acked_or_spoken_twice():
     await guide.close()
 
     assert len(session.calls) == 1
-    assert len(_acks(room)) == 1
+    assert len(_acks(room)) == 2
 
 
 async def test_two_rapid_changes_fire_one_nudge():
-    guide, session, _, _ = _coordinator()
+    guide, session, _, _, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     guide.submit_frame(_frame(4, change="1"))
@@ -239,7 +353,7 @@ async def test_two_rapid_changes_fire_one_nudge():
 
 
 async def test_nudge_suppressed_right_after_a_spoken_turn():
-    guide, session, _, _ = _coordinator()
+    guide, session, _, _, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     guide.note_user_turn("What should I click?")
@@ -252,7 +366,7 @@ async def test_nudge_suppressed_right_after_a_spoken_turn():
 
 
 async def test_stale_frame_is_acked_but_not_spoken():
-    guide, session, _, room = _coordinator()
+    guide, session, _, room, _ = _coordinator()
     guide.apply_control(_control(), USER_ID)
     guide.start()
     stale = _frame(10, change="1")
@@ -267,7 +381,7 @@ async def test_stale_frame_is_acked_but_not_spoken():
 
 
 async def test_disarm_flips_guide_persona_off():
-    guide, _, buddy, _ = _coordinator()
+    guide, _, buddy, _, _ = _coordinator()
     guide.apply_control(_control(active=True, generation=1), USER_ID)
     await _settle()
     assert buddy.guide_active is True
@@ -277,7 +391,7 @@ async def test_disarm_flips_guide_persona_off():
 
 
 async def test_old_images_are_stripped_before_next_guide_frame():
-    guide, _, buddy, _ = _coordinator()
+    guide, _, buddy, _, _ = _coordinator()
     buddy._chat_ctx.items.append(
         lk_llm.ChatMessage(
             role="user",

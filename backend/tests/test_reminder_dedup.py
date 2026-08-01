@@ -22,6 +22,7 @@ import pytest
 import src.services.analytics.posthog_client as posthog_client
 import src.services.signal_engine.embedder as embedder_module
 import src.services.threads.thread_writer as thread_writer
+import src.services.tool_executor as tool_executor_module
 from src.services.tool_executor import (
     ToolExecutor,
     _cosine,
@@ -79,6 +80,11 @@ def _executor_with_store(monkeypatch) -> tuple[ToolExecutor, dict]:
     store: dict = {}
     ex = ToolExecutor("u1", created_via="text")
     monkeypatch.setattr(ex, "_reminders_ref", lambda: _FakeCollection(store))
+    monkeypatch.setattr(
+        tool_executor_module,
+        "_get_user_timezone",
+        AsyncMock(return_value="UTC"),
+    )
     monkeypatch.setattr(thread_writer, "record_reminder_thread", AsyncMock())
     monkeypatch.setattr(posthog_client, "capture_event", AsyncMock())
     return ex, store
@@ -111,11 +117,9 @@ def test_within_trigger_window():
 async def test_exact_duplicate_within_window_skips_embedding(monkeypatch):
     ex, store = _executor_with_store(monkeypatch)
     embed = _patch_embed(monkeypatch, [[1.0, 0.0], [1.0, 0.0]])
-    base = datetime.now(UTC) + timedelta(hours=1)
-
-    first = await ex._set_reminder({"message": "Call mom", "scheduled_at": base.isoformat()})
+    first = await ex._set_reminder({"message": "Call mom", "when": "in 1 hour"})
     second = await ex._set_reminder(
-        {"message": "call mom", "scheduled_at": (base + timedelta(seconds=40)).isoformat()}
+        {"message": "call mom", "when": "in 61 minutes"}
     )
 
     assert len(store) == 1
@@ -126,13 +130,11 @@ async def test_exact_duplicate_within_window_skips_embedding(monkeypatch):
 async def test_paraphrase_within_window_is_deduped(monkeypatch):
     ex, store = _executor_with_store(monkeypatch)
     _patch_embed(monkeypatch, [[1.0, 0.0], [0.99, 0.02]])  # cosine ~1.0 >= threshold
-    base = datetime.now(UTC) + timedelta(hours=2)
-
     first = await ex._set_reminder(
-        {"message": "Send a LinkedIn DM to Vish Jaggi about Lululemon", "scheduled_at": base.isoformat()}
+        {"message": "Send a LinkedIn DM to Vish Jaggi about Lululemon", "when": "in 2 hours"}
     )
     second = await ex._set_reminder(
-        {"message": "Send a DM to Vishal about Lululemon", "scheduled_at": base.isoformat()}
+        {"message": "Send a DM to Vishal about Lululemon", "when": "in 2 hours"}
     )
 
     assert len(store) == 1, "a re-worded duplicate of the same task must collapse to one"
@@ -142,11 +144,9 @@ async def test_paraphrase_within_window_is_deduped(monkeypatch):
 async def test_distinct_tasks_at_same_time_are_kept(monkeypatch):
     ex, store = _executor_with_store(monkeypatch)
     _patch_embed(monkeypatch, [[1.0, 0.0], [0.0, 1.0]])  # cosine 0.0 < threshold
-    base = datetime.now(UTC) + timedelta(hours=3)
-
-    await ex._set_reminder({"message": "Ask gender at onboarding", "scheduled_at": base.isoformat()})
+    await ex._set_reminder({"message": "Ask gender at onboarding", "when": "in 3 hours"})
     await ex._set_reminder(
-        {"message": "Let users pick what voice they want", "scheduled_at": base.isoformat()}
+        {"message": "Let users pick what voice they want", "when": "in 3 hours"}
     )
 
     assert len(store) == 2, "a batch of distinct tasks at one time must survive"
@@ -155,12 +155,10 @@ async def test_distinct_tasks_at_same_time_are_kept(monkeypatch):
 async def test_similar_text_far_apart_in_time_is_kept(monkeypatch):
     ex, store = _executor_with_store(monkeypatch)
     embed = _patch_embed(monkeypatch, [[1.0, 0.0], [1.0, 0.0]])
-    base = datetime.now(UTC) + timedelta(hours=1)
-
-    first = await ex._set_reminder({"message": "Fill out I-983 form", "scheduled_at": base.isoformat()})
+    first = await ex._set_reminder({"message": "Fill out I-983 form", "when": "in 1 hour"})
     # 4 hours later is outside the window: an intentional re-set, not a duplicate.
     second = await ex._set_reminder(
-        {"message": "Fill out I-983 form", "scheduled_at": (base + timedelta(hours=4)).isoformat()}
+        {"message": "Fill out I-983 form", "when": "in 5 hours"}
     )
 
     assert len(store) == 2
@@ -171,13 +169,11 @@ async def test_similar_text_far_apart_in_time_is_kept(monkeypatch):
 async def test_embedding_failure_fails_open(monkeypatch):
     ex, store = _executor_with_store(monkeypatch)
     _patch_embed(monkeypatch, error=RuntimeError("quota exhausted"))
-    base = datetime.now(UTC) + timedelta(hours=2)
-
     await ex._set_reminder(
-        {"message": "Hook up Indeed and Apify connectors", "scheduled_at": base.isoformat()}
+        {"message": "Hook up Indeed and Apify connectors", "when": "in 2 hours"}
     )
     await ex._set_reminder(
-        {"message": "Wire Indeed plus Apify integrations", "scheduled_at": base.isoformat()}
+        {"message": "Wire Indeed plus Apify integrations", "when": "in 2 hours"}
     )
 
     # Embedding is the only way to catch this paraphrase; if it errors we must

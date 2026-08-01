@@ -148,7 +148,6 @@ void main() {
           'message': 'Call mom',
           'trigger_at': '2026-06-01T10:00:00Z',
           'status': 'pending',
-          'priority': 'normal',
         },
       }),
     ]);

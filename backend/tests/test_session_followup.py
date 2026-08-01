@@ -17,6 +17,11 @@ from src.services.notifications import orchestrator
 from src.services.notifications.memory_graph_framer import (
     FramedMemoryGraphNotification,
 )
+from src.services.notifications.proposal import (
+    REASON_OK,
+    Disposition,
+    OrchestratorDecision,
+)
 from src.services.reactive import event_bus
 from src.services.session_followup import evaluator, lifecycle, revalidator
 from src.services.session_followup import fields as F
@@ -250,8 +255,6 @@ def followup_db(monkeypatch):
         monkeypatch.setattr(module, "admin_firestore", lambda: db)
     for module in (machine, lifecycle, revalidator):
         monkeypatch.setattr(module, "fs", _Firestore)
-    monkeypatch.setattr(settings, "FOLLOWUP_SHADOW", True)
-    monkeypatch.setattr(settings, "PROACTIVE_FOLLOWUP_SEND", False)
     monkeypatch.setattr(
         orchestrator,
         "_user_local",
@@ -266,7 +269,15 @@ def followup_db(monkeypatch):
         )
 
     monkeypatch.setattr(revalidator, "frame_memory_graph_notification", _frame)
-    monkeypatch.setattr(orchestrator, "submit", AsyncMock())
+    # The send path is live now, so the fake has to return a real decision: a bare
+    # AsyncMock's .disposition is a Mock and would silently read as "not delivered".
+    monkeypatch.setattr(
+        orchestrator,
+        "submit",
+        AsyncMock(return_value=OrchestratorDecision(
+            disposition=Disposition.SEND, reason=REASON_OK, delivered=True,
+        )),
+    )
     return db
 
 
@@ -336,7 +347,7 @@ async def _evaluate(uid="u1", session_id="s1", **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_one_candidate_per_session_and_shadow_never_submits(followup_db):
+async def test_one_candidate_per_session_and_evaluation_never_submits(followup_db):
     _seed_session(followup_db)
     for index in range(4, 8):
         followup_db.docs[(
@@ -358,9 +369,8 @@ async def test_one_candidate_per_session_and_shadow_never_submits(followup_db):
     ]
     assert candidate_id
     assert len(candidates) == 1
-    assert candidates[0]["state"] == machine.STATE_SHADOW
-    assert candidates[0]["shadow_outcome"] == "would_submit"
-    assert candidates[0]["framed_text"]
+    assert candidates[0]["state"] == machine.STATE_SCHEDULED
+    # Evaluation schedules; only the fire-time drain may submit.
     orchestrator.submit.assert_not_awaited()
 
 
@@ -443,6 +453,8 @@ async def test_finalize_revision_version_and_task_retry_are_idempotent(followup_
     assert len([
         path for path in followup_db.docs if path[-2:-1] == (machine.CANDIDATE_SUBCOLLECTION,)
     ]) == 1
+    # A Cloud Tasks retry of an already-delivered candidate must not push twice.
+    assert orchestrator.submit.await_count == 1
 
     followup_db.docs[_path("u1", F.SESSIONS, "s1")]["input_revision"] = 2
     candidate_two = await _evaluate()
@@ -451,9 +463,11 @@ async def test_finalize_revision_version_and_task_retry_are_idempotent(followup_
     assert followup_db.docs[_path(
         "u1", machine.TOPIC_STATE_SUBCOLLECTION, candidate["topic_id"]
     )]["active_candidate_id"] == candidate_three
+    # Superseding does not rewrite a candidate that already went out; delivered is
+    # terminal and the ledger has to keep saying so.
     assert followup_db.docs[_path(
         "u1", machine.CANDIDATE_SUBCOLLECTION, candidate_one
-    )]["state"] == machine.STATE_CANCELED
+    )]["state"] == machine.STATE_DELIVERED
 
     # A duplicate finalization is owned and suppressed at the lifecycle boundary.
     assert await service.finalize_session("u1", "s1", reason="duplicate", now=NOW) is False
@@ -503,14 +517,7 @@ async def test_voice_grace_resumes_same_session_and_finalizes_once(followup_db):
         for path, data in followup_db.docs.items()
         if len(path) == 4 and path[-2] == "outbox"
     ]
-    assert len(events) == 1
-    assert events[0]["payload"] == {
-        "uid": "u1",
-        "session_id": session_id,
-        "surface": F.SURFACE_VOICE,
-        "origin": F.ORIGIN_ORGANIC,
-        "input_revision": 1,
-    }
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -530,17 +537,17 @@ async def test_same_topic_live_cancels_other_topic_live_defers(followup_db):
         now=candidate["fire_at"],
     )
     assert result == "canceled"
-    assert candidate["drop_reason"] == "same_topic_live"
+    assert candidate["terminal_reason"] == "same_topic_live"
 
     followup_db.docs[_path("u1", F.SESSIONS, "live")]["active_topic_id"] = "topic_other"
-    candidate["drop_reason"] = None
+    candidate["state"] = machine.STATE_SCHEDULED
     candidate["fire_at"] = NOW + timedelta(hours=1)
     result = await revalidator.revalidate_and_submit_followup(
         "u1", candidate_id, expected_fire_epoch=candidate["fire_at"].timestamp(),
         now=candidate["fire_at"],
     )
     assert result == "deferred"
-    assert candidate["drop_reason"] == "other_topic_live"
+    assert candidate["defer_reason"] == "other_topic_live"
 
 
 @pytest.mark.asyncio
@@ -556,7 +563,7 @@ async def test_quiet_hours_defer_then_refire_while_fresh(followup_db, monkeypatc
         now=candidate["fire_at"],
     )
     assert result == "deferred"
-    assert candidate["drop_reason"] == "quiet_hours"
+    assert candidate["defer_reason"] == "quiet_hours"
     deferred_fire_at = candidate["fire_at"]
 
     monkeypatch.setattr(orchestrator, "_is_quiet_hours", lambda _: False)
@@ -564,8 +571,9 @@ async def test_quiet_hours_defer_then_refire_while_fresh(followup_db, monkeypatc
         "u1", candidate_id, expected_fire_epoch=deferred_fire_at.timestamp(),
         now=deferred_fire_at,
     )
-    assert result == "shadow"
-    assert candidate["shadow_outcome"] == "would_submit"
+    assert result == machine.STATE_DELIVERED
+    assert candidate["framed_text"]
+    orchestrator.submit.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -705,14 +713,12 @@ def test_clustering_falls_back_without_graph_documents():
 
 
 @pytest.mark.asyncio
-async def test_flags_off_write_nothing_and_schedule_nothing(followup_db, monkeypatch):
-    monkeypatch.setattr(settings, "FOLLOWUP_SHADOW", False)
-    monkeypatch.setattr(settings, "PROACTIVE_FOLLOWUP_SEND", False)
+async def test_unknown_session_finalizes_and_evaluates_to_nothing(followup_db):
+    """Source D is unconditional now, so the old flags-off test asserts this instead:
+    an unseeded session must still be a clean no-op rather than an error."""
     service = lifecycle.SessionLifecycleService(followup_db)
 
-    assert await service.start_session("u1", "off", surface="chat") == "off"
     assert await service.finalize_session("u1", "off", reason="idle", now=NOW) is False
     assert await evaluator.evaluate_finalized_session("u1", "off", now=NOW) is None
     assert await scheduler._run_session_followup_lifecycle_sweep(now=NOW) == 0
-    assert await scheduler._run_session_followup_shadow_drain(now=NOW) == 0
-    assert not any(path[-1] == "off" for path in followup_db.docs)
+    assert await scheduler._run_session_followup_drain(now=NOW) == 0

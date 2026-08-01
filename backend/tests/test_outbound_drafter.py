@@ -18,7 +18,21 @@ from __future__ import annotations
 import asyncio
 
 from src.handlers import draft_outbound as handler
+from src.prompts import UNTRUSTED_INPUT_OPEN
 from src.services.outbound_draft import drafter
+
+
+def _draft_output(message: str, summary: str) -> drafter._DraftOutput:
+    return drafter._DraftOutput(
+        artifact=drafter._GeneratedArtifact(body=message),
+        private_context=drafter._PrivateDraftContext(summary=summary),
+    )
+
+
+def _refine_output(message: str) -> drafter._RefineOutput:
+    return drafter._RefineOutput(
+        artifact=drafter._GeneratedArtifact(body=message),
+    )
 
 
 class _FakeProvider:
@@ -38,7 +52,7 @@ class _FakeProvider:
         self.expert_calls.append({"prompt": prompt, "system": system, "images": images})
         if self._raises is not None:
             raise self._raises
-        return drafter._DraftOutput(message=self._message, context_summary=self._summary)
+        return _draft_output(self._message, self._summary)
 
     async def balanced(
         self, prompt, *, system=None, response_model=None, temperature=0.7
@@ -48,10 +62,8 @@ class _FakeProvider:
             raise self._raises
         # A frameless snippet draft rides balanced() with the DRAFT shape.
         if response_model is drafter._DraftOutput:
-            return drafter._DraftOutput(
-                message=self._message, context_summary=self._summary
-            )
-        return drafter._RefineOutput(message=self._message)
+            return _draft_output(self._message, self._summary)
+        return _refine_output(self._message)
 
 
 class _Req:
@@ -236,7 +248,7 @@ async def test_refine_rides_balanced_with_untrusted_context(monkeypatch):
     prompt = fake.balanced_calls[0]["prompt"]
     # Prior draft is delimited, and the screen-derived summary is untrusted-wrapped.
     assert "<prior_draft>" in prompt
-    assert drafter._UNTRUSTED_INPUT_OPEN in prompt
+    assert UNTRUSTED_INPUT_OPEN in prompt
     assert summary in prompt
     assert "warmer" in prompt
 
@@ -341,10 +353,10 @@ async def test_snippet_refine_is_valid_and_skips_length(monkeypatch):
     assert "use setx instead" in prompt
 
 
-async def test_on_screen_blank_length_is_valid_and_persona_no_ladder(monkeypatch):
+async def test_on_screen_storage_length_does_not_force_generation_length(monkeypatch):
     """The adaptive on_screen channel (the voice tool's default for a form
-    field): a blank length is VALID, it carries the user's writing voice like a
-    message, but it never forces the length ladder or a LENGTH line."""
+    field) carries a desktop-valid medium enum without forcing the medium
+    generation ladder."""
     fake = _FakeProvider(
         message="I'm building the same thing for Windows and can't wait to compare notes.",
         summary="Waitlist answer for the Clicky team about why the user is excited.",
@@ -354,9 +366,9 @@ async def test_on_screen_blank_length_is_valid_and_persona_no_ladder(monkeypatch
     result = await drafter.draft_outbound(
         "uid1",
         channel=drafter.DEFAULT_CHANNEL,
-        length="",  # inferred from the field, never asked for
-        recipient_hint="the Clicky team",
-        intent="why I'm excited to use Clicky",
+        length="medium",
+        recipient_hint="",
+        intent="  why I'm excited to use Clicky in one sentence  ",
         jpeg_base64="ZmFrZQ==",
         jpeg_width=2880,
         jpeg_height=1800,
@@ -372,13 +384,13 @@ async def test_on_screen_blank_length_is_valid_and_persona_no_ladder(monkeypatch
     # Persona: writes AS THE USER and carries the writing voice, unlike a snippet.
     assert "AS THE USER" in system
     assert "writing voice" in system
-    # No length ladder when length is blank.
+    # The storage-only default does not become a generation instruction.
     assert "50 words" not in system and "80-120 words" not in system
     # The user prompt has the screen + intent but no forced LENGTH line.
     prompt = call["prompt"]
     assert "LENGTH:" not in prompt
     assert "screenshot" in prompt.lower()
-    assert "Clicky" in prompt
+    assert "  why I'm excited to use Clicky in one sentence  " in prompt
 
 
 async def test_on_screen_without_frame_needs_one(monkeypatch):

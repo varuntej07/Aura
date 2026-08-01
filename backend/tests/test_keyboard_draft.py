@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 
 from src.handlers import keyboard
+from src.prompts import UNTRUSTED_INPUT_CLOSE, UNTRUSTED_INPUT_OPEN
 from src.services.keyboard import drafter
 from src.services.keyboard.drafter import DraftRequest
 
@@ -252,7 +253,7 @@ async def test_untrusted_input_is_delimited_and_digest_never_echoed(monkeypatch)
     system = fake.calls[0]["system"]
     user = fake.calls[0]["prompt"]
     # The attacker text is wrapped in untrusted delimiters, not pasted as a bare line.
-    assert drafter._UNTRUSTED_INPUT_OPEN in user and drafter._UNTRUSTED_INPUT_CLOSE in user
+    assert UNTRUSTED_INPUT_OPEN in user and UNTRUSTED_INPUT_CLOSE in user
     assert attack in user
     # The security rule is present (and restated) in the system prompt.
     assert "untrusted_input" in system

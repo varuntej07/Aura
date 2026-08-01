@@ -2,14 +2,11 @@
 Coverage for the voice worker's Buddy Drafts tool (agent/voice/draft_outbound).
 
 Pins the branch logic that guards cost and privacy:
-  - missing length defaults to medium and an unrecognized/blank channel falls
-    back to the adaptive on_screen channel, so a draft never bounces a
-    clarifying question (Buddy reads the screen instead);
+  - a new draft uses the finalized transcript verbatim and reads the fresh frame;
   - no screen frame publishes draft.failed{no_frame} and speaks the retry line;
   - the free-tier daily cap is charged ONCE per new draft, prod-only, and a
     voice refine never touches the counter or the frame store;
-  - a refine with no current draft falls through to a new draft using the
-    instruction as intent;
+  - a refine with no current draft fails truthfully and creates nothing;
   - happy paths publish draft.generating -> draft.created / draft.updated with
     the right revisions and keep session state consistent;
   - a drafter failure publishes draft.failed and degrades to speech.
@@ -23,6 +20,8 @@ from types import SimpleNamespace
 
 from src.agent.voice import draft_outbound as dm
 from src.services.outbound_draft.drafter import OutboundDraftResult
+
+_DRAFT_ID = "d" * 32
 
 
 class _FakeFrame:
@@ -107,75 +106,37 @@ def _state(tier="free"):
     )
 
 
-async def test_missing_length_defaults_to_medium_and_drafts(monkeypatch):
-    """An outbound channel with no length no longer bounces a question: it
-    defaults to medium and drafts, so the user never hears "how long?"."""
+async def test_new_uses_exact_finalized_transcript_and_fresh_frame(monkeypatch):
     h = _Harness(monkeypatch, production=True)
     state = _state()
     store = _FakeFrameStore(_FakeFrame())
+    transcript = "  Draft a warm reply to Sarah in two sentences.  "
 
     spoken = await dm.run_draft_tool(
-        state, store,
-        channel="email_reply", length="", recipient_hint="Sarah",
-        intent="decline", refine_instruction="",
+        state,
+        store,
+        operation="new",
+        transcript=transcript,
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
+    assert store.calls == 1
+    assert h.draft_calls[0]["intent"] == transcript
+    assert h.draft_calls[0]["channel"] == dm.DEFAULT_CHANNEL
     assert h.draft_calls[0]["length"] == "medium"
+    assert h.draft_calls[0]["recipient_hint"] == ""
+    assert h.draft_calls[0]["jpeg_base64"]
     assert h.event_types() == ["draft.generating", "draft.created"]
     assert state.current is not None
-
-
-async def test_unrecognized_channel_falls_back_to_on_screen(monkeypatch):
-    """A channel the model can't map (or a form field that is neither email nor
-    DM) falls back to the adaptive on_screen channel and drafts from the frame,
-    instead of the old dead-end "email or new message?" bounce."""
-    h = _Harness(monkeypatch, production=True)
-    state = _state()
-
-    spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="fax", length="", recipient_hint="", intent="say why I'm excited",
-        refine_instruction="",
-    )
-
-    assert spoken == dm.SPOKEN_DRAFT_READY
-    assert h.draft_calls[0]["channel"] == dm.DEFAULT_CHANNEL
-    assert h.event_types() == ["draft.generating", "draft.created"]
-    assert state.current is not None and state.current.channel == dm.DEFAULT_CHANNEL
-
-
-async def test_empty_channel_with_frame_drafts_on_screen(monkeypatch):
-    """The transcript scenario: user on a web form asks Buddy to write the field
-    with no channel or length given. It must draft from the screen (on_screen),
-    never ask a clarifying question."""
-    h = _Harness(monkeypatch, production=True)
-    state = _state()
-
-    spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="", length="", recipient_hint="the Clicky team",
-        intent="why I'm excited to use Clicky", refine_instruction="",
-    )
-
-    assert spoken == dm.SPOKEN_DRAFT_READY
-    call = h.draft_calls[0]
-    assert call["channel"] == dm.DEFAULT_CHANNEL
-    # on_screen infers its own real length internally, but a blank length is
-    # normalized to a valid ladder value so draft.created ships an enum every
-    # desktop client accepts (a blank length was dropped as malformed there,
-    # leaving the card stuck on its skeleton).
-    assert call["length"] == "medium"
-    assert call["jpeg_base64"] and call["jpeg_width"] == 1280
-    assert state.current is not None and state.current.channel == dm.DEFAULT_CHANNEL
 
 
 async def test_no_frame_fails_loudly_without_quota(monkeypatch):
     h = _Harness(monkeypatch, production=True)
     spoken = await dm.run_draft_tool(
-        _state(), _FakeFrameStore(None),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="",
+        _state(),
+        _FakeFrameStore(None),
+        operation="new",
+        transcript="decline",
     )
     assert spoken == dm.SPOKEN_NO_FRAME
     assert h.event_types() == ["draft.failed"]
@@ -186,9 +147,10 @@ async def test_no_frame_fails_loudly_without_quota(monkeypatch):
 async def test_quota_exceeded_speaks_limit_and_captures(monkeypatch):
     h = _Harness(monkeypatch, production=True, quota_allowed=False)
     spoken = await dm.run_draft_tool(
-        _state(tier="free"), _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="",
+        _state(tier="free"),
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
     )
     assert spoken == dm.SPOKEN_QUOTA
     assert h.event_types() == ["draft.failed"]
@@ -200,9 +162,10 @@ async def test_quota_exceeded_speaks_limit_and_captures(monkeypatch):
 async def test_paid_tier_skips_quota(monkeypatch):
     h = _Harness(monkeypatch, production=True)
     await dm.run_draft_tool(
-        _state(tier="pro"), _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="",
+        _state(tier="pro"),
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
     )
     assert h.quota_calls == []
     assert h.event_types() == ["draft.generating", "draft.created"]
@@ -211,9 +174,10 @@ async def test_paid_tier_skips_quota(monkeypatch):
 async def test_non_production_skips_quota(monkeypatch):
     h = _Harness(monkeypatch, production=False)
     await dm.run_draft_tool(
-        _state(tier="free"), _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="",
+        _state(tier="free"),
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
     )
     assert h.quota_calls == []
 
@@ -223,9 +187,10 @@ async def test_new_draft_happy_path(monkeypatch):
     state = _state(tier="free")
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="medium", recipient_hint="Sarah",
-        intent="politely decline", refine_instruction="",
+        state,
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="politely decline",
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
@@ -243,23 +208,24 @@ async def test_new_draft_happy_path(monkeypatch):
     assert call["display_name"] == "Varun"
     assert [c["event"] for c in h.captured] == ["desktop_draft_requested"]
     props = h.captured[0]["properties"]
-    assert props == {"channel": "email_reply", "length": "medium", "mode": "new"}
+    assert props == {"channel": "on_screen", "length": "medium", "mode": "new"}
 
 
 async def test_voice_refine_skips_quota_and_frame(monkeypatch):
     h = _Harness(monkeypatch, production=True)
     state = _state(tier="free")
     state.current = dm.DraftState(
-        draft_id="d1", channel="email_reply", length="short",
+        draft_id=_DRAFT_ID, channel="email_reply", length="short",
         text="hi Sarah, can't make it", context_summary="declining Sarah",
         recipient_hint="Sarah", revision=1,
     )
     store = _FakeFrameStore(None)  # even with no frame, refine must work
 
     spoken = await dm.run_draft_tool(
-        state, store,
-        channel="", length="", recipient_hint="", intent="",
-        refine_instruction="warmer",
+        state,
+        store,
+        operation="refine",
+        transcript="  warmer, please  ",
     )
 
     assert spoken == dm.SPOKEN_REFINE_READY
@@ -267,69 +233,38 @@ async def test_voice_refine_skips_quota_and_frame(monkeypatch):
     assert h.event_types() == ["draft.generating", "draft.updated"]
     assert h.published[0]["payload"]["mode"] == "refine"
     updated = h.published[1]["payload"]
-    assert updated == {
-        "draft_id": "d1", "revision": 2, "length": "short",
-        "text": "hey Sarah, warmer now",
-    }
+    assert updated["draft_id"] == _DRAFT_ID
+    assert updated["revision"] == 2
+    assert updated["length"] == "short"
+    assert updated["text"] == "hey Sarah, warmer now"
+    assert updated["artifact"]["body"] == updated["text"]
+    assert h.published[1]["schema_version"] == 2
     assert state.current.revision == 2
     assert state.current.text == "hey Sarah, warmer now"
     # The stored screen-derived summary rode into the refine call.
     assert h.refine_calls[0]["context_summary"] == "declining Sarah"
+    assert h.refine_calls[0]["refine_instruction"] == "  warmer, please  "
 
 
-async def test_snippet_skips_length_frame_and_quota(monkeypatch):
-    """The snippet contract: no length question, no frame requirement, and no
-    free-tier draft quota, even on the strictest path (prod + free tier +
-    screen sight off)."""
-    h = _Harness(monkeypatch, production=True)
-    state = _state(tier="free")
-    store = _FakeFrameStore(None)  # screen sight off
-
-    spoken = await dm.run_draft_tool(
-        state, store,
-        channel="snippet", length="", recipient_hint="",
-        intent="make PowerShell open in MobileApps", refine_instruction="",
-    )
-
-    assert spoken == dm.SPOKEN_DRAFT_READY
-    assert h.quota_calls == []  # snippets are deliberately uncapped
-    assert h.event_types() == ["draft.generating", "draft.created"]
-    assert h.published[1]["payload"]["channel"] == "snippet"
-    call = h.draft_calls[0]
-    assert call["channel"] == "snippet"
-    assert call["length"] == "short"  # ladder placeholder, never asked for
-    assert call["jpeg_base64"] == "" and call["jpeg_width"] is None
-    assert state.current is not None and state.current.channel == "snippet"
-
-
-async def test_snippet_uses_frame_when_available(monkeypatch):
-    h = _Harness(monkeypatch, production=True)
-
-    spoken = await dm.run_draft_tool(
-        _state(tier="free"), _FakeFrameStore(_FakeFrame()),
-        channel="snippet", length="", recipient_hint="",
-        intent="the command that fixes this error", refine_instruction="",
-    )
-
-    assert spoken == dm.SPOKEN_DRAFT_READY
-    assert h.quota_calls == []
-    call = h.draft_calls[0]
-    assert call["jpeg_base64"] and call["jpeg_width"] == 1280
-
-
-async def test_refine_without_current_draft_becomes_intent(monkeypatch):
+async def test_refine_without_current_draft_fails_without_creating(monkeypatch):
     h = _Harness(monkeypatch, production=False)
     state = _state()
+    store = _FakeFrameStore(_FakeFrame())
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="cold_dm", length="short", recipient_hint="this recruiter",
-        intent="", refine_instruction="ask about the open role",
+        state,
+        store,
+        operation="refine",
+        transcript="ask about the open role",
     )
 
-    assert spoken == dm.SPOKEN_DRAFT_READY
+    assert spoken == dm.SPOKEN_NO_CURRENT_DRAFT
+    assert store.calls == 0
+    assert h.quota_calls == []
     assert h.refine_calls == []
-    assert h.draft_calls[0]["intent"] == "ask about the open role"
+    assert h.draft_calls == []
+    assert h.published == []
+    assert state.current is None
 
 
 async def test_drafter_failure_publishes_failed(monkeypatch):
@@ -337,9 +272,10 @@ async def test_drafter_failure_publishes_failed(monkeypatch):
     h.draft_result = OutboundDraftResult(reason="timeout")
 
     spoken = await dm.run_draft_tool(
-        _state(), _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="",
+        _state(),
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
     )
 
     assert spoken == dm.SPOKEN_FAILED
@@ -352,30 +288,30 @@ async def test_drafter_failure_publishes_failed(monkeypatch):
 
 
 class _FakeRunCtx:
-    """Minimal RunContext for the async new-draft path. Each failure mode is a
-    flag so a test can prove the filler/update can NEVER cost the draft."""
+    """Minimal RunContext for direct acknowledgement plus filler speech."""
 
     def __init__(
         self,
         *,
-        update_raises=False,
-        update_hangs=False,
+        say_raises=False,
+        say_hangs=False,
         filler_enter_raises=False,
         filler_exit_raises=False,
     ) -> None:
-        self.updates: list[str] = []
+        self.said: list[str] = []
         self.filler_entered = False
-        self._update_raises = update_raises
-        self._update_hangs = update_hangs
+        self._say_raises = say_raises
+        self._say_hangs = say_hangs
         self._filler_enter_raises = filler_enter_raises
         self._filler_exit_raises = filler_exit_raises
+        self.session = SimpleNamespace(say=self._say)
 
-    async def update(self, message, *, template=None) -> None:
-        if self._update_hangs:
-            await asyncio.sleep(3600)  # cancelled by the tool's wait_for timeout
-        if self._update_raises:
-            raise RuntimeError("update boom")
-        self.updates.append(message)
+    async def _say(self, message) -> None:
+        if self._say_hangs:
+            await asyncio.sleep(3600)
+        if self._say_raises:
+            raise RuntimeError("say boom")
+        self.said.append(message)
 
     def with_filler(self, source, *, delay=0, interval=None, max_steps=None):
         outer = self
@@ -395,19 +331,21 @@ class _FakeRunCtx:
         return _CM()
 
 
-async def test_async_path_speaks_update_and_creates_draft(monkeypatch):
+async def test_draft_path_speaks_direct_ack_and_creates_draft(monkeypatch):
     h = _Harness(monkeypatch, production=True)
     state = _state(tier="pro")
     ctx = _FakeRunCtx()
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="Sarah",
-        intent="decline", refine_instruction="", run_ctx=ctx,
+        state,
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
+        run_ctx=ctx,
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
-    assert len(ctx.updates) == 1 and "email_reply" in ctx.updates[0]
+    assert ctx.said == [dm.SPOKEN_DRAFT_STARTED]
     assert ctx.filler_entered is True
     assert h.event_types() == ["draft.generating", "draft.created"]
     assert len(h.draft_calls) == 1  # generated exactly once
@@ -422,9 +360,11 @@ async def test_filler_exit_failure_keeps_the_good_draft(monkeypatch):
     ctx = _FakeRunCtx(filler_exit_raises=True)
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="", run_ctx=ctx,
+        state,
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
+        run_ctx=ctx,
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
@@ -439,9 +379,11 @@ async def test_filler_enter_failure_regenerates_draft_once(monkeypatch):
     ctx = _FakeRunCtx(filler_enter_raises=True)
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="", run_ctx=ctx,
+        state,
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
+        run_ctx=ctx,
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
@@ -449,35 +391,39 @@ async def test_filler_enter_failure_regenerates_draft_once(monkeypatch):
     assert state.current is not None
 
 
-async def test_ctx_update_failure_does_not_block_draft(monkeypatch):
+async def test_direct_ack_failure_does_not_block_draft(monkeypatch):
     h = _Harness(monkeypatch, production=False)
     state = _state()
-    ctx = _FakeRunCtx(update_raises=True)
+    ctx = _FakeRunCtx(say_raises=True)
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="", run_ctx=ctx,
+        state,
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
+        run_ctx=ctx,
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
-    assert ctx.updates == []  # the failed update recorded nothing
+    assert ctx.said == []
     assert h.event_types() == ["draft.generating", "draft.created"]
     assert state.current is not None
 
 
-async def test_ctx_update_hang_times_out_and_draft_proceeds(monkeypatch):
-    monkeypatch.setattr(dm, "_CTX_UPDATE_TIMEOUT_S", 0.05)
+async def test_direct_ack_hang_times_out_and_draft_proceeds(monkeypatch):
+    monkeypatch.setattr(dm, "_DIRECT_SPEECH_TIMEOUT_S", 0.05)
     _Harness(monkeypatch, production=False)  # wires the seams via monkeypatch
     state = _state()
-    ctx = _FakeRunCtx(update_hangs=True)
+    ctx = _FakeRunCtx(say_hangs=True)
 
     spoken = await dm.run_draft_tool(
-        state, _FakeFrameStore(_FakeFrame()),
-        channel="email_reply", length="short", recipient_hint="", intent="decline",
-        refine_instruction="", run_ctx=ctx,
+        state,
+        _FakeFrameStore(_FakeFrame()),
+        operation="new",
+        transcript="decline",
+        run_ctx=ctx,
     )
 
     assert spoken == dm.SPOKEN_DRAFT_READY
-    assert ctx.updates == []  # timed out before recording
+    assert ctx.said == []
     assert state.current is not None

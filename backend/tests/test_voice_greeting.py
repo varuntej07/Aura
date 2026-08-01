@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+from src.agent.buddy_agent import BuddyAgent
 from src.agent.voice import greeting
 from src.agent.voice.context import SessionContext
 
@@ -89,3 +90,9 @@ async def test_none_answer_and_empty_digest_fall_back(monkeypatch):
 
 async def test_missing_task_resolves_to_static_fallback():
     assert await greeting.resolve_opener(None, budget_s=1.0) == ""
+
+
+async def test_buddy_lifecycle_starts_silent():
+    placeholder = object()
+    assert await BuddyAgent.on_enter(placeholder) is None
+    assert await BuddyAgent.greet(placeholder) is None

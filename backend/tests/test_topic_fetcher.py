@@ -154,7 +154,7 @@ async def test_locale_and_cutoff_are_part_of_cache_identity(monkeypatch):
 async def test_fetch_brave_parses_iso_latest_published(monkeypatch):
     from src.agents.data_fetchers import brave_search as brave_module
 
-    async def _fake_brave_search(query, *, uid, recency="any", timeout_s=7.0):
+    async def _fake_brave_search(query, *, uid, recency="any", timeout_s=7.0, feature="web_surf"):
         return {
             "text": _LONG, "sources": [], "query": query, "cached": False,
             "latest_published": "2026-07-07T18:00:29+00:00",
@@ -169,7 +169,7 @@ async def test_fetch_brave_parses_iso_latest_published(monkeypatch):
 async def test_fetch_brave_none_when_latest_published_absent(monkeypatch):
     from src.agents.data_fetchers import brave_search as brave_module
 
-    async def _fake_brave_search(query, *, uid, recency="any", timeout_s=7.0):
+    async def _fake_brave_search(query, *, uid, recency="any", timeout_s=7.0, feature="web_surf"):
         return {"text": _LONG, "sources": [], "query": query, "cached": False, "latest_published": ""}
 
     monkeypatch.setattr(brave_module, "brave_search", _fake_brave_search)

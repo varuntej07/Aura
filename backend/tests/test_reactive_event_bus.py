@@ -167,3 +167,20 @@ def test_outbox_collection_group_index_declared():
     assert len(match) == 1, "outbox COLLECTION_GROUP index missing (relay sweep 400s)"
     field_paths = [f["fieldPath"] for f in match[0]["fields"]]
     assert field_paths == ["consumed", "ts"]
+
+
+def test_outbox_ttl_declared():
+    indexes_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "firestore.indexes.json",
+    )
+    with open(indexes_path, encoding="utf-8") as fh:
+        overrides = json.load(fh)["fieldOverrides"]
+
+    match = [
+        override for override in overrides
+        if override.get("collectionGroup") == "outbox"
+        and override.get("fieldPath") == F.FIELD_EXPIRES_AT
+    ]
+    assert len(match) == 1, "outbox expires_at TTL policy missing"
+    assert match[0].get("ttl") is True
