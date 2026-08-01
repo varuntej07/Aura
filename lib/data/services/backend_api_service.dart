@@ -78,14 +78,12 @@ class ReminderPayload {
   final String message;
   final DateTime triggerAt;
   final String status;
-  final String priority;
 
   const ReminderPayload({
     required this.reminderId,
     required this.message,
     required this.triggerAt,
     required this.status,
-    required this.priority,
   });
 
   factory ReminderPayload.fromJson(Map<String, dynamic> json) {
@@ -96,7 +94,6 @@ class ReminderPayload {
           DateTime.tryParse(json['trigger_at'] as String? ?? '') ??
           DateTime.now(),
       status: json['status'] as String? ?? 'pending',
-      priority: json['priority'] as String? ?? 'normal',
     );
   }
 
@@ -105,7 +102,6 @@ class ReminderPayload {
     'message': message,
     'trigger_at': triggerAt.toUtc().toIso8601String(),
     'status': status,
-    'priority': priority,
   };
 
   String toJsonString() => jsonEncode(toJson());
@@ -330,6 +326,22 @@ class BackendApiService implements ChatServiceProvider {
       {'device_id': deviceId},
       (json) => json,
       timeout: AppConstants.apiWriteTimeout,
+    );
+  }
+
+  /// Tells the server the chat went to the background so it can start the
+  /// session-end grace clock. This is a hint, not an end event: the server waits
+  /// out a grace window and any new turn cancels it, so a quick app switch costs
+  /// nothing. Unlike [consolidateSession] this is sent for every backgrounding,
+  /// including short sessions, because session END and session VALUE are separate
+  /// questions and only the server decides the second one.
+  Future<Result<Map<String, dynamic>>> markChatSessionBackgrounded(
+    String sessionId,
+  ) async {
+    return _apiClient.post(
+      '/chat/session-background',
+      {'session_id': sessionId},
+      (json) => json,
     );
   }
 

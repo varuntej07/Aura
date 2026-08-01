@@ -51,6 +51,14 @@ FANOUT_CAP = 8
 ADJACENCY_CACHE_TTL_S = 60.0
 GRAPH_PROXIMITY_WEIGHT = 0.20
 VOICE_RETRIEVAL_BUDGET_S = 0.35
+# Budget for retrieval fired while the user is still SPEAKING, which is off the
+# turn's critical path and therefore free. VOICE_RETRIEVAL_BUDGET_S has to stay
+# small because it runs inside on_user_turn_completed, where every millisecond
+# is silence the user hears; that tightness is why the 2026-08-01 baseline
+# measured a TimeoutError on 15 of 15 turns and returned memory on none of
+# them. An embedding call plus a Firestore read does not fit in 350ms. It fits
+# comfortably here, because the only deadline is the user finishing a sentence.
+EARLY_MEMORY_BUDGET_S = 2.5
 INACTIVE_GRAPH_STATUSES = frozenset({
     GF.NODE_STATUS_COMPLETED,
     GF.NODE_STATUS_ABANDONED,

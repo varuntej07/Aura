@@ -1,7 +1,5 @@
 enum ReminderStatus { pending, fired, dismissed, snoozed }
 
-enum ReminderPriority { low, normal, urgent }
-
 /// Centralised status classification — update here when new statuses are added.
 extension ReminderStatusX on ReminderStatus {
   /// Visible in the "Upcoming" section. Includes [fired] because the
@@ -20,7 +18,6 @@ class ReminderModel {
   final String message;
   final DateTime triggerAt;
   final ReminderStatus status;
-  final ReminderPriority priority;
   final String createdVia; // voice, text, notification_reply
   final int snoozeCount;
   final DateTime createdAt;
@@ -32,7 +29,6 @@ class ReminderModel {
     required this.message,
     required this.triggerAt,
     required this.status,
-    required this.priority,
     required this.createdVia,
     required this.snoozeCount,
     required this.createdAt,
@@ -56,7 +52,6 @@ class ReminderModel {
     String? message,
     DateTime? triggerAt,
     ReminderStatus? status,
-    ReminderPriority? priority,
     String? createdVia,
     int? snoozeCount,
     DateTime? createdAt,
@@ -68,7 +63,6 @@ class ReminderModel {
       message: message ?? this.message,
       triggerAt: triggerAt ?? this.triggerAt,
       status: status ?? this.status,
-      priority: priority ?? this.priority,
       createdVia: createdVia ?? this.createdVia,
       snoozeCount: snoozeCount ?? this.snoozeCount,
       createdAt: createdAt ?? this.createdAt,
@@ -85,9 +79,6 @@ class ReminderModel {
       triggerAt: DateTime.parse(json['trigger_at'] as String),
       status: ReminderStatus.values.byName(
         json['status'] as String? ?? 'pending',
-      ),
-      priority: ReminderPriority.values.byName(
-        json['priority'] as String? ?? 'normal',
       ),
       createdVia: json['created_via'] as String? ?? 'text',
       snoozeCount: json['snooze_count'] as int? ?? 0,
@@ -106,7 +97,6 @@ class ReminderModel {
         'message': message,
         'trigger_at': triggerAt.toUtc().toIso8601String(),
         'status': status.name,
-        'priority': priority.name,
         'created_via': createdVia,
         'snooze_count': snoozeCount,
         'created_at': createdAt.toUtc().toIso8601String(),

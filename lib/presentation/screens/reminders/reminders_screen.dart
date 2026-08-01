@@ -297,17 +297,6 @@ class _ReminderTileState extends State<_ReminderTile> {
     return '${months[local.month - 1]} ${local.day} · $timeStr';
   }
 
-  Color get _priorityColor {
-    switch (widget.reminder.priority) {
-      case ReminderPriority.urgent:
-        return AppColors.error;
-      case ReminderPriority.low:
-        return AppColors.textTertiary;
-      case ReminderPriority.normal:
-        return AppColors.accent;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     // Show "Notified" badge only on fired reminders that haven't been
@@ -345,7 +334,7 @@ class _ReminderTileState extends State<_ReminderTile> {
               padding: const EdgeInsets.only(top: 1),
               child: _CompletionCircle(
                 isCompleted: _showAsCompleted,
-                color: _priorityColor,
+                color: AppColors.accent,
               ),
             ),
             const SizedBox(width: 12),

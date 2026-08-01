@@ -196,10 +196,13 @@ class _MessageInputState extends State<MessageInput> {
   Future<void> _pickFile() async {
     setState(() => _isProcessingAttachment = true);
     try {
-      final result = await _processor.pickFiles();
-      if (result == null) return;
-      for (final platformFile in result.files) {
-        final processed = await _processor.processPlatformFile(platformFile, _pendingAttachments);
+      final files = await _processor.pickFiles();
+      if (files.isEmpty) return;
+      for (final selectedFile in files) {
+        final processed = await _processor.processSelectedFile(
+          selectedFile,
+          _pendingAttachments,
+        );
         _handleResult(processed);
       }
     } catch (_) {
@@ -396,7 +399,11 @@ class _SendButton extends StatelessWidget {
             color: AppColors.accent,
             shape: BoxShape.circle,
           ),
-          child: const Icon(Icons.arrow_upward_rounded, color: Colors.white, size: 20),
+          child: const Icon(
+            Icons.arrow_upward_rounded,
+            color: Colors.white,
+            size: 20,
+          ),
         ),
       ),
     );
