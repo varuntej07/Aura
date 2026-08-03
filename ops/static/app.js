@@ -41,15 +41,10 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const ago = (iso) => {
-    if (!iso) return "";
-    const d = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (!isFinite(d)) return "";
-    if (d < 60) return Math.floor(d) + "s";
-    if (d < 3600) return Math.floor(d / 60) + "m";
-    if (d < 86400) return Math.floor(d / 3600) + "h";
-    return Math.floor(d / 86400) + "d";
-  };
+  const ago = window.AuraOpsTime.ago;
+  const inspectTime = window.AuraOpsTime.inspect;
+  const isDisplayableTime = window.AuraOpsTime.isDisplayable;
+  const timePhrase = window.AuraOpsTime.phrase;
 
   const NA = '<span class="faint">n/a</span>';
   const num = (v) => (v === null || v === undefined) ? NA : esc(String(v));
@@ -196,12 +191,46 @@
   });
 
   function setStamp(iso) {
-    stamp.textContent = iso ? "updated " + ago(iso) + " ago" : "";
+    if (!iso) {
+      stamp.textContent = "";
+      return;
+    }
+    const time = inspectTime(iso);
+    stamp.textContent = time.state === "invalid"
+      ? "data timestamp unavailable"
+      : "updated " + timePhrase(iso);
+  }
+
+  function setStampLabel(label) {
+    stamp.textContent = label || "";
   }
 
   /* ── shared render pieces ────────────────────────────────────────── */
   function metric(n, label, cls) {
     return `<div class="metric"><div class="n ${cls || ""}">${n ?? "n/a"}</div><div class="l">${label}</div></div>`;
+  }
+
+  function pageHeading(eyebrow, title, summary, sources) {
+    const sourceHtml = (sources || []).map((source) =>
+      `<span class="source-pill ${source.tone || ""}" title="${esc(source.detail || "")}">${esc(source.label)}</span>`
+    ).join("");
+    return `<section class="page-heading">
+      <div>
+        <p class="eyebrow">${esc(eyebrow)}</p>
+        <h1>${esc(title)}</h1>
+        <p class="summary">${esc(summary)}</p>
+      </div>
+      ${sourceHtml ? `<div class="source-strip" aria-label="Data source status">${sourceHtml}</div>` : ""}
+    </section>`;
+  }
+
+  function timeLabel(iso) {
+    const time = inspectTime(iso);
+    const timestampMs = Date.parse(iso);
+    const title = Number.isFinite(timestampMs)
+      ? new Date(timestampMs).toLocaleString()
+      : "Timestamp unavailable";
+    return `<time class="when ${time.state === "future" ? "future" : ""}" datetime="${esc(iso)}" title="${esc(title)}">${esc(time.label)}</time>`;
   }
 
   function funnel(steps) {
@@ -316,11 +345,20 @@
       ${metric(m.server_errors, "5xx / 1h", m.server_errors ? "danger" : "")}
     </div>`;
 
-    const msgRow = (x) => `<div class="row"><span class="when">${ago(x.at)}</span>
-      <span class="who">${esc(x.name)}</span>${x.channel === "voice" ? '<span class="tag">voice</span>' : ""}
-      <div class="body">${esc(x.text)}</div></div>`;
+    const visibleMessages = (d.messages || []).filter((message) =>
+      isDisplayableTime(message.at));
 
-    const voiceRow = (v) => `<div class="row"><span class="when">${ago(v.at)}</span>
+    const msgRow = (x) => {
+      const timestamp = inspectTime(x.at);
+      const timestampWarning = timestamp.state === "invalid"
+          ? '<span class="tag red">invalid timestamp</span>'
+          : "";
+      return `<div class="row">${timeLabel(x.at)}
+        <span class="who">${esc(x.name)}</span>${x.channel === "voice" ? '<span class="tag">voice</span>' : ""}${timestampWarning}
+        <div class="body">${esc(x.text)}</div></div>`;
+    };
+
+    const voiceRow = (v) => `<div class="row">${timeLabel(v.at)}
       <span class="who">${esc(v.name)}</span><span class="tag">${esc(v.duration)} · ${v.turns} turns</span>
       <div class="body muted">${esc(v.summary) || "(no summary)"}</div></div>`;
 
@@ -328,20 +366,32 @@
       const cat = r.category ? `<span class="tag gray">${esc(r.category)}</span>` : "";
       const score = r.score != null ? `<span class="tag">score ${r.score}</span>` : "";
       const tapped = /opened/i.test(r.outcome || "");
-      return `<div class="row"><span class="when">${ago(r.at)}</span>
+      return `<div class="row">${timeLabel(r.at)}
         <span class="who">${esc(r.name)}</span>${cat}${score}
         <div class="body">${esc(r.title) || "(no title)"}</div>
         <div class="body muted">${esc(r.reason)}</div>
         <div class="body ${tapped ? "good" : "muted"}">${esc(r.outcome)}${r.source ? " · " + esc(r.source) : ""}</div></div>`;
     };
 
-    box.innerHTML = strip + `<div class="grid">
-      <div class="card col-6"><h2>Latest text messages</h2><div class="scroll">
-        ${(d.messages || []).map(msgRow).join("") || '<p class="empty">none</p>'}</div></div>
-      <div class="card col-6"><h2>Latest voice sessions</h2><div class="scroll">
+    const posthogHasData = (d.screens || []).length > 0;
+    const heading = pageHeading(
+      "Live production health",
+      "Operations overview",
+      "A single view of user activity, reliability, recommendations, feedback, retention, and spend. Refresh is manual to protect Firestore read costs.",
+      [
+        { label: "Firestore live", detail: "Users, messages, sessions, feedback, and recommendation history" },
+        { label: posthogHasData ? "PostHog reporting" : "PostHog: no recent data", tone: posthogHasData ? "" : "warn", detail: "Product analytics, retention, funnels, and client-observed latency" },
+        { label: m.server_errors == null ? "Cloud metrics unavailable" : "Cloud metrics live", tone: m.server_errors == null ? "warn" : "", detail: "Cloud Monitoring and Logging reliability signals" },
+      ],
+    );
+
+    box.innerHTML = heading + strip + `<div class="grid">
+      <div class="card col-6"><h2>Latest text messages <span class="tag gray">${visibleMessages.length} shown</span></h2><div class="scroll">
+        ${visibleMessages.map(msgRow).join("") || '<p class="empty">none</p>'}</div></div>
+      <div class="card col-6"><h2>Latest voice sessions <span class="tag gray">${(d.voice || []).length} shown</span></h2><div class="scroll">
         ${(d.voice || []).map(voiceRow).join("") || '<p class="empty">none</p>'}</div></div>
       <div class="card col-6"><h2>Recommender health (recent ticks)</h2>
-        ${(d.recommender_health || []).map((h) => `<div class="row"><span class="when">${ago(h.at)}</span>
+        ${(d.recommender_health || []).map((h) => `<div class="row">${timeLabel(h.at)}
           <div class="body muted">${esc(h.message)}</div></div>`).join("")
           || '<p class="empty">no tick-health lines yet (INFO logs from the signal engine)</p>'}</div>
       <div class="card col-6"><h2>Top screens (7d, by views)</h2>
@@ -356,11 +406,11 @@
           <td>${u.aura_consent ? '<span class="good">yes</span>' : '<span class="faint">no</span>'}</td></tr>`).join("")}
       </table></div></div>
       <div class="card col-4"><h2>Recent feedback</h2><div class="scroll">
-        ${(d.feedback || []).map((f) => `<div class="row"><span class="when">${ago(f.at)}</span>
+        ${(d.feedback || []).map((f) => `<div class="row">${timeLabel(f.at)}
           <span class="who">${esc(f.username) || "?"}</span><span class="tag gray">${esc(f.category)} · ${esc(f.severity)}</span>
           <div class="body">${esc(f.summary)}</div></div>`).join("") || '<p class="empty">none</p>'}</div></div>
       <div class="card col-12"><h2>Backend errors (multi-service)</h2><div class="scroll">
-        ${(d.errors || []).map((e) => `<div class="row"><span class="when">${ago(e.at)}</span>
+        ${(d.errors || []).map((e) => `<div class="row">${timeLabel(e.at)}
           <span class="tag red">${esc(e.severity)}</span>${e.service ? `<span class="tag gray">${esc(e.service)}</span>` : ""}
           <div class="body">${esc(e.message)}</div></div>`).join("") || '<p class="empty">none in window</p>'}</div></div>
     </div>`;
@@ -586,11 +636,42 @@
           ${metric(esc(downloads.latest_version || "n/a"), "latest release")}</div>
         <div class="scroll" style="max-height:220px"><table>
           <tr><th>Release</th><th>Published</th><th class="num">Downloads</th></tr>
-          ${releases.map((r) => `<tr><td>${esc(r.tag)}</td><td class="muted">${ago(r.published_at)} ago</td>
+          ${releases.map((r) => `<tr><td>${esc(r.tag)}</td><td class="muted">${timePhrase(r.published_at)}</td>
             <td class="num">${r.downloads}</td></tr>`).join("") || '<tr><td colspan="3" class="empty">no releases</td></tr>'}
         </table></div></div>`;
     }
-    content.innerHTML = `<div class="grid">
+    const backendHasData = Object.values(d.backend_latency || {}).some((item) =>
+      item && (item.p95 != null || item.p99 != null));
+    const posthogSamples = Number(d.chat_latency?.count || 0) +
+      Number(d.voice_first_response?.count || 0);
+    const crashSource = kind === "mobile"
+      ? {
+          label: d.crashes?.available ? "Crashlytics connected" : "Crashlytics setup needed",
+          tone: d.crashes?.available ? "" : "warn",
+          detail: d.crashes?.note || "Firebase Crashlytics BigQuery export",
+        }
+      : {
+          label: "Errors in Logs",
+          detail: "Desktop errors are collected through Cloud Logging. Sentry remains intentionally disabled.",
+        };
+    const heading = pageHeading(
+      kind === "mobile" ? "Android + iOS" : "Windows desktop",
+      kind === "mobile" ? "Mobile reliability" : "Desktop reliability",
+      kind === "mobile"
+        ? "Crash health, backend and client-observed latency, voice responsiveness, and store-readiness signals."
+        : "Release adoption, API and conversation latency, voice responsiveness, and operational error coverage for Aura Desktop.",
+      [
+        { label: backendHasData ? "Backend latency live" : "Backend split pending", tone: backendHasData ? "" : "warn", detail: "Cloud Monitoring log-based request latency by platform" },
+        { label: posthogSamples ? `PostHog ${posthogSamples} samples` : "PostHog: no 7d samples", tone: posthogSamples ? "" : "warn", detail: "Client-observed chat and voice response events" },
+        crashSource,
+        ...(kind === "desktop" ? [{
+          label: downloads.available === false ? "GitHub unavailable" : "GitHub Releases live",
+          tone: downloads.available === false ? "warn" : "",
+          detail: "Installer asset downloads and latest release",
+        }] : []),
+      ],
+    );
+    content.innerHTML = heading + `<div class="grid">
       ${latencyCard("Latency · backend by platform + client-observed", d.backend_latency, d.chat_latency, d.voice_first_response, d.voice_worker_latency)}
       ${downloadsCard}
       ${crashPanel(kind === "mobile" ? "Crashes · Firebase Crashlytics (7d)" : "Desktop runtime errors", d.crashes)}
@@ -778,7 +859,7 @@
       return;
     }
     if (tab === "architecture") {
-      setStamp("synthetic data");
+      setStampLabel("synthetic model");
       window.AuraArchitectureTwin.mount(content);
       return;
     }

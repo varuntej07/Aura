@@ -22,7 +22,7 @@
   <div id="app" hidden>
     <header>
       <div class="brand"><span class="dot"></span>AURA OPS</div>
-      <nav id="tabs">
+      <nav id="tabs" aria-label="Dashboard sections">
         <button class="tab active" data-tab="overview">Overview</button>
         <button class="tab" data-tab="mobile">Mobile</button>
         <button class="tab" data-tab="desktop">Desktop</button>
@@ -31,15 +31,17 @@
         <button class="tab" data-tab="architecture">Architecture</button>
         <button class="tab" data-tab="logs">Logs</button>
       </nav>
-      <span class="spacer"></span>
-      <span id="stamp" class="muted"></span>
-      <button id="refresh" title="Refresh active tab">Refresh</button>
-      <button id="lock" title="Forget passcode">Lock</button>
+      <div class="header-actions">
+        <span id="stamp" class="muted"></span>
+        <button id="refresh" title="Refresh active tab">Refresh</button>
+        <button id="lock" title="Forget passcode">Lock</button>
+      </div>
     </header>
     <main class="wrap" id="content"></main>
   </div>
 
   <script src="vendor/chart.umd.min.js"></script>
+  <script src="time.js"></script>
   <script src="architecture-twin.js"></script>
   <script src="app.js"></script>
 </body>
