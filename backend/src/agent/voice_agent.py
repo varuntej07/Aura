@@ -4,7 +4,7 @@ LiveKit voice agent using cascading architecture: STT -> LLM -> TTS
 Pipeline plugins:
   Deepgram Nova STT (with nova-3 -> nova-2 fallback)
   Anthropic Claude LLM (with Gemini Flash fallback)
-  Cartesia TTS (sonic-3 -> sonic-2 fallback)
+  Cartesia TTS (Sonic 3.5 -> Deepgram Aura 2 -> Sonic 3 fallback)
   Silero VAD + LiveKit audio turn detector (inference.TurnDetector)
 
 Tools live in the FastAPI backend at POST /mcp and are pulled in via
@@ -232,10 +232,10 @@ async def _connect_to_room(ctx: JobContext, candidate_user_id: str) -> bool:
 def _build_sonic3_controls(
     *, session_id: str, user_id: str, dominant_tone: str, dominant_emotion: str
 ) -> dict:
-    """Derive and log the per-session sonic-3 generation controls.
+    """Derive and log per-session Cartesia Sonic generation controls.
 
     None kwargs are omitted so a profile-less user constructs the exact default
-    voice; only the sonic-3 primary consumes these (the fallbacks are unconditioned).
+    voice; only the Sonic 3.5 primary consumes these (the fallbacks are unconditioned).
     """
     voice_speed, voice_emotion = derive_voice_controls(dominant_tone, dominant_emotion)
     sonic3_controls: dict = {}
@@ -532,6 +532,18 @@ async def entrypoint(ctx: JobContext) -> None:
         # is what lets a screen-aware turn keep its speculative reply instead of
         # paying a cold round trip (see voice/speculation.py).
         screen_context.set_context_listener(buddy.ingest_structured_context)
+        # Same idea for graph memory, on a different trigger. Retrieval used to
+        # run inside on_user_turn_completed, where it was serial silence the
+        # user sat through; the 2026-08-01 baseline measured it timing out on
+        # 15 of 15 turns and returning memory on none of them. Starting it off
+        # the first substantial interim transcript overlaps it with their own
+        # speech, which both hides the cost and makes a realistic budget
+        # affordable. The recorder listens to this same event for its own
+        # reasons, which is why this is `on` and not an exclusive setter.
+        session.on(
+            "user_input_transcribed",
+            lambda ev: buddy.ingest_partial_transcript(ev.transcript, ev.is_final),
+        )
 
         recorder = VoiceSessionRecorder(
             session=session,
