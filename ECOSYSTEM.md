@@ -1,18 +1,16 @@
 # Aura Ecosystem
 
-This is the map of how the three live Aura codebases fit together: Aura (this repo, Flutter mobile app + the `juno-backend` FastAPI service), Aura-Desktop (Tauri Windows companion), and Aura-Web (Next.js marketing site + browser auth handoff page).
+How the three live Aura codebases fit together: Aura (this repo, Flutter mobile app plus the `juno-backend` FastAPI service), Aura-Desktop (Tauri Windows companion), and Aura-Web (Next.js marketing site plus the browser auth handoff page).
 
-Each repo's own README/CLAUDE.md explains that repo in depth.
-This file exists for the parts no single repo's docs can see: which repo calls which, over what transport, and what breaks if one side changes a contract without the others knowing.
-Read this first when a change touches more than one repo, then follow the pointers at the bottom into the repo that actually owns the code.
+Each repo's own CLAUDE.md covers that repo. This file covers only what no single repo can see: which repo calls which, over what transport, and what breaks when one side changes a contract without telling the others.
 
 ## How to keep this file current
 
-Update this file only when a change alters a **cross-repo contract**: an HTTP endpoint's path/request/response shape, a shared Firestore collection's schema, an auth/pairing handshake, a data-channel or event schema, shared config identity (the Firebase project, the PostHog project, analytics event names), or a deploy/version linkage between repos (like the Windows release feed below).
+Update it **only** when a change alters a cross-repo contract: an endpoint's path or request/response shape, a shared Firestore collection's schema, an auth or pairing handshake, a data-channel or event schema, shared config identity (Firebase project, PostHog project, analytics event names), or a deploy/version linkage between repos.
 
-Do **not** update it for internal refactors, UI changes, or anything that stays inside one repo. That kind of detail belongs in that repo's own CLAUDE.md/README, not here. If you're unsure whether a change qualifies, ask rather than guessing either way.
+Do not update it for internal refactors, UI changes, or anything that stays inside one repo. If unsure, ask rather than guessing either way.
 
-**Filesystem assumption:** the pointer sections added to each repo's CLAUDE.md reference this file by relative path (e.g. `../Aura/ECOSYSTEM.md`), which only resolves because all three repos happen to be checked out as siblings under `C:\Users\varun\MobileApps\` on this machine. A clone of any one repo elsewhere, without that sibling layout, won't be able to follow that relative path. Treat this file's content as the authority, the pointer as a convenience that only works here.
+**Filesystem assumption:** relative pointers like `../Aura/ECOSYSTEM.md` only resolve because all three repos are checked out as siblings under `C:\Users\varun\MobileApps\` on this machine. Treat this file's content as the authority and the relative pointer as a local convenience.
 
 ## System map
 
@@ -21,9 +19,8 @@ Do **not** update it for internal refactors, UI changes, or anything that stays 
 | **Aura** (this repo) | `MobileApps/Aura` | `varuntej07/juno` (repo renamed Aura, remote URL still says juno) | Flutter (mobile, Android/iOS) + FastAPI (`backend/`) | Mobile: Play Store / manual `.aab`. Backend: `docker build` straight from local disk (`backend/deploy.sh`), no git trigger, Cloud Run `juno-2ea45`/`us-central1` | Primary client (full API surface) and the shared backend every other repo talks to |
 | **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` + `latest.json`) | Current live Windows companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
 | **Aura-Web** | `MobileApps/Aura-Web` | `varuntej07/aura-web` | Next.js (App Router) + React + Framer Motion | Git-triggered deploy to Vercel (push to main auto-builds) | Marketing site (`auravoiceapp.com`), hosts the Google sign-in browser leg, and serves as the download page for Aura-Desktop |
-| Legacy Flutter desktop (was `lib/main_desktop.dart`, inside this repo) | (deleted) | same as Aura | Flutter (Windows target) | Built `.exe` was pushed to a GCS bucket (`gs://aura-desktop-downloads`) | **Deleted 2026-07-11** (code, `windows/` platform tree, and the GCS-hosted installers). Aura-Desktop (Tauri) is the only Windows client. This repo keeps the backend contracts it consumes (pairing, web-auth, connector OAuth, draft-outbound, voice screen-sight, screen saves). |
 
-`MobileApps/Juno` (no `.git`, last touched 2026-05-20) is a stale leftover checkout, not a live repo. It is not part of this system; if it keeps causing confusion it's a candidate to delete, but nothing currently reads or writes it.
+A legacy Flutter Windows client was deleted from this repo on 2026-07-11 (code, `windows/` tree, and its GCS-hosted installers). Aura-Desktop is the only Windows client. This repo still owns the backend contracts that client consumes: pairing, web-auth, connector OAuth, draft-outbound, voice screen-sight, and screen saves.
 
 ## Shared infrastructure
 
@@ -80,6 +77,8 @@ Aura-Desktop's `SignInForm` calls Firebase `signInWithEmailAndPassword` directly
 
 Both Aura mobile and Aura-Desktop call `GET /voice/token` and join the same kind of LiveKit room against the same backend voice agent (`backend/src/agent/voice_agent.py`). The token stamps a `surface` value into participant metadata so the agent can tell which client type joined. Full sequence (join detection, agent state, captions, watchdogs) is documented in `Aura-Desktop/README.md`; that detail is desktop/backend-specific enough it isn't duplicated here.
 
+The response also carries `realtime_bridge_enabled: bool`, owned by the backend's `REALTIME_BRIDGE_ENABLED` setting. Aura-Desktop must read this field before calling `POST /realtime/session`. When false, the backend ignores `bridged=1`, returns an ordinary LiveKit token, and the desktop activates that room without starting any OpenAI Realtime leg. Deploy this additive backend contract before releasing the desktop consumer.
+
 ### 5. Screen-sight (desktop-only capture, backend-shared agent)
 
 Desktop-exclusive today (mobile has no equivalent). Frame goes desktop to LiveKit `streamBytes` to the same voice agent process, which replies over the data channel with `element.point`. Full flow lives in `Aura-Desktop/README.md`; the only cross-repo fact worth stating here is that it rides the same backend voice agent as contract 4, not a separate service.
@@ -95,15 +94,45 @@ The endpoint is text-only by design and cannot mint a new draft, which is also h
 
 ### 5b. Meeting Notes (desktop-only capture, REST + Cloud Tasks synthesis)
 
-Desktop-exclusive (Windows WASAPI capture; design doc `Aura-Desktop/MEETING_NOTES_PLAN.md`, implemented 2026-07-11).
-Unlike screen-sight/drafts this rides pure REST, no LiveKit leg and no data-channel schema, so there is no forced client/backend release order: the desktop fails soft (silent 404) against a backend without the routes, and the routes ignore clients that never call them.
+Desktop-exclusive (Windows WASAPI capture; source architecture
+`Aura-Desktop/MEETING_RECORDING_V2_ARCHITECTURE.md`). Unlike screen-sight/drafts this
+rides pure REST, no LiveKit leg and no data-channel schema. Rollout order is
+runtime lease, immutable ingest, new workers, then publication quality enforcement.
 
 The contract, all under Firebase-ID-token auth (`backend/src/handlers/meetings.py`):
-`POST /meetings/claim` gates capture and charges the transactional monthly counter (`users/{uid}/usage/meetings_{YYYYMM}`; 5/month on free AND companion, unlimited pro; 402 body mirrors the `/voice/token` cap shape `{"detail": {"code": "meeting_cap_reached", "seconds_until_reset"}}`; 409 `meeting_already_claimed` for a cross-device conflict; same-device re-claim is idempotent via `users/{uid}/meeting_claims/{sha1(event_id)}` locks that self-expire at event end + 30 min).
-`POST /meetings/{id}/segments/{seq}` takes raw 2-channel 16 kHz FLAC bodies (ch0 = device owner's mic, ch1 = system loopback) with `X-Segment-Start-Ms`/`X-Segment-Duration-Ms` headers into GCS `gs://juno-2ea45-meeting-audio/meetings/{uid}/{meeting_id}/` (bucket has a 7-day lifecycle rule as backstop; the worker deletes audio immediately after synthesis).
+`POST /meetings/claim` gates capture and charges the transactional monthly counter
+(`users/{uid}/usage/meetings_{YYYYMM}`; 5/month on free AND companion, unlimited
+pro). It binds ownership to `installation_id`, retains `runtime_instance_id` for
+diagnostics, and returns `capture_run_id`, monotonic `capture_fence`,
+`lease_expires_at`, `protocol_version: 2`, and `max_capture_minutes`. A same-installation
+recovery retains the immutable run identity and increments the fence. A different
+installation receives the existing `meeting_already_claimed` conflict. Stale-fence
+mutations return 409 `stale_capture_fence`.
+`PUT /meetings/{id}/capture-runs/{capture_run_id}/segments/{seq}` takes raw
+two-channel 16 kHz FLAC with the V2 integrity headers. It creates only
+`audio/v2/{uid}/{meeting_id}/{capture_run_id}/{seq:06}/{plaintext_sha256}.flac`
+using generation-match zero and returns a persisted receipt bound to digest, size,
+object, generation, run, fence, meeting, and sequence. The V1 POST route remains a
+temporary compatibility surface; it must not regain overwrite semantics.
 The bucket plus that lifecycle rule are a VERIFIED deploy prerequisite, not a comment: `backend/deploy.sh` runs `scripts/check_meeting_storage.py --check` before shifting traffic and aborts the deploy when the bucket is missing, in the wrong region, or lacks the lifecycle rule (2026-07-14 incident: the bucket was never provisioned, so every segment upload 404'd, the handler answered 503, and a real 22-minute meeting produced no note; the desktop's durable encrypted queue held the audio and recovered on the next signed-in restart once the bucket existed).
-`POST /meetings/{id}/complete` enqueues one Cloud Tasks job (existing `juno-engagement` queue, deterministic task name) to `/internal/meetings/synthesize`, which transcribes per-channel (Deepgram nova-3 multichannel, the same `DEEPGRAM_API_KEY` the voice worker mounts), checks the user's exclude-keyword list (`users/{uid}/settings/meeting_notes`) BEFORE any STT, synthesizes `{summary, decisions, action_items, open_questions, language, one_sided, partial}`, attaches provider-derived `transcript: [{speaker, text}]` turns, and persists the ready note atomically to `users/{uid}/meetings/{meeting_id}`. The insight model never authors transcript text or speaker labels.
-Free and Companion meeting documents, including transcripts, carry a 7-day `expires_at` TTL. Pro notes and transcripts remain until account deletion. The TTL policy is declared in `firestore.indexes.json`; the equivalent one-time command is `gcloud firestore fields ttls update expires_at --collection-group=meetings --enable-ttl`. Raw audio is deleted immediately after the ready note is durable, with the bucket's 7-day lifecycle as a backstop. Account deletion strictly removes any remaining `meetings/{uid}/` GCS objects before Firestore data and Firebase Auth.
+`POST /meetings/{id}/capture-runs/{capture_run_id}/complete` verifies the canonical
+ordered manifest against deterministic segment documents and real upload receipts.
+The same Firestore transaction advances state and creates a durable job, outbox row,
+and append-only audit event. Cloud Tasks is only delivery. Workers use attempt/token
+leases, transcribe per segment, persist immutable provider and transcript artifacts,
+apply `meeting-quality-v1`, and can publish `ready` only through a fenced transaction
+with a passing quality report. The insight model never authors transcript text or
+speaker labels.
+Free and Companion meeting documents carry a 7-day `expires_at` TTL. Pro notes remain
+until explicit deletion or account deletion. Successful upload, completion,
+transcription, and publication do not delete cloud audio. `DELETE /meetings/{id}`
+runs an exact-generation, retryable, receipt-bearing deletion saga; broad prefix
+deletion is forbidden. It returns `state`, stable `deletion_id`, and `completed_at`;
+a retryable storage or Firestore interruption returns 503
+`meeting_deletion_retry_required`. The source architecture requires a resumable
+handoff: server `block_new_work`, desktop durable `local_delete` receipt, then exact
+cloud deletion through `delete_complete`. Uploads and stale workers must remain
+blocked throughout.
 `GET /meetings/recent` returns the note without transcript turns for a bounded dashboard payload. `GET /meetings/{id}` returns the full note with transcript. Both use an explicit public note-field allowlist, and legacy notes without transcripts remain valid.
 Capture trust model is load-bearing for the brand: user-armed only (global toggle default OFF), visible recording indicator the entire time, session-lock pause.
 Duration is TEMPORARILY clamped to 60 minutes on every tier (product decision 2026-07-11): events scheduled longer than an hour are not armable, the desktop engine hard-stops capture at 60 minutes per meeting, and the backend synthesis caps mirror the clamp (design values of 4h capture / 240min Pro synthesis return when long-meeting support lands).
@@ -145,6 +174,8 @@ Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebas
 | `GET /desktop/usage` | none | `{voice_minutes_used, voice_minutes_limit, drafts_used, drafts_limit, period_start, period_end}` from the daily entitlement counters. A null limit is unlimited. |
 
 The endpoint field names are snake_case. `Aura-Desktop/src/lib/dashboardApi.ts` maps them to its own camelCase models, so neither side may rename fields independently. Empty data is a successful empty payload, not an error.
+
+Guide Mode itself (the armed screen-guidance session those usage rows describe) is a substantial worker-side subsystem, not just this endpoint. Arming is native on the desktop, so the worker can only request it. Full flow in `architectures/guide-mode.md`.
 
 ### 7c. Google connector control and browser handoff
 
@@ -216,27 +247,23 @@ GitHub release metadata is unavailable
     -> no effect on already installed clients or backend services
 ```
 
-### Obvious walkthrough: mobile calls the shared backend
+### The non-obvious one: browser auth completes without a backend callback
 
-1. Aura mobile authenticates with Firebase and sends a request to juno-backend.
-2. The backend validates the token, reads or writes shared Firestore state, and returns the feature response.
-3. Voice is the exception in transport: the backend mints a token, then audio and data travel through LiveKit.
+Aura-Desktop asks juno-backend to create a pending code document. Aura-Web authenticates the user and updates that exact Firestore document directly, never calling juno-backend. Aura-Desktop polls juno-backend, which transactionally reads and deletes the completed document. The custom token is single-use, so losing the successful response requires a new handshake rather than replaying the deleted session.
 
-### Non-obvious walkthrough: browser auth completes without a backend callback
-
-1. Aura-Desktop asks juno-backend to create a pending code document.
-2. Aura-Web authenticates the user and updates that exact Firestore document directly.
-3. Aura-Desktop polls juno-backend, which transactionally reads and deletes the completed document.
-4. The custom token is single-use. Losing the successful response requires a new handshake rather than replaying the deleted session.
+Everything else is conventional: mobile authenticates with Firebase and calls juno-backend over HTTP. Voice is the only transport exception, where the backend mints a token and audio then travels through LiveKit.
 
 ## Known gaps / open questions
 
-- **Legacy Flutter desktop fully retired (2026-07-11):** the code, the `windows/` platform tree, the CLAUDE.md shipping section, and the GCS-hosted `AuraSetup*.exe` installers were all deleted. No users remained on the old build. The GCS bucket `aura-desktop-downloads` itself still exists but is empty.
-- **Aura-Web's PostHog project identity is unconfirmed.** It initializes its own `posthog-js` client from `NEXT_PUBLIC_POSTHOG_KEY`, separate code from the app-side analytics contract (`funnel_events.py`/`.dart`). Whether it's the same PostHog project as the app side, or a distinct marketing-site project, wasn't verified while writing this (the key value lives in Vercel env vars, not in the repo). Confirm before assuming shared funnels between the site and the app.
-- **`MobileApps/Juno`** is an untracked, non-git leftover folder, not a live repo. Not part of this system; flagged here so it isn't mistaken for one.
+- **Aura-Web's PostHog project identity is unconfirmed.** It initializes its own `posthog-js` client from `NEXT_PUBLIC_POSTHOG_KEY`, separate code from the app-side analytics contract (`funnel_events.py` / `.dart`). Whether that resolves to the same PostHog project as the app side was never verified; the key lives in Vercel env vars, not in the repo. Confirm before assuming shared funnels between the site and the app.
+- **The GCS bucket `aura-desktop-downloads`** still exists but is empty, left over from the deleted Flutter Windows client.
+- **Meeting deletion still lacks the cross-repository local-delete handoff.** Aura-Desktop has not connected local deletion to `DELETE /meetings/{id}`, and the current backend route advances from `block_new_work` into cloud deletion in the same request. The source architecture requires a resumable pause for the desktop's durable `local_delete` receipt before exact cloud deletion. Split/acknowledge the route and add the desktop retry flow before calling deletion end-to-end across both repositories.
+- **Meeting deletion during capture/upload is not yet proven safe.** Backend target discovery currently keys off the verified completion `segment_count`, so a delete before completion can miss already-created segment objects. Reconcile all exact run objects and generations before committing `delete_complete`.
+- **Meeting V2 operational acceptance remains partial.** Current reconciliation covers stranded finalized runs, missing jobs/outbox delivery, expired worker leases, provider/quality failures, ready rows without artifacts, and integrity conflicts. Retry-deadline upload alerts, dimensional quality metrics, local-retention timing alerts, sanitized incident-bundle export, and shadow quality rollout are still missing.
+- **The canonical desktop architecture status is stale.** `Aura-Desktop/MEETING_RECORDING_V2_ARCHITECTURE.md` still marks backend Phases C through E unchecked and describes this backend as read-only. Update that sibling source-of-truth only after the remaining cross-repository deletion and rollout gates are complete.
 
 ## Where to look next
 
-- **Aura (this repo):** `README.md` (mobile + backend architecture), `CLAUDE.md` (working rules, the many backend subsystems: notifications, signal engine, reactive orchestration, briefing, tracking, keyboard IME).
+- **Aura (this repo):** `CLAUDE.md` for working rules and the subsystem index, `architectures/README.md` for the architecture atlas itself (notifications, signal engine, reactive orchestration, briefing, tracking, voice, Guide Mode), `README.md` for mobile and backend setup.
 - **Aura-Desktop:** `README.md` (full IPC surface, overlay state machine, voice/screen-sight sequence diagrams), `CLAUDE.md` (avatar rendering gotchas, main-thread-blocking rule, optimistic-cache rule), `lessons-learnt.txt`.
 - **Aura-Web:** `CLAUDE.md` (design system rules, landing-page performance rules, blog publishing checklist), `DESIGN.md`.

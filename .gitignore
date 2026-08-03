@@ -125,3 +125,7 @@ skills-lock.json
 # Windows filesystem noise
 Thumbs.db
 Desktop.ini
+.claude/agents/backend-typescript-architect.md
+.claude/settings.local.json
+.claude/agents/senior-code-reviewer.md
+.claude/agents/ui-engineer.md

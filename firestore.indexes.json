@@ -275,6 +275,54 @@
   ],
   "fieldOverrides": [
     {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "expires_at",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "history",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "message",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "answer_text",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "notification_reason",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "tool_receipts",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chat_turns",
+      "fieldPath": "reminder",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "tool_idempotency",
+      "fieldPath": "expires_at",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "pending_actions",
+      "fieldPath": "expires_at",
+      "ttl": true,
+      "indexes": []
+    },
+    {
       "collectionGroup": "fcm_tokens",
       "fieldPath": "last_seen",
       "indexes": [
@@ -442,6 +490,60 @@
         {
           "order": "DESCENDING",
           "queryScope": "COLLECTION"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "meeting_job_outbox",
+      "fieldPath": "dispatch_due_at",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "meetings",
+      "fieldPath": "protocol_version",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "capture_runs",
+      "fieldPath": "updated_at",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
         }
       ]
     },
