@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -53,6 +54,17 @@ class SegmentTranscript:
     mic_words: int = 0
     loopback_words: int = 0
     language: str | None = None
+    language_confidence: float | None = None
+    confidence: float | None = None
+    words: list[dict[str, Any]] = field(default_factory=list)
+    provider: str = "deepgram"
+    model: str = "nova-3"
+    parameters: dict[str, str] = field(default_factory=dict)
+    request_id: str = ""
+    responded_at: str = ""
+    raw_response: dict[str, Any] = field(default_factory=dict)
+    parser_version: str = "deepgram-meeting-v2"
+    forced_english: bool = False
 
 
 class DeepgramError(Exception):
@@ -66,7 +78,23 @@ class DeepgramRejectedError(DeepgramError):
     retry loop here just resends the identical bad audio forever."""
 
 
-async def transcribe_segment(flac_bytes: bytes) -> SegmentTranscript:
+class ProviderOutputError(DeepgramError):
+    code = "provider_output_invalid"
+
+
+class ProviderMalformedError(ProviderOutputError):
+    code = "provider_output_malformed"
+
+
+class ProviderEmptyError(ProviderOutputError):
+    code = "provider_output_empty"
+
+
+async def transcribe_segment(
+    flac_bytes: bytes,
+    *,
+    force_english: bool = False,
+) -> SegmentTranscript:
     """Transcribe one 2-channel FLAC segment. Retries transient failures
     (429/5xx/network) twice with a short backoff, then raises DeepgramError.
     A 4xx other than 429 raises immediately - resending the same bytes cannot
@@ -78,23 +106,38 @@ async def transcribe_segment(flac_bytes: bytes) -> SegmentTranscript:
         "Authorization": f"Token {settings.DEEPGRAM_API_KEY.strip()}",
         "Content-Type": "audio/flac",
     }
+    params = dict(_PARAMS)
+    if force_english:
+        params["language"] = "en"
+        params["detect_language"] = "false"
 
     last_error = ""
     async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
                 response = await client.post(
-                    _LISTEN_URL, params=_PARAMS, headers=headers, content=flac_bytes,
+                    _LISTEN_URL,
+                    params=params,
+                    headers=headers,
+                    content=flac_bytes,
                 )
             except httpx.HTTPError as exc:
                 last_error = f"network: {exc}"
             else:
                 if response.status_code == 200:
-                    return _parse(response.json())
+                    try:
+                        body = response.json()
+                    except ValueError as exc:
+                        raise ProviderMalformedError("Deepgram returned invalid JSON.") from exc
+                    return _parse(
+                        body,
+                        request_id=response.headers.get("dg-request-id", ""),
+                        parameters=params,
+                        force_english=force_english,
+                    )
                 if response.status_code not in (429,) and response.status_code < 500:
                     raise DeepgramRejectedError(
-                        f"deepgram rejected request: {response.status_code} "
-                        f"{response.text[:200]}"
+                        f"deepgram rejected request: {response.status_code}"
                     )
                 last_error = f"status {response.status_code}"
 
@@ -104,31 +147,100 @@ async def transcribe_segment(flac_bytes: bytes) -> SegmentTranscript:
     raise DeepgramError(f"deepgram failed after {_MAX_ATTEMPTS} attempts: {last_error}")
 
 
-def _parse(body: dict[str, Any]) -> SegmentTranscript:
-    """Defensive parse of the prerecorded response. Anything malformed
-    degrades to an empty transcript for the segment rather than raising -
-    one silent segment must not fail the whole meeting."""
-    results = body.get("results") or {}
-    out = SegmentTranscript()
+def _parse(
+    body: dict[str, Any],
+    *,
+    request_id: str = "",
+    parameters: dict[str, str] | None = None,
+    force_english: bool = False,
+) -> SegmentTranscript:
+    """Parse provider evidence strictly; malformed data is never silence."""
+    if not isinstance(body, dict) or not isinstance(body.get("results"), dict):
+        raise ProviderMalformedError("Deepgram response is missing results.")
+    results = body["results"]
+    utterance_rows = results.get("utterances", [])
+    channel_rows = results.get("channels", [])
+    if not isinstance(utterance_rows, list) or not isinstance(channel_rows, list):
+        raise ProviderMalformedError("Deepgram response has malformed channels.")
+    if not channel_rows and not utterance_rows and not str(results.get("transcript") or "").strip():
+        raise ProviderMalformedError("Deepgram response has no recognition payload.")
+    out = SegmentTranscript(
+        parameters=dict(parameters or _PARAMS),
+        request_id=request_id,
+        responded_at=datetime.now(UTC).isoformat(),
+        raw_response=body,
+        forced_english=force_english,
+    )
 
-    for utt in results.get("utterances") or []:
+    previous_start = -1.0
+    for utt in utterance_rows:
+        if not isinstance(utt, dict):
+            raise ProviderMalformedError("Deepgram utterance is malformed.")
         text = str(utt.get("transcript") or "").strip()
         if not text:
             continue
-        out.utterances.append(Utterance(
-            channel=int(utt.get("channel") or 0),
-            start_s=float(utt.get("start") or 0.0),
-            end_s=float(utt.get("end") or 0.0),
-            text=text,
-        ))
+        try:
+            start = float(utt["start"])
+            end = float(utt["end"])
+            channel = int(utt.get("channel", 0))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProviderMalformedError("Deepgram utterance timing is malformed.") from exc
+        if start < 0 or end < start or start < previous_start:
+            raise ProviderMalformedError("Deepgram utterance timing is non-monotonic.")
+        previous_start = start
+        out.utterances.append(
+            Utterance(
+                channel=channel,
+                start_s=start,
+                end_s=end,
+                text=text,
+            )
+        )
 
-    channels = results.get("channels") or []
     channel_fallbacks: list[Utterance] = []
-    for index, channel in enumerate(channels[:2]):
-        alternatives = channel.get("alternatives") or [{}]
+    confidences: list[float] = []
+    for index, channel in enumerate(channel_rows[:2]):
+        if not isinstance(channel, dict):
+            raise ProviderMalformedError("Deepgram channel is malformed.")
+        alternatives = channel.get("alternatives") or []
+        if not isinstance(alternatives, list) or not alternatives:
+            raise ProviderMalformedError("Deepgram channel has no alternatives.")
         alternative = alternatives[0]
+        if not isinstance(alternative, dict):
+            raise ProviderMalformedError("Deepgram alternative is malformed.")
         fallback_text = str(alternative.get("transcript") or "").strip()
-        words = len(alternative.get("words") or []) or len(fallback_text.split())
+        word_rows = alternative.get("words") or []
+        if not isinstance(word_rows, list):
+            raise ProviderMalformedError("Deepgram words are malformed.")
+        normalized_words: list[dict[str, Any]] = []
+        previous_word_start = -1.0
+        for word in word_rows:
+            if not isinstance(word, dict):
+                raise ProviderMalformedError("Deepgram word is malformed.")
+            try:
+                start = float(word["start"])
+                end = float(word["end"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProviderMalformedError("Deepgram word timing is malformed.") from exc
+            if start < 0 or end < start or start < previous_word_start:
+                raise ProviderMalformedError("Deepgram word timing is non-monotonic.")
+            previous_word_start = start
+            confidence = word.get("confidence")
+            if isinstance(confidence, (int, float)):
+                confidences.append(float(confidence))
+            normalized_words.append(
+                {
+                    "word": str(word.get("punctuated_word") or word.get("word") or ""),
+                    "start_s": start,
+                    "end_s": end,
+                    "confidence": float(confidence)
+                    if isinstance(confidence, (int, float))
+                    else None,
+                    "channel": index,
+                }
+            )
+        out.words.extend(normalized_words)
+        words = len(normalized_words) or len(fallback_text.split())
         if index == MIC_CHANNEL:
             out.mic_words = words
         else:
@@ -137,17 +249,22 @@ def _parse(body: dict[str, Any]) -> SegmentTranscript:
             detected = channel.get("detected_language")
             if detected:
                 out.language = str(detected)
+                raw_language_confidence = channel.get("language_confidence")
+                if isinstance(raw_language_confidence, (int, float)):
+                    out.language_confidence = float(raw_language_confidence)
 
         # Deepgram can occasionally return a channel transcript without the
         # requested utterance array. Keep the channel provenance rather than
         # degrading a meeting with recognized words to an empty transcript.
         if fallback_text:
-            channel_fallbacks.append(Utterance(
-                channel=index,
-                start_s=0.0,
-                end_s=0.0,
-                text=fallback_text,
-            ))
+            channel_fallbacks.append(
+                Utterance(
+                    channel=index,
+                    start_s=0.0,
+                    end_s=0.0,
+                    text=fallback_text,
+                )
+            )
 
     if not out.utterances:
         if channel_fallbacks:
@@ -156,20 +273,25 @@ def _parse(body: dict[str, Any]) -> SegmentTranscript:
             # This is not part of the current multichannel Deepgram response,
             # but keeps a future mono or provider fallback transcript usable
             # without inventing speaker attribution.
-            fallback_text = str(
-                results.get("transcript") or body.get("transcript") or ""
-            ).strip()
+            fallback_text = str(results.get("transcript") or body.get("transcript") or "").strip()
             if fallback_text:
-                out.utterances.append(Utterance(
-                    channel=-1,
-                    start_s=0.0,
-                    end_s=0.0,
-                    text=fallback_text,
-                    speaker="",
-                ))
+                out.utterances.append(
+                    Utterance(
+                        channel=-1,
+                        start_s=0.0,
+                        end_s=0.0,
+                        text=fallback_text,
+                        speaker="",
+                    )
+                )
 
     if not out.utterances and (out.mic_words or out.loopback_words):
-        logger.warn("meetings.deepgram: words without utterances", {
-            "mic_words": out.mic_words, "loopback_words": out.loopback_words,
-        })
+        logger.warn(
+            "meetings.deepgram: words without utterances",
+            {
+                "mic_words": out.mic_words,
+                "loopback_words": out.loopback_words,
+            },
+        )
+    out.confidence = sum(confidences) / len(confidences) if confidences else None
     return out

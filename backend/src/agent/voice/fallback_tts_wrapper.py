@@ -1,10 +1,10 @@
-"""A fallback-TTS wrapper that strips sonic-3-only speech markup before speaking.
+"""A fallback-TTS wrapper that strips Cartesia speech markup before speaking.
 
-Only the Cartesia sonic-3 primary understands the inline <emotion/speed/volume>
-tags emitted by emotion_tags.py and the [laughter] nonverbalism; Deepgram
-aura-2 and Cartesia sonic-2 would read them aloud as literal text. The
+Cartesia's Sonic models understand the inline <emotion/speed/volume> tags
+emitted by emotion_tags.py and the [laughter] nonverbalism; Deepgram Aura 2
+would read them aloud as literal text. The
 FallbackAdapter replays the exact same text chunks to every engine, so the
-strip must live on the fallback TTS instances themselves.
+strip must live on the non-Cartesia fallback TTS instance itself.
 
 streaming=False is deliberate: FallbackAdapter wraps a non-streaming TTS in
 its own StreamAdapter, which tokenizes the replayed chunks into COMPLETE
