@@ -388,8 +388,6 @@ class ModelProvider:
         this does not flatten to text. Plain tool-use turn: no thinking, no temperature
         — the step discipline lives in the system prompt, not in extended reasoning.
         Streams so a longer turn never trips the SDK HTTP timeout."""
-        # Anthropic -> Anthropic only: this returns RAW Anthropic tool_use blocks, which
-        # Gemini cannot produce, so the fallback stays Sonnet -> Haiku.
         model_chain = [settings.REASON_STEP_MODEL, settings.REASON_STEP_MODEL_FALLBACK]
         client = self._get_anthropic_client().with_options(timeout=_REASON_TIMEOUT_S)
         kwargs: dict[str, Any] = {
@@ -405,8 +403,6 @@ class ModelProvider:
             logger.debug("ModelProvider.reason_turn", {"model": model_id, "turns": len(messages)})
             for attempt in range(1, _MAX_RETRIES + 1):
                 try:
-                    # One telemetry generation per actual API attempt; the inner
-                    # try re-raises into the existing retry/fallback handling.
                     recording = start_llm_generation(
                         model=model_id, provider="anthropic", caller="reason_turn"
                     )
@@ -437,7 +433,6 @@ class ModelProvider:
                     })
                     raise
                 except anthropic.BadRequestError:
-                    # 400 fails identically on the next model — raise, never fall back.
                     logger.exception("ModelProvider: reason_turn() bad request (400), not falling back", {
                         "model": model_id,
                     })
@@ -471,8 +466,6 @@ class ModelProvider:
                         "error_type": type(exc).__name__,
                     })
                     await asyncio.sleep(delay)
-        # model loop always returns or raises; this line is unreachable
-        raise RuntimeError("ModelProvider: reason_turn() retry loop exited unexpectedly")
 
     async def _call(
         self,

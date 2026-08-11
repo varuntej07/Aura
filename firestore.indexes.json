@@ -385,6 +385,11 @@
       ]
     },
     {
+      "collectionGroup": "desktop_chat_messages",
+      "fieldPath": "text",
+      "indexes": []
+    },
+    {
       "collectionGroup": "voice_sessions",
       "fieldPath": "started_at",
       "indexes": [
@@ -532,6 +537,24 @@
     {
       "collectionGroup": "capture_runs",
       "fieldPath": "updated_at",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "DESCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "dictation_traces",
+      "fieldPath": "audio_expires_at",
       "indexes": [
         {
           "order": "ASCENDING",
