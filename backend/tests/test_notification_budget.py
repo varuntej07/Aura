@@ -122,15 +122,17 @@ def test_adaptive_cap_is_monotonic_in_engagement():
 
 def test_new_account_forces_flat_cap_regardless_of_engagement():
     # Even a "heavy tapper" engagement profile (would normally earn cap=5) is
-    # held to the flat new-account ceiling while under the window.
+    # held to the flat new-account ceiling while under the window. The flat tier
+    # now matches the adaptive default cap but keeps its own wider spacing, so a
+    # new account is paced more gently than an engaged one without being starved.
     cap, spacing = resolve_effective_limits(delivered=20, opened=12, account_age_days=0)
-    assert cap == 1 and spacing == timedelta(hours=4)
+    assert cap == 3 and spacing == timedelta(hours=2)
 
 
 def test_new_account_window_boundary():
     # One day short of the window -> still new-account tier.
-    cap, _ = resolve_effective_limits(delivered=0, opened=0, account_age_days=NEW_ACCOUNT_WINDOW_DAYS - 1)
-    assert cap == 1
+    cap, spacing = resolve_effective_limits(delivered=0, opened=0, account_age_days=NEW_ACCOUNT_WINDOW_DAYS - 1)
+    assert cap == 3 and spacing == timedelta(hours=2)
     # At the window -> falls through to the adaptive resolve (gentle default here).
     cap, spacing = resolve_effective_limits(delivered=0, opened=0, account_age_days=NEW_ACCOUNT_WINDOW_DAYS)
     assert (cap, spacing) == resolve_adaptive_limits(0, 0)

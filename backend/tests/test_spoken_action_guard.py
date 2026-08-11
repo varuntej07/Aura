@@ -26,14 +26,18 @@ def test_frustration_corrections_are_detected():
         assert wants_copyable_artifact(text), text
 
 
-def test_ordinary_and_outbound_turns_do_not_trigger():
-    # Conversation and outbound-message drafting must NOT be backstopped: those
-    # either stay spoken or belong to draft_outbound_message.
+def test_ordinary_turns_do_not_trigger():
+    # Conversation must never be backstopped. Outbound drafting used to be
+    # excluded here too, on the grounds that it belongs to
+    # draft_outbound_message. A live session showed the failure path that
+    # assumption ignores: when that tool does not fire, the draft is read aloud,
+    # which is the exact bug this module exists to stop. The backstop only runs
+    # when NO tool fired, so a working outbound draft is still untouched; all
+    # that changed is that a narrated one now lands on a card instead of in the
+    # user's ear, at the cost of being ephemeral rather than refinable.
     for text in (
         "what is the weather today",
         "can you tell me a joke",
-        "draft a reply to this email",
-        "reply to Sarah on WhatsApp",
         "",
     ):
         assert not wants_copyable_artifact(text), text

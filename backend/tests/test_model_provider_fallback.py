@@ -276,7 +276,7 @@ async def test_reason_turn_escalates_to_fallback_model(monkeypatch):
     result = await provider.reason_turn([{"role": "user", "content": "x"}])
 
     assert result is sentinel
-    assert inner.messages.stream.call_count == mp._MAX_RETRIES + 1  # 3 sonnet + 1 haiku
+    assert inner.messages.stream.call_count == mp._MAX_RETRIES + 1
 
 
 async def test_reason_turn_both_models_down_raises(monkeypatch):

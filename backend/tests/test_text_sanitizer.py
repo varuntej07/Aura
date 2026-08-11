@@ -2,7 +2,7 @@
 
 The three cases the PRE-DEMO gate requires (must pass before any live call):
   1. the real session 0ee06b42 markdown-list/bold sample -> clean prose, no `*`
-  2. snake_case identifiers preserved (underscores are not emphasis)
+  2. snake_case identifiers converted to ordinary spoken words
   3. the literal WORD "asterisk" preserved
 Plus a few guards on links/headers and the streaming wrapper.
 """
@@ -35,14 +35,13 @@ def test_strips_real_markdown_list_and_bold_sample():
     assert "**" not in out
     # The actual words survive, including the de-bolded labels.
     assert "Content: Start a blog" in out
-    assert "Communities: Engage with online ADHD groups" in out
+    assert "Communities: Engage with online attention deficit hyperactivity disorder groups" in out
     assert "website is absolutely key" in out
 
 
-def test_preserves_snake_case_identifiers():
+def test_converts_snake_case_identifiers_to_spoken_words():
     out = sanitize_for_speech("call get_user_context and then web_surf now")
-    assert "get_user_context" in out
-    assert "web_surf" in out
+    assert out == "call get user context and then web surf now"
 
 
 def test_preserves_literal_word_asterisk():
@@ -63,13 +62,12 @@ def test_raw_urls_never_reach_speech():
     assert "https://" not in out
     assert "www.notion.so" not in out
     assert "my-integrations" not in out
-    assert out == "Open the link on screen next."
+    assert out == "Open the website next."
 
 
-def test_hyphenated_words_survive():
+def test_hyphenated_words_become_spoken_words():
     out = sanitize_for_speech("a voice-first, low-latency build")
-    assert "voice-first" in out
-    assert "low-latency" in out
+    assert out == "a voice first, low latency build"
 
 
 @pytest.mark.asyncio
@@ -188,10 +186,17 @@ async def test_buddy_tts_node_sanitizes_before_delegating(monkeypatch):
         for piece in ["Here's the plan:\n*   **Step one:** call ", "get_user_context now.\n"]:
             yield piece
 
-    # Call the override unbound; it only uses `self` to forward to the (stubbed) default node.
-    frames = [f async for f in BuddyAgent.tts_node(SimpleNamespace(), reply_stream(), None)]
+    # Call the override unbound. Besides forwarding to the (stubbed) default node it
+    # reads self._text_output, the output-mute flag that early-returns without
+    # synthesizing, so the fake has to carry it.
+    frames = [
+        f
+        async for f in BuddyAgent.tts_node(
+            SimpleNamespace(_text_output=False), reply_stream(), None
+        )
+    ]
 
     joined = "".join(received)
     assert "*" not in joined  # markdown stripped before TTS
-    assert "Step one: call get_user_context now" in joined  # words + identifier preserved
+    assert "Step one: call get user context now" in joined  # written identifier is speakable
     assert frames == []  # stub emits no audio frames

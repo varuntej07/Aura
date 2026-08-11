@@ -4,11 +4,11 @@ Pins the contracts that keep screen sight correct and every other session unharm
   - frames assemble from byte-stream chunks with their client-stamped attributes;
   - the size cap and empty streams drop loudly instead of buffering garbage;
   - a stale frame is never injected (it no longer reflects "their screen right now");
-  - a session that never received a frame passes through the turn hook UNTOUCHED —
+  - a session that never received a frame passes through the turn hook UNTOUCHED -
     this is what preserves LiveKit preemptive generation for mobile/keyboard/unarmed
     desktop sessions;
   - injection appends the label + ImageContent to the user message, and the label
-    changes text_content — the mechanism that invalidates the speculative imageless
+    changes text_content - the mechanism that invalidates the speculative imageless
     reply so the screenshot actually reaches the LLM;
   - earlier turns' images collapse to text placeholders on the SHARED message objects
     (turn_ctx is a shallow copy), so exactly one image is ever hot in context;
@@ -202,7 +202,9 @@ async def test_fresh_frame_injects_label_and_image():
     assert image_part.image.startswith("data:image/jpeg;base64,")
     assert image_part.mime_type == "image/jpeg"
     label = message.content[-2]
-    assert isinstance(label, str) and "1280x720" in label
+    # The frame's dimensions are stated as the POINT coordinate space rather than
+    # as a size, so the model stops reading them back as "the image is too small".
+    assert isinstance(label, str) and "0,0 to 1279,719" in label
     # The label must change text_content: that is what invalidates the speculative
     # imageless reply so the screenshot actually reaches the LLM.
     assert message.text_content != text_before
@@ -267,8 +269,12 @@ async def test_hook_never_raises():
 def test_surface_prompt_renders_screen_policy_only_for_desktop():
     note = voice_system_prompt("desktop")
     normalized = note.lower()
-    assert "ctrl+alt+g" in normalized
-    assert "ctrl+alt+s" not in normalized
+    assert "current screen evidence" in normalized
+    # No shortcut may be named at all. Every binding is user-rebindable and the
+    # agent cannot see what this user set, so any named combination is a guess:
+    # a live session had Buddy insist on Ctrl+Alt+S while the user was on a
+    # different binding entirely.
+    assert "ctrl+alt" not in normalized
     assert "eye" not in normalized
     assert "screenshot" in note
     # The prompt-injection posture rides with the capability.

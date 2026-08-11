@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.config.settings import settings
 from src.handlers import scheduler
 from src.services.memory import graph_fields as GF
 from src.services.notifications import candidate_machine as machine
@@ -26,6 +25,7 @@ from src.services.reactive import event_bus
 from src.services.session_followup import evaluator, lifecycle, revalidator
 from src.services.session_followup import fields as F
 from src.services.session_followup.clustering import cluster_turns
+from src.services.threads import thread_writer
 
 NOW = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
 
@@ -269,6 +269,13 @@ def followup_db(monkeypatch):
         )
 
     monkeypatch.setattr(revalidator, "frame_memory_graph_notification", _frame)
+    # Evaluation now also opens conversation-derived curiosity threads, whose
+    # worthiness judge is a live LLM call. These tests cover follow-up
+    # evaluation, not thread creation (see test_thread_writer.py), so stub it
+    # out to keep this file offline.
+    monkeypatch.setattr(
+        thread_writer, "record_conversation_threads", AsyncMock(return_value=0)
+    )
     # The send path is live now, so the fake has to return a real decision: a bare
     # AsyncMock's .disposition is a Mock and would silently read as "not delivered".
     monkeypatch.setattr(
@@ -417,7 +424,11 @@ async def test_unrelated_reminder_in_session_does_not_suppress_topic(followup_db
 
 
 @pytest.mark.asyncio
-async def test_cold_start_requires_explicit_future_intent_or_action(followup_db):
+async def test_first_session_is_gated_on_score_not_on_cold_start(followup_db):
+    # COLD_START_SESSION_COUNT is 1 and _prior_finalized_count includes the
+    # just-finalized session, so a first conversation is no longer dropped for
+    # being a first conversation. The score threshold is what still governs, and
+    # this weak session is dropped by that instead.
     _seed_session(
         followup_db,
         future_intent=False,
@@ -428,9 +439,7 @@ async def test_cold_start_requires_explicit_future_intent_or_action(followup_db)
 
     assert await _evaluate() is None
     topic_doc = followup_db.docs[_path("u1", F.SESSION_TOPICS, "s1")]
-    assert topic_doc["topics"][0]["drop_reason"] == (
-        "cold_start_requires_explicit_intent"
-    )
+    assert topic_doc["topics"][0]["drop_reason"] == "below_threshold"
 
 
 @pytest.mark.asyncio

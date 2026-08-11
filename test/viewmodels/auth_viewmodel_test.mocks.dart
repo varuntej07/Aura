@@ -326,6 +326,21 @@ class MockNotificationService extends _i1.Mock
           as _i3.Future<void>);
 
   @override
+  _i3.Future<void> deactivateForSignOut() =>
+      (super.noSuchMethod(
+            Invocation.method(#deactivateForSignOut, []),
+            returnValue: _i3.Future<void>.value(),
+            returnValueForMissingStub: _i3.Future<void>.value(),
+          )
+          as _i3.Future<void>);
+
+  @override
+  void clearUser() => super.noSuchMethod(
+    Invocation.method(#clearUser, []),
+    returnValueForMissingStub: null,
+  );
+
+  @override
   _i3.Future<void> dispose() =>
       (super.noSuchMethod(
             Invocation.method(#dispose, []),
@@ -376,11 +391,17 @@ class MockNotificationService extends _i1.Mock
           as _i3.Future<void>);
 
   @override
-  void dispatchNotificationTap(Map<String, dynamic>? data) =>
-      super.noSuchMethod(
-        Invocation.method(#dispatchNotificationTap, [data]),
-        returnValueForMissingStub: null,
-      );
+  void dispatchNotificationTap(
+    Map<String, dynamic>? data, {
+    String? fallbackBody,
+  }) => super.noSuchMethod(
+    Invocation.method(
+      #dispatchNotificationTap,
+      [data],
+      {#fallbackBody: fallbackBody},
+    ),
+    returnValueForMissingStub: null,
+  );
 
   @override
   _i3.Future<String?> getToken() =>
@@ -577,6 +598,30 @@ class MockBackendApiService extends _i1.Mock implements _i9.BackendApiService {
                   _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
                     this,
                     Invocation.method(#unlinkDevice, [deviceId]),
+                  ),
+                ),
+          )
+          as _i3.Future<_i6.Result<Map<String, dynamic>>>);
+
+  @override
+  _i3.Future<_i6.Result<Map<String, dynamic>>> markChatSessionBackgrounded(
+    String? sessionId,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#markChatSessionBackgrounded, [sessionId]),
+            returnValue: _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+              _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#markChatSessionBackgrounded, [sessionId]),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i6.Result<Map<String, dynamic>>>.value(
+                  _i7.dummyValue<_i6.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#markChatSessionBackgrounded, [
+                      sessionId,
+                    ]),
                   ),
                 ),
           )

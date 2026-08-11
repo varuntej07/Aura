@@ -1,13 +1,13 @@
 """Tests for bracket audio cues -> Cartesia sonic-3 inline speech markup.
 
 Four layers under test, mirroring how the reply text actually flows:
-  1. convert_audio_cues_for_sonic3 — pure cue -> markup conversion + the
+  1. convert_audio_cues_for_sonic3 - pure cue -> markup conversion + the
      hallucinated-cue killer ([soft laughter] must die here, not reach TTS).
-  2. convert_audio_cue_stream — the same conversion across chunk boundaries,
+  2. convert_audio_cue_stream - the same conversion across chunk boundaries,
      with the shared bracket-cue holdback.
-  3. BuddyAgent.tts_node wiring — the default TTS node must receive markdown-free
+  3. BuddyAgent.tts_node wiring - the default TTS node must receive markdown-free
      text with cues already converted; the caption path must never see a cue.
-  4. SpeechMarkupStrippingTTS + build_tts_pipeline — the fallback engines must
+  4. SpeechMarkupStrippingTTS + build_tts_pipeline - the fallback engines must
      never be handed sonic-3-only markup they would read aloud.
 """
 
@@ -28,7 +28,7 @@ from src.agent.voice.text_sanitizer import strip_nonverbal_cue_stream
 
 
 # --------------------------------------------------------------------------
-# convert_audio_cues_for_sonic3 — pure conversion
+# convert_audio_cues_for_sonic3 - pure conversion
 # --------------------------------------------------------------------------
 
 def test_emotion_cue_converts_to_inline_markup():
@@ -94,7 +94,7 @@ def test_delivery_cue_names_never_collide_with_emotion_names():
 
 
 # --------------------------------------------------------------------------
-# strip_inline_speech_markup — what the fallback engines receive
+# strip_inline_speech_markup - what the fallback engines receive
 # --------------------------------------------------------------------------
 
 def test_strip_removes_all_three_markup_kinds_and_cues():
@@ -122,7 +122,7 @@ def test_strip_fails_open_on_internal_error(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# convert_audio_cue_stream — cross-chunk holdback
+# convert_audio_cue_stream - cross-chunk holdback
 # --------------------------------------------------------------------------
 
 async def _collect(chunks: list[str]) -> list[str]:
@@ -165,7 +165,7 @@ async def test_stream_never_yields_a_partial_tag():
 
 
 # --------------------------------------------------------------------------
-# Live wiring — tts_node converts, the caption path stays cue-free
+# Live wiring - tts_node converts, the caption path stays cue-free
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -199,7 +199,14 @@ async def test_buddy_tts_node_converts_cues_after_markdown_strip(monkeypatch):
         ]:
             yield piece
 
-    frames = [f async for f in BuddyAgent.tts_node(SimpleNamespace(), reply_stream(), None)]
+    # tts_node reads self._text_output, the output-mute flag that early-returns
+    # without synthesizing, so the fake has to carry it.
+    frames = [
+        f
+        async for f in BuddyAgent.tts_node(
+            SimpleNamespace(_text_output=False), reply_stream(), None
+        )
+    ]
 
     joined = "".join(received)
     assert "*" not in joined                              # markdown stripped first
@@ -223,7 +230,7 @@ async def test_caption_path_still_strips_emotion_and_delivery_cues():
 
 
 # --------------------------------------------------------------------------
-# SpeechMarkupStrippingTTS — the fallback engines never see sonic-3 markup
+# SpeechMarkupStrippingTTS - the fallback engines never see sonic-3 markup
 # --------------------------------------------------------------------------
 
 class _RecordingFakeTTS(lk_tts.TTS):
@@ -295,10 +302,10 @@ async def test_wrapper_aclose_closes_inner():
 
 
 # --------------------------------------------------------------------------
-# build_tts_pipeline — wrapper placement
+# build_tts_pipeline - wrapper placement
 # --------------------------------------------------------------------------
 
-def test_pipeline_wraps_only_the_fallback_engines(monkeypatch):
+def test_pipeline_wraps_only_the_non_cartesia_fallback(monkeypatch):
     from livekit.plugins import cartesia, deepgram
 
     from src.agent.voice.pipelines import build_tts_pipeline
@@ -309,10 +316,10 @@ def test_pipeline_wraps_only_the_fallback_engines(monkeypatch):
 
     adapter = build_tts_pipeline({})
     primary, first_fallback, second_fallback = adapter._tts_instances
-    # sonic-3 understands the markup and MUST receive it unstripped.
+    # Both Cartesia Sonic legs understand the markup and receive it unstripped.
     assert isinstance(primary, cartesia.TTS)
     assert not isinstance(primary, SpeechMarkupStrippingTTS)
     assert isinstance(first_fallback, SpeechMarkupStrippingTTS)
     assert isinstance(first_fallback._wrapped_tts, deepgram.TTS)
-    assert isinstance(second_fallback, SpeechMarkupStrippingTTS)
-    assert isinstance(second_fallback._wrapped_tts, cartesia.TTS)
+    assert isinstance(second_fallback, cartesia.TTS)
+    assert not isinstance(second_fallback, SpeechMarkupStrippingTTS)

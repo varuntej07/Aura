@@ -162,11 +162,8 @@ def test_surface_and_fresh_frame_are_the_only_desktop_tool_boundaries():
     desktop_with_frame = _policy("anything", surface="desktop", frame=True)
 
     assert "present_visible_artifact" not in app.allowed_tools
-    assert "save_screen_item" not in app.allowed_tools
     assert "present_visible_artifact" in desktop_without_frame.allowed_tools
-    assert "save_screen_item" not in desktop_without_frame.allowed_tools
     assert "draft_outbound_message" not in desktop_without_frame.allowed_tools
-    assert "save_screen_item" in desktop_with_frame.allowed_tools
     assert "draft_outbound_message" in desktop_with_frame.allowed_tools
 
 
@@ -370,7 +367,6 @@ def test_every_current_voice_tool_has_registry_metadata():
         "get_user_context",
         "report_feedback",
         "track_topic",
-        "save_screen_item",
         "draft_outbound_message",
         "present_visible_artifact",
         "set_guide_mode",
@@ -402,17 +398,15 @@ async def test_original_followup_reaches_existing_model_with_reminder_tool(monke
     output = await _collect_llm(agent, context, tools)
 
     assert output == ["model decides from the existing conversation"]
-    assert [tool.info.name for tool in captured["tools"]] == [
-        "set_reminder",
-        "query_memory",
-        "web_surf",
-    ]
+    assert [tool.info.name for tool in captured["tools"]] == ["set_reminder"]
     passed_context = captured["context"]
-    assert [item.text_content for item in passed_context.items] == [
+    passed_text = [item.text_content for item in passed_context.items]
+    assert passed_text[:3] == [
         "Remind me to call Mom",
         "When should I remind you?",
         "Or tonight",
     ]
+    assert "<active_intent_state>" in passed_text[3]
 
 
 async def test_parallel_safe_reads_from_separate_chunks_survive_in_order():
@@ -612,6 +606,7 @@ async def test_single_valid_call_is_preserved_unchanged():
 
 async def test_parallel_telemetry_records_each_call_once():
     telemetry = SimpleNamespace(
+        turn_index=0,
         emitted=Mock(),
         deferred=Mock(),
     )
@@ -660,24 +655,26 @@ async def test_parallel_telemetry_records_each_call_once():
     ]
 
 
-async def test_every_finalized_turn_invalidates_speculative_generation():
+async def test_finalized_artifact_side_effect_invalidates_speculative_generation():
     agent = BuddyAgent(
         user_id="u",
         context_vars=_agent_context_vars(),
         chat_ctx=lk_llm.ChatContext(),
         session_id="s",
     )
-    for text in ("Remind me tonight", "Tell me a joke"):
-        turn_context = lk_llm.ChatContext()
-        message = lk_llm.ChatMessage(role="user", content=[text])
-        await agent.on_user_turn_completed(turn_context, message)
-        assert len(turn_context.items) == 1
-        assert "finalized transcript" in turn_context.items[0].text_content
+    agent._launch_surface = VoiceSurface.DESKTOP
+    turn_context = lk_llm.ChatContext()
+    message = lk_llm.ChatMessage(role="user", content=["Give me the command"])
+
+    await agent.on_user_turn_completed(turn_context, message)
+
+    assert len(turn_context.items) == 1
+    assert "finalized_side_effect" in turn_context.items[0].text_content
 
 
 async def test_tool_and_policy_telemetry_survive_native_tool_calling(monkeypatch):
     context = lk_llm.ChatContext()
-    message = context.add_message(role="user", content=["Or tonight"])
+    message = context.add_message(role="user", content=["Remind me tonight"])
     telemetry = SimpleNamespace(
         turn_index=1,
         start_turn=Mock(),
@@ -824,7 +821,6 @@ def test_tool_descriptions_contain_selection_and_argument_guidance_only():
     from src.shared.tools import TOOL_DEFINITIONS
 
     local_tools = (
-        BuddyAgent.save_screen_item,
         BuddyAgent.report_feedback,
         BuddyAgent.draft_outbound_message,
         BuddyAgent.present_visible_artifact,

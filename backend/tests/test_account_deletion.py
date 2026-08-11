@@ -23,7 +23,17 @@ def test_account_deletion_removes_meeting_audio_before_data_and_auth(monkeypatch
         calls.append(f"audio:{uid}")
         return 2
 
+    async def delete_dictation_audio(uid: str) -> int:
+        calls.append(f"dictation_audio:{uid}")
+        return 3
+
+    async def delete_transcripts(uid: str) -> int:
+        calls.append(f"transcripts:{uid}")
+        return 1
+
+    monkeypatch.setattr(account.dictation_audio, "delete_user_audio", delete_dictation_audio)
     monkeypatch.setattr(account.meeting_audio, "delete_user_audio", delete_audio)
+    monkeypatch.setattr(account.meeting_audio, "delete_user_transcripts", delete_transcripts)
     monkeypatch.setattr(account, "_delete_all_user_data", lambda uid: calls.append(f"data:{uid}"))
     monkeypatch.setattr(
         account,
@@ -34,7 +44,13 @@ def test_account_deletion_removes_meeting_audio_before_data_and_auth(monkeypatch
     response = asyncio.run(account.handle_delete_account(_Request()))
 
     assert response.status_code == 200
-    assert calls == ["audio:user-1", "data:user-1", "auth:user-1"]
+    assert calls == [
+        "dictation_audio:user-1",
+        "audio:user-1",
+        "transcripts:user-1",
+        "data:user-1",
+        "auth:user-1",
+    ]
 
 
 def test_account_deletion_keeps_data_and_auth_when_audio_cleanup_fails(monkeypatch):
@@ -44,6 +60,10 @@ def test_account_deletion_keeps_data_and_auth_when_audio_cleanup_fails(monkeypat
     async def delete_audio(uid: str) -> int:
         raise RuntimeError("storage unavailable")
 
+    async def delete_dictation_audio(uid: str) -> int:
+        return 0
+
+    monkeypatch.setattr(account.dictation_audio, "delete_user_audio", delete_dictation_audio)
     monkeypatch.setattr(account.meeting_audio, "delete_user_audio", delete_audio)
     monkeypatch.setattr(account, "_delete_all_user_data", lambda uid: calls.append("data"))
     monkeypatch.setattr(account, "_delete_firebase_auth_user", lambda uid: calls.append("auth"))

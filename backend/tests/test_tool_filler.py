@@ -63,7 +63,6 @@ async def test_fast_tool_stays_silent():
     speaker = _speaker(session)
     speaker.speak_for_tool("set_reminder")
     speaker.speak_for_tool("store_memory")
-    speaker.speak_for_tool("save_screen_item")
     await _drain(speaker)
 
     assert session.say_calls == []

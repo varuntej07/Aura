@@ -18,7 +18,9 @@ async def test_visible_artifact_returns_card_post_call_contract(monkeypatch):
 
     monkeypatch.setattr(buddy, "_present_visible_artifact", _present)
     monkeypatch.setattr(buddy, "start_tool_span", lambda **_kwargs: _Span())
-    agent = SimpleNamespace(_user_id="u", _session_id="s")
+    # None is the "publish and assume" path, which is what this envelope test is
+    # about; the delivery round trip has its own behaviour and is not in scope here.
+    agent = SimpleNamespace(_user_id="u", _session_id="s", _artifact_delivery=None)
 
     result = await buddy.BuddyAgent.present_visible_artifact.__wrapped__(
         agent,
@@ -40,7 +42,7 @@ async def test_visible_artifact_failure_never_claims_card_rendered(monkeypatch):
 
     monkeypatch.setattr(buddy, "_present_visible_artifact", _present)
     monkeypatch.setattr(buddy, "start_tool_span", lambda **_kwargs: _Span())
-    agent = SimpleNamespace(_user_id="u", _session_id="s")
+    agent = SimpleNamespace(_user_id="u", _session_id="s", _artifact_delivery=None)
 
     result = await buddy.BuddyAgent.present_visible_artifact.__wrapped__(
         agent,
@@ -69,6 +71,7 @@ async def test_outbound_draft_returns_card_silence_contract(monkeypatch):
         _draft_outbound=object(),
         _screen_frames=object(),
         _finalized_transcript="decline politely",
+        _current_turn_frame_context_id="",
     )
 
     result = await buddy.BuddyAgent.draft_outbound_message.__wrapped__(

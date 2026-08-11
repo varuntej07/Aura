@@ -38,19 +38,32 @@ def test_profile_writes_only_authenticated_users_record(monkeypatch):
     writes: list[tuple[str, dict, bool]] = []
 
     class _Doc:
-        def __init__(self, uid: str):
-            self.uid = uid
+        def __init__(self, path: str):
+            self.path = path
 
-        def set(self, data, merge=False):
-            writes.append((self.uid, data, merge))
+        def collection(self, name: str):
+            return _Collection(f"{self.path}/{name}")
 
-    class _Users:
+    class _Collection:
+        def __init__(self, path: str):
+            self.path = path
+
         def document(self, uid):
-            return _Doc(uid)
+            return _Doc(f"{self.path}/{uid}")
+
+    class _Batch:
+        def set(self, ref, data, merge=False):
+            writes.append((ref.path, data, merge))
+
+        def commit(self):
+            pass
 
     class _Db:
-        def collection(self, _name):
-            return _Users()
+        def collection(self, name):
+            return _Collection(name)
+
+        def batch(self):
+            return _Batch()
 
     monkeypatch.setattr(desktop_profile, "admin_firestore", lambda: _Db())
     response = _client().post(
@@ -60,22 +73,67 @@ def test_profile_writes_only_authenticated_users_record(monkeypatch):
             "where_heard_other": None,
             "role": "developer",
             "role_other": None,
+            "desktop": {
+                "install": {
+                    "install_id": "install-1",
+                    "first_started_at": "2026-08-07T02:00:00Z",
+                    "last_started_version": "0.8.2",
+                },
+                "device": {"region": "US", "timezone": "America/Los_Angeles"},
+                "auth": {"created_at": "2026-08-07T01:00:00Z", "last_login_at": "2026-08-07T02:00:00Z"},
+                "onboarding": {"completed": True},
+            },
+            "events": [
+                {
+                    "event_id": "profile_answers_saved",
+                    "event": "desktop_profile_answers_saved",
+                    "occurred_at": "2026-08-07T02:01:00Z",
+                    "properties": {"role": "developer"},
+                }
+            ],
         },
     )
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert writes == [
-        (
-            "user-a",
-            {
-                "where_heard": "friend",
-                "where_heard_other": None,
-                "role": "developer",
-                "role_other": None,
-            },
-            True,
-        )
-    ]
+    assert response.json() == {"ok": True, "events_saved": 1}
+    assert writes[0][0] == "users/user-a"
+    assert writes[0][1]["where_heard"] == "friend"
+    assert writes[0][1]["role"] == "developer"
+    assert writes[0][1]["desktop_install"]["install_id"] == "install-1"
+    assert writes[0][1]["desktop_device"]["region"] == "US"
+    assert writes[0][1]["account_created_at"] == "2026-08-07T01:00:00Z"
+    assert writes[0][1]["last_desktop_active_at"]
+    assert writes[0][2] is True
+    assert writes[1] == (
+        "users/user-a/linked_devices/install-1",
+        {
+            "device_name": "Windows PC",
+            "platform": "windows",
+            "linked_at": "2026-08-07T02:00:00Z",
+            "last_seen_at": writes[1][1]["last_seen_at"],
+            "app_version": "0.8.2",
+            "os_platform": None,
+            "os_family": None,
+            "os_type": None,
+            "os_version": None,
+            "os_arch": None,
+            "locale": None,
+            "region": "US",
+            "timezone": "America/Los_Angeles",
+            "sign_in_method": None,
+        },
+        True,
+    )
+    assert writes[2] == (
+        "users/user-a/desktop_events/profile_answers_saved",
+        {
+            "event": "desktop_profile_answers_saved",
+            "occurred_at": "2026-08-07T02:01:00Z",
+            "received_at": writes[2][1]["received_at"],
+            "source": "aura_desktop",
+            "properties": {"role": "developer"},
+        },
+        True,
+    )
 
 
 def test_dashboard_empty_states_have_exact_valid_shapes(monkeypatch):

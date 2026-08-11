@@ -35,7 +35,8 @@ class _FakeFrameStore:
         self._frame = frame
         self.calls = 0
 
-    async def fresh_frame(self):
+    async def fresh_frame(self, *, current_turn_context_id=""):
+        del current_turn_context_id
         self.calls += 1
         return self._frame
 

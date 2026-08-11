@@ -6,10 +6,7 @@ Covers: register_token, get_user_tokens, remove_invalid_tokens
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
-
-import pytest
-
+from unittest.mock import MagicMock, patch
 
 def _make_db(doc_exists: bool = True, doc_data: dict | None = None):
     """Build a minimal Firestore client mock."""
