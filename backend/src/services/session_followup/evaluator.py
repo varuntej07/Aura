@@ -409,6 +409,24 @@ async def evaluate_finalized_session(
         return str(existing.get("candidate_id") or "") or None
 
     topics = cluster_turns(turns)
+
+    # Open curiosity threads from what the user actually talked about. Reuses the
+    # clustering above rather than re-reading and re-embedding the turns, and is
+    # awaited (not detached) because Cloud Run can freeze CPU the moment the
+    # scheduler tick that got us here returns. Never raises by contract.
+    #
+    # Consent-gated for the same reason the curiosity agent is: a thread
+    # follow-up enriches UserAura.
+    if topics and user.get("aura_consent_granted") is True:
+        from ..threads.thread_writer import record_conversation_threads
+
+        await record_conversation_threads(
+            uid,
+            session_id=session_id,
+            topics=topics,
+            surface=str(session.get("surface") or ""),
+        )
+
     prior_count = await _prior_finalized_count(uid, session)
     evaluated_topics: list[dict[str, Any]] = []
     lineage = list(session.get("lineage_chain") or [])

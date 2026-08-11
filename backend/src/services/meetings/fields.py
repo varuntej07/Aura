@@ -1,63 +1,27 @@
-"""Meeting-notes document contract - the single source of truth for field
-names, statuses, and caps on ``users/{uid}/meetings/{meeting_id}`` and its
-companion docs.
+"""Meeting Recording V2 Firestore contract and stable public enums.
 
-Stored shape (written only by this backend, read by desktop over REST):
+The meeting document is the public projection. Immutable ingest evidence lives
+under capture runs and deterministic segment documents; processing, audit, and
+deletion each have their own durable collection:
 
-    users/{uid}/meetings/{meeting_id} = {
-        "event_id":       str,        # calendar instance id, or "manual:{uuid}"
-        "title":          str,
-        "start_time":     iso8601,    # calendar event window, client-supplied
-        "end_time":       iso8601,
-        "device_id":      str,        # hostname of the capturing device
-        "status":         str,        # capturing -> uploaded -> synthesizing
-                                      #   -> ready | excluded | failed
-        "cap_minutes":    int,        # synthesis cap frozen at claim time
-        "segments":       [ { "seq": int, "start_ms": int, "duration_ms": int } ],
-        "segment_count":  int,        # client-reported at /complete
-        "total_duration_ms": int,     # client-reported at /complete
-        "created_at":     iso8601,
-        "updated_at":     iso8601,
-        "note":           { "summary": str, "decisions": [str],
-                            "action_items": [str], "open_questions": [str],
-                            "transcript": [{ "speaker": str, "text": str }],
-                            "language": str, "one_sided": bool,
-                            "partial": bool },                       # ready only
-        "expires_at":     timestamp,  # native datetime; set for non-pro tiers
-                                      #   only, drives the Firestore TTL policy
-        # --- additive processing metadata (explains "status") ---
-        "processing_stage":  str,     # capturing|uploading|queued|transcribing
-                                      #   |building_insights|ready
-        "failure_code":      str,     # safe enum (FAIL_*), never a raw exception
-        "failure_message":   str,     # optional friendly fallback copy
-        "retryable":         bool,    # may the UI offer Retry
-        "attempt_count":     int,     # synthesis attempts (diagnostic)
-        "last_error_at":     iso8601, # for stale-processing alerts
-        "status_revision":   int,     # monotonic; used in notification dedup keys
-    }
+    users/{uid}/meetings/{meeting_id}
+      /capture_runs/{capture_run_id}/segments/{seq:06d}
+      /audit_events/{sequence-event}
+    users/{uid}/meeting_claims/{event_key}
+    users/{uid}/meeting_jobs/{job_id}
+    users/{uid}/meeting_job_outbox/{job_id}
+    users/{uid}/meeting_deletions/{meeting_id}
 
-    users/{uid}/meeting_claims/{event_key} = {
-        "event_id":   str,            # raw id (event_key is its sha1 hex)
-        "meeting_id": str,
-        "device_id":  str,
-        "expires_at_ms": int,         # event end + grace; a live lock past this
-                                      #   is stale and can be re-claimed
-    }
+Claims bind ownership to ``installation_id`` and advance ``capture_fence`` on
+recovery. Completion verifies the finalized run, persisted upload receipts,
+contiguous identities, manifest digest, and duration before creating its job,
+outbox, and audit event in the same transaction.
 
-    users/{uid}/usage/meetings_{YYYYMM} = { "count": int }
-        The monthly cap counter. Charged transactionally at claim (never at
-        synthesis, so worker retries can never double-bill). The doc id carries
-        the month, so there is no rollover logic - a new month is a new doc.
-
-    users/{uid}/settings/meeting_notes = { "exclude_keywords": [str] }
-        Sensitive-meeting exclude list, matched against the meeting title
-        before any STT runs. Absent doc means an empty list. A free feature,
-        not a paywall lever (MEETING_NOTES_PLAN.md section 4).
-
-Retention: ``expires_at`` = now + RETENTION_DAYS for free/companion; pro notes
-carry no TTL. One-time infra step (mirrors drafts): ``gcloud firestore fields
-ttls update expires_at --collection-group=meetings --enable-ttl``. TTL deletion
-can lag ~72h, so ``store.list_recent`` also drops expired rows itself.
+The monthly cap is charged only at claim, so worker retries never double-bill.
+Free/Companion public meeting rows receive the seven-day Firestore TTL; source
+audio is not deleted by successful processing. See
+``backend/docs/meeting-recording-v2.md`` and the canonical sibling-repository
+``MEETING_RECORDING_V2_ARCHITECTURE.md``.
 """
 
 from __future__ import annotations
@@ -76,6 +40,15 @@ TITLE = "title"
 START_TIME = "start_time"
 END_TIME = "end_time"
 DEVICE_ID = "device_id"
+INSTALLATION_ID = "installation_id"
+RUNTIME_INSTANCE_ID = "runtime_instance_id"
+PROTOCOL_VERSION = "protocol_version"
+CAPTURE_RUN_ID = "capture_run_id"
+CAPTURE_FENCE = "capture_fence"
+LEASE_EXPIRES_AT = "lease_expires_at"
+DELETION_STATE = "deletion_state"
+DELETED_AT = "deleted_at"
+AUDIT_SEQUENCE = "audit_sequence"
 STATUS = "status"
 CAP_MINUTES = "cap_minutes"
 SEGMENTS = "segments"
@@ -89,6 +62,12 @@ TRANSCRIPT_SPEAKER = "speaker"
 TRANSCRIPT_TEXT = "text"
 EXPIRES_AT = "expires_at"
 COMPLETE_REASON = "complete_reason"
+MANIFEST_SHA256 = "manifest_sha256"
+COMPLETION_RECEIPT = "completion_receipt"
+ARTIFACT_REVISION = "artifact_revision"
+ARTIFACTS = "artifacts"
+QUALITY_OUTCOME = "quality_outcome"
+QUALITY_POLICY_VERSION = "quality_policy_version"
 
 # --- durable processing metadata (additive; explains the coarse STATUS) --------
 # STATUS above stays the compatibility contract; these fields let the desktop
@@ -107,6 +86,11 @@ STATUS_REVISION = "status_revision"
 CLAIM_EVENT_ID = "event_id"
 CLAIM_MEETING_ID = "meeting_id"
 CLAIM_DEVICE_ID = "device_id"
+CLAIM_INSTALLATION_ID = "installation_id"
+CLAIM_RUNTIME_INSTANCE_ID = "runtime_instance_id"
+CLAIM_CAPTURE_RUN_ID = "capture_run_id"
+CLAIM_CAPTURE_FENCE = "capture_fence"
+CLAIM_LEASE_EXPIRES_AT = "lease_expires_at"
 CLAIM_EXPIRES_AT_MS = "expires_at_ms"
 
 # --- statuses --------------------------------------------------------------------
@@ -116,6 +100,9 @@ STATUS_SYNTHESIZING = "synthesizing"
 STATUS_READY = "ready"
 STATUS_EXCLUDED = "excluded"
 STATUS_FAILED = "failed"
+STATUS_NEEDS_ATTENTION = "needs_attention"
+STATUS_DELETE_REQUESTED = "delete_requested"
+STATUS_DELETE_COMPLETE = "delete_complete"
 # Statuses during which an event's claim lock is honored and segment uploads
 # are accepted.
 ACTIVE_STATUSES = (STATUS_CAPTURING, STATUS_UPLOADED, STATUS_SYNTHESIZING)
@@ -129,18 +116,36 @@ STAGE_QUEUED = "queued"
 STAGE_TRANSCRIBING = "transcribing"
 STAGE_BUILDING_INSIGHTS = "building_insights"
 STAGE_READY = "ready"
+STAGE_UPLOADED_VERIFIED = "uploaded_verified"
+STAGE_QUALITY = "quality_evaluation"
+STAGE_NEEDS_ATTENTION = "needs_attention"
+STAGE_DELETE_REQUESTED = "delete_requested"
+STAGE_BLOCK_NEW_WORK = "block_new_work"
+STAGE_CLOUD_AUDIO_DELETE = "cloud_audio_delete"
+STAGE_TRANSCRIPT_DELETE = "transcript_delete"
+STAGE_FIRESTORE_TOMBSTONE = "firestore_tombstone"
+STAGE_DELETE_COMPLETE = "delete_complete"
 
 # --- safe failure codes (a stable enum, NEVER a provider exception string) -----
 # The desktop maps each to non-blaming copy + one allowed action. upload_* codes
 # marked (client) are authored on the desktop from its local queue state; the
 # rest are server-authored.
 FAIL_UPLOAD_STORAGE_UNAVAILABLE = "upload_storage_unavailable"  # bucket/IAM/outage; retryable
-FAIL_NO_AUDIO = "no_audio"                                     # nothing captured; terminal
-FAIL_AUDIO_REJECTED = "audio_rejected"                         # STT will reject forever; terminal
-FAIL_TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"   # transient STT; retryable
-FAIL_INSIGHT_GENERATION_FAILED = "insight_generation_failed"   # all LLM fallbacks failed; terminal
-FAIL_EXCLUDED_SENSITIVE = "excluded_sensitive"                 # private-meeting rule; terminal
-FAIL_PROCESSING_TIMEOUT = "processing_timeout"                 # stuck past threshold; retryable
+FAIL_NO_AUDIO = "no_audio"  # nothing captured; terminal
+FAIL_AUDIO_REJECTED = "audio_rejected"  # STT will reject forever; terminal
+FAIL_TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"  # transient STT; retryable
+FAIL_INSIGHT_GENERATION_FAILED = "insight_generation_failed"  # all LLM fallbacks failed; terminal
+FAIL_EXCLUDED_SENSITIVE = "excluded_sensitive"  # private-meeting rule; terminal
+FAIL_PROCESSING_TIMEOUT = "processing_timeout"  # stuck past threshold; retryable
+FAIL_STALE_CAPTURE_FENCE = "stale_capture_fence"
+FAIL_IMMUTABLE_OBJECT_CONFLICT = "immutable_object_conflict"
+FAIL_SEGMENT_IDENTITY_CONFLICT = "segment_identity_conflict"
+FAIL_COMPLETION_CONFLICT = "completion_conflict"
+FAIL_MANIFEST_INTEGRITY = "manifest_integrity_failed"
+FAIL_PROVIDER_MALFORMED = "provider_output_malformed"
+FAIL_PROVIDER_EMPTY = "provider_output_empty"
+FAIL_TRANSCRIPT_QUALITY = "transcript_quality_insufficient"
+FAIL_DELETION_IN_PROGRESS = "deletion_in_progress"
 
 # Statuses POST /meetings/{id}/retry may re-drive. A retry NEVER touches ready,
 # excluded, an actively-leased synthesizing run, or a non-retryable failure.
@@ -160,7 +165,7 @@ MONTHLY_MEETING_CAP = 5
 # defense-in-depth layer against modified clients, not the primary gate.
 # Design values to restore when long-meeting support lands:
 # PRO_SYNTHESIS_CAP_MINUTES = 240, MAX_CAPTURE_MINUTES = 240,
-# MAX_SEGMENTS_PER_MEETING = 100 (see MEETING_NOTES_PLAN.md section 4).
+# MAX_SEGMENTS_PER_MEETING = 100 (long-meeting target; not active in V2).
 FREE_SYNTHESIS_CAP_MINUTES = 60
 PRO_SYNTHESIS_CAP_MINUTES = 60
 MAX_CAPTURE_MINUTES = 60
@@ -191,6 +196,45 @@ MAX_SEGMENT_START_MS = MAX_CAPTURE_MINUTES * 60_000
 # without letting a concurrent duplicate double-run STT+LLM).
 SYNTHESIS_LEASE_MS = 30 * 60_000
 SYNTHESIS_STARTED_AT_MS = "synthesis_started_at_ms"
+
+# --- V2 immutable evidence collections ---------------------------------------
+CAPTURE_RUNS_SUBCOLLECTION = "capture_runs"
+SEGMENTS_SUBCOLLECTION = "segments"
+AUDIT_SUBCOLLECTION = "audit_events"
+JOBS_SUBCOLLECTION = "meeting_jobs"
+DELETIONS_SUBCOLLECTION = "meeting_deletions"
+JOB_OUTBOX_SUBCOLLECTION = "meeting_job_outbox"
+
+CAPTURE_RUN_STATE = "state"
+CAPTURE_RUN_CAPTURING = "capturing"
+CAPTURE_RUN_FINALIZED = "finalized"
+CAPTURE_RUN_UPLOADED = "uploaded_verified"
+CAPTURE_RUN_SPLIT_BRAIN = "split_brain"
+CAPTURE_RUN_DELETED = "deleted"
+
+JOB_PENDING = "pending"
+JOB_DISPATCHED = "dispatched"
+JOB_LEASED = "leased"
+JOB_RETRY = "retry"
+JOB_COMPLETE = "complete"
+JOB_FAILED = "failed"
+JOB_BLOCKED = "blocked"
+
+MEETING_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 2
+TRANSCRIPT_SCHEMA_VERSION = "meeting-transcript-v2"
+QUALITY_POLICY_V1 = "meeting-quality-v1"
+AUDIT_SCHEMA_VERSION = "meeting-audit-v2"
+SOFTWARE_COMPONENT = "juno-backend"
+
+# A capture claim currently has no desktop heartbeat route. The lease therefore
+# spans the supported capture clamp plus the existing rejoin grace; ownership
+# recovery still advances CAPTURE_FENCE transactionally.
+CAPTURE_LEASE_MINUTES = MAX_CAPTURE_MINUTES + CLAIM_GRACE_MINUTES
+
+# Completion checks decoded FLAC duration against the signed manifest using the
+# architecture's max(2 seconds, 1 percent) tolerance.
+DURATION_TOLERANCE_FLOOR_MS = 2_000
 
 # Machine codes the desktop client matches on (mirrors the /voice/token cap
 # contract shape: 402 + {"detail": {"code": ..., "seconds_until_reset": ...}}).

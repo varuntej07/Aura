@@ -51,8 +51,9 @@ def enqueue_synthesis(
     (gRPC); call via asyncio.to_thread from async handlers. Raises on real
     enqueue failures so /complete answers 5xx and the client retries.
 
-    ``dedup_suffix`` (empty for /complete, the attempt count for /retry) makes a
-    deliberate re-run a distinct task name instead of an AlreadyExists no-op."""
+    ``dedup_suffix`` (empty for /complete, attempt plus durable dispatch
+    generation for /retry) makes a deliberate re-run a distinct task name
+    instead of an AlreadyExists no-op."""
     from google.api_core.exceptions import AlreadyExists  # type: ignore
     from google.cloud import tasks_v2  # type: ignore
 
@@ -145,7 +146,7 @@ async def dispatch_job(uid: str, job_id: str) -> bool:
         uid,
         str(job["meeting_id"]),
         dedup_suffix=(
-            f"a{int(job.get('job_attempt', 0))}"
+            f"a{int(job.get('job_attempt', 0))}-d{int(outbox.get('dispatch_attempts', 0))}"
             if outbox.get("state") == "retry"
             else f"s{int(outbox.get('dispatch_attempts', 0))}"
             if stale_dispatch

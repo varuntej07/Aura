@@ -203,17 +203,6 @@ async def list_trackers_for_user(user_id: str) -> list[Tracker]:
         return []
 
 
-async def latest_tracker_update_at(user_id: str) -> datetime | None:
-    """The most recent time ANY of this user's trackers delivered an update, or None.
-
-    Lets a proactive decider tell whether the user already got a tracker push recently
-    (e.g. today) so it can avoid stacking another notification on the same day. Reuses
-    the auto-indexed per-user tracker query; returns None on no trackers / read error."""
-    trackers = await list_trackers_for_user(user_id)
-    stamps = [t.last_update_at for t in trackers if t.last_update_at is not None]
-    return max(stamps) if stamps else None
-
-
 async def list_active_subscribers(topic_key: str) -> list[Tracker]:
     """Active subscribers of a shared topic, for the per-checkpoint fan-out. Single
     equality (topic_key ==) at collection scope (auto-indexed); the active filter is
@@ -370,34 +359,13 @@ async def claim_checkpoint(checkpoint_id: str) -> bool:
         return False
 
 
-async def upsert_checkpoints(checkpoints: list[Checkpoint]) -> None:
-    """Idempotent batch upsert keyed by checkpoint id (reconcile re-materialization).
-    merge=True so a re-upsert that shifts fire_at never clobbers an in-flight
-    status/last_summary that a fire already wrote."""
-    if not checkpoints:
-        return
-
-    def _write() -> None:
-        db = admin_firestore()
-        batch = db.batch()
-        for cp in checkpoints:
-            ref = db.collection(f.COLLECTION_CHECKPOINTS).document(cp.id)
-            batch.set(ref, cp.to_dict(), merge=True)
-        batch.commit()
-
-    try:
-        await asyncio.to_thread(_write)
-    except Exception as exc:
-        logger.warn("tracking_store: upsert_checkpoints failed", {"count": len(checkpoints), "error": str(exc)})
-
-
 async def upsert_moment_schedule(checkpoints: list[Checkpoint]) -> None:
     """Upsert MOMENT checkpoints without ever resurrecting a settled one. A missing
     doc is created whole (pending); an existing PENDING doc gets its schedule fields
     (fire_at, label, wake_override) refreshed in place; a doc in any other status —
     fired, skipped, claimed mid-flight — is left completely alone. This is what
-    ``upsert_checkpoints``'s merge-write cannot guarantee (its full-doc merge includes
-    ``status: pending``, which would re-arm an already-fired moment on reconcile)."""
+    A full-doc merge would include ``status: pending`` and could re-arm an
+    already-fired moment during reconciliation."""
     if not checkpoints:
         return
 

@@ -2,7 +2,7 @@
 DELETE /account permanently deletes a user's account.
 
 Deletes in order:
-1. Raw meeting audio in Cloud Storage
+1. Raw dictation and meeting audio in Cloud Storage
 2. Firestore subcollections and documents
 3. Firebase Auth user (last, so retries don't orphan data if an earlier step fails)
 
@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from google.cloud import firestore as fs
 
 from ..lib.logger import logger
+from ..services.dictation import gcs_audio as dictation_audio
 from ..services.firebase import admin_auth, admin_firestore
 from ..services.meetings import gcs_audio as meeting_audio
 from ..services.request_auth import decode_firebase_claims
@@ -35,19 +36,24 @@ async def handle_delete_account(request: Request) -> JSONResponse:
     logger.info("account: delete requested", {"user_id": uid})
 
     try:
-        # Raw meeting audio is outside Firestore. Delete it strictly before
+        # Raw audio is outside Firestore. Delete it strictly before
         # removing account records so a storage failure leaves Auth intact and
         # the user can safely retry the deletion request.
+        await dictation_audio.delete_user_audio(uid)
         await meeting_audio.delete_user_audio(uid)
+        await meeting_audio.delete_user_transcripts(uid)
         await asyncio.to_thread(_delete_all_user_data, uid)
         await asyncio.to_thread(_delete_firebase_auth_user, uid)
         logger.info("account: deletion complete", {"user_id": uid})
         return JSONResponse({"ok": True})
     except Exception as exc:
-        logger.exception("account: deletion failed", {
-            "user_id": uid,
-            "error": str(exc),
-        })
+        logger.exception(
+            "account: deletion failed",
+            {
+                "user_id": uid,
+                "error": str(exc),
+            },
+        )
         return JSONResponse({"error": "Deletion failed. Please try again."}, status_code=500)
 
 
@@ -65,7 +71,10 @@ def _delete_all_user_data(uid: str) -> None:
     user_ref = db.collection("users").document(uid)
     _delete_document_and_subcollections(db, user_ref)
 
-    # Chat sessions are stored per-user in local SQLite on device, nothing to delete server-side
+    # Desktop chat history (users/{uid}/desktop_chat_sessions and its nested
+    # desktop_chat_messages) needs no entry here: the recursive walk above follows every
+    # subcollection under users/{uid}. The device's local SQLite copy is separate and is
+    # cleared client-side at the sign-out boundary.
     _delete_collection_docs(
         db.collection("devices").where(filter=fs.FieldFilter("uid", "==", uid)).stream()
     )
@@ -101,8 +110,11 @@ def _delete_firebase_auth_user(uid: str) -> None:
     try:
         admin_auth().delete_user(uid)
     except Exception as exc:
-        logger.warn("account: Firebase Auth user deletion failed", {
-            "user_id": uid,
-            "error": str(exc),
-        })
+        logger.warn(
+            "account: Firebase Auth user deletion failed",
+            {
+                "user_id": uid,
+                "error": str(exc),
+            },
+        )
         raise

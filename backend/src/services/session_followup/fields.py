@@ -33,7 +33,13 @@ QUIET_HOURS_DEFER = timedelta(minutes=30)
 
 EVALUATOR_VERSION = "session-followup-v1"
 MIN_MEANINGFUL_TURNS = 3
-COLD_START_SESSION_COUNT = 3
+# Sessions a user must have before a topic can earn a follow-up WITHOUT an
+# explicit intent signal. Note _prior_finalized_count runs after the current
+# session is already marked finalized, so a first-time user counts 1 — meaning
+# 1 lets a first conversation qualify, which is the whole point: a user with one
+# session was the exact cohort this gate silently locked out of every proactive
+# surface. SCORE_THRESHOLD below is still the quality bar.
+COLD_START_SESSION_COUNT = 1
 SCORE_THRESHOLD = 0.45
 
 SOURCE_SESSION_FOLLOWUP = "session_followup"

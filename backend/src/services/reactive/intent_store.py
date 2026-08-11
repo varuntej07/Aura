@@ -29,7 +29,6 @@ from datetime import UTC, datetime
 
 from google.cloud import firestore as fs  # type: ignore
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from .fields import (

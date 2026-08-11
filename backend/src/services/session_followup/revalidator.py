@@ -346,6 +346,9 @@ async def revalidate_and_submit_followup(
                 "candidate_id": candidate_id,
                 "topic_id": topic_id,
                 "notification_origin": F.SOURCE_SESSION_FOLLOWUP,
+                # Seeds the chat on tap with the same framed line the push shows,
+                # so Buddy continues its own opener instead of starting blank.
+                "opening_chat_message": framed.body,
                 # FCM data values must be strings; a list here fails at delivery.
                 "lineage_chain": ",".join(
                     str(item) for item in (candidate.get("lineage_chain") or [])

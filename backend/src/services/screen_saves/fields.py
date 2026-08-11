@@ -2,7 +2,7 @@
 Screen-save document contract — the single source of truth for field names on
 ``UserAura/{uid}/screen_saves/{item_id}`` and
 ``UserAura/{uid}/screen_save_collections/{doc_id}``, plus the small pure
-helpers (``collection_slug``, ``new_item_id``, ``normalized_collection_name``)
+helpers (``collection_slug``, ``normalized_collection_name``)
 the writer and every reader both depend on.
 
 Per the data-layer discipline in CLAUDE.md, ``store.py``/``collections.py`` and
@@ -38,7 +38,6 @@ directly to a client — readers only ever see each item's own ``collection_name
 from __future__ import annotations
 
 import hashlib
-import uuid
 
 # --- Firestore locations ---------------------------------------------------
 # Parent collection is UserAura (co-located with memory_atoms), so both fall
@@ -95,8 +94,3 @@ def collection_slug(name: str) -> str:
     matching memory/fields.py's ``atom_id`` technique."""
     digest = hashlib.sha1(normalized_collection_name(name).encode("utf-8")).hexdigest()
     return digest[:24]
-
-
-def new_item_id() -> str:
-    """Fresh id for one screen_saves item. Never merged with another save."""
-    return uuid.uuid4().hex
