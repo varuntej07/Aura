@@ -352,12 +352,6 @@ def _legacy_top_keys(profile: dict[str, Any], k: int) -> list[str]:
 # Consumer-facing accessors
 # --------------------------------------------------------------------------
 
-def has_interest_data(profile: dict[str, Any], now: datetime | None = None) -> bool:
-    """True if there is any new-structure or legacy interest signal to inject."""
-    now = now or datetime.now(UTC)
-    return bool(_ranked_categories(profile, now)) or bool(_legacy_top_keys(profile, 1))
-
-
 def interest_prompt_lines(
     profile: dict[str, Any],
     now: datetime | None = None,

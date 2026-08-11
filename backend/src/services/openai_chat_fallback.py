@@ -1,6 +1,6 @@
 """
 openai_chat_fallback.py — third-tier cross-provider chat fallback for the text
-/chat stream, using GPT (settings.OPENAI_CHAT_MODEL, already provisioned via
+/chat stream, using GPT (settings.OPENAI_TEXT_CHAT_MODEL, already provisioned via
 OPENAI_API_KEY for the voice pipeline).
 
 When the cross-provider Gemini hop (gemini_chat_fallback.py) is ALSO exhausted
@@ -223,7 +223,7 @@ async def stream_openai_chat_fallback(
         ]
 
         logger.info("OpenAI fallback: starting", {
-            "model": settings.OPENAI_CHAT_MODEL,
+            "model": settings.OPENAI_TEXT_CHAT_MODEL,
             "messages_in_history": len(openai_messages),
             "tools": len(tools),
         })
@@ -239,14 +239,17 @@ async def stream_openai_chat_fallback(
             tool_call_fragments: dict[int, dict[str, str]] = {}
 
             recording = start_llm_generation(
-                model=settings.OPENAI_CHAT_MODEL, provider="openai", caller="chat_openai_fallback",
+                model=settings.OPENAI_TEXT_CHAT_MODEL,
+                provider="openai",
+                caller="chat_openai_fallback",
                 uid=tool_executor.user_id,
             )
             turn_usage: Any = None
             stream = await client.chat.completions.create(
-                model=settings.OPENAI_CHAT_MODEL,
+                model=settings.OPENAI_TEXT_CHAT_MODEL,
                 messages=openai_messages,
                 tools=openai_tools or None,
+                reasoning_effort="none",
                 stream=True,
                 # Asks OpenAI to append one final chunk carrying token usage
                 # (choices empty on that chunk); without it usage never streams.

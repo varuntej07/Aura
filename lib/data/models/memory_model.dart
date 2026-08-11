@@ -1,4 +1,12 @@
-enum MemoryCategory { preferences, facts, habits, health, routines }
+enum MemoryCategory {
+  preferences,
+  facts,
+  habits,
+  health,
+  routines,
+  lifestyle,
+  interests,
+}
 
 class MemoryModel {
   final String id;
@@ -24,9 +32,15 @@ class MemoryModel {
       id: json['id'] as String,
       key: json['key'] as String,
       value: json['value'] as String,
-      category: MemoryCategory.values.byName(
-        json['category'] as String? ?? 'facts',
-      ),
+      // NEVER byName() here. It throws on an unknown name, and getMemories maps
+      // every doc in the collection through this factory inside one try, so a
+      // single memory written with a category this build has not heard of fails
+      // the ENTIRE list read. Prod accounts already hold categories the chat
+      // surface wrote without validating ('project', 'bug report',
+      // 'feature_request'), so this was silently emptying the memories screen.
+      // Unknown categories degrade to facts and stay readable.
+      category: MemoryCategory.values.asNameMap()[json['category'] as String?] ??
+          MemoryCategory.facts,
       source: json['source'] as String? ?? 'system',
       createdAt: DateTime.parse(json['created_at'] as String),
       updatedAt: DateTime.parse(json['updated_at'] as String),

@@ -20,24 +20,54 @@ import json
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
+from uuid import uuid4
 
-from fastapi.responses import StreamingResponse
+from fastapi import Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..lib.query_logger import log_query
-from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
-from ..services.claude_client import ClaudeClient
-from ..services.request_auth import resolve_user_id
-from ..services.tool_executor import ToolExecutor
-from ..services.user_aura_extractor import extract_and_update_user_aura
+from ..services import desktop_chat_store
+from ..services.analytics.llm_telemetry import bind_trace_context, reset_trace_context
+from ..services.chat_completion import handoff_store
 from ..services.chat_completion import prompt_builder as _prompt_builder
+from ..services.chat_completion import text_compaction
 from ..services.chat_completion import turn_store
 from ..services.chat_completion.prompt_builder import build_turn_system_blocks, fetch_user_doc
+from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
+from ..services.claude_client import ClaudeClient
 from ..services.engagement.task_scheduler import get_task_scheduler
+from ..services.request_auth import resolve_user_id, resolve_user_id_from_request
+from ..services.tool_executor import (
+    ToolExecutor,
+    excluded_tools_for_chat_surface,
+    resolve_chat_surface_allowed_tools,
+)
+from ..services.user_aura_extractor import extract_and_update_user_aura
 
 _build_user_content = _prompt_builder.build_user_content
 _NOTIFICATION_REASON_MAX_CHARS = _prompt_builder.NOTIFICATION_REASON_MAX_CHARS
+
+
+class ChatRequest(BaseModel):
+    """Versioned, backward-compatible boundary for released chat clients."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    contract_version: int = 1
+    surface: str = "app"
+    user_id: str | None = None
+    message: str = Field(default="", max_length=8_000)
+    attachments: list[Any] = Field(default_factory=list, max_length=10)
+    history: list[Any] = Field(default_factory=list, max_length=100)
+    session_id: str | None = Field(default=None, max_length=128)
+    client_message_id: str | None = Field(default=None, max_length=128)
+    notification_reason: str = ""
+    lineage_chain: list[Any] = Field(default_factory=list, max_length=50)
+    origin: str = Field(default="organic", max_length=64)
+    origin_candidate_id: str | None = Field(default=None, max_length=128)
 _build_system_blocks = _prompt_builder.build_system_blocks
 _build_injected_system_prompt_suffix = _prompt_builder.build_injected_system_prompt_suffix
 
@@ -88,6 +118,24 @@ def _error_stream(message: str) -> AsyncGenerator[str, None]:
     return _gen()
 
 
+async def _read_conversation_summary(
+    user_id: str, conversation_id: str | None
+) -> str:
+    """This conversation's compacted older context, or "" when there is none.
+
+    Empty for every non-desktop surface without touching Firestore: the summary
+    lives on the desktop session document, and mobile supplies its own history.
+    Fail-open by way of get_context_state, which already swallows read errors, so
+    a Firestore hiccup costs the turn its older context rather than the turn.
+    """
+    if not conversation_id:
+        return ""
+    state = await desktop_chat_store.get_context_state(user_id, conversation_id)
+    if not state:
+        return ""
+    return str(state.get(desktop_chat_store.FIELD_CONTEXT_SUMMARY) or "")
+
+
 def _chat_limit_reached_stream() -> AsyncGenerator[str, None]:
     _payload = json.dumps({
         "type": "chat_limit_reached",
@@ -96,6 +144,30 @@ def _chat_limit_reached_stream() -> AsyncGenerator[str, None]:
 
     async def _gen():
         yield f"data: {_payload}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return _gen()
+
+
+def _replay_stream(answer: str, reminder: dict[str, Any] | None) -> AsyncGenerator[str, None]:
+    """Re-deliver an answer this exact turn already produced.
+
+    Reached when a desktop client re-POSTs a client_message_id whose canonical assistant
+    message is already stored (a lost acknowledgement, or a resend after a dropped
+    connection). Replaying costs nothing and cannot produce a second, differently-worded
+    answer, which is the whole point of the deterministic message id.
+    """
+    metadata: dict[str, Any] = {"tool_names": [], "replayed": True}
+    if reminder:
+        metadata["reminder"] = reminder
+    frames = [
+        json.dumps({"type": "text_delta", "delta": answer}),
+        json.dumps({"type": "done", "metadata": metadata}),
+    ]
+
+    async def _gen():
+        for frame in frames:
+            yield f"data: {frame}\n\n"
         yield "data: [DONE]\n\n"
 
     return _gen()
@@ -198,39 +270,6 @@ def _validate_and_filter_attachments(
     return accepted, rejections
 
 
-def _build_user_content(
-    message: str,
-    attachments: list[dict[str, Any]],
-) -> str | list[dict[str, Any]]:
-    """
-    Build the Anthropic user content value.
-    Returns a plain string when there are no attachments (common path).
-    Returns a content block list when attachments are present.
-    """
-    if not attachments:
-        return message
-
-    blocks: list[dict[str, Any]] = []
-    for att in attachments:
-        att_type = att.get("type")
-        mime = att.get("mime_type", "")
-        data = att.get("data", "")
-        if att_type == "image":
-            blocks.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": mime, "data": data},
-            })
-        elif att_type == "document":
-            blocks.append({
-                "type": "document",
-                "source": {"type": "base64", "media_type": mime, "data": data},
-            })
-
-    if message:
-        blocks.append({"type": "text", "text": message})
-    return blocks
-
-
 _NOTIFICATION_REASON_MAX_CHARS = 600
 
 
@@ -292,6 +331,61 @@ def _build_system_blocks(
     return blocks
 
 
+async def handle_chat_handoff(request: Request) -> JSONResponse:
+    """Store the recent text exchanges a voice session about to start should load.
+
+    Desktop calls this in parallel with /voice/token, carrying the same client-owned
+    conversation id it stamps into the token. The write has to land before the worker's
+    pre-session fetch, which is why it is awaited rather than fired off.
+
+    A rejected or failed handoff is not a failed call: the client treats it as fail-open
+    and the session simply starts without text context.
+    """
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    conversation_id = str((body or {}).get("conversation_id", "")).strip()
+    if not handoff_store.CONVERSATION_ID_RE.fullmatch(conversation_id):
+        return JSONResponse({"error": "Invalid conversation_id"}, status_code=400)
+    raw_turns = (body or {}).get("turns")
+    if not isinstance(raw_turns, list):
+        return JSONResponse({"error": "turns must be a list"}, status_code=400)
+    stored = await handoff_store.save_handoff(user_id, conversation_id, raw_turns)
+    return JSONResponse({"ok": True, "stored": stored})
+
+
+async def handle_chat_session_background(request: Request) -> JSONResponse:
+    """The chat client backgrounded. Arm the grace clock, never finalize here.
+
+    This is a hint, not an end event. Android fires `paused` for a notification
+    shade pull or a permission dialog, so the session only becomes eligible for
+    finalization once CHAT_BACKGROUND_GRACE elapses with no new turn. Always 200:
+    a lost hint costs a slower follow-up, never a wrong one.
+    """
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session_id = str((body or {}).get("session_id", "")).strip()
+    if not session_id:
+        return JSONResponse({"ok": True, "armed": False})
+
+    from ..services.session_followup.lifecycle import session_lifecycle_service
+
+    asyncio.create_task(
+        session_lifecycle_service.note_client_background(user_id, session_id),
+        name=f"followup-chat-background-{session_id[:8]}",
+    )
+    return JSONResponse({"ok": True, "armed": True})
+
+
 async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     _sse_headers = {
         "Cache-Control": "no-cache",
@@ -303,6 +397,30 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         body: dict[str, Any] = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
         return _sse_error_response("Invalid JSON body", status_code=400, headers=_sse_headers)
+    try:
+        body = ChatRequest.model_validate(body).model_dump()
+    except ValidationError as exc:
+        logger.info(
+            "Chat: request contract rejected",
+            {"error_count": len(exc.errors())},
+        )
+        return _sse_error_response(
+            "Invalid chat request",
+            status_code=422,
+            headers=_sse_headers,
+        )
+
+    surface = str(body.get("surface") or "app")
+    surface_allowed_tools = resolve_chat_surface_allowed_tools(surface)
+    surface_tool_exclusions = excluded_tools_for_chat_surface(surface)
+    # Which SSE frame types this client can parse. Absent means 1, which is every
+    # build shipped before per-tool activity frames existed. A client that cannot
+    # parse a frame renders it as a visible error, so new frame types are opt-in
+    # by the CLIENT, never decided by the server's own version.
+    try:
+        contract_version = int(body.get("contract_version") or 1)
+    except (TypeError, ValueError):
+        contract_version = 1
 
     user_id = _resolve_user_id(event, body)
     if not user_id:
@@ -362,7 +480,13 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         if isinstance(raw_session_id, str) and raw_session_id.strip()
         else None
     )
-    if session_id and (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
+    # Both ids reach Firestore as document ids (chat_turns, and the desktop transcript
+    # below), so an id containing "/" would build a different path than intended. Guard
+    # every surface, not just desktop.
+    if session_id is not None and not desktop_chat_store.is_safe_document_id(session_id):
+        logger.warn("Chat: rejected, unusable session_id", {"user_id": user_id})
+        return _sse_error_response("invalid session_id", status_code=400, headers=_sse_headers)
+    if session_id:
         from ..services.session_followup.lifecycle import session_lifecycle_service
 
         raw_lineage = body.get("lineage_chain")
@@ -380,21 +504,39 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             name=f"followup-chat-session-{session_id[:8]}",
         )
 
-    raw_history: list[Any] = (body.get("history") or [])[-settings.CHAT_HISTORY_WINDOW * 2 :]
-    history: list[dict[str, Any]] = []
-    for h in raw_history:
+    # Filter first, THEN take the tail. Slicing before filtering and breaking at
+    # the window size kept the OLDEST entries of the pre-slice and silently threw
+    # away the most recent ones, so any thread longer than the window was answered
+    # against conversation state from a window-length ago.
+    filtered: list[dict[str, Any]] = []
+    for h in (body.get("history") or []):
         if not isinstance(h, dict) or h.get("role") not in ("user", "assistant") or not h.get("content"):
             continue
-        if len(history) >= settings.CHAT_HISTORY_WINDOW:
-            break
         content = h["content"]
-        if isinstance(content, list):
-            history.append({"role": str(h["role"]), "content": content})
-        else:
-            history.append({"role": str(h["role"]), "content": str(content)})
+        filtered.append({
+            "role": str(h["role"]),
+            "content": content if isinstance(content, list) else str(content),
+        })
+    history: list[dict[str, Any]] = filtered[-settings.CHAT_HISTORY_WINDOW :]
+    # The window has to open on a user message: a leading assistant reply whose
+    # prompt was just trimmed away reads as context-free noise, and some provider
+    # configurations reject it outright.
+    if history and history[0]["role"] == "assistant":
+        history = history[1:]
 
-    client_message_id: str | None = body.get("client_message_id") or None
-
+    raw_client_message_id = body.get("client_message_id")
+    client_message_id = (
+        raw_client_message_id.strip()
+        if isinstance(raw_client_message_id, str) and raw_client_message_id.strip()
+        else None
+    )
+    if client_message_id is not None and not desktop_chat_store.is_safe_document_id(
+        client_message_id
+    ):
+        logger.warn("Chat: rejected, unusable client_message_id", {"user_id": user_id})
+        return _sse_error_response(
+            "invalid client_message_id", status_code=400, headers=_sse_headers
+        )
     # Sent ONLY on the first chat turn after a proactive-notification tap (the client
     # drops it after one send). It is the Buddy-facing "why I reached out" note from
     # the push payload; injected into the system prompt below so Buddy stays oriented
@@ -412,6 +554,59 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             headers=_sse_headers,
         )
 
+    # Canonical desktop transcript. Written BEFORE any generation work, so the user's own
+    # message is durable the moment the request is accepted.
+    #
+    # This one does NOT fail open, unlike turn_store. Firestore is the promised source of
+    # truth for desktop chat, so continuing past a failed user-message write would generate
+    # an answer, store it, and leave an assistant-only conversation with the recovery record
+    # deleted underneath it - a turn the user can neither see the question for nor retry.
+    # Refusing up front costs one model call that was never going to be recoverable, and the
+    # client already renders a 5xx as a failed bubble with Retry.
+    desktop_conversation_id: str | None = None
+    if (
+        surface == "desktop"
+        and session_id
+        and client_message_id
+        and desktop_chat_store.is_valid_id(session_id)
+        and desktop_chat_store.is_valid_id(client_message_id)
+    ):
+        desktop_conversation_id = session_id
+        user_message_result = await desktop_chat_store.put_user_message(
+            user_id,
+            desktop_conversation_id,
+            client_message_id,
+            text=message,
+            has_attachments=bool(validated_attachments),
+        )
+        if user_message_result == desktop_chat_store.RESULT_ERROR:
+            # Only reachable on a real Firestore failure: both ids were validated above.
+            logger.warn("Chat: desktop transcript write failed, refusing the turn", {
+                "user_id": user_id, "cmid": client_message_id,
+            })
+            return _sse_error_response(
+                "Could not save this message. Try sending it again.",
+                status_code=503,
+                headers=_sse_headers,
+            )
+        if user_message_result == desktop_chat_store.RESULT_DUPLICATE:
+            stored_answer = await desktop_chat_store.get_assistant_message(
+                user_id, desktop_conversation_id, client_message_id
+            )
+            if stored_answer:
+                logger.info("Chat: replayed stored answer for duplicate turn", {
+                    "user_id": user_id, "cmid": client_message_id,
+                })
+                return StreamingResponse(
+                    _replay_stream(
+                        str(stored_answer.get(desktop_chat_store.FIELD_TEXT) or ""),
+                        stored_answer.get(desktop_chat_store.FIELD_REMINDER),
+                    ),
+                    media_type="text/event-stream",
+                    status_code=200,
+                    headers=_sse_headers,
+                )
+
     prev_buddy_response: str | None = next(
         (h["content"] for h in reversed(history) if h["role"] == "assistant"),
         None,
@@ -420,13 +615,22 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     # Single read of users/{uid} for this turn, shared below instead of 4
     # independent re-fetches (datetime, aura-revoke check, and the two fire-and-
     # forget tasks' own consent checks) -- see firestore_read_audit_20260706 memory.
-    user_doc = await fetch_user_doc(user_id)
+    #
+    # The conversation summary rides along in the SAME gather rather than as a
+    # second sequential await: it is one extra document read, and putting it in
+    # series would add its full round trip to time-to-first-token on every
+    # desktop turn. Non-desktop surfaces resolve it to "" without any read.
+    user_doc, conversation_summary = await asyncio.gather(
+        fetch_user_doc(user_id),
+        _read_conversation_summary(user_id, desktop_conversation_id),
+    )
 
     # Build the full system prompt (datetime + aura profile suffix + query-relevant
     # long-term memory) via the shared assembler, so the live turn here and the durable
     # background completion (services/chat_completion) construct the EXACT same prompt.
     system_prompt_blocks = await build_turn_system_blocks(
         user_id, message, notification_reason, user_doc=user_doc,
+        conversation_summary=conversation_summary,
     )
 
     asyncio.create_task(
@@ -471,6 +675,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     )
 
     action_tool_exclusions = excluded_tools_for_text_turn(message)
+    action_tool_exclusions |= surface_tool_exclusions
     reminder_create_requested = explicitly_requests_reminder_create(message)
 
     logger.info(
@@ -481,6 +686,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             "message_len": len(message),
             "history_turns": len(history),
             "attachment_count": len(validated_attachments),
+            "surface": surface,
         },
     )
 
@@ -489,8 +695,9 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     # Durable background completion: record this turn and enqueue a delayed Cloud Task so
     # that if the phone disconnects mid-stream (the generator below is cancelled and the
     # answer is lost), the turn still finishes server-side and pushes the reply. 
+    completion_task_name: str | None = None
     if client_message_id:
-        await turn_store.start_turn(
+        turn_recorded = await turn_store.start_turn(
             user_id,
             client_message_id,
             session_id=session_id,
@@ -499,30 +706,45 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             has_attachments=bool(validated_attachments),
             tier=effective_tier,
             notification_reason=notification_reason,
+            surface=surface,
         )
-        try:
-            await asyncio.to_thread(
-                get_task_scheduler().schedule_chat_completion,
-                user_id,
-                client_message_id,
-                session_id or "",
-                settings.CHAT_COMPLETION_DELAY_SECONDS,
-            )
-        except Exception as exc:
-            logger.warn("Chat: completion task enqueue failed (backstop sweep covers it)", {
-                "user_id": user_id, "cmid": client_message_id, "error": str(exc),
-            })
+        if turn_recorded:
+            try:
+                completion_task_name = await asyncio.to_thread(
+                    get_task_scheduler().schedule_chat_completion,
+                    user_id,
+                    client_message_id,
+                    session_id or "",
+                    settings.CHAT_COMPLETION_DELAY_SECONDS,
+                )
+            except Exception as exc:
+                logger.warn("Chat: completion task enqueue failed (backstop sweep covers it)", {
+                    "user_id": user_id, "cmid": client_message_id, "error": str(exc),
+                })
 
     async def _generate() -> AsyncGenerator[str, None]:
+        trace_token = bind_trace_context(
+            trace_id=client_message_id or uuid4().hex,
+            client_message_id=client_message_id,
+            session_id=session_id,
+            surface="chat",
+            prompt_version="chat-v1",
+        )
         try:
             tool_executor = ToolExecutor(
                 user_id,
                 created_via="text",
                 client_message_id=client_message_id or "",
                 session_id=session_id or "",
+                allowed_tools=surface_allowed_tools,
             )
             claude = ClaudeClient(tool_executor)
             buffered_text_events: list[dict[str, Any]] = []
+            # What the user actually saw, reassembled so the canonical desktop transcript
+            # stores the delivered answer rather than a second regeneration of it.
+            answer_parts: list[str] = []
+            done_metadata: dict[str, Any] = {}
+            stream_error_seen = False
             async for sse_event in claude.send_text_turn_stream(
                 system_prompt=system_prompt_blocks,
                 user_content=user_content,
@@ -530,6 +752,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 is_agent=False,
                 user_tier=effective_tier,
                 extra_excluded_tools=action_tool_exclusions,
+                contract_version=contract_version,
             ):
                 if reminder_create_requested and sse_event.get("type") == "text_delta":
                     buffered_text_events.append(sse_event)
@@ -560,8 +783,16 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                             ),
                         }]
                     for buffered_event in buffered_text_events:
+                        answer_parts.append(str(buffered_event.get("delta", "")))
                         yield f"data: {json.dumps(buffered_event)}\n\n"
                     buffered_text_events = []
+                event_type = sse_event.get("type")
+                if event_type == "text_delta":
+                    answer_parts.append(str(sse_event.get("delta", "")))
+                elif event_type == "done":
+                    done_metadata = sse_event.get("metadata") or {}
+                elif event_type == "error":
+                    stream_error_seen = True
                 yield f"data: {json.dumps(sse_event)}\n\n"
             duration_ms = int((time.monotonic() - start_ts) * 1000)
             logger.info(
@@ -575,8 +806,51 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             # pending completion task becomes a no-op. Reached only when the loop finishes
             # without the client disconnecting (a disconnect cancels the generator before
             # here, leaving the turn 'generating' for the task to finish + push).
-            if client_message_id:
+            #
+            # For a desktop turn the canonical answer is stored FIRST. The recovery record
+            # is the only durable copy until that write lands, so releasing it earlier
+            # would mean one Firestore hiccup loses the answer outright. If the canonical
+            # write fails, or the turn produced no answer at all, the record stays
+            # 'generating' and the delayed task (or the per-minute backstop) repairs it.
+            release_recovery = True
+            if desktop_conversation_id and client_message_id:
+                answer_text = "".join(answer_parts)
+                if stream_error_seen or not answer_text.strip():
+                    release_recovery = False
+                else:
+                    reminder_payload = done_metadata.get("reminder")
+                    transcript_result = await desktop_chat_store.put_assistant_message(
+                        user_id,
+                        desktop_conversation_id,
+                        client_message_id,
+                        text=answer_text,
+                        status=desktop_chat_store.STATUS_COMPLETE,
+                        reminder=(
+                            reminder_payload if isinstance(reminder_payload, dict) else None
+                        ),
+                    )
+                    release_recovery = (
+                        transcript_result != desktop_chat_store.RESULT_ERROR
+                    )
+                    if release_recovery:
+                        # Fire and forget, deliberately NOT awaited: the turn is
+                        # already answered and the stream is closing, so making
+                        # the user wait on a summarization call would charge them
+                        # latency for work that only benefits a later turn.
+                        # maybe_compact is a no-op unless enough has aged out.
+                        asyncio.create_task(
+                            text_compaction.maybe_compact(
+                                user_id, desktop_conversation_id
+                            ),
+                            name=f"chat-compact-{desktop_conversation_id[:8]}",
+                        )
+            if client_message_id and release_recovery:
                 await turn_store.mark_client_complete(user_id, client_message_id)
+            if completion_task_name and release_recovery:
+                await asyncio.to_thread(
+                    get_task_scheduler().cancel_task,
+                    completion_task_name,
+                )
         except Exception as exc:
             duration_ms = int((time.monotonic() - start_ts) * 1000)
             logger.exception(
@@ -594,6 +868,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             })
             yield f"data: {_err}\n\n"
         finally:
+            reset_trace_context(trace_token)
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(_generate(), media_type="text/event-stream", headers=_sse_headers)

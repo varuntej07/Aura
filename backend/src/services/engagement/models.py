@@ -1,9 +1,6 @@
 """
 Engagement system data models.
 
-EngagementState   — TypedDict passed between functions in the pipeline.
-                    Plain dict so it's JSON-serializable for Cloud Task payloads.
-
 EngagementDecision — Output of DecisionEngine (pure Python, no LLM).
 NotificationOutput — Output of specialist agents (LLM-generated copy).
 ReEngagementOutput — Output of ReEngagementAgent for follow-up notifications.
@@ -14,46 +11,9 @@ rather than silently coercing wrong types.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
-
-
-# ── Pipeline state ────────────────────────────────────────────────────────────
-
-class EngagementState(TypedDict, total=False):
-    """Immutable context dict passed between pipeline stages.
-
-    total=False means all keys are optional — stages populate only what they own.
-    Serializable to JSON for Cloud Task payloads.
-    """
-    # Set by the event trigger (chat.py, calendar sync, etc.)
-    user_id: str
-    trigger_event: str                  # "chat_query" | "calendar_event"
-    trigger_payload: dict[str, Any]     # raw event data (query text, event id…)
-
-    # Populated by context loader
-    memories: list[dict[str, Any]]
-    upcoming_events: list[dict[str, Any]]
-    engagement_guard: dict[str, Any] | None   # rate-limit / daily-cap state
-
-    # Populated by DecisionEngine
-    should_engage: bool
-    chosen_agent: str                   # "calendar_prep" | "habit_nudge" | …
-    delay_minutes: int
-    tone: str                           # "roast" | "warn" | "educate" | "celebrate" | "check_in"
-    engagement_context: dict[str, Any]  # curated subset passed to the specialist agent
-    suppression_reason: str | None      # why we're not engaging (for analytics)
-
-    # Populated by specialist agent
-    notification_title: str
-    notification_body: str
-    opening_chat_message: str
-    suggested_replies: list[str]
-
-    # Set after Cloud Task is enqueued
-    engagement_id: str
-    cloud_task_name: str | None
 
 
 # ── Decision engine output ────────────────────────────────────────────────────
@@ -95,43 +55,3 @@ class ReEngagementOutput(BaseModel):
     body: str
     opening_chat_message: str
     escalation_level: int        # 1 = gentle nudge, 2 = general check-in
-
-
-# ── Firestore engagement_log document shape ───────────────────────────────────
-
-class EngagementLogDoc(TypedDict, total=False):
-    """Shape of users/{uid}/engagement_log/{engagement_id} in Firestore.
-
-    Not a Pydantic model — Firestore reads/writes use plain dicts.
-    Defined here so every place that touches the doc shares the same field names.
-    """
-    trigger_event: str
-    trigger_payload: dict[str, Any]
-    chosen_agent: str
-    notification_title: str
-    notification_body: str
-    opening_chat_message: str
-    suggested_replies: list[str]
-    engagement_context: dict[str, Any]
-    cloud_task_name: str | None
-    actions_completed: list[str]        # idempotency guard per action branch
-    status: str                         # "scheduled"|"sent"|"responded"|"expired"
-    created_at: str
-    sent_at: str | None
-    responded_at: str | None
-    re_engagement_count: int            # 0, 1, or 2 (max 2 follow-ups)
-    last_re_engagement_at: str | None
-
-
-# ── Analytics event shape ─────────────────────────────────────────────────────
-
-class EngagementAnalyticsEvent(TypedDict, total=False):
-    """Appended to users/{uid}/engagement_analytics/{event_id}. Write-only."""
-    event: str          # "sent"|"tapped"|"re_engaged"|"expired"|"suppressed"
-    engagement_id: str
-    agent_type: str
-    tone: str
-    re_engagement_level: int
-    trigger_event: str
-    suppression_reason: str | None
-    timestamp: str

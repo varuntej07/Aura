@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart' hide XFile;
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -11,11 +11,65 @@ class AttachmentProcessingResult {
   final ChatAttachment? attachment;
   final String? error;
 
-  const AttachmentProcessingResult.success(ChatAttachment this.attachment) : error = null;
-  const AttachmentProcessingResult.failure(String this.error) : attachment = null;
+  const AttachmentProcessingResult.success(ChatAttachment this.attachment)
+    : error = null;
+  const AttachmentProcessingResult.failure(String this.error)
+    : attachment = null;
 }
 
 class AttachmentProcessor {
+  static const _attachmentTypeGroup = XTypeGroup(
+    label: 'documents and images',
+    extensions: [
+      'pdf',
+      'docx',
+      'doc',
+      'txt',
+      'csv',
+      'tsv',
+      'html',
+      'htm',
+      'rtf',
+      'epub',
+      'jpg',
+      'jpeg',
+      'png',
+      'gif',
+      'webp',
+    ],
+    mimeTypes: [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/msword',
+      'text/plain',
+      'text/csv',
+      'text/tab-separated-values',
+      'text/html',
+      'application/rtf',
+      'application/epub+zip',
+      'image/jpeg',
+      'image/png',
+      'image/gif',
+      'image/webp',
+    ],
+    uniformTypeIdentifiers: [
+      'com.adobe.pdf',
+      'org.openxmlformats.wordprocessingml.document',
+      'com.microsoft.word.doc',
+      'public.plain-text',
+      'public.comma-separated-values-text',
+      'public.tab-separated-values-text',
+      'public.html',
+      'public.rtf',
+      'org.idpf.epub-container',
+      'public.jpeg',
+      'public.png',
+      'com.compuserve.gif',
+      'org.webmproject.webp',
+    ],
+    webWildCards: ['application/*', 'text/*', 'image/*'],
+  );
+
   final _imagePicker = ImagePicker();
 
   Future<XFile?> pickImageFromCamera() =>
@@ -24,16 +78,8 @@ class AttachmentProcessor {
   Future<List<XFile>> pickImagesFromGallery() =>
       _imagePicker.pickMultiImage(imageQuality: 85);
 
-  Future<FilePickerResult?> pickFiles() => FilePicker.pickFiles(
-        allowMultiple: true,
-        withData: true,
-        type: FileType.custom,
-        // Kept in sync with attachment_validator.dart and backend/src/handlers/chat.py
-        allowedExtensions: [
-          'pdf', 'docx', 'doc', 'txt', 'csv', 'tsv', 'html', 'htm', 'rtf', 'epub',
-          'jpg', 'jpeg', 'png', 'gif', 'webp',
-        ],
-      );
+  Future<List<XFile>> pickFiles() =>
+      openFiles(acceptedTypeGroups: const [_attachmentTypeGroup]);
 
   Future<List<AttachmentProcessingResult>> processPickedImages(
     List<XFile> xFiles,
@@ -50,18 +96,23 @@ class AttachmentProcessor {
     List<ChatAttachment> existingAttachments,
   ) => _processImage(xFile, existingAttachments);
 
-  Future<AttachmentProcessingResult> processPlatformFile(
-    PlatformFile platformFile,
+  Future<AttachmentProcessingResult> processSelectedFile(
+    XFile selectedFile,
     List<ChatAttachment> existingAttachments,
   ) async {
-    final bytes = platformFile.bytes;
-    if (bytes == null) {
+    final Uint8List bytes;
+    try {
+      bytes = await selectedFile.readAsBytes();
+    } catch (_) {
       return AttachmentProcessingResult.failure(
-        'Could not read "${platformFile.name}". Try again.',
+        'Could not read "${selectedFile.name}". Try again.',
       );
     }
 
-    final ext = platformFile.extension?.toLowerCase();
+    final dot = selectedFile.name.lastIndexOf('.');
+    final ext = dot == -1
+        ? null
+        : selectedFile.name.substring(dot + 1).toLowerCase();
     final mimeType = AttachmentValidator.mimeTypeFromExtension(ext);
     if (mimeType == null) {
       return const AttachmentProcessingResult.failure(
@@ -72,7 +123,11 @@ class AttachmentProcessor {
     final resolvedType = AttachmentValidator.resolveType(mimeType);
 
     if (resolvedType == ChatAttachmentType.image) {
-      return _compressAndCreateImage(bytes, platformFile.name, existingAttachments);
+      return _compressAndCreateImage(
+        bytes,
+        selectedFile.name,
+        existingAttachments,
+      );
     }
 
     final validation = AttachmentValidator.validate(
@@ -86,13 +141,15 @@ class AttachmentProcessor {
       );
     }
 
-    return AttachmentProcessingResult.success(ChatAttachment(
-      fileName: platformFile.name,
-      mimeType: mimeType,
-      fileSizeBytes: bytes.length,
-      bytes: bytes,
-      type: ChatAttachmentType.document,
-    ));
+    return AttachmentProcessingResult.success(
+      ChatAttachment(
+        fileName: selectedFile.name,
+        mimeType: mimeType,
+        fileSizeBytes: bytes.length,
+        bytes: bytes,
+        type: ChatAttachmentType.document,
+      ),
+    );
   }
 
   Future<AttachmentProcessingResult> _processImage(
@@ -102,7 +159,8 @@ class AttachmentProcessor {
     try {
       final bytes = await xFile.readAsBytes();
       final ext = xFile.path.split('.').last.toLowerCase();
-      final mimeType = AttachmentValidator.mimeTypeFromExtension(ext) ?? 'image/jpeg';
+      final mimeType =
+          AttachmentValidator.mimeTypeFromExtension(ext) ?? 'image/jpeg';
 
       final validation = AttachmentValidator.validate(
         mimeType: mimeType,
@@ -147,14 +205,16 @@ class AttachmentProcessor {
       );
     }
 
-    return AttachmentProcessingResult.success(ChatAttachment(
-      fileName: fileName,
-      mimeType: 'image/jpeg',
-      fileSizeBytes: compressedBytes.length,
-      bytes: compressedBytes,
-      type: ChatAttachmentType.image,
-      thumbnail: thumbnailBytes,
-    ));
+    return AttachmentProcessingResult.success(
+      ChatAttachment(
+        fileName: fileName,
+        mimeType: 'image/jpeg',
+        fileSizeBytes: compressedBytes.length,
+        bytes: compressedBytes,
+        type: ChatAttachmentType.image,
+        thumbnail: thumbnailBytes,
+      ),
+    );
   }
 
   Future<Uint8List?> _compressImage(

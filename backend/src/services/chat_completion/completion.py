@@ -21,9 +21,14 @@ from __future__ import annotations
 from typing import Any
 
 from ...lib.logger import logger
+from .. import desktop_chat_store
 from ..action_intent_policy import excluded_tools_for_text_turn
 from ..claude_client import ClaudeClient
-from ..tool_executor import ToolExecutor
+from ..tool_executor import (
+    ToolExecutor,
+    excluded_tools_for_chat_surface,
+    resolve_chat_surface_allowed_tools,
+)
 from . import tool_idempotency, turn_store
 from .prompt_builder import build_turn_system_blocks, build_user_content
 
@@ -47,6 +52,62 @@ _TOOL_CONFIRMATIONS: dict[str, str] = {
 
 _PREVIEW_MAX_CHARS = 140
 
+# Terminal copy for a desktop turn that cannot be finished. Written into the canonical
+# transcript so a restart shows an honest failed turn with Retry instead of a message
+# that appears to have vanished.
+_DESKTOP_FAILED_TEXT = "Aura could not finish this message. Try sending it again."
+_DESKTOP_ATTACHMENT_FAILED_TEXT = (
+    "I lost the screen you shared with that message. Capture the screen and ask again."
+)
+
+
+async def _store_desktop_answer(
+    user_id: str,
+    conversation_id: str,
+    cmid: str,
+    *,
+    text: str,
+    status: str,
+    reminder: dict[str, Any] | None = None,
+) -> bool:
+    """Persist this turn's terminal answer to the canonical desktop transcript.
+
+    Returns whether the answer now has a durable home. ``duplicate`` counts as success:
+    the foreground stream already stored its own answer under the same deterministic id,
+    so the write was unnecessary rather than failed, and the user never sees two replies.
+
+    Called BEFORE turn_store.mark_complete/mark_failed in every branch, because the
+    recovery record is the only durable copy of the answer until this lands. A non-desktop
+    turn has no transcript to write and is trivially durable.
+    """
+    if not conversation_id:
+        return True
+    result = await desktop_chat_store.put_assistant_message(
+        user_id, conversation_id, cmid, text=text, status=status, reminder=reminder,
+    )
+    return result != desktop_chat_store.RESULT_ERROR
+
+
+def _leave_repairable(user_id: str, cmid: str, branch: str) -> str:
+    """Abandon this attempt WITHOUT terminalizing the recovery record.
+
+    The turn stays ``regenerating`` with its claim timestamp, so once
+    COMPLETION_CLAIM_LEASE (4 minutes) lapses the backstop sweep re-claims and retries it;
+    list_stuck_turns already scans that status. MAX_ATTEMPTS bounds the whole thing at two
+    tries. The cost is that a transcript-write failure burns one attempt, which is the right
+    trade: marking the turn complete here would strip the recovery fields and leave the
+    answer with no durable home and nothing to retry it.
+
+    Repair is NOT immediate. The sweep is gated at ``now_minute % 5 == 3`` in
+    handlers/scheduler.py and only looks at turns older than a 5-minute cutoff, so a repair
+    lands roughly 5 to 10 minutes out. Any client waiting on one has to keep checking past
+    that window, not just past CHAT_COMPLETION_DELAY_SECONDS.
+    """
+    logger.warn("chat_completion: canonical transcript write failed, left repairable", {
+        "user_id": user_id, "cmid": cmid, "branch": branch,
+    })
+    return "transcript_write_failed"
+
 
 async def complete_turn(
     user_id: str, cmid: str, session_id: str | None = None
@@ -66,6 +127,16 @@ async def complete_turn(
 
     session_id = session_id or str(turn.get(turn_store.FIELD_SESSION_ID) or "")
     completed_tools: list[str] = list(turn.get(turn_store.FIELD_COMPLETED_TOOLS) or [])
+    # Read before any mark_complete/mark_failed below: both DELETE_FIELD `surface`, so
+    # asking afterwards would always come back empty and silently skip the transcript.
+    surface = str(turn.get(turn_store.FIELD_SURFACE) or "app")
+    desktop_conversation_id = (
+        session_id
+        if surface == desktop_chat_store.SURFACE
+        and desktop_chat_store.is_valid_id(session_id)
+        and desktop_chat_store.is_valid_id(cmid)
+        else ""
+    )
 
     # The live run already did real, side-effecting work before disconnecting. Do NOT
     # re-run the LLM (it might phrase or act differently); just confirm what happened.
@@ -82,6 +153,11 @@ async def complete_turn(
         # Hydrate the reminder card from the actual receipt so a backgrounded reminder
         # arrives as a card, not text-only, matching the live stream's `reminder` payload.
         reminder: dict[str, Any] | None = receipts.get("set_reminder")
+        if not await _store_desktop_answer(
+            user_id, desktop_conversation_id, cmid,
+            text=answer, status=desktop_chat_store.STATUS_COMPLETE, reminder=reminder,
+        ):
+            return _leave_repairable(user_id, cmid, "synthesized")
         await turn_store.mark_complete(
             user_id, cmid, answer_text=answer, completed_tools=confirmed_tools,
             reminder=reminder, pushed=True,
@@ -96,18 +172,36 @@ async def complete_turn(
     # Attachment turns were stored text-only (base64 would blow the doc limit), so a regen
     # would answer a different question. Fail rather than mislead; the client offers retry.
     if turn.get(turn_store.FIELD_HAS_ATTACHMENTS):
+        # No screenshot is kept anywhere, by design, so there is nothing to regenerate
+        # from. Say so plainly instead of answering a question we can no longer see.
+        if not await _store_desktop_answer(
+            user_id, desktop_conversation_id, cmid,
+            text=_DESKTOP_ATTACHMENT_FAILED_TEXT,
+            status=desktop_chat_store.STATUS_FAILED,
+        ):
+            return _leave_repairable(user_id, cmid, "skipped_attachments")
         await turn_store.mark_failed(user_id, cmid)
         logger.info("chat_completion: skipped (had attachments)", {"user_id": user_id, "cmid": cmid})
         return "skipped_attachments"
 
     answer, reminder, tools = await _regenerate(turn, user_id, cmid)
     if not answer.strip():
+        if not await _store_desktop_answer(
+            user_id, desktop_conversation_id, cmid,
+            text=_DESKTOP_FAILED_TEXT, status=desktop_chat_store.STATUS_FAILED,
+        ):
+            return _leave_repairable(user_id, cmid, "failed_empty")
         await turn_store.mark_failed(user_id, cmid)
         logger.warn("chat_completion: regeneration produced no answer", {
             "user_id": user_id, "cmid": cmid,
         })
         return "failed_empty"
 
+    if not await _store_desktop_answer(
+        user_id, desktop_conversation_id, cmid,
+        text=answer, status=desktop_chat_store.STATUS_COMPLETE, reminder=reminder,
+    ):
+        return _leave_repairable(user_id, cmid, "regenerated")
     await turn_store.mark_complete(
         user_id, cmid, answer_text=answer, completed_tools=tools, reminder=reminder, pushed=True
     )
@@ -127,8 +221,26 @@ async def _regenerate(
     history = list(turn.get(turn_store.FIELD_HISTORY) or [])
     tier = str(turn.get(turn_store.FIELD_TIER) or "pro")
     notification_reason = str(turn.get(turn_store.FIELD_NOTIFICATION_REASON) or "")
+    surface = str(turn.get(turn_store.FIELD_SURFACE) or "app")
+    surface_allowed_tools = resolve_chat_surface_allowed_tools(surface)
 
-    system_blocks = await build_turn_system_blocks(user_id, message, notification_reason)
+    # Same conversation summary the live turn would have used. Without this a
+    # regenerated answer is built from a strictly smaller context than the one
+    # the user's original attempt had, so a turn that only failed on delivery
+    # comes back visibly worse informed than it should be.
+    session_id = str(turn.get(turn_store.FIELD_SESSION_ID) or "")
+    conversation_summary = ""
+    if surface == "desktop" and session_id:
+        state = await desktop_chat_store.get_context_state(user_id, session_id)
+        if state:
+            conversation_summary = str(
+                state.get(desktop_chat_store.FIELD_CONTEXT_SUMMARY) or ""
+            )
+
+    system_blocks = await build_turn_system_blocks(
+        user_id, message, notification_reason,
+        conversation_summary=conversation_summary,
+    )
     user_content = build_user_content(message, [])
 
     tool_executor = ToolExecutor(
@@ -136,6 +248,7 @@ async def _regenerate(
         created_via="text",
         client_message_id=cmid,
         session_id=str(turn.get(turn_store.FIELD_SESSION_ID) or ""),
+        allowed_tools=surface_allowed_tools,
     )
     claude = ClaudeClient(tool_executor)
 
@@ -151,6 +264,7 @@ async def _regenerate(
             user_tier=tier,
             extra_excluded_tools=(
                 _REGEN_EXCLUDED_TOOLS | excluded_tools_for_text_turn(message)
+                | excluded_tools_for_chat_surface(surface)
             ),
         ):
             etype = ev.get("type")

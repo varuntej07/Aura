@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +14,10 @@ from livekit.agents import llm as lk_llm
 from ...lib.logger import logger
 from ...prompts import VOICE_CONTEXT_COMPACTION_PROMPT
 from ...services.model_provider import get_model_provider
+from ...shared.context_summary import (
+    empty_summary as _empty_summary,
+    normalize_summary as _normalize_summary,
+)
 from .action_policy import tool_output_succeeded
 
 CONTEXT_COMPACTOR_VERSION = "2026-07-13.1"
@@ -23,35 +26,9 @@ SOFT_DYNAMIC_TOKEN_TRIGGER = 6_000
 HARD_RAW_TURN_CEILING = 20
 SOFT_RETAINED_RAW_TURNS = 8
 HARD_RETAINED_RAW_TURNS = 10
-MAX_SUMMARY_TOKENS = 450
 
 _SUMMARY_PREFIX = "<voice_session_summary>"
 _SUMMARY_SUFFIX = "</voice_session_summary>"
-_SUMMARY_FIELDS = (
-    "current_objective",
-    "current_topic",
-    "user_constraints",
-    "confirmed_facts",
-    "decisions",
-    "steps_already_attempted",
-    "successful_tool_results",
-    "failed_attempts",
-    "pending_next_step",
-    "explicitly_cancelled_intents",
-    "important_entities",
-)
-_LIST_FIELDS = frozenset(
-    {
-        "user_constraints",
-        "confirmed_facts",
-        "decisions",
-        "steps_already_attempted",
-        "successful_tool_results",
-        "failed_attempts",
-        "explicitly_cancelled_intents",
-        "important_entities",
-    }
-)
 @dataclass(frozen=True, slots=True)
 class CompactionSnapshot:
     context_item_ids: tuple[str, ...]
@@ -206,59 +183,6 @@ def build_compaction_snapshot(
         serialized_turns=_serialize_turns(compacted),
         compacted_turn_count=len(compacted),
     )
-
-
-def _empty_summary() -> dict[str, object]:
-    return {
-        field: ([] if field in _LIST_FIELDS else "")
-        for field in _SUMMARY_FIELDS
-    }
-
-
-def _normalize_summary(raw: str) -> str:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
-    try:
-        parsed = json.loads(cleaned)
-    except (TypeError, json.JSONDecodeError):
-        parsed = {}
-    normalized = _empty_summary()
-    if isinstance(parsed, dict):
-        for field in _SUMMARY_FIELDS:
-            value = parsed.get(field)
-            if field in _LIST_FIELDS:
-                if isinstance(value, list):
-                    normalized[field] = [
-                        str(item).strip()[:240]
-                        for item in value
-                        if str(item).strip()
-                    ]
-                elif isinstance(value, str) and value.strip():
-                    normalized[field] = [value.strip()[:240]]
-            elif isinstance(value, str):
-                normalized[field] = value.strip()[:500]
-    def _dump() -> str:
-        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
-
-    while math.ceil(len(_dump()) / 4) > MAX_SUMMARY_TOKENS:
-        longest_list = max(
-            _LIST_FIELDS,
-            key=lambda key: sum(len(str(value)) for value in normalized[key]),
-        )
-        values = normalized[longest_list]
-        if isinstance(values, list) and values:
-            values.pop()
-            continue
-        longest_text = max(
-            (field for field in _SUMMARY_FIELDS if field not in _LIST_FIELDS),
-            key=lambda key: len(str(normalized[key])),
-        )
-        text = str(normalized[longest_text])
-        if not text:
-            break
-        normalized[longest_text] = text[: max(0, len(text) - 80)]
-    return _dump()
 
 
 def _apply_result(

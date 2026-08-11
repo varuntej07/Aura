@@ -296,21 +296,3 @@ def arbitrate(
         return None, []
     ordered = sorted(proposals, key=proposal_sort_key, reverse=True)
     return ordered[0], ordered[1:]
-
-
-def freshness_decision(
-    proposal: NotificationProposal, now: datetime
-) -> OrchestratorDecision | None:
-    """DROP if stale, else ``None`` (pass)."""
-    if is_stale(proposal, now):
-        return OrchestratorDecision(Disposition.DROP, REASON_STALE)
-    return None
-
-
-def dedup_decision(
-    proposal: NotificationProposal, recent_dedup_keys: set[str]
-) -> OrchestratorDecision | None:
-    """DROP if this exact content was already sent recently, else ``None``."""
-    if proposal.dedup_key and proposal.dedup_key in recent_dedup_keys:
-        return OrchestratorDecision(Disposition.DROP, REASON_DUPLICATE)
-    return None

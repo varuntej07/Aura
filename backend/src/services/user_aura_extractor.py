@@ -152,14 +152,6 @@ _LIFE_FACT_REFERENCE = "\n".join(
     f" - {key}: {LIFE_FACT_DESCRIPTIONS[key]}" for key in LIFE_FACT_KEYS
 )
 
-def _sanitize_firestore_key(key: str) -> str:
-    """
-    Firestore field names cannot contain '.' or '/'.
-    Keys are trimmed to 100 chars to stay well within Firestore limits.
-    """
-    return key.replace(".", "_").replace("/", "_").strip()[:100]
-
-
 def _argmax(freq_map: dict[str, int]) -> str | None:
     return max(freq_map, key=lambda k: freq_map[k]) if freq_map else None
 

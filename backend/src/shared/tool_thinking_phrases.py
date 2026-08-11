@@ -47,6 +47,70 @@ SLOW_TOOL_THINKING_PHRASES: dict[str, list[str]] = {
 }
 
 
+# UI labels for the desktop activity rail, which is a different job from the
+# phrases above and must not reuse them. A phrase is Buddy TALKING ("lemme think
+# back for a sec") and only exists for slow tools; a label is the CLIENT naming a
+# step in a list ("Checking your memory"), so every tool the surface allows needs
+# one or its row renders unnamed. Present participle, sentence case, no trailing
+# period: these are read as a running list of steps, not as sentences.
+TOOL_ACTIVITY_LABELS: dict[str, str] = {
+    "ask_clarification": "Asking a question",
+    "cancel_reminder": "Cancelling a reminder",
+    "cancel_tracker": "Cancelling a tracker",
+    "create_calendar_event": "Adding to your calendar",
+    "delete_memory": "Forgetting something",
+    "get_upcoming_events": "Checking your calendar",
+    "get_user_context": "Pulling up your details",
+    "list_emails": "Checking your inbox",
+    "list_reminders": "Checking your reminders",
+    "list_trackers": "Checking your trackers",
+    "query_memory": "Checking your memory",
+    "read_email": "Reading an email",
+    "report_feedback": "Filing your feedback",
+    "send_email": "Sending an email",
+    "set_reminder": "Setting a reminder",
+    "store_memory": "Saving that to memory",
+    "track_topic": "Setting up a tracker",
+    "update_calendar_event": "Updating your calendar",
+    "web_surf": "Searching the web",
+}
+
+# Which tools may echo one argument into the transcript, and which argument.
+#
+# STRICT ALLOWLIST, and it must stay that way. "Searching the web for X" is
+# genuinely useful to the user and X is their own phrasing anyway. Everything
+# else is not: `read_email` would leak a message id, `list_emails` a query that
+# may name a person, `query_memory` the retrieval probe. A tool absent from this
+# map shows its label alone, which is the safe default for anything added later.
+_ECHOABLE_TOOL_ARGUMENT: dict[str, str] = {
+    "web_surf": "query",
+}
+
+_MAX_DETAIL_CHARS = 80
+
+
+def tool_activity_label(tool_name: str) -> str:
+    """The client-facing name for one step. Never empty, so a row always renders."""
+    return TOOL_ACTIVITY_LABELS.get(tool_name) or "Working on it"
+
+
+def tool_activity_detail(tool_name: str, tool_input: object) -> str:
+    """The one argument this tool may show the user, or "" for every other tool.
+
+    Fail-closed on anything unexpected: a non-dict input, a missing key, or a
+    non-string value all yield "". The rail is a transparency feature, and a
+    transparency feature that leaks an argument it should not have shown is worse
+    than one that shows nothing.
+    """
+    key = _ECHOABLE_TOOL_ARGUMENT.get(tool_name)
+    if not key or not isinstance(tool_input, dict):
+        return ""
+    value = tool_input.get(key)
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:_MAX_DETAIL_CHARS]
+
+
 def pick_tool_thinking_phrase(tool_name: str, seed: str) -> str | None:
     """Deterministically choose one phrase for ``tool_name`` from ``seed``.
 

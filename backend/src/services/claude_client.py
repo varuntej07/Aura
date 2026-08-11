@@ -16,7 +16,11 @@ import anthropic
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..shared.tool_thinking_phrases import pick_tool_thinking_phrase
+from ..shared.tool_thinking_phrases import (
+    pick_tool_thinking_phrase,
+    tool_activity_detail,
+    tool_activity_label,
+)
 from ..shared.tools import claude_tool_definitions
 from .analytics.llm_telemetry import anthropic_usage_tokens, start_llm_generation
 from .chat_completion import tool_idempotency as _tool_idempotency
@@ -282,6 +286,47 @@ class ClaudeClient:
             "tool_result_data": all_captured_tool_data,
         }
 
+    @staticmethod
+    def _block_type(block: Any) -> str:
+        """The ``type`` of a content block, whichever shape it arrived in.
+
+        Blocks reach ``messages`` two ways: as SDK objects straight off
+        ``response.content``, and as plain dicts we built ourselves. Only the
+        former has attribute access, so a dict-only or attribute-only reader would
+        silently classify half of them as untyped.
+        """
+        if isinstance(block, dict):
+            return str(block.get("type") or "")
+        return str(getattr(block, "type", "") or "")
+
+    @classmethod
+    def _strip_thinking_blocks(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Drop thinking blocks from assistant turns, for a model switch.
+
+        Must remove ``redacted_thinking`` as well as ``thinking``. Filtering on
+        ``thinking`` alone is the documented footgun: it leaves the encrypted
+        redacted blocks behind, which is exactly the state the multi-turn protocol
+        forbids. Assistant turns whose content is a plain string are untouched.
+        """
+        cleaned: list[dict[str, Any]] = []
+        for message in messages:
+            content = message.get("content")
+            if message.get("role") != "assistant" or not isinstance(content, list):
+                cleaned.append(message)
+                continue
+            kept = [
+                block for block in content
+                if cls._block_type(block) not in ("thinking", "redacted_thinking")
+            ]
+            # An assistant turn of nothing but thinking would become an empty
+            # content list, which the API rejects; keep the original in that case
+            # and let the new model ignore the blocks instead.
+            cleaned.append({**message, "content": kept} if kept else message)
+        return cleaned
+
     async def send_text_turn_stream(
         self,
         *,
@@ -291,12 +336,15 @@ class ClaudeClient:
         is_agent: bool = False,
         user_tier: str = "pro",
         extra_excluded_tools: frozenset[str] = frozenset(),
+        contract_version: int = 1,
     ) -> AsyncIterator[dict[str, Any]]:
         """
         Streaming version of send_text_turn. Yields SSE-compatible event dicts:
           {"type": "text_delta",      "delta": str}
           {"type": "tool_thinking",   "message": str}
           {"type": "tool_status",     "tool": str, "message": str}
+          {"type": "tool_start",      "id": str, "tool": str, "label": str, "detail": str}
+          {"type": "tool_end",        "id": str, "tool": str, "ok": bool}
           {"type": "clarification_ui","clarification_id": str, "question": str,
                                        "options": list[str], "multi_select": bool}
           {"type": "done",            "metadata": {...}}
@@ -304,6 +352,14 @@ class ClaudeClient:
 
         user_content accepts either plain text or a list of Anthropic content
         blocks (used when the user attaches images or documents to their message).
+
+        ``contract_version`` gates the per-tool lifecycle frames. Clients at v1
+        (every already-installed build, and mobile) get exactly what they got
+        before: at most one ``tool_status`` per assistant turn. Only a client that
+        declared v2 receives ``tool_start``/``tool_end``, because the desktop
+        client renders any frame type it does not recognise as a visible error
+        bubble, so emitting new frames unconditionally would break every deployed
+        build the moment this ships.
         """
         excluded = EXCLUDED_TOOLS_FOR_AGENT_CHAT if is_agent else EXCLUDED_TOOLS_FOR_GENERAL_CHAT
         tools = [
@@ -348,12 +404,37 @@ class ClaudeClient:
                             model=model_id, provider="anthropic", caller="chat",
                             uid=self._tool_executor.user_id,
                         )
+                        # Adaptive thinking lets the MODEL decide, per request,
+                        # whether this turn is worth reasoning about; a simple
+                        # question produces no thinking block at all. That is why
+                        # there is no heuristic here deciding it for the model.
+                        #
+                        # Only offered to a v2 client and only on the primary model:
+                        # Haiku 4.5 (the in-provider fallback) does not support
+                        # interleaved thinking, so a turn that fell back mid-flight
+                        # would silently change reasoning behaviour partway through.
+                        # Config is constant for the whole turn, because the thinking
+                        # config and effort are rendered into the prompt and any
+                        # change to either starts a new cache prefix.
+                        thinking_kwargs: dict[str, Any] = {}
+                        if contract_version >= 2 and current_model_idx == 0:
+                            thinking_kwargs = {
+                                "thinking": {"type": "adaptive", "display": "summarized"},
+                                "output_config": {"effort": settings.ANTHROPIC_CHAT_EFFORT},
+                            }
                         async with self._client.messages.stream(
                             model=model_id,
-                            max_tokens=settings.ANTHROPIC_MAX_TOKENS,
+                            # Thinking tokens count against this same budget, so it
+                            # has to leave room for the reasoning AND the answer.
+                            max_tokens=(
+                                settings.ANTHROPIC_MAX_TOKENS_THINKING
+                                if thinking_kwargs
+                                else settings.ANTHROPIC_MAX_TOKENS
+                            ),
                             system=system_prompt,  # type: ignore[arg-type]
                             tools=tools,  # type: ignore[arg-type]
                             messages=messages,  # type: ignore[arg-type]
+                            **thinking_kwargs,
                         ) as stream:
                             # Per-turn buffer: holds text until we know if this is a
                             # tool-call turn (narration -> tool_thinking) or a final turn
@@ -362,9 +443,21 @@ class ClaudeClient:
                             turn_text_buffer: list[str] = []
                             buffered_chars = 0
                             committed_to_streaming = False
+                            in_thinking = False
 
                             async for event in stream:
+                                if event.type == "content_block_stop" and in_thinking:
+                                    in_thinking = False
+                                    yield {"type": "thinking_end"}
+
                                 if event.type == "content_block_start":
+                                    if event.content_block.type == "thinking":
+                                        # Tracked as a flag because content_block_stop
+                                        # carries only an index, not the block type,
+                                        # so there is no other way to know which kind
+                                        # of block just closed.
+                                        in_thinking = True
+                                        yield {"type": "thinking_start"}
                                     if event.content_block.type == "tool_use":
                                         narration = "".join(turn_text_buffer).strip()
                                         if narration:
@@ -377,8 +470,14 @@ class ClaudeClient:
                                         # tools return None -> stay silent), and only the first
                                         # slow tool in the turn speaks. Seeded by the tool_use
                                         # block id so the phrase is stable, not random.
-                                        if not tool_status_emitted:
-                                            tool_name = event.content_block.name
+                                        tool_name = event.content_block.name
+                                        # v2 emits tool_start after the stream
+                                        # closes instead of here: a tool_use block's
+                                        # `input` is still EMPTY at content_block_start
+                                        # (arguments arrive as input_json_delta and are
+                                        # only complete at block stop), so a row built
+                                        # here could never show what was searched for.
+                                        if contract_version < 2 and not tool_status_emitted:
                                             phrase = pick_tool_thinking_phrase(
                                                 tool_name, seed=event.content_block.id
                                             )
@@ -391,7 +490,17 @@ class ClaudeClient:
                                                 }
 
                                 elif event.type == "content_block_delta":
-                                    if event.delta.type == "text_delta":
+                                    # Only ever the SUMMARIZED thinking text: the
+                                    # raw chain of thought is not what the API
+                                    # returns, and signature_delta / the encrypted
+                                    # `data` of a redacted_thinking block are
+                                    # deliberately not forwarded to any client.
+                                    if event.delta.type == "thinking_delta":
+                                        yield {
+                                            "type": "thinking_delta",
+                                            "delta": event.delta.thinking,
+                                        }
+                                    elif event.delta.type == "text_delta":
                                         chunk = event.delta.text
                                         if committed_to_streaming:
                                             text_started = True
@@ -447,6 +556,13 @@ class ClaudeClient:
                         if current_model_idx < len(model_chain) - 1:
                             current_model_idx += 1
                             attempt = 0
+                            # Thinking blocks are bound to the model that produced
+                            # them. Carrying them across a fallback does not error -
+                            # the new model ignores them - but it silently pays input
+                            # tokens for content that can no longer be used, on a turn
+                            # that is already degrading. Multi-turn tool loops are the
+                            # only case where any are present by this point.
+                            messages = self._strip_thinking_blocks(messages)
                             logger.warn("Claude stream: model exhausted, falling back", {
                                 "from_model": model_id,
                                 "to_model": model_chain[current_model_idx],
@@ -490,6 +606,20 @@ class ClaudeClient:
 
                 tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
+                # Announce every tool BEFORE any of it runs, in the model's own
+                # order. Read-only tools are gathered concurrently below, so
+                # announcing inside _run_tool would emit rows in completion order
+                # and the rail would reorder itself as fast tools finished first.
+                if contract_version >= 2:
+                    for block in tool_use_blocks:
+                        yield {
+                            "type": "tool_start",
+                            "id": block.id,
+                            "tool": block.name,
+                            "label": tool_activity_label(block.name),
+                            "detail": tool_activity_detail(block.name, block.input),
+                        }
+
                 async def _run_tool(block: Any) -> tuple[str, str, Any, Exception | None]:
                     try:
                         result = await self._tool_executor.execute(block.name, block.input)
@@ -520,6 +650,22 @@ class ClaudeClient:
                 tool_results_raw = [tool_results_by_id[block.id] for block in tool_use_blocks]
                 for _, name, _, _ in tool_results_raw:
                     tool_names_used.append(name)
+
+                # Close every row that was opened above. A tool that raised and a
+                # tool that returned an {"error": ...} payload are both failures to
+                # the user, so both close as ok=False; leaving an errored row
+                # spinning forever is the one outcome the rail must never produce.
+                if contract_version >= 2:
+                    for tool_id, tool_name, result, exc in tool_results_raw:
+                        failed = exc is not None or (
+                            isinstance(result, dict) and "error" in result
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "id": tool_id,
+                            "tool": tool_name,
+                            "ok": not failed,
+                        }
 
                 # Check for clarification sentinel
                 clarification = next(

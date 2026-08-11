@@ -43,6 +43,35 @@ REASON_STEP_TIMEOUT_S = max(
     min(40.0, TOOL_TIMEOUT_S * settings.REASON_STEP_MAX_TURNS),
 )
 
+DESKTOP_CHAT_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "list_reminders",
+    "get_upcoming_events",
+    "query_memory",
+    "get_user_context",
+    "web_surf",
+    "list_emails",
+    "read_email",
+    "ask_clarification",
+    "list_trackers",
+    "reason_step",
+    })
+def resolve_chat_surface_allowed_tools(surface: str) -> frozenset[str] | None:
+    """Return None for the unrestricted app surface, otherwise fail closed."""
+    if surface == "app":
+        return None
+    return DESKTOP_CHAT_ALLOWED_TOOLS
+
+
+def excluded_tools_for_chat_surface(surface: str) -> frozenset[str]:
+    allowed_tools = resolve_chat_surface_allowed_tools(surface)
+    if allowed_tools is None:
+        return frozenset()
+    return frozenset(
+        tool["name"]
+        for tool in claude_tool_definitions()
+        if tool["name"] not in allowed_tools
+    )
+
 
 def _canonical_args_hash(args: dict[str, Any]) -> str:
     blob = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
@@ -109,11 +138,8 @@ def _within_trigger_window(existing_trigger_at: Any, new_trigger_at: datetime) -
     return abs(existing_dt - new_trigger_at) <= REMINDER_SIMILAR_TRIGGER_WINDOW
 
 
-# reason_step funnel contract. The stepper (Sonnet) fetches via the web_surf TOOL; 
-# it talks to the user only through this JSON shape, one step per call 
-# (A1: clarify renders through the existing ask_clarification chips).
 class _ReasonStep(BaseModel):
-    action: str = "present"          # "clarify" | "present" | "final"
+    action: str = "present"
     confidence: float = 0.0
     question: str = ""
     options: list[str] = []
@@ -122,7 +148,6 @@ class _ReasonStep(BaseModel):
     answer: str = ""
 
 
-# The stepper may call only web_surf — never itself or any other tool.
 _REASON_STEP_TOOLS = [t for t in claude_tool_definitions() if t["name"] == "web_surf"]
 
 
@@ -133,23 +158,22 @@ def _build_reason_seed(inp: dict[str, Any]) -> str:
 
 
 def _format_fetch_result(out: ToolResult) -> str:
-    """Turn a _web_surf result into text the stepper can cite (real sites + urls)."""
+    """Turn a web result into text the stepper can cite."""
     if out.get("error"):
         return str(out.get("user_message") or "Search unavailable right now.")
-    
-    text = str(out.get("text") or "").strip()
+
+    result_text = str(out.get("text") or "").strip()
     sources = out.get("sources") or []
     lines = [
-        f"- {s.get('title') or s.get('url')} — {s.get('url')}"
-        for s in sources
-        if isinstance(s, dict) and s.get("url")
+        f"- {source.get('title') or source.get('url')} — {source.get('url')}"
+        for source in sources
+        if isinstance(source, dict) and source.get("url")
     ]
-    
-    if lines and text:
-        return text + "\n\nSources:\n" + "\n".join(lines)
+    if lines and result_text:
+        return result_text + "\n\nSources:\n" + "\n".join(lines)
     if lines:
         return "Sources:\n" + "\n".join(lines)
-    return text or "No useful results."
+    return result_text or "No useful results."
 
 
 def _parse_reason_step(raw: str) -> _ReasonStep:
@@ -157,16 +181,18 @@ def _parse_reason_step(raw: str) -> _ReasonStep:
     try:
         return _ReasonStep.model_validate_json(cleaned)
     except Exception:
-        # Model didn't emit clean JSON — degrade to presenting its text, never crash the chat.
         return _ReasonStep(action="present", findings=raw)
 
 
 def _reason_step_to_result(step: _ReasonStep) -> ToolResult:
     action = step.action
-    # Confidence gate: don't let a low-confidence 'final' through — ask instead of guessing.
-    if action == "final" and step.confidence and step.confidence < settings.REASON_STEP_CONFIDENCE_FLOOR:
+    if (
+        action == "final"
+        and step.confidence
+        and step.confidence < settings.REASON_STEP_CONFIDENCE_FLOOR
+    ):
         action = "clarify"
-    
+
     if action == "clarify":
         return {
             "needs_clarification": True,
@@ -174,7 +200,7 @@ def _reason_step_to_result(step: _ReasonStep) -> ToolResult:
             "question": step.question or step.next_question,
             "options": step.options,
         }
-    
+
     if action == "present":
         out: ToolResult = {"findings": step.findings}
         if step.next_question:
@@ -184,7 +210,9 @@ def _reason_step_to_result(step: _ReasonStep) -> ToolResult:
                 "Relay the findings, then call ask_clarification with next_question and options."
             )
         else:
-            out["instruction"] = "Relay these concrete findings to the user, then ask what they'd like next."
+            out["instruction"] = (
+                "Relay these concrete findings to the user, then ask what they'd like next."
+            )
         return out
     return {"reasoned_answer": step.answer or step.findings}
 
@@ -256,11 +284,13 @@ class ToolExecutor:
         created_via: str = "text",
         client_message_id: str = "",
         session_id: str = "",
+        allowed_tools: frozenset[str] | None = None,
     ) -> None:
         self._user_id = user_id
         self._created_via = created_via     # How reminders created in this session are tagged
         self._client_message_id = client_message_id
         self._session_id = session_id
+        self._allowed_tools = allowed_tools
 
     @property
     def user_id(self) -> str:
@@ -279,6 +309,18 @@ class ToolExecutor:
         return self._user_ref().collection("memories")
 
     async def execute(self, tool_name: str, input_data: dict[str, Any]) -> ToolResult:
+        if self._allowed_tools is not None and tool_name not in self._allowed_tools:
+            logger.warn(
+                "Tool: blocked by surface policy",
+                {"tool": tool_name, "user_id": self._user_id},
+            )
+            return {
+                "ok": False,
+                "error": True,
+                "code": "tool_not_allowed",
+                "retryable": False,
+                "user_message": f"Tool '{tool_name}' is not allowed for this chat surface.",
+            }
         if not isinstance(input_data, dict):
             return {
                 "ok": False,
@@ -1223,14 +1265,13 @@ class ToolExecutor:
             "multi_select": bool(inp.get("multi_select", False)),
         }
 
-    # Staged reasoning funnel (chat-only, flag-gated). Sonnet runs the protocol one step at a
-    # time, fetching real resources via web_surf itself, and crosses back to the user only for
-    # a clarify / present / final step (A1: clarify renders through ask_clarification). Off by
-    # default — see REASON_STEP_ENABLED.
     async def _reason_step(self, inp: dict[str, Any]) -> ToolResult:
         if not settings.REASON_STEP_ENABLED:
             logger.warn("Tool: reason_step called while disabled", {"user_id": self._user_id})
-            return {"error": True, "user_message": "I can't walk you through that one step by step yet."}
+            return {
+                "error": True,
+                "user_message": "I can't walk you through that one step by step yet.",
+            }
 
         task = str(inp.get("task", "")).strip()
         if not task:
@@ -1246,16 +1287,16 @@ class ToolExecutor:
                 system=REASON_STEP_SYSTEM_PROMPT,
                 tools=_REASON_STEP_TOOLS,
             )
-            tool_uses = [b for b in msg.content if getattr(b, "type", None) == "tool_use"]
+            tool_uses = [block for block in msg.content if getattr(block, "type", None) == "tool_use"]
 
-            # No tool call → the model emitted the structured step as text. Done for this turn.
             if not tool_uses:
                 raw = " ".join(
-                    b.text for b in msg.content if getattr(b, "type", None) == "text"
+                    block.text
+                    for block in msg.content
+                    if getattr(block, "type", None) == "text"
                 ).strip()
                 return _reason_step_to_result(_parse_reason_step(raw))
 
-            # Execute the model's web_surf calls itself, feed results back, continue the funnel.
             messages.append({"role": "assistant", "content": msg.content})
             results: list[dict[str, Any]] = []
             for block in tool_uses:
@@ -1265,10 +1306,13 @@ class ToolExecutor:
                     content = _format_fetch_result(out)
                 else:
                     content = "Fetch budget reached — present what you have or ask the user."
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": content})
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": content,
+                })
             messages.append({"role": "user", "content": results})
 
-        # Out of turns — fail soft with a clarification rather than a half-baked answer.
         logger.warn("Tool: reason_step exhausted turns", {
             "user_id": self._user_id,
             "fetches": fetches_used,
@@ -1424,18 +1468,3 @@ def mark_reminder_fired(user_id: str, reminder_id: str) -> None:
         "status": "fired",
         "fired_at": now_iso,
     })
-
-
-def list_user_fcm_tokens(user_id: str) -> list[str]:
-    """Return all FCM token strings for a user.
-
-    Reads from the ``users/{uid}/fcm_tokens`` subcollection managed by
-    :mod:`fcm_token_registry`.  Kept for backward compatibility with any
-    callers that haven't been migrated to ``send_notification`` yet.
-    """
-    from .fcm_token_registry import get_user_tokens
-    return [t["token"] for t in get_user_tokens(user_id)]
-
-
-def log_tool_failure(tool_name: str, error: Exception) -> None:
-    logger.error("Tool execution failed", {"tool": tool_name, "error": str(error)})

@@ -28,6 +28,7 @@ from ..memory.retrieval import (
     retrieve_relevant_subgraph,
 )
 from ..user_aura_schema import active_category_slugs, interest_prompt_lines
+from .text_compaction import render_summary_block
 
 # Process-global aura cache (per-uid profile + accepted hints). Shared across the
 # live handler and the completion path; either may populate it.
@@ -357,6 +358,7 @@ async def build_turn_system_blocks(
     message: str,
     notification_reason: str = "",
     user_doc: dict[str, Any] | None = None,
+    conversation_summary: str = "",
 ) -> list[dict[str, Any]]:
     """Assemble the full system prompt for one chat turn: datetime + aura profile
     suffix + query-relevant long-term memory, in one place so the live handler and
@@ -374,6 +376,13 @@ async def build_turn_system_blocks(
     break the turn. The block is appended AFTER the cached prefix (same slot as
     notification_reason) so per-turn memory never invalidates the system-prompt cache,
     and is deduped against the static <interests> already shown.
+
+    ``conversation_summary`` is the compacted tail of THIS conversation
+    (services/chat_completion/text_compaction.py), covering turns that have aged
+    out of the raw history window the client sends. It goes in the same
+    after-the-prefix slot for the same reason: it changes as the thread grows, so
+    caching it would invalidate the prefix on every compaction. It is distinct
+    from the memory block above, which is cross-conversation long-term recall.
     """
     if user_doc is None:
         user_doc = await fetch_user_doc(uid)
@@ -388,6 +397,14 @@ async def build_turn_system_blocks(
         local_datetime,
         notification_reason,
     )
+
+    # Before the memory block: this conversation's own compacted history is more
+    # immediately relevant than cross-conversation recall, and reads better next
+    # to the raw tail it continues.
+    if conversation_summary:
+        summary_block = render_summary_block(conversation_summary)
+        if summary_block:
+            blocks.append({"type": "text", "text": summary_block})
 
     if aura_profile:
         # Graph-first (always on; the GRAPH_READ_CHAT flag was removed 2026-07-20),

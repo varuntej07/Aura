@@ -76,5 +76,12 @@ async def maybe_send_welcome_notification(user_id: str, *, now: datetime | None 
         dedup_key=f"welcome:{user_id}",
         title=WELCOME_TITLE,
         body=WELCOME_BODY,
+        data={
+            # Tapping this opens a chat already seeded with Buddy's opener, so the
+            # very first push lands the user in a conversation rather than on an
+            # empty home screen.
+            "opening_chat_message": WELCOME_BODY,
+            "notification_origin": SOURCE_WELCOME,
+        },
     )
     await orchestrator.submit(proposal)

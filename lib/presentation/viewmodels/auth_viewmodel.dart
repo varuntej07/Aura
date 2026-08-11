@@ -94,6 +94,8 @@ class AuthViewModel extends SafeChangeNotifier {
             unawaited(_subscriptionService.refreshEntitlement());
           }
           unawaited(_postHogAnalyticsService.identifyUser(user.uid));
+        } else {
+          _notificationService.clearUser();
         }
         final nextState = user != null ? ViewState.loaded : ViewState.idle;
         AppLogger.info('Auth state -> $nextState', tag: 'AuthVM');
@@ -344,7 +346,8 @@ class AuthViewModel extends SafeChangeNotifier {
     ErrorHandler.logBreadcrumb('user_signed_out');
     unawaited(_postHogAnalyticsService.reset());
     _setState(ViewState.idle);
-    unawaited(_authRepository.signOut());
+    await _notificationService.deactivateForSignOut();
+    await _authRepository.signOut();
   }
 
   /// Permanently deletes the account. Calls the backend to wipe all Firestore
