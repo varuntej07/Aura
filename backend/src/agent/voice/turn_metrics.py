@@ -92,6 +92,19 @@ class VoiceTurnMetrics:
                 "speculative_decision_reason": None,
                 "speculative_reused": None,
                 "screen_text_context": None,
+                # Why a turn ended up spoken or carded. Names, flags and reason
+                # codes only, never the artifact body or the request wording.
+                # Reconstructing this from a transcript is what turned one bad
+                # session into a full investigation.
+                "artifact_signal": None,  # "intent" | "output" | None
+                "artifact_kind": None,
+                "artifact_published": False,
+                # The deterministic "I can't see your screen" answer fired.
+                "screen_visibility_deterministic": False,
+                # Calls the action policy refused, with the reason code. Executed
+                # calls land in tool_calls; a gated one produced no call at all
+                # and was invisible here.
+                "tools_deferred": [],
                 "user_transcript": "",
                 "assistant_text": "",
                 "tool_calls": [],
@@ -166,6 +179,38 @@ class VoiceTurnMetrics:
         if self._pending_screen_text_context is not None:
             turn["screen_text_context"] = self._pending_screen_text_context
             self._pending_screen_text_context = None
+
+    def note_artifact(
+        self,
+        *,
+        turn_index: int,
+        signal: str,
+        kind: str,
+        published: bool,
+    ) -> None:
+        """Records that content was routed to a card instead of to speech.
+
+        ``signal`` is which layer caught it: "intent" when the request wording
+        armed the guard, "output" when the answer contained something speech
+        would have destroyed. Knowing which one fired is the difference between
+        tuning request matching and tuning content detection.
+        """
+        turn = self._turn(turn_index)
+        turn["artifact_signal"] = signal
+        turn["artifact_kind"] = kind
+        turn["artifact_published"] = published
+
+    def note_tool_deferred(
+        self, *, turn_index: int, name: str, reason: str, effect: str
+    ) -> None:
+        """Records one call the action policy refused, and why."""
+        self._turn(turn_index)["tools_deferred"].append(
+            {"name": name, "reason": reason, "effect": effect}
+        )
+
+    def note_screen_visibility_answer(self, *, turn_index: int) -> None:
+        """Records that the screen-visibility answer bypassed the model."""
+        self._turn(turn_index)["screen_visibility_deterministic"] = True
 
     def note_model_first_chunk(self, *, turn_index: int, latency_ms: int) -> None:
         turn = self._turn(turn_index)
@@ -301,6 +346,18 @@ class VoiceTurnMetrics:
                     "completion_tokens": record.get("completion_tokens"),
                     "frame_attached": record.get("frame_attached"),
                     "frame_count_in_ctx": record.get("frame_count_in_ctx"),
+                    # Screen evidence was already collected but only ever reached
+                    # _append, whose jsonl sits on an ephemeral container disk. It
+                    # belongs here, where `lk agent logs` can actually read it.
+                    "context_strategy": record.get("context_strategy"),
+                    "structured_context_bytes": record.get("structured_context_bytes"),
+                    "turn_context_id": record.get("turn_context_id"),
+                    "screen_visibility_deterministic": record.get(
+                        "screen_visibility_deterministic"
+                    ),
+                    "artifact_signal": record.get("artifact_signal"),
+                    "artifact_kind": record.get("artifact_kind"),
+                    "artifact_published": record.get("artifact_published"),
                     "n_model_requests_this_turn": record.get("n_model_requests_this_turn"),
                     "tool_names": [
                         call.get("name") for call in record.get("tool_calls") or []
@@ -310,6 +367,7 @@ class VoiceTurnMetrics:
                         for call in record.get("tool_calls") or []
                         if not call.get("success")
                     ],
+                    "tools_deferred": record.get("tools_deferred") or [],
                     "t_stt_final_ms": record.get("t_stt_final_ms"),
                     "t_model_first_chunk_ms": record.get("t_model_first_chunk_ms"),
                     "t_llm_node_first_output_ms": record.get("t_llm_node_first_output_ms"),

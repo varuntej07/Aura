@@ -1,11 +1,9 @@
 """Deterministic backstop for copyable answers that get spoken instead of carded.
 
 The system prompt and tool skills route "draft me a prompt / command / code" to
-present_visible_artifact (see voice_prompt.py). This module is the safety net for
-the turns where the model narrates that copyable text anyway: it is a narrow,
-OUTPUT-side intent match (it never removes tools pre-inference, only adds a card
-after the fact) so the user always ends up with something to copy, even on the
-turn the model spoke it.
+present_visible_artifact (see voice_prompt.py). This module is the finalized
+request-intent safety net for turns where the model narrates that copyable text
+anyway. Output shape alone never authorizes a card.
 
 Pure functions only; the wiring that calls them lives in buddy_agent.llm_node.
 """
@@ -21,11 +19,49 @@ _ARTIFACT_VERB = (
 )
 _ARTIFACT_NOUN = (
     r"(?:prompt|command|cmd|code|script|snippet|config|configuration|query|regex|"
-    r"json|yaml|function|css|html|sql|markdown|text to (?:paste|copy)|"
+    r"json|yaml|function|css|html|sql|markdown|url|link|web address|draft|text to (?:paste|copy)|"
     r"message to (?:paste|copy))"
 )
+# Outbound-message nouns, deliberately kept OUT of the verb-agnostic pattern
+# below. "he sent me a message" and "she left me a comment" are ordinary talk,
+# and arming on those would buffer a normal reply and card it. Behind an
+# explicit compose verb ("write me a message") the intent is unambiguous.
+_OUTBOUND_NOUN = (
+    r"(?:tweet|thread|post|dm|direct message|message|email|reply|comment|"
+    r"caption|bio)"
+)
 _WANT_ARTIFACT_RE = re.compile(
-    rf"\b{_ARTIFACT_VERB}\b[^.?!]{{0,80}}?\b{_ARTIFACT_NOUN}\b",
+    rf"\b{_ARTIFACT_VERB}\b[^.?!]{{0,80}}?\b(?:{_ARTIFACT_NOUN}|{_OUTBOUND_NOUN})\b",
+    re.IGNORECASE,
+)
+
+# The compose verb doubles as the noun: "tweet something about this", "post
+# about this". Aura cannot publish to any of these places, so the only useful
+# outcome is exact text on screen for the user to copy.
+# Split by how ambiguous the word is on its own. "tweet" and "post" are rarely
+# nouns in conversation, so they can take "this/that". "message", "email" and
+# "dm" are everyday nouns, and allowing "this" there armed on "he sent me a
+# message this morning", so they only take an explicit object or "about".
+_SOCIAL_ACTION_RE = re.compile(
+    r"\b(?:tweet|post)\s+(?:something|anything|about|out|this|that)\b"
+    r"|\b(?:dm|email|message)\s+(?:something|anything|about|out|him|her|them)\b",
+    re.IGNORECASE,
+)
+
+# Verb-agnostic form, for when speech recognition mangles the verb: the live
+# session that motivated this module transcribed "draft me a prompt" as "test me
+# a prompt", and no verb list would have caught it. "me a <copyable noun>" is a
+# request for one in practice, whatever verb precedes it.
+_WANT_ARTIFACT_INDIRECT_RE = re.compile(
+    rf"\b(?:me|us)\s+(?:a|an|the|one)\s+(?:\w+\s+){{0,2}}{_ARTIFACT_NOUN}\b",
+    re.IGNORECASE,
+)
+
+# Question form, including the short deictic request that motivated the guard:
+# "what is the command for that?" The requested object is still explicit even
+# though English does not use an imperative verb.
+_WANT_ARTIFACT_QUERY_RE = re.compile(
+    rf"\b(?:what(?:'s| is)|which)\b[^.?!]{{0,60}}\b{_ARTIFACT_NOUN}\b",
     re.IGNORECASE,
 )
 
@@ -38,8 +74,28 @@ _CORRECTION_RE = re.compile(
     r"put it on (?:the )?screen|on (?:the )?screen|not out loud|"
     r"spitting it out|reading it out|spelling it out|"
     r"i (?:just )?asked (?:you )?(?:to |for )(?:a |the )?(?:draft|prompt|command|code)|"
-    r"give me (?:a|the) (?:prompt|command|code|script)"
+    r"give me (?:a|the) (?:prompt|command|code|script)|"
+    r"draft me\b"
     r")",
+    re.IGNORECASE,
+)
+
+_VISIBLE_ARTIFACT_FOLLOWUP_RE = re.compile(
+    r"(?:"
+    r"^\s*(?:please\s+)?(?:make|rewrite|revise|change|shorten|lengthen|expand|"
+    r"simplify|tighten|translate|format|regenerate)\s+(?:it|that|this)\b|"
+    r"\b(?:rewrite|revise|change|shorten|lengthen|expand|simplify|tighten|"
+    r"translate|format|regenerate)\s+(?:the|that|this)\s+(?:card|artifact|"
+    r"draft|prompt|command|code|script|snippet|config|checklist|note)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_SHORT_CONFIRMATION_RE = re.compile(
+    r"(?:"
+    r"(?:sure|okay|ok|absolutely|of course)(?:[,.!]\s*(?:one moment|one sec(?:ond)?))?|"
+    r"here you go|done|working on it|one moment|one sec(?:ond)?"
+    r")[.!]?",
     re.IGNORECASE,
 )
 
@@ -53,21 +109,26 @@ def wants_copyable_artifact(transcript: str) -> bool:
     """
     if not transcript:
         return False
-    return bool(_WANT_ARTIFACT_RE.search(transcript) or _CORRECTION_RE.search(transcript))
+    return bool(
+        _WANT_ARTIFACT_RE.search(transcript)
+        or _WANT_ARTIFACT_INDIRECT_RE.search(transcript)
+        or _WANT_ARTIFACT_QUERY_RE.search(transcript)
+        or _SOCIAL_ACTION_RE.search(transcript)
+        or _CORRECTION_RE.search(transcript)
+    )
+
+
+def references_visible_artifact(transcript: str) -> bool:
+    """True when a turn clearly edits or refers to the card already on screen."""
+    return bool(transcript and _VISIBLE_ARTIFACT_FOLLOWUP_RE.search(transcript))
 
 
 def looks_copyable(text: str) -> bool:
-    """True when spoken text is substantial enough to be worth a card.
-
-    Guards against carding a short confirmation ("sure, one sec"). A code fence,
-    a line break, or a reasonably long block all qualify as copyable content.
-    """
+    """True for any non-empty requested body except a bare progress acknowledgement."""
     if not text:
         return False
     stripped = text.strip()
-    if "```" in stripped or "\n" in stripped:
-        return True
-    return len(stripped) >= 120
+    return bool(stripped and not _SHORT_CONFIRMATION_RE.fullmatch(stripped))
 
 
 def artifact_kind_for(transcript: str) -> tuple[str, str]:
@@ -83,4 +144,21 @@ def artifact_kind_for(transcript: str) -> tuple[str, str]:
         return "command", "Command"
     if re.search(r"\b(code|script|function|regex|css|html|sql|json|yaml)\b", lowered):
         return "code", "Snippet"
+    # Outbound wording is checked before the generic "draft" fallback so "draft a
+    # tweet" titles the card Tweet rather than Draft. present_visible_artifact has
+    # no outbound_message kind (see visible_artifacts.ARTIFACT_KINDS), so these all
+    # ride as notes: the card is exact text to copy, not a send.
+    for pattern, title in (
+        (r"\b(tweet|thread)\b", "Tweet"),
+        (r"\bpost\b", "Post"),
+        (r"\b(dm|direct message|message)\b", "Message"),
+        (r"\bemail\b", "Email"),
+        (r"\b(reply|comment)\b", "Reply"),
+        (r"\bcaption\b", "Caption"),
+        (r"\bbio\b", "Bio"),
+    ):
+        if re.search(pattern, lowered):
+            return "note", title
+    if re.search(r"\bdrafts?\b", lowered):
+        return "note", "Draft"
     return "prompt", "Prompt"

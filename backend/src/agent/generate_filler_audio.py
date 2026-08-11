@@ -20,7 +20,7 @@ _AUDIO_DIR = Path(__file__).parent / "audio"
 
 # Default Cartesia voice used by the LiveKit cartesia.TTS plugin when no voice is specified.
 _VOICE_ID = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
-_MODEL = "sonic-3"
+_MODEL = "sonic-3.5"
 _API_VERSION = "2025-04-16"
 
 _CLIPS: list[tuple[str, str]] = [

@@ -21,14 +21,19 @@ from livekit.agents import AgentSession, JobContext
 if TYPE_CHECKING:
     from .screen_frames import ScreenFrameStore
 
-from ...config.settings import settings
 from ...lib.logger import logger
+from ...prompts import (
+    FIRST_AWAY_NUDGE_INSTRUCTIONS,
+    FIRST_AWAY_NUDGE_SCREEN_INSTRUCTIONS,
+)
+from ...services import voice_action_receipts
 from ...services.analytics.llm_telemetry import start_llm_generation
 from .action_policy import tool_output_succeeded
 from .capabilities import VOICE_TOOL_REGISTRY, ToolEffect
 from .errors import classify_pipeline_error, publish_client_error
 from .telemetry import log_turn_metrics, log_voice_failure
 from .text_sanitizer import strip_nonverbal_cues
+from .turn_metrics import VoiceTurnMetrics
 
 # Slow-tool filler phrases moved to voice/tool_filler.py, triggered from
 # BuddyAgent.llm_node (the only pre-execution tool signal on this stack).
@@ -40,38 +45,6 @@ from .text_sanitizer import strip_nonverbal_cues
 # every agent turn while the user stays quiet, so it is gated behind a
 # `_away_nudged` latch that is only released when a real final user transcript
 # arrives. Without it, Buddy talks repeatedly during one silence span.
-
-FIRST_AWAY_NUDGE_SCREEN_INSTRUCTIONS = (
-    "The user has gone quiet for a bit, and a recent screenshot of their screen is "
-    "in this conversation's context. In Buddy's warm, casual voice, say ONE short, "
-    "playful line. If something on that screenshot is genuinely interesting, riff on "
-    "it or ask about it the way a curious friend peeking at the same screen would — "
-    "you two are looking at it together, never watching them. If nothing on it is "
-    "worth mentioning, just a light, friendly check-in instead. Vary the wording "
-    "naturally every time; never a stock phrase like 'you still there? no rush.' "
-    "No guilt, no list of questions."
-)
-
-FIRST_AWAY_NUDGE_INSTRUCTIONS = (
-    "The user has gone quiet for a bit. In Buddy's warm, casual voice, gently check "
-    "in with ONE short, low-pressure line. Make it feel spontaneous and specific to "
-    "this moment: if you two were mid-conversation, lightly reference what you were "
-    "just talking about; otherwise a light, friendly check-in. Vary the wording "
-    "naturally every time and never fall back on a stock phrase like 'you still "
-    "there? no rush.' No guilt, no list of questions."
-)
-
-SECOND_AWAY_NUDGE_INSTRUCTIONS = (
-    "The user has stayed quiet for a while now. In Buddy's warm, playful voice, "
-    "re-open the conversation with ONE short line that gives them something to bite "
-    "on. If a recent screenshot in this conversation's context shows something "
-    "genuinely interesting, riff on that. Otherwise pull ONE specific thread from "
-    "what you actually know about them — a past conversation, something they were "
-    "working toward, a thing they said they'd do — and ask about it like a friend "
-    "who's been wondering ('btw, did you ever finish...'). Never invent a memory, "
-    "never recap, never ask 'are you still there', and vary the wording every time. "
-    "One line, then let it breathe."
-)
 
 # `say` is the tool-returned spoken confirmation (Action Truth Contract in
 # handlers/mcp.py); captured so session records show exactly what Buddy was
@@ -117,6 +90,7 @@ class VoiceSessionRecorder:
         voice_requested_at_ms: int | None = None,
         voice_request_id: str = "",
         surface: str = "unknown",
+        turn_metrics: VoiceTurnMetrics | None = None,
     ) -> None:
         self._session = session
         self._ctx = ctx
@@ -133,6 +107,7 @@ class VoiceSessionRecorder:
         self._voice_requested_at_ms = voice_requested_at_ms
         self._voice_request_id = voice_request_id
         self._surface = surface
+        self._turn_metrics = turn_metrics
         self._first_talk_logged = False
         # ScreenFrameStore on desktop sessions (None elsewhere); lets the away
         # nudge pick the screen-aware instruction only when a fresh frame exists.
@@ -140,6 +115,7 @@ class VoiceSessionRecorder:
         self.turns: list[dict] = []
         self.tool_calls: list[str] = []
         self.action_receipts: list[dict[str, Any]] = []
+        self._receipt_tasks: set[asyncio.Task[None]] = set()
         self.done = asyncio.Event()
         self._followup_idle_task: asyncio.Task | None = None
         # Latched True once Buddy has checked in during the CURRENT silence span;
@@ -164,8 +140,6 @@ class VoiceSessionRecorder:
         self._reset_followup_idle_timer()
 
     def _reset_followup_idle_timer(self) -> None:
-        if not (settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND):
-            return
         if self._followup_idle_task is not None:
             self._followup_idle_task.cancel()
 
@@ -266,7 +240,8 @@ class VoiceSessionRecorder:
     def _on_user_transcript(self, ev) -> None:  # type: ignore[misc]
         logger.info("VoiceSession: STT transcript", {
             "session_id": self._session_id, "user_id": self._user_id,
-            "text": ev.transcript, "is_final": ev.is_final,
+            "text_length": len(str(ev.transcript or "")),
+            "is_final": ev.is_final,
         })
         if ev.is_final and ev.transcript:
             # The user actually spoke: this silence span is over, re-open nudging
@@ -282,25 +257,24 @@ class VoiceSessionRecorder:
             note_user_turn = getattr(self._guide, "note_user_turn", None)
             if callable(note_user_turn):
                 note_user_turn(str(ev.transcript))
-            if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
-                from ...services.session_followup.lifecycle import session_lifecycle_service
+            from ...services.session_followup.lifecycle import session_lifecycle_service
 
-                turn_digest = hashlib.sha1(
-                    f"{timestamp.isoformat()}|{ev.transcript}".encode()
-                ).hexdigest()[:20]
-                asyncio.create_task(
-                    session_lifecycle_service.note_user_turn(
-                        self._user_id,
-                        self._session_id,
-                        surface="voice",
-                        turn_id=f"voice_{turn_digest}",
-                        turn_index=sum(
-                            turn.get("role") == "user" for turn in self.turns
-                        ) - 1,
-                        text=str(ev.transcript),
-                    ),
-                    name=f"followup-voice-turn-{self._session_id[:8]}",
-                )
+            turn_digest = hashlib.sha1(
+                f"{timestamp.isoformat()}|{ev.transcript}".encode()
+            ).hexdigest()[:20]
+            asyncio.create_task(
+                session_lifecycle_service.note_user_turn(
+                    self._user_id,
+                    self._session_id,
+                    surface="voice",
+                    turn_id=f"voice_{turn_digest}",
+                    turn_index=sum(
+                        turn.get("role") == "user" for turn in self.turns
+                    ) - 1,
+                    text=str(ev.transcript),
+                ),
+                name=f"followup-voice-turn-{self._session_id[:8]}",
+            )
 
     def _on_conversation_item(self, ev) -> None:  # type: ignore[misc]
         item = getattr(ev, "item", None)
@@ -308,6 +282,7 @@ class VoiceSessionRecorder:
             return
 
         role = getattr(item, "role", None)
+        metrics_payload: dict[str, Any] = {}
 
         if role == "assistant":
             source = "normal_turn"
@@ -325,13 +300,15 @@ class VoiceSessionRecorder:
         # assistant turns: LLM TTFT, TTS TTFB, EOU->first-audio)
         metrics = getattr(item, "metrics", None)
         if isinstance(metrics, dict) and metrics and role in ("user", "assistant"):
-            log_turn_metrics(
+            metrics_payload = log_turn_metrics(
                 session_id=self._session_id,
                 user_id=self._user_id,
                 role=role,
                 metrics=metrics,
                 tier=self._user_tier,
             )
+            if self._turn_metrics is not None and role == "user":
+                self._turn_metrics.note_user_metrics(metrics_payload)
             note_metrics = getattr(self._guide, "note_turn_metrics", None)
             if callable(note_metrics):
                 note_metrics(role, metrics)
@@ -365,13 +342,20 @@ class VoiceSessionRecorder:
             content = strip_nonverbal_cues(getattr(item, "text_content", None) or str(item))
             logger.info("VoiceSession: agent response", {
                 "session_id": self._session_id, "user_id": self._user_id,
-                "text_preview": str(content)[:120],
+                "text_length": len(str(content)),
             })
             self.turns.append({
                 "role": "assistant",
                 "text": str(content)[:500],
                 "timestamp": datetime.now(UTC).isoformat(),
             })
+            if self._turn_metrics is not None and not bool(
+                getattr(item, "interrupted", False)
+            ):
+                self._turn_metrics.complete_turn(
+                    assistant_text=str(content),
+                    metrics_payload=metrics_payload,
+                )
             observer = self._tool_observer
             record_item = getattr(observer, "record_voice_conversation_item", None)
             if callable(record_item):
@@ -414,15 +398,113 @@ class VoiceSessionRecorder:
                     safe_result = _safe_tool_result(name, output) if output is not None else {}
                     if safe_result:
                         receipt["result"] = safe_result
-                    self.action_receipts.append(receipt)
+                    self._append_action_receipt(receipt)
                 observer = self._tool_observer
                 record = getattr(observer, "record_voice_tool_execution", None)
+                latency_ms = None
                 if callable(record):
-                    record(name, success=success)
+                    latency_ms = record(name, success=success)
+                if self._turn_metrics is not None:
+                    is_error = output is None or bool(getattr(output, "is_error", False))
+                    self._turn_metrics.note_tool_call(
+                        name=name,
+                        arguments=getattr(fnc_call, "arguments", "{}"),
+                        latency_ms=latency_ms,
+                        success=success,
+                        error_type=(
+                            "MissingToolOutput"
+                            if output is None
+                            else "ToolError"
+                            if is_error
+                            else "ToolResultError"
+                            if not success
+                            else None
+                        ),
+                    )
                 logger.info("VoiceSession: tool executed", {
                     "session_id": self._session_id, "user_id": self._user_id,
                     "tool": name,
                 })
+
+    def record_direct_action(
+        self,
+        *,
+        name: str,
+        call_id: str,
+        success: bool,
+        result: dict[str, Any],
+        latency_ms: int | None,
+    ) -> None:
+        """Record a finalized deterministic action that bypassed model tools."""
+        self.tool_calls.append(name)
+        note_tool = getattr(self._guide, "note_tool", None)
+        if callable(note_tool):
+            note_tool(name)
+        receipt: dict[str, Any] = {
+            "tool_name": name,
+            "call_id": call_id,
+            "success": success,
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "result": {
+                key: value
+                for key, value in result.items()
+                if value is not None
+            },
+        }
+        self._append_action_receipt(receipt)
+        if self._turn_metrics is not None:
+            self._turn_metrics.note_tool_call(
+                name=name,
+                arguments="{}",
+                latency_ms=latency_ms,
+                success=success,
+                error_type=None if success else "DeterministicActionError",
+            )
+        logger.info(
+            "VoiceSession: deterministic action executed",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "action": name,
+                "success": success,
+            },
+        )
+
+    def _append_action_receipt(self, receipt: dict[str, Any]) -> None:
+        self.action_receipts.append(receipt)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Synchronous harnesses persist the retained receipt at session end.
+            return
+        name = str(receipt.get("tool_name") or "action")
+        receipt_task = loop.create_task(
+            voice_action_receipts.persist(
+                self._user_id,
+                self._session_id,
+                receipt,
+            ),
+            name=f"voice-receipt-{self._session_id[:8]}-{name}",
+        )
+        self._receipt_tasks.add(receipt_task)
+
+    async def flush_action_receipts(self) -> None:
+        """Wait for every immediate receipt write before the worker can exit."""
+        if not self._receipt_tasks:
+            return
+        tasks = tuple(self._receipt_tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        self._receipt_tasks.difference_update(tasks)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            logger.error(
+                "VoiceSession: action receipt persistence failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "failure_count": len(failures),
+                },
+            )
 
     def _on_usage(self, ev) -> None:  # type: ignore[misc]
         # Cumulative per-model token counts, re-emitted after every turn.
@@ -436,24 +518,37 @@ class VoiceSessionRecorder:
             input_tokens = getattr(mu, "input_tokens", 0)
             cached_tokens = getattr(mu, "input_cached_tokens", 0)
             cache_hit_pct = round(100 * cached_tokens / input_tokens, 1) if input_tokens else 0.0
+            model = str(getattr(mu, "model", "") or "")
+            provider = str(getattr(mu, "provider", "") or "")
+            usage_totals = {
+                "provider": provider,
+                "input_tokens": int(input_tokens or 0),
+                "cached_tokens": int(cached_tokens or 0),
+                "output_tokens": int(getattr(mu, "output_tokens", 0) or 0),
+            }
+            usage_changed = bool(model) and self._model_usage_totals.get(model) != usage_totals
             logger.info("VoiceSession: llm usage", {
                 "session_id": self._session_id, "user_id": self._user_id,
-                "model": getattr(mu, "model", ""),
-                "provider": getattr(mu, "provider", ""),
+                "model": model,
+                "provider": provider,
                 "input_tokens": input_tokens,
                 "input_cached_tokens": cached_tokens,
                 "cache_hit_pct": cache_hit_pct,
                 "output_tokens": getattr(mu, "output_tokens", 0),
             })
-            model = str(getattr(mu, "model", "") or "")
+            if self._turn_metrics is not None:
+                self._turn_metrics.note_usage(
+                    model=model,
+                    provider=provider,
+                    prompt_tokens=int(input_tokens or 0),
+                    input_cached_tokens=int(cached_tokens or 0),
+                    cache_hit_pct=cache_hit_pct,
+                    completion_tokens=int(getattr(mu, "output_tokens", 0) or 0),
+                    changed=usage_changed,
+                )
             if model:
                 # Overwrite, never add: these are running totals for the session.
-                self._model_usage_totals[model] = {
-                    "provider": str(getattr(mu, "provider", "") or ""),
-                    "input_tokens": int(input_tokens or 0),
-                    "cached_tokens": int(cached_tokens or 0),
-                    "output_tokens": int(getattr(mu, "output_tokens", 0) or 0),
-                }
+                self._model_usage_totals[model] = usage_totals
 
     def _on_session_error(self, ev) -> None:  # type: ignore[misc]
         error = getattr(ev, "error", None) or ev

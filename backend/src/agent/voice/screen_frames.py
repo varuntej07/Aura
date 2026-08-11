@@ -47,6 +47,18 @@ _MAX_FRAME_BYTES = 2_000_000
 # never injected. The client captures per turn, so a fresh frame normally exists.
 _FRAME_MAX_AGE_S = 15.0
 
+# Long-edge cap applied HERE rather than trusting the client to have done it.
+# Desktop is supposed to send a 1280-long-edge JPEG, but a real session was
+# observed shipping 2880x1800, which is ~2.5k vision tokens on every single turn
+# and the one part of the prompt that can never be prefix-cached. Downscaling in
+# the worker fixes it for every already-installed desktop build at once, with no
+# cross-repo contract change, so an old client cannot opt out of the fix.
+#
+# 1280 is chosen to stay above the detail floor for reading UI labels and button
+# text, which is what Guide Mode needs the frame for at all.
+_MODEL_FRAME_LONG_EDGE_PX = 1280
+_MODEL_FRAME_JPEG_QUALITY = 82
+
 # When a frame is mid-transfer at turn end, wait briefly for it instead of going
 # imageless; past this the reply matters more than the picture.
 _INFLIGHT_FRAME_WAIT_S = 0.8
@@ -54,6 +66,52 @@ _INFLIGHT_FRAME_WAIT_S = 0.8
 # What an old turn's screenshot collapses into, so exactly one image is ever hot in
 # context (token cost) while the transcript still shows one existed.
 _STALE_IMAGE_PLACEHOLDER = "[screenshot from an earlier moment removed]"
+
+# Turn ids whose frame a finalized turn already attached. Bounded so a long
+# session cannot grow it, and large enough that no realistic reordering
+# re-attaches an old frame.
+_CONSUMED_TURN_RING_SIZE = 16
+
+
+def _downscale_for_model(jpeg_bytes: bytes) -> tuple[bytes, float]:
+    """Shrink an oversized frame to the long-edge cap. Returns (bytes, scale applied).
+
+    Pure and synchronous so the caller can push it onto a thread: a 2880x1800
+    decode/resize/encode is tens of milliseconds, which is far too long to hold the
+    event loop during a live call.
+
+    Fail-soft in both directions. If Pillow cannot read the payload, or the re-encode
+    somehow comes out larger than the original, the original bytes pass through at
+    scale 1.0. A frame the model can see is always better than no frame, and this
+    runs on every turn, so it must never be able to raise.
+    """
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(jpeg_bytes)) as image:
+            long_edge = max(image.width, image.height)
+            if long_edge <= _MODEL_FRAME_LONG_EDGE_PX:
+                return jpeg_bytes, 1.0
+            scale = _MODEL_FRAME_LONG_EDGE_PX / long_edge
+            resized = image.convert("RGB").resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+            buffer = BytesIO()
+            resized.save(
+                buffer,
+                format="JPEG",
+                quality=_MODEL_FRAME_JPEG_QUALITY,
+                optimize=True,
+            )
+            shrunk = buffer.getvalue()
+        if not shrunk or len(shrunk) >= len(jpeg_bytes):
+            return jpeg_bytes, 1.0
+        return shrunk, scale
+    except Exception:
+        return jpeg_bytes, 1.0
 
 
 @dataclass
@@ -63,6 +121,11 @@ class ScreenFrame:
     jpeg_bytes: bytes
     attributes: dict[str, str]
     received_at_monotonic: float
+    # How much jpeg_bytes was shrunk from what the client sent. 0.5 means the model
+    # sees a half-size image, so a coordinate it reports must be divided by 0.5 to
+    # land in the client's original frame geometry. See coordinate_scale in
+    # point_tag.publish_element_point: forgetting this silently breaks pointing.
+    model_scale: float = 1.0
 
     def attribute_int(self, key: str) -> int | None:
         try:
@@ -75,16 +138,40 @@ class ScreenFrame:
         return self.attributes.get("frame_id", "")
 
     @property
+    def turn_context_id(self) -> str:
+        """Which speaking turn this frame was captured for.
+
+        Stamped by the desktop the moment the user starts a turn, and shared
+        with the structured-context stream, so the backend can tell "the frame
+        for this turn" from "a frame still inside the 15s freshness window that
+        a previous turn already used".
+        """
+        return self.attributes.get("turn_context_id", "")
+
+    @property
     def sequence(self) -> int | None:
         return self.attribute_int("frame_seq")
 
     @property
     def width_px(self) -> int | None:
-        return self.attribute_int("jpeg_width_px")
+        """Width of the image the MODEL sees, not what the client captured.
+
+        Every consumer of this (the frame label, the guide kernel, the bounds check
+        in guide_task_runtime) reasons about coordinates the model produced, so it
+        must be the post-downscale space. The client never reads this back: it maps
+        points against its own record for frame_id.
+        """
+        return self._scaled("jpeg_width_px")
 
     @property
     def height_px(self) -> int | None:
-        return self.attribute_int("jpeg_height_px")
+        return self._scaled("jpeg_height_px")
+
+    def _scaled(self, key: str) -> int | None:
+        raw = self.attribute_int(key)
+        if raw is None:
+            return None
+        return max(1, round(raw * self.model_scale))
 
     @property
     def age_seconds(self) -> float:
@@ -148,6 +235,7 @@ class ScreenFrameStore:
         self._assembly_tasks: set[asyncio.Task] = set()
         self._frame_count = 0
         self._frame_listener: Callable[[ScreenFrame], None] | None = None
+        self._consumed_turn_ids: list[str] = []
 
     @property
     def has_ever_received_frame(self) -> bool:
@@ -174,6 +262,18 @@ class ScreenFrameStore:
         task.add_done_callback(self._assembly_tasks.discard)
 
     async def _assemble_frame(self, reader, participant_identity: str) -> None:
+        if participant_identity != self._user_id:
+            logger.warn(
+                "VoiceSession: screen frame participant rejected",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "participant": participant_identity,
+                    "outcome": "failed",
+                    "reason": "participant_identity_mismatch",
+                },
+            )
+            return
         self._inflight_count += 1
         self._frame_landed.clear()
         attributes = dict(getattr(reader.info, "attributes", None) or {})
@@ -235,6 +335,14 @@ class ScreenFrameStore:
                     },
                 )
                 return
+            # After the ordering check so a frame that loses the race costs no CPU,
+            # and off the event loop so the resize cannot stall the live call.
+            shrunk_bytes, model_scale = await asyncio.to_thread(
+                _downscale_for_model, incoming.jpeg_bytes
+            )
+            incoming.jpeg_bytes = shrunk_bytes
+            incoming.model_scale = model_scale
+
             self._latest = incoming
             self._frame_count += 1
             logger.info(
@@ -243,6 +351,8 @@ class ScreenFrameStore:
                     "session_id": self._session_id,
                     "user_id": self._user_id,
                     "bytes": len(chunks),
+                    "bytes_to_model": len(shrunk_bytes),
+                    "model_scale": round(model_scale, 4),
                     "frame_id": self._latest.frame_id,
                     "jpeg_px": f"{self._latest.width_px}x{self._latest.height_px}",
                     "stage": "capture",
@@ -284,16 +394,33 @@ class ScreenFrameStore:
             self._inflight_count -= 1
             self._frame_landed.set()
 
-    async def fresh_frame(self) -> ScreenFrame | None:
+    async def fresh_frame(
+        self, *, current_turn_context_id: str | None = None
+    ) -> ScreenFrame | None:
         """The newest frame if it still reflects the screen; waits briefly on an
-        in-flight transfer so a frame racing the turn boundary isn't missed."""
-        if self._inflight_count > 0:
-            try:
-                await asyncio.wait_for(self._frame_landed.wait(), timeout=_INFLIGHT_FRAME_WAIT_S)
-            except TimeoutError:
-                pass
+        in-flight transfer so a frame racing the turn boundary isn't missed.
+
+        ``current_turn_context_id`` exempts the frame this exact turn already
+        consumed (e.g. via the general vision attach in
+        ``on_user_turn_completed``) from the staleness check below: a mid-turn
+        tool call runs AFTER that attach has already marked the frame
+        consumed, so without this exemption a tool would spuriously see its
+        own turn's just-shown frame as unavailable. Only an exact id match is
+        exempt, so a genuinely older turn's frame is still rejected.
+        """
+        await self._wait_for_inflight_frame()
         frame = self._latest
         if frame is None:
+            return None
+        if (
+            frame.turn_context_id
+            and frame.turn_context_id in self._consumed_turn_ids
+            and frame.turn_context_id != current_turn_context_id
+        ):
+            # A previous turn already showed the model this exact frame. Without
+            # this the freshness window alone would re-attach it: a structured
+            # -context turn arriving within 15s of a pixel turn would silently
+            # answer against the older screenshot.
             return None
         if frame.age_seconds > _FRAME_MAX_AGE_S:
             logger.info(
@@ -306,6 +433,46 @@ class ScreenFrameStore:
             )
             return None
         return frame
+
+    async def latest_for_save(self) -> ScreenFrame | None:
+        """Return the latest session frame for an explicit user-authorized save.
+
+        LLM freshness and save availability are intentionally different. A frame
+        already attached to a prior model turn must not be injected again, but its
+        bytes remain the last screen Buddy actually saw and may be persisted when
+        the user explicitly asks. The cache is memory-only and is cleared at
+        session shutdown.
+        """
+        await self._wait_for_inflight_frame()
+        return self._latest
+
+    async def _wait_for_inflight_frame(self) -> None:
+        if self._inflight_count <= 0:
+            return
+        try:
+            await asyncio.wait_for(
+                self._frame_landed.wait(), timeout=_INFLIGHT_FRAME_WAIT_S
+            )
+        except TimeoutError:
+            pass
+
+    def close(self) -> None:
+        """Release session-only pixels and stop outstanding assembly work."""
+        self._latest = None
+        self._frame_listener = None
+        self._consumed_turn_ids.clear()
+        for task in tuple(self._assembly_tasks):
+            task.cancel()
+        self._assembly_tasks.clear()
+
+    def mark_turn_consumed(self, turn_context_id: str) -> None:
+        """Record that a finalized turn already carries this turn's frame."""
+        if not turn_context_id or turn_context_id in self._consumed_turn_ids:
+            return
+        self._consumed_turn_ids.append(turn_context_id)
+        overflow = len(self._consumed_turn_ids) - _CONSUMED_TURN_RING_SIZE
+        if overflow > 0:
+            del self._consumed_turn_ids[0:overflow]
 
 
 def strip_stale_images(turn_ctx: lk_llm.ChatContext) -> int:
@@ -330,12 +497,20 @@ def strip_stale_images(turn_ctx: lk_llm.ChatContext) -> int:
 
 
 def _frame_label(frame: ScreenFrame) -> str:
-    dims = ""
+    """Introduce the attached frame, and state the POINT coordinate space.
+
+    The dimensions are here for exactly one reason: `[POINT:x,y:label]` is specified
+    in prompts.py as "integer pixels from the frame's top-left" without ever naming a
+    range, so this is the only place the model learns the bounds. They are phrased as
+    a coordinate space rather than a size ("1280x800 pixels") because the size framing
+    was being read back to users as a complaint about the image being too small.
+    """
+    bounds = ""
     if frame.width_px and frame.height_px:
-        dims = f", {frame.width_px}x{frame.height_px} pixels"
+        bounds = f" Pointing coordinates in it run from 0,0 to {frame.width_px - 1},{frame.height_px - 1}."
     return (
         "A screenshot of the user's screen accompanies this message "
-        f"(the display their cursor is on{dims})."
+        f"(the display their cursor is on).{bounds}"
     )
 
 
@@ -378,7 +553,15 @@ async def attach_screen_frame_to_turn(
         # The label string changes new_message.text_content, which deliberately
         # invalidates the speculative imageless reply (see module docstring).
         new_message.content.append(_frame_label(frame))
-        new_message.content.append(lk_llm.ImageContent(image=data_url, mime_type="image/jpeg"))
+        # inference_detail is pinned rather than left at LiveKit's "auto", which is
+        # forwarded verbatim to OpenAI as image_url.detail and lets an undocumented
+        # provider-side heuristic decide fidelity on a live path. Read only by the
+        # OpenAI legs; the Anthropic and Gemini fallbacks in pipelines.py ignore it.
+        new_message.content.append(
+            lk_llm.ImageContent(
+                image=data_url, mime_type="image/jpeg", inference_detail="high"
+            )
+        )
         logger.info(
             "VoiceSession: screen frame injected into turn",
             {

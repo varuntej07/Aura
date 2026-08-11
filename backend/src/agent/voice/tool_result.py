@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
 
 RenderMode = Literal["verbatim", "summary"]
 RenderChannel = Literal["card", "voice"]
-
-
-class RenderInstruction(TypedDict):
-    mode: RenderMode
-    channel: RenderChannel
 
 
 def action_truth_envelope(

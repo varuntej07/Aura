@@ -9,6 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ...shared.tools import (
+    CREATE_CALENDAR_EVENT_TOOL_DEFINITION,
+    UPDATE_CALENDAR_EVENT_TOOL_DEFINITION,
+)
+
 
 class VoiceSurface(StrEnum):
     APP = "app"
@@ -20,6 +25,35 @@ class ToolEffect(StrEnum):
     READ = "read"
     WRITE = "write"
     PRESENT = "present"
+
+
+class ToolRisk(StrEnum):
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+
+
+class ToolLatency(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ToolConcurrency(StrEnum):
+    PARALLEL_SAFE = "parallel_safe"
+    SERIAL = "serial"
+
+
+class ToolRollout(StrEnum):
+    GENERAL = "general"
+    LIMITED = "limited"
+    DISABLED = "disabled"
+
+
+class ToolPrerequisite(StrEnum):
+    AUTHENTICATED = "authenticated"
+    FINALIZED_REQUEST = "finalized_request"
+    FRESH_DESKTOP_FRAME = "fresh_desktop_frame"
 
 
 class Capability(StrEnum):
@@ -47,13 +81,29 @@ DESKTOP_ONLY = frozenset({VoiceSurface.DESKTOP})
 class VoiceToolCapability:
     name: str
     capability: Capability
+    namespace: str
     effect: ToolEffect
     allowed_surfaces: frozenset[VoiceSurface]
     requires_fresh_desktop_frame: bool
     safe_concurrently: bool
     complex_lane_eligible: bool
+    prerequisites: frozenset[ToolPrerequisite]
+    required_connectors: frozenset[str]
+    risk: ToolRisk
+    latency: ToolLatency
+    version: str
+    rollout_state: ToolRollout
+    feature_rollout: str | None
     required_fields: frozenset[str] = frozenset()
-    skill_name: str | None = None
+    empty_allowed_fields: frozenset[str] = frozenset()
+
+    @property
+    def concurrency(self) -> ToolConcurrency:
+        return (
+            ToolConcurrency.PARALLEL_SAFE
+            if self.safe_concurrently
+            else ToolConcurrency.SERIAL
+        )
 
 
 def _tool(
@@ -61,23 +111,43 @@ def _tool(
     capability: Capability,
     effect: ToolEffect,
     *,
+    namespace: str,
     surfaces: frozenset[VoiceSurface] = ALL_SURFACES,
     frame: bool = False,
     concurrent: bool = True,
     complex_eligible: bool = False,
+    connectors: tuple[str, ...] = (),
+    risk: ToolRisk | None = None,
+    latency: ToolLatency = ToolLatency.LOW,
+    version: str = "1",
+    rollout: ToolRollout = ToolRollout.GENERAL,
+    feature_rollout: str | None = None,
     required: tuple[str, ...] = (),
-    skill: str | None = None,
+    empty_allowed: tuple[str, ...] = (),
 ) -> VoiceToolCapability:
+    prerequisites = {ToolPrerequisite.AUTHENTICATED}
+    if effect is not ToolEffect.READ:
+        prerequisites.add(ToolPrerequisite.FINALIZED_REQUEST)
+    if frame:
+        prerequisites.add(ToolPrerequisite.FRESH_DESKTOP_FRAME)
     return VoiceToolCapability(
         name=name,
         capability=capability,
+        namespace=namespace,
         effect=effect,
         allowed_surfaces=surfaces,
         requires_fresh_desktop_frame=frame,
         safe_concurrently=concurrent,
         complex_lane_eligible=complex_eligible,
+        prerequisites=frozenset(prerequisites),
+        required_connectors=frozenset(connectors),
+        risk=risk or (ToolRisk.LOW if effect is ToolEffect.READ else ToolRisk.MODERATE),
+        latency=latency,
+        version=version,
+        rollout_state=rollout,
+        feature_rollout=feature_rollout,
         required_fields=frozenset(required),
-        skill_name=skill,
+        empty_allowed_fields=frozenset(empty_allowed),
     )
 
 
@@ -88,114 +158,146 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "list_reminders",
             Capability.REMINDER_READ,
             ToolEffect.READ,
+            namespace="productivity.reminders",
             complex_eligible=True,
-            skill="reminder_read",
         ),
         _tool(
             "set_reminder",
             Capability.REMINDER_WRITE,
             ToolEffect.WRITE,
+            namespace="productivity.reminders",
             concurrent=False,
             complex_eligible=True,
-            required=("message", "scheduled_at"),
-            skill="reminder_write",
+            required=("message", "when"),
         ),
         _tool(
             "cancel_reminder",
             Capability.REMINDER_WRITE,
             ToolEffect.WRITE,
+            namespace="productivity.reminders",
             concurrent=False,
             complex_eligible=True,
             required=("reminder_id",),
-            skill="reminder_write",
         ),
         _tool(
             "get_upcoming_events",
             Capability.CALENDAR_READ,
             ToolEffect.READ,
+            namespace="productivity.calendar",
+            connectors=("google_calendar",),
             complex_eligible=True,
-            skill="calendar_read",
         ),
         _tool(
             "create_calendar_event",
             Capability.CALENDAR_WRITE,
             ToolEffect.WRITE,
+            namespace="productivity.calendar",
+            connectors=("google_calendar",),
+            latency=ToolLatency.MEDIUM,
             concurrent=False,
             complex_eligible=True,
-            required=("title", "start_time"),
-            skill="calendar_write",
+            required=tuple(
+                CREATE_CALENDAR_EVENT_TOOL_DEFINITION["inputSchema"]["required"]
+            ),
+            empty_allowed=("description", "location", "attendees"),
+        ),
+        _tool(
+            "update_calendar_event",
+            Capability.CALENDAR_WRITE,
+            ToolEffect.WRITE,
+            namespace="productivity.calendar",
+            connectors=("google_calendar",),
+            latency=ToolLatency.MEDIUM,
+            concurrent=False,
+            complex_eligible=True,
+            required=tuple(
+                UPDATE_CALENDAR_EVENT_TOOL_DEFINITION["inputSchema"]["required"]
+            ),
+            # Only event_id must carry a value. Every other field is a partial-update
+            # slot where empty means "leave this alone", so the structural gate must
+            # not read an empty string as a missing argument.
+            empty_allowed=("title", "when", "description", "location", "attendees"),
         ),
         _tool(
             "query_memory",
             Capability.MEMORY_READ,
             ToolEffect.READ,
+            namespace="personal.memory",
             complex_eligible=True,
         ),
         _tool(
             "store_memory",
             Capability.MEMORY_WRITE,
             ToolEffect.WRITE,
+            namespace="personal.memory",
             concurrent=False,
             complex_eligible=True,
             required=("key", "value", "category"),
         ),
-        _tool("web_surf", Capability.WEB_READ, ToolEffect.READ, complex_eligible=True),
+        _tool(
+            "delete_memory",
+            Capability.MEMORY_WRITE,
+            ToolEffect.WRITE,
+            namespace="personal.memory",
+            risk=ToolRisk.HIGH,
+            concurrent=False,
+            complex_eligible=True,
+            required=("memory_id",),
+        ),
+        _tool(
+            "web_surf",
+            Capability.WEB_READ,
+            ToolEffect.READ,
+            namespace="research.web",
+            latency=ToolLatency.HIGH,
+            complex_eligible=True,
+        ),
         _tool(
             "get_user_context",
             Capability.USER_CONTEXT_READ,
             ToolEffect.READ,
+            namespace="personal.context",
             complex_eligible=True,
         ),
         _tool(
             "report_feedback",
             Capability.FEEDBACK_WRITE,
             ToolEffect.WRITE,
+            namespace="feedback",
             concurrent=True,
             complex_eligible=True,
-            required=("category", "about", "summary", "verbatim_quote"),
+            required=("category", "about", "summary", "severity"),
         ),
         _tool(
             "track_topic",
             Capability.TRACKING_WRITE,
             ToolEffect.WRITE,
+            namespace="research.tracking",
+            latency=ToolLatency.HIGH,
             concurrent=False,
             complex_eligible=True,
             required=("request",),
         ),
         _tool(
-            "save_screen_item",
-            Capability.SCREEN_SAVE,
-            ToolEffect.WRITE,
-            surfaces=DESKTOP_ONLY,
-            frame=True,
-            concurrent=False,
-            complex_eligible=True,
-            required=("title", "collection_name"),
-            skill="screen_save",
-        ),
-        _tool(
             "draft_outbound_message",
             Capability.OUTBOUND_DRAFT,
             ToolEffect.WRITE,
+            namespace="desktop.screen",
             surfaces=DESKTOP_ONLY,
             frame=True,
             concurrent=False,
             complex_eligible=True,
-            # No required field: channel/length are optional hints the drafter
-            # infers from the screen, so Buddy can draft from just the intent
-            # (or nothing) without the old "email or new message?" bounce.
-            required=(),
-            skill="outbound_draft",
+            required=("operation",),
         ),
         _tool(
             "present_visible_artifact",
             Capability.VISIBLE_ARTIFACT,
             ToolEffect.PRESENT,
+            namespace="desktop.screen",
             surfaces=DESKTOP_ONLY,
             concurrent=False,
             complex_eligible=True,
             required=("kind", "title", "content"),
-            skill="visible_artifact",
         ),
         _tool(
             # Requests the desktop arm/disarm Guide Mode. No frame needed: arming
@@ -205,10 +307,10 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "set_guide_mode",
             Capability.GUIDE_CONTROL,
             ToolEffect.WRITE,
+            namespace="desktop.guide",
             surfaces=DESKTOP_ONLY,
             concurrent=False,
             required=("enable",),
-            skill="guide_control",
         ),
     )
 }

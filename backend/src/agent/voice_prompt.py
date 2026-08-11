@@ -21,6 +21,6 @@ def render_voice_session_context(context_vars: dict[str, str]) -> str:
             Last session:
             {context_vars["last_session_context"]}
             Recent memory:
-            {context_vars["memory_summary"]}{context_vars["graph_context"]}
+            {context_vars["memory_summary"]}{context_vars["graph_context"]}{context_vars.get("text_chat_context", "")}
             </session>
 """

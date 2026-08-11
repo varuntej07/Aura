@@ -12,6 +12,7 @@ import asyncio
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ...lib.logger import logger
+from ...services.chat_completion.handoff_store import read_handoff_turns
 from ...services.firebase import admin_firestore
 from ...services.memory import graph_fields as GF
 from ...services.memory.salience import normalized_graph_salience
@@ -59,6 +60,25 @@ async def fetch_memory_summary(user_id: str) -> str:
             if key and value and key.casefold() not in _PROFILE_OWNED_MEMORY_KEYS:
                 lines.append(f"- {key}: {value}")
         return "\n".join(lines)
+    return await asyncio.to_thread(_read)
+
+
+async def fetch_connector_states(user_id: str) -> dict[str, bool]:
+    """Return explicit connector enablement without refreshing provider tokens."""
+    def _read() -> dict[str, bool]:
+        integrations = (
+            admin_firestore()
+            .collection("users")
+            .document(user_id)
+            .collection("integrations")
+        )
+        states = {"google_calendar": False, "gmail": False}
+        for connector in states:
+            snapshot = integrations.document(connector).get()
+            if snapshot.exists:
+                states[connector] = bool((snapshot.to_dict() or {}).get("enabled"))
+        return states
+
     return await asyncio.to_thread(_read)
 
 
@@ -140,6 +160,26 @@ async def fetch_archive_context(user_id: str) -> dict[str, str]:
         )
         data = doc.to_dict() or {}
         return {"archive_summary": str(data.get("archive_summary", ""))}
+    return await asyncio.to_thread(_read)
+
+
+async def fetch_text_handoff(user_id: str, conversation_id: str) -> str:
+    """Read the text exchanges this conversation typed just before starting the call.
+
+    Rendered as prompt lines, not as ChatContext turns: raw turns would join compaction's
+    turn grouping and compete with "latest finalized user turn has authority", while a
+    context block stays inside the one dynamic session block that already exists.
+    Empty string whenever there is nothing to carry, which is the common case.
+    """
+    def _read() -> str:
+        turns = read_handoff_turns(user_id, conversation_id)
+        if not turns:
+            return ""
+        return "\n".join(
+            f"- {'They typed' if turn['role'] == 'user' else 'You replied'}: "
+            f"{sanitize_for_speech(turn['content'])}"
+            for turn in turns
+        )
     return await asyncio.to_thread(_read)
 
 

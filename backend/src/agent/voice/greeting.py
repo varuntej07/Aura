@@ -14,25 +14,13 @@ from __future__ import annotations
 import asyncio
 
 from ...lib.logger import logger
+from ...prompts import VOICE_OPENER_SYSTEM_PROMPT
 from ...services.model_provider import get_model_provider
 from .context import SessionContext
 
 # The opener teaches a category (a friend's hello that lands personal), never a
 # fixed line. The model decides whether the digest holds anything worth a
 # callback; an empty/none answer is a valid outcome and falls back to static.
-_OPENER_SYSTEM_PROMPT = (
-    "You write the very first spoken line of a voice call from Buddy, the user's "
-    "closest friend. One short, casual hello (under 15 words), warm and easygoing, "
-    "the way a friend who remembers them opens a call. If the context below holds "
-    "ONE thing genuinely worth a light callback (something they were doing, chasing, "
-    "or feeling last time), weave it in naturally as a greeting, not a question "
-    "stack and never a recap. If nothing is clearly worth referencing, or the "
-    "context is empty, respond with exactly NONE. Never invent details, never "
-    "mention notes or memory, no emojis, no quotes around the line. Lowercase, "
-    "contracted, natural for text-to-speech."
-)
-
-
 def start_opener_task(
     session_context: SessionContext, *, session_id: str, user_id: str
 ) -> "asyncio.Task[str]":
@@ -56,7 +44,7 @@ def start_opener_task(
                 return ""
             opener = await get_model_provider().cheap(
                 "\n".join(digest_parts),
-                system=_OPENER_SYSTEM_PROMPT,
+                system=VOICE_OPENER_SYSTEM_PROMPT,
             )
             line = str(opener or "").strip().strip('"')
             if not line or line.upper() == "NONE" or len(line) > 120:

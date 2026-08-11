@@ -46,11 +46,22 @@ class SpeculationDecision(StrEnum):
     TOOL_POLICY_CHANGED = "tool_policy_changed"
     # Guide Mode owns the turn; its runtime generates instead of this path.
     GUIDE_ACTIVE = "guide_active"
+    # Finalized speech matched the deterministic screen-capture grammar. The
+    # speculative LLM reply must be discarded because this turn is handled by
+    # the local capture path before any model generation.
+    DETERMINISTIC_SCREEN_CAPTURE = "deterministic_screen_capture"
     # The speculative pass emitted a side-effecting tool call, which the
     # execution gate refused because that pass is not a finalized turn. Reusing
     # it would speak the refusal, so the turn is invalidated and the finalized
     # pass performs the action for real.
     SPECULATIVE_WRITE_TOOL = "speculative_write_tool"
+    # A finalized turn selected a tool that can mutate or present state. Always
+    # regenerate it under finalized authorization instead of racing a blocked
+    # speculative call against end-of-turn finalization.
+    FINALIZED_SIDE_EFFECT = "finalized_side_effect"
+    # A historical screen block was collapsed because this turn received no
+    # replacement. The context changed, so the old speculation cannot survive.
+    STALE_SCREEN_CONTEXT_REMOVED = "stale_screen_context_removed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +76,9 @@ class TurnMutations:
     screen_frame_attached: bool = False
     tool_policy_changed: bool = False
     speculative_write_attempt: bool = False
+    finalized_side_effect: bool = False
+    stale_screen_context_collapsed: bool = False
+    deterministic_screen_capture: bool = False
 
     def applied(self) -> tuple[str, ...]:
         """Names of every mutation that fired, for the decision log line."""
@@ -79,6 +93,9 @@ class TurnMutations:
                 "screen_frame_attached",
                 "tool_policy_changed",
                 "speculative_write_attempt",
+                "finalized_side_effect",
+                "stale_screen_context_collapsed",
+                "deterministic_screen_capture",
             )
             if getattr(self, name)
         )
@@ -88,7 +105,12 @@ class TurnMutations:
 # still carries the full ``applied()`` tuple, so collapsing to one decision
 # loses nothing and keeps the metric aggregatable.
 _PRIORITY: tuple[tuple[str, SpeculationDecision], ...] = (
+    (
+        "deterministic_screen_capture",
+        SpeculationDecision.DETERMINISTIC_SCREEN_CAPTURE,
+    ),
     ("guide_active", SpeculationDecision.GUIDE_ACTIVE),
+    ("finalized_side_effect", SpeculationDecision.FINALIZED_SIDE_EFFECT),
     # Ranked above everything else that could also be true, because this one is
     # about the turn being ACTED on correctly rather than merely being fresh.
     ("speculative_write_attempt", SpeculationDecision.SPECULATIVE_WRITE_TOOL),
@@ -97,6 +119,10 @@ _PRIORITY: tuple[tuple[str, SpeculationDecision], ...] = (
     ("graph_context_appended", SpeculationDecision.GRAPH_CONTEXT_CHANGED),
     ("structured_context_arrived_late", SpeculationDecision.CONTEXT_ARRIVED_LATE),
     ("structured_context_appended", SpeculationDecision.SCREEN_CONTEXT_ADDED),
+    (
+        "stale_screen_context_collapsed",
+        SpeculationDecision.STALE_SCREEN_CONTEXT_REMOVED,
+    ),
     ("tool_policy_changed", SpeculationDecision.TOOL_POLICY_CHANGED),
 )
 

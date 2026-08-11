@@ -31,7 +31,7 @@ from .config.settings import settings
 from .handlers.account import handle_delete_account
 from .handlers.aura import (
     handle_consolidate_session,
-    handle_delete_memory,
+    handle_delete_memory as handle_delete_aura_memory,
     handle_get_memory,
     handle_wipe_memory,
 )
@@ -47,7 +47,11 @@ from .handlers.briefing import (
 )
 from .handlers.buddy_pills import handle_refresh_buddy_pills
 from .handlers.calendar import get_upcoming_calendar
-from .handlers.chat import handle_chat_stream
+from .handlers.chat import (
+    handle_chat_handoff,
+    handle_chat_session_background,
+    handle_chat_stream,
+)
 from .handlers.connectors import (
     connect_gmail,
     connect_google_calendar,
@@ -73,6 +77,11 @@ from .handlers.desktop_dashboard import (
     handle_desktop_saved,
     handle_desktop_usage,
 )
+from .handlers.desktop_chat import (
+    handle_get_session as handle_desktop_chat_session,
+    handle_list_pending as handle_desktop_chat_pending,
+    handle_list_sessions as handle_desktop_chat_sessions,
+)
 from .handlers.desktop_notifications import (
     handle_acknowledge as handle_desktop_notification_acknowledge,
     handle_get_preferences as handle_desktop_notification_preferences_get,
@@ -82,6 +91,13 @@ from .handlers.desktop_notifications import (
 from .handlers.desktop_profile import handle_desktop_profile
 from .handlers.guide_usage import handle_guide_usage
 from .handlers.devices import register_device
+from .handlers.dictation import (
+    handle_delete_trace as handle_dictation_delete_trace,
+    handle_get_quota as handle_dictation_get_quota,
+    handle_mint_stt_token as handle_dictation_mint_stt_token,
+    handle_put_audio as handle_dictation_put_audio,
+    handle_put_trace as handle_dictation_put_trace,
+)
 from .handlers.draft_outbound import handle_draft_outbound_refine
 from .handlers.drafts import (
     handle_delete_draft,
@@ -106,31 +122,22 @@ from .handlers.history import (
 )
 from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
 from .handlers.mcp import register_mcp
-from .handlers.realtime import create_realtime_session
 from .handlers.meetings import (
     handle_claim as handle_meeting_claim,
-)
-from .handlers.meetings import (
     handle_complete as handle_meeting_complete,
-)
-from .handlers.meetings import (
+    handle_complete_v2 as handle_meeting_complete_v2,
+    handle_delete_meeting,
     handle_get_meeting,
-)
-from .handlers.meetings import (
     handle_internal_synthesize as handle_meeting_synthesize,
-)
-from .handlers.meetings import (
     handle_list_recent as handle_meetings_recent,
-)
-from .handlers.meetings import (
     handle_retry as handle_meeting_retry,
-)
-from .handlers.meetings import (
     handle_upload_segment as handle_meeting_upload_segment,
+    handle_upload_segment_v2 as handle_meeting_upload_segment_v2,
 )
+from .handlers.realtime import create_realtime_session
 from .handlers.memories import (
     handle_callback_card,
-    handle_delete_memory,
+    handle_delete_memory as handle_delete_visible_memory,
     handle_list_memories,
     handle_patch_memory,
 )
@@ -152,7 +159,10 @@ from .handlers.signal_tick import handle_signal_tick
 from .handlers.threads import handle_thread_messages, handle_thread_reply
 from .handlers.web_auth import handle_web_auth_start, handle_web_auth_status
 from .lib.logger import logger
+from .services.meetings.observability import configure_sentry
 from .services.request_auth import decode_firebase_claims
+
+configure_sentry()
 
 app = FastAPI(title="Juno Backend", version="1.0.0")
 
@@ -249,7 +259,9 @@ async def health() -> dict[str, bool]:
 # Launch surfaces the voice worker understands (voice_agent._KNOWN_SURFACES). Anything
 # else collapses to "app", the neutral default, so a bad query param never changes behavior.
 _VOICE_SURFACES = frozenset({"app", "keyboard", "desktop"})
-_VOICE_MODES = frozenset({"standard", "guide"})
+_VOICE_MODES = frozenset({"standard", "guide", "onboarding"})
+_VOICE_OUTPUT_MODES = frozenset({"voice", "text"})
+_ARTIFACT_ACK_CAPABILITY = "displayed-v1"
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
@@ -277,33 +289,48 @@ async def voice_token(request: Request) -> JSONResponse:
     conversation_id = request.query_params.get("conversation_id", "").strip()
     if conversation_id and not _CONVERSATION_ID_RE.fullmatch(conversation_id):
         raise HTTPException(status_code=400, detail="Invalid conversation_id")
+    # Output mute rides the token, not a published control message: a mute sent
+    # after connect loses the race against the worker's first speech. Anything
+    # unexpected collapses to "voice", the audible default.
+    output_mode = request.query_params.get("output", "voice")
+    if output_mode not in _VOICE_OUTPUT_MODES:
+        output_mode = "voice"
 
     participant_metadata = {
         "surface": surface,
         "mode": mode,
+        "output_mode": output_mode,
         "voice_request_id": uuid.uuid4().hex,
         "voice_requested_at_ms": int(time.time() * 1000),
     }
+    if (
+        surface == "desktop"
+        and request.query_params.get("artifact_ack") == _ARTIFACT_ACK_CAPABILITY
+    ):
+        participant_metadata["artifact_ack"] = _ARTIFACT_ACK_CAPABILITY
     if conversation_id:
         participant_metadata["conversation_id"] = conversation_id
-    # Realtime bridge: the desktop opened an instant OpenAI Realtime leg and this session
-    # should HOLD for a handover instead of greeting. The worker also gates on its own
-    # REALTIME_BRIDGE_ENABLED flag, so this metadata alone can never strand it.
-    if request.query_params.get("bridged") == "1":
+    # Realtime bridge: only the API kill switch may admit a bridge-mode room.
+    # A client query parameter alone must never put the worker into HOLD.
+    # Text output mode never bridges: the Realtime leg is audio-only and plays
+    # through its own <audio> element, so admitting it would speak over a mute.
+    realtime_bridge_enabled = settings.REALTIME_BRIDGE_ENABLED and output_mode == "voice"
+    if realtime_bridge_enabled and request.query_params.get("bridged") == "1":
         participant_metadata["bridged"] = True
-    if settings.FOLLOWUP_SHADOW or settings.PROACTIVE_FOLLOWUP_SEND:
-        origin = request.query_params.get("origin", "").strip()
-        origin_candidate_id = request.query_params.get("origin_candidate_id", "").strip()
-        if origin == "notification_tap" and origin_candidate_id:
-            participant_metadata["origin"] = origin
-            participant_metadata["origin_candidate_id"] = origin_candidate_id[:80]
-            raw_lineage = request.query_params.get("lineage_chain", "")
-            if raw_lineage:
-                participant_metadata["lineage_chain"] = [
-                    value.strip()[:80]
-                    for value in raw_lineage.split(",")
-                    if value.strip()
-                ][:20]
+    # Follow-up lineage: a voice session opened from a follow-up push carries the
+    # chain forward so the evaluator can refuse to chase the same topic in a loop.
+    origin = request.query_params.get("origin", "").strip()
+    origin_candidate_id = request.query_params.get("origin_candidate_id", "").strip()
+    if origin == "notification_tap" and origin_candidate_id:
+        participant_metadata["origin"] = origin
+        participant_metadata["origin_candidate_id"] = origin_candidate_id[:80]
+        raw_lineage = request.query_params.get("lineage_chain", "")
+        if raw_lineage:
+            participant_metadata["lineage_chain"] = [
+                value.strip()[:80]
+                for value in raw_lineage.split(",")
+                if value.strip()
+            ][:20]
 
     room_name = f"voice-{user_id}"
     token = (
@@ -314,7 +341,14 @@ async def voice_token(request: Request) -> JSONResponse:
         .with_grants(VideoGrants(room_join=True, room=room_name))
         .to_jwt()
     )
-    return JSONResponse({"token": token, "url": settings.LIVEKIT_URL, "room": room_name})
+    return JSONResponse(
+        {
+            "token": token,
+            "url": settings.LIVEKIT_URL,
+            "room": room_name,
+            "realtime_bridge_enabled": realtime_bridge_enabled,
+        }
+    )
 
 
 @app.post("/realtime/session")
@@ -404,6 +438,25 @@ async def desktop_usage_endpoint(request: Request) -> JSONResponse:
     return await handle_desktop_usage(request)
 
 
+# Canonical desktop chat transcript, read back on relaunch. Distinct from
+# /desktop/conversations, which is a cross-surface activity projection.
+@app.get("/desktop/chat/sessions")
+async def desktop_chat_sessions_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_chat_sessions(request)
+
+
+@app.get("/desktop/chat/pending")
+async def desktop_chat_pending_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_chat_pending(request)
+
+
+@app.get("/desktop/chat/sessions/{conversation_id}")
+async def desktop_chat_session_endpoint(
+    request: Request, conversation_id: str
+) -> JSONResponse:
+    return await handle_desktop_chat_session(request, conversation_id)
+
+
 # Desktop pairing: the signed-in phone app requests a short-lived one-time code.
 @app.post("/devices/pair/start")
 async def devices_pair_start_endpoint(request: Request) -> JSONResponse:
@@ -445,6 +498,19 @@ async def chat_endpoint(request: Request) -> StreamingResponse:
     return await handle_chat_stream(event)
 
 
+# Cross-lane continuity: desktop hands the recent text exchanges over here just before
+# it asks for a voice token with the same conversation_id, so the worker can load them
+# before it greets. See services/chat_completion/handoff_store.py.
+@app.post("/chat/handoff")
+async def chat_handoff_endpoint(request: Request) -> JSONResponse:
+    return await handle_chat_handoff(request)
+
+
+@app.post("/chat/session-background")
+async def chat_session_background_endpoint(request: Request) -> JSONResponse:
+    return await handle_chat_session_background(request)
+
+
 @app.post("/notification-reply")
 async def notification_reply_endpoint(request: Request) -> JSONResponse:
     body = await request.body()
@@ -480,7 +546,7 @@ async def aura_wipe_memory_endpoint(request: Request) -> JSONResponse:
 
 @app.delete("/aura/memory/{atom_id}")
 async def aura_delete_memory_endpoint(request: Request, atom_id: str) -> JSONResponse:
-    return await handle_delete_memory(request, atom_id)
+    return await handle_delete_aura_memory(request, atom_id)
 
 
 @app.get("/history/sessions")
@@ -540,7 +606,7 @@ async def memories_list_endpoint(request: Request) -> JSONResponse:
 
 @app.delete("/memories/{memory_id}")
 async def memories_delete_endpoint(request: Request, memory_id: str) -> JSONResponse:
-    return await handle_delete_memory(request, memory_id)
+    return await handle_delete_visible_memory(request, memory_id)
 
 
 @app.patch("/memories/{memory_id}")
@@ -889,7 +955,36 @@ async def desktop_notification_acknowledge_endpoint(
     return await handle_desktop_notification_acknowledge(request, notification_id)
 
 
-# Meeting notes (desktop capture -> synthesis; MEETING_NOTES_PLAN.md).
+# The desktop dictation chord's transcription credential. Short-lived, scoped,
+# and minted per device session so the real provider key stays on the server.
+@app.post("/dictation/stt-token")
+async def dictation_stt_token_endpoint(request: Request) -> JSONResponse:
+    return await handle_dictation_mint_stt_token(request)
+
+
+# Opt-in desktop dictation training traces. Metadata is written before audio so
+# a crashed upload leaves a label record, never an unowned blob.
+@app.put("/dictation/traces/{trace_id}")
+async def dictation_put_trace_endpoint(request: Request, trace_id: str) -> JSONResponse:
+    return await handle_dictation_put_trace(request, trace_id)
+
+
+@app.put("/dictation/traces/{trace_id}/audio")
+async def dictation_put_audio_endpoint(request: Request, trace_id: str) -> JSONResponse:
+    return await handle_dictation_put_audio(request, trace_id)
+
+
+@app.delete("/dictation/traces/{trace_id}")
+async def dictation_delete_trace_endpoint(request: Request, trace_id: str) -> JSONResponse:
+    return await handle_dictation_delete_trace(request, trace_id)
+
+
+@app.get("/dictation/quota")
+async def dictation_get_quota_endpoint(request: Request) -> JSONResponse:
+    return await handle_dictation_get_quota(request)
+
+
+# Meeting Recording V2 (desktop capture -> immutable ingest -> fenced synthesis).
 # /meetings/recent is registered before /meetings/{meeting_id} so "recent"
 # can never be captured as a meeting id (same rule as /memories/callback).
 @app.post("/meetings/claim")
@@ -909,14 +1004,40 @@ async def meetings_upload_segment_endpoint(
     return await handle_meeting_upload_segment(request, meeting_id, seq)
 
 
+@app.put("/meetings/{meeting_id}/capture-runs/{capture_run_id}/segments/{seq}")
+async def meetings_upload_segment_v2_endpoint(
+    request: Request,
+    meeting_id: str,
+    capture_run_id: str,
+    seq: int,
+) -> JSONResponse:
+    return await handle_meeting_upload_segment_v2(
+        request, meeting_id, capture_run_id, seq,
+    )
+
+
 @app.post("/meetings/{meeting_id}/complete")
 async def meetings_complete_endpoint(request: Request, meeting_id: str) -> JSONResponse:
     return await handle_meeting_complete(request, meeting_id)
 
 
+@app.post("/meetings/{meeting_id}/capture-runs/{capture_run_id}/complete")
+async def meetings_complete_v2_endpoint(
+    request: Request,
+    meeting_id: str,
+    capture_run_id: str,
+) -> JSONResponse:
+    return await handle_meeting_complete_v2(request, meeting_id, capture_run_id)
+
+
 @app.post("/meetings/{meeting_id}/retry")
 async def meetings_retry_endpoint(request: Request, meeting_id: str) -> JSONResponse:
     return await handle_meeting_retry(request, meeting_id)
+
+
+@app.delete("/meetings/{meeting_id}")
+async def meetings_delete_endpoint(request: Request, meeting_id: str) -> JSONResponse:
+    return await handle_delete_meeting(request, meeting_id)
 
 
 @app.get("/meetings/{meeting_id}")
@@ -941,6 +1062,7 @@ def _check_env() -> None:
         "LIVEKIT_API_KEY": bool(settings.LIVEKIT_API_KEY),
         "LIVEKIT_CONFIGURED": settings.livekit_configured,
         "DEEPGRAM_API_KEY": bool(settings.DEEPGRAM_API_KEY),
+        "DEEPGRAM_DICTATION_API_KEY": bool(settings.DEEPGRAM_DICTATION_API_KEY),
         "CARTESIA_API_KEY": bool(settings.CARTESIA_API_KEY),
         "GOOGLE_CALENDAR": settings.google_calendar_configured,
         "GOOGLE_CALENDAR_WEBHOOK_URL": bool(settings.GOOGLE_CALENDAR_WEBHOOK_URL),
@@ -966,6 +1088,9 @@ def _check_env() -> None:
 # See the NOTE in mcp.register_mcp and lessons-learnt 2026-05-29.
 @app.on_event("startup")  # pyright: ignore[reportDeprecated]
 async def on_startup() -> None:
+    from .services.analytics.arize_tracing import configure_arize_tracing
+
+    configure_arize_tracing("api")
     _check_env()
 
 
@@ -974,8 +1099,11 @@ async def on_shutdown() -> None:
     # Drain any still-queued Langfuse telemetry before the container stops; the
     # SDK's atexit hook covers hard exits, this covers the clean path. Never
     # raises (llm_telemetry swallows everything).
+    from .services.analytics.arize_tracing import shutdown_arize_tracing
     from .services.analytics.llm_telemetry import flush as flush_llm_telemetry
+
     flush_llm_telemetry()
+    shutdown_arize_tracing()
 
 
 if __name__ == "__main__":

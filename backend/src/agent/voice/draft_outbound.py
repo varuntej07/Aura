@@ -31,6 +31,7 @@ import base64
 import json
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from livekit.agents import RunContext, get_job_context
 
@@ -63,7 +64,11 @@ from .tool_filler import (
     DRAFT_STILL_WORKING_PHRASES,
 )
 
+if TYPE_CHECKING:
+    from .artifact_delivery import ArtifactDeliveryTracker
+
 _DIRECT_SPEECH_TIMEOUT_S = 5.0
+_PUBLISH_TIMEOUT_S = 1.5
 
 # What the model speaks when a call can't produce a draft. Each line is a
 # complete, natural sentence the TTS reads verbatim.
@@ -116,6 +121,7 @@ class DraftOutboundSession:
         self.user_tier = user_tier
         self.display_name = display_name
         self.current: DraftState | None = None
+        self.delivery: ArtifactDeliveryTracker | None = None
 
 
 async def run_draft_tool(
@@ -125,6 +131,7 @@ async def run_draft_tool(
     operation: str,
     transcript: str,
     run_ctx: RunContext | None = None,
+    current_turn_context_id: str = "",
 ) -> str:
     """Produce or refine the session's draft; returns ONLY the sentence Buddy
     speaks. Never raises: a raised tool call surfaces as a generic error
@@ -156,6 +163,7 @@ async def run_draft_tool(
             recipient_hint="",
             intent=transcript,
             run_ctx=run_ctx,
+            current_turn_context_id=current_turn_context_id,
         )
     except Exception as exc:
         # Belt and braces: the drafter itself never raises, so this only
@@ -185,13 +193,16 @@ async def _draft_new(
     recipient_hint: str,
     intent: str,
     run_ctx: RunContext | None = None,
+    current_turn_context_id: str = "",
 ) -> str:
     request_id = new_request_id()
     draft_id = uuid.uuid4().hex
     frame = None
     if screen_frames is not None:
         try:
-            frame = await screen_frames.fresh_frame()
+            frame = await screen_frames.fresh_frame(
+                current_turn_context_id=current_turn_context_id
+            )
         except Exception as exc:
             logger.warn("draft_outbound: fresh_frame failed", {
                 "user_id": state.user_id, "session_id": state.session_id,
@@ -490,11 +501,44 @@ async def _publish_draft_event(
     """Push a draft event down the data channel for the desktop card. Fail-soft,
     exactly like screen_saves' publisher: a lost event costs a card update,
     never the spoken reply. Log lines carry ids and lengths, never text."""
+    payload = event.get("payload") or {}
+    artifact = payload.get("artifact")
+    display_key = None
+    if (
+        state.delivery is not None
+        and isinstance(artifact, dict)
+        and isinstance(artifact.get("body"), str)
+        and isinstance(artifact.get("id"), str)
+        and isinstance(artifact.get("revision"), int)
+    ):
+        display_key = state.delivery.expect(artifact["id"], artifact["revision"])
     try:
         room = get_job_context().room
         data = json.dumps(event, ensure_ascii=False).encode("utf-8")
-        await room.local_participant.publish_data(data, reliable=True)
-        payload = event.get("payload") or {}
+        await asyncio.wait_for(
+            room.local_participant.publish_data(data, reliable=True),
+            timeout=_PUBLISH_TIMEOUT_S,
+        )
+        if (
+            display_key is not None
+            and state.delivery is not None
+            and state.delivery.ack_required
+        ):
+            confirmed = await state.delivery.wait(display_key)
+            if not confirmed:
+                await asyncio.wait_for(
+                    room.local_participant.publish_data(data, reliable=True),
+                    timeout=_PUBLISH_TIMEOUT_S,
+                )
+                confirmed = await state.delivery.wait(display_key)
+            if not confirmed:
+                logger.warn("draft_outbound: display not confirmed", {
+                    "session_id": state.session_id,
+                    "user_id": state.user_id,
+                    "event": event.get("type"),
+                    "draft_id": payload.get("draft_id"),
+                })
+                return False
         logger.info("draft_outbound: event published", {
             "session_id": state.session_id, "user_id": state.user_id,
             "event": event.get("type"), "draft_id": payload.get("draft_id"),
@@ -507,3 +551,6 @@ async def _publish_draft_event(
             "event": event.get("type"), "error": str(exc),
         })
         return False
+    finally:
+        if display_key is not None and state.delivery is not None:
+            state.delivery.release(display_key)

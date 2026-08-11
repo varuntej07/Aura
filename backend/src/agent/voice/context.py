@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...lib.logger import logger
@@ -20,9 +20,11 @@ from ...services.entitlement import (
 )
 from .fetchers import (
     fetch_archive_context,
+    fetch_connector_states,
     fetch_graph_digest,
     fetch_last_session_summary,
     fetch_memory_summary,
+    fetch_text_handoff,
     fetch_user_aura_profile,
     fetch_user_profile,
 )
@@ -50,6 +52,8 @@ class SessionContext:
     user_tier: str
     remaining_free_voice_seconds: int | None
     graph_context: str = ""
+    connector_states: dict[str, bool] = field(default_factory=dict)
+    text_chat_context: str = ""
 
     @property
     def prompt_context_vars(self) -> dict[str, str]:
@@ -60,6 +64,15 @@ class SessionContext:
             "timezone": timezone,
             "local_time": local_time_in_zone(timezone),
             "local_date": local_date_in_zone(timezone),
+            # Pre-wrapped exactly like graph_context: "" when there is nothing to carry,
+            # so a session with no text handoff renders byte-identically to before this
+            # slot existed and the prompt cache boundary is unaffected.
+            "text_chat_context": (
+                "\n            Just before this call they were typing to you:\n            "
+                + self.text_chat_context.replace("\n", "\n            ")
+                if self.text_chat_context
+                else ""
+            ),
             "memory_summary": self.memory_summary or "(nothing yet — first conversation)",
             "graph_context": self.graph_context,
             "last_session_context": self.last_session_summary,
@@ -68,7 +81,9 @@ class SessionContext:
         }
 
 
-async def gather_session_context(user_id: str, session_id: str) -> SessionContext:
+async def gather_session_context(
+    user_id: str, session_id: str, conversation_id: str = ""
+) -> SessionContext:
     """Fetch profile, memory, last session, archive, aura, and tier in parallel.
 
     The hard 1.5s ceiling enforces the under-1s greeting feel. On timeout every
@@ -101,6 +116,22 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
     coroutines.append(graph_source[0])
     defaults.append(graph_source[1])
     names.append("graph_context")
+    connector_source = (fetch_connector_states(user_id), {})
+    sources.append(connector_source)
+    coroutines.append(connector_source[0])
+    defaults.append(connector_source[1])
+    names.append("connector_states")
+    # Cross-lane continuity. Only desktop sends a conversation_id today, and only after
+    # it has handed its recent text turns to /chat/handoff, so this read is skipped
+    # entirely for every other caller. It rides the same 1.5s ceiling and the same
+    # per-source default as everything above: a slow or missing handoff means the call
+    # starts with no text context, never that the greeting waits for one.
+    if conversation_id:
+        handoff_source = (fetch_text_handoff(user_id, conversation_id), "")
+        sources.append(handoff_source)
+        coroutines.append(handoff_source[0])
+        defaults.append(handoff_source[1])
+        names.append("text_chat_context")
 
     try:
         raw_results = await asyncio.wait_for(
@@ -127,6 +158,8 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
     profile, memory_summary, last_session, archive_data, aura_profile = resolved[:5]
     user_tier, remaining_free_voice_seconds = resolved[5:7]
     graph_digest = resolved[7]
+    connector_states = resolved[8]
+    text_chat_context = resolved[9] if conversation_id else ""
 
     return SessionContext(
         profile=profile,
@@ -145,4 +178,6 @@ async def gather_session_context(user_id: str, session_id: str) -> SessionContex
             if graph_digest
             else ""
         ),
+        connector_states=connector_states,
+        text_chat_context=text_chat_context,
     )

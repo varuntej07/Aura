@@ -179,6 +179,7 @@ async def publish_element_point(
     frame_id: str,
     session_id: str,
     user_id: str,
+    coordinate_scale: float = 1.0,
 ) -> None:
     """Push the parsed target down the data channel for the overlay to animate.
 
@@ -187,14 +188,24 @@ async def publish_element_point(
     frame_id names the screenshot the coordinates live in, so the client maps
     against that frame's monitor geometry. Fail-soft: a lost point event costs
     an animation, never the reply.
+
+    ``coordinate_scale`` is the frame's ``model_scale``: the worker downscales
+    oversized frames before showing them to the model, so the model's coordinates
+    are in the SHRUNK image's space while the client still maps against the size it
+    captured. Dividing here converts back. The client contract is deliberately
+    unchanged, which is what keeps already-installed desktop builds pointing
+    correctly. A scale of 1.0 (no downscale happened) is a no-op.
     """
     try:
         room = get_job_context().room
+        scale = coordinate_scale if coordinate_scale > 0 else 1.0
+        published_x = round(target.x / scale)
+        published_y = round(target.y / scale)
         payload = json.dumps({
             "type": "element.point",
             "payload": {
-                "x": target.x,
-                "y": target.y,
+                "x": published_x,
+                "y": published_y,
                 "label": target.label,
                 "screen": target.screen,
                 "frame_id": frame_id,
@@ -204,8 +215,11 @@ async def publish_element_point(
         logger.info("VoiceSession: element.point published", {
             "session_id": session_id,
             "user_id": user_id,
-            "x": target.x,
-            "y": target.y,
+            "x": published_x,
+            "y": published_y,
+            "model_x": target.x,
+            "model_y": target.y,
+            "coordinate_scale": round(scale, 4),
             "label": target.label,
             "frame_id": frame_id,
         })

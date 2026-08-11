@@ -35,6 +35,12 @@ from livekit.agents.voice import room_io
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..services.analytics.arize_tracing import (
+    bind_arize_context,
+    configure_arize_tracing,
+    flush_arize_tracing,
+    reset_arize_context,
+)
 from ..services.entitlement import add_free_voice_seconds
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
@@ -48,7 +54,17 @@ from .voice.guide_mode import (
     GUIDE_MODE_TYPE,
     GuideCoordinator,
 )
+from .voice.artifact_delivery import (
+    ARTIFACT_DISPLAYED_TYPE,
+    ArtifactDeliveryTracker,
+)
 from .voice.guide_provider_adapter import AuraGuideDecisionProvider
+from .voice.output_mode import (
+    DEFAULT_OUTPUT_MODE,
+    KNOWN_OUTPUT_MODES,
+    OUTPUT_MODE_TYPE,
+    OutputModeController,
+)
 from .voice.guide_task_runtime import GuideTaskRuntime
 from .voice.pipelines import (
     build_agent_session,
@@ -62,11 +78,12 @@ from .voice.pipelines import (
 from .voice.recorder import VoiceSessionRecorder
 from .voice.revision import worker_revision_fields
 from .voice.screen_context import (
+    CLIENT_EVENTS_TOPIC,
     OCR_CONTEXT_TYPE,
     SCREEN_CONTEXT_TYPE,
     TEXT_INPUT_TYPE,
+    TypedMessageQueue,
     deliver_screen_context,
-    deliver_typed_message,
 )
 from .voice.screen_context_stream import SCREEN_CONTEXT_TOPIC, StructuredContextStore
 from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
@@ -81,7 +98,8 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 # Launch surfaces the client stamps into its participant metadata at /voice/token.
 # Anything else (or a missing value) collapses to "app", the neutral default.
 _KNOWN_SURFACES = frozenset({"app", "keyboard", "desktop"})
-_KNOWN_VOICE_MODES = frozenset({"standard", "guide"})
+_KNOWN_VOICE_MODES = frozenset({"standard", "guide", "onboarding"})
+_ARTIFACT_ACK_CAPABILITY = "displayed-v1"
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
@@ -127,6 +145,37 @@ def _resolve_bridged(ctx: JobContext) -> bool:
             if not raw:
                 continue
             return json.loads(raw).get("bridged") is True
+    except Exception:
+        pass
+    return False
+
+
+def _resolve_output_mode(ctx: JobContext) -> str:
+    """Read the output mode ('voice' vs 'text') stamped by the token endpoint.
+
+    Read BEFORE the agent is built, because a mute published after connect
+    loses the race against the worker's first speech (see voice/output_mode.py).
+    """
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            mode = json.loads(raw).get("output_mode")
+            return mode if mode in KNOWN_OUTPUT_MODES else DEFAULT_OUTPUT_MODE
+    except Exception:
+        pass
+    return DEFAULT_OUTPUT_MODE
+
+
+def _resolve_artifact_ack_capability(ctx: JobContext) -> bool:
+    """True only when the desktop advertised committed-render acknowledgements."""
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            return json.loads(raw).get("artifact_ack") == _ARTIFACT_ACK_CAPABILITY
     except Exception:
         pass
     return False
@@ -186,6 +235,9 @@ def _resolve_followup_metadata(ctx: JobContext) -> tuple[str, str | None, list[s
 
 
 def prewarm(process: JobProcess) -> None:
+    # Prewarm runs inside each LiveKit job process. Configure tracing here so
+    # its provider exists in the same process that creates agent spans.
+    configure_arize_tracing("voice")
     logger.info("VoiceWorker: prewarming VAD model")
     # Bundled local silero VAD (livekit-local-inference); replaces the deprecated
     # livekit-plugins-silero. Loaded here so the model isn't cold on the first job.
@@ -293,15 +345,20 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.room.name,
         session_id=followup_session_id,
     ) as session_id:
-        # Fetch profile, memory, last session, archive, aura, and tier in
-        # parallel under a hard ceiling. Each source defaults independently.
-        session_context = await gather_session_context(user_id, session_id)
-        context_vars = session_context.prompt_context_vars
-
         # Where the call was launched from. Baked into the prompt once here (the prompt is
         # built once per session in BuddyAgent), so a keyboard tap stays short and
         # task-focused for the whole session, not just the first turn.
+        # Resolved BEFORE the context fetch, not after: conversation_id is what lets the
+        # fetch pick up the text exchanges this same conversation typed just before
+        # starting the call. Safe here because _connect_to_room already returned, so the
+        # remote participant and its metadata exist.
         persisted_surface, conversation_id = _resolve_participant_metadata(ctx)
+
+        # Fetch profile, memory, last session, archive, aura, and tier in
+        # parallel under a hard ceiling. Each source defaults independently.
+        session_context = await gather_session_context(user_id, session_id, conversation_id)
+        context_vars = session_context.prompt_context_vars
+
         voice_request_id, voice_requested_at_ms = _resolve_voice_request_timing(ctx)
         surface = persisted_surface or "app"
         voice_mode = _resolve_voice_mode(ctx)
@@ -310,6 +367,19 @@ async def entrypoint(ctx: JobContext) -> None:
         # single handover authority so the separately deployed API and LiveKit worker
         # cannot disagree because one runtime missed an environment update.
         bridged = _resolve_bridged(ctx)
+        # Output mute is audio-only suppression, and the Realtime bridge plays
+        # through the desktop's own <audio> element rather than a LiveKit track,
+        # so a bridged text-mode session would speak straight past the mute. The
+        # token endpoint already refuses to stamp `bridged` in text mode; this is
+        # the worker-side half of the same rule.
+        output_mode = _resolve_output_mode(ctx)
+        artifact_ack_capable = _resolve_artifact_ack_capability(ctx)
+        if output_mode == "text" and bridged:
+            bridged = False
+            logger.info(
+                "bridge: refused, output mode is text",
+                {"session_id": session_id, "user_id": user_id},
+            )
         logger.info(
             "bridge: mode resolved",
             {
@@ -478,7 +548,10 @@ async def entrypoint(ctx: JobContext) -> None:
             user_tier=session_context.user_tier,
             display_name=draft_display_name,
             launch_surface=surface,
+            voice_mode=voice_mode,
+            connector_states=session_context.connector_states,
             bridged=bridged,
+            text_output=output_mode == "text",
             turn_metrics=turn_metrics,
         )
 
@@ -560,6 +633,7 @@ async def entrypoint(ctx: JobContext) -> None:
             surface=surface,
             turn_metrics=turn_metrics,
         )
+        buddy.bind_direct_action_recorder(recorder.record_direct_action)
         recorder.attach()
 
         session_start_iso = datetime.now(UTC).isoformat()
@@ -576,17 +650,63 @@ async def entrypoint(ctx: JobContext) -> None:
         # session is live. screen_context fires once per session.
         screen_context_fired = False
         session_live = False
-        pending_context_payloads: list[tuple[dict, str]] = []
+        pending_context_payloads: list[tuple[dict, str, str]] = []
         context_tasks: list[asyncio.Task] = []
+        typed_messages = TypedMessageQueue(
+            session=session,
+            room=ctx.room,
+            session_id=session_id,
+            user_id=user_id,
+            bind_text_observer=buddy.bind_typed_text_observer,
+        )
+        output_mode_controller = OutputModeController(
+            session=session,
+            room=ctx.room,
+            buddy=buddy,
+            session_id=session_id,
+            user_id=user_id,
+            initial_mode=output_mode,
+            client_events_topic=CLIENT_EVENTS_TOPIC,
+        )
+        # Capable desktop builds must prove the first card. Older builds omit the
+        # capability and keep the legacy optimistic behavior.
+        artifact_delivery = ArtifactDeliveryTracker(
+            session_id=session_id,
+            user_id=user_id,
+            client_events_topic=CLIENT_EVENTS_TOPIC,
+            client_ack_capable=artifact_ack_capable,
+        )
+        buddy.bind_artifact_delivery(artifact_delivery)
 
-        def _dispatch_context_payload(msg: dict, participant_identity: str) -> None:
+        def _dispatch_context_payload(msg: dict, participant_identity: str, topic: str) -> None:
             nonlocal screen_context_fired
             msg_type = msg.get("type")
             if msg_type in BRIDGE_CONTROL_TYPES:
-                if bridge is not None:
+                if bridge is not None and participant_identity == user_id:
                     bridge.handle(msg)
+                elif bridge is not None:
+                    logger.warn(
+                        "bridge: control packet participant rejected",
+                        {
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "participant": participant_identity,
+                            "type": msg_type,
+                        },
+                    )
                 return
-            if msg_type == GUIDE_MODE_TYPE:
+            if msg_type == OUTPUT_MODE_TYPE:
+                context_tasks.append(
+                    asyncio.create_task(
+                        output_mode_controller.apply_control(
+                            msg, participant_identity, topic
+                        ),
+                        name=f"voice-output-mode-{session_id[:8]}",
+                    )
+                )
+            elif msg_type == ARTIFACT_DISPLAYED_TYPE:
+                artifact_delivery.handle_ack(msg, participant_identity, topic)
+            elif msg_type == GUIDE_MODE_TYPE:
                 guide.apply_control(msg, participant_identity)
             elif msg_type == GUIDE_HEARTBEAT_TYPE:
                 guide.apply_heartbeat(msg, participant_identity)
@@ -624,16 +744,35 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
                 )
             elif msg_type == TEXT_INPUT_TYPE:
-                context_tasks.append(
-                    asyncio.create_task(
-                        deliver_typed_message(
-                            session,
-                            text=str(msg.get("text", "")),
-                            session_id=session_id,
-                            user_id=user_id,
-                        ),
-                        name=f"voice-text-input-{session_id[:8]}",
+                if participant_identity != user_id:
+                    logger.warn(
+                        "VoiceSession: typed message packet rejected",
+                        {
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "participant": participant_identity,
+                            "topic": topic,
+                        },
                     )
+                    return
+                if surface != "desktop" and not topic and not msg.get("client_message_id"):
+                    typed_messages.submit_legacy(text=str(msg.get("text", "")))
+                    return
+                if topic != CLIENT_EVENTS_TOPIC:
+                    logger.warn(
+                        "VoiceSession: typed message packet rejected",
+                        {
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "participant": participant_identity,
+                            "topic": topic,
+                        },
+                    )
+                    return
+                typed_messages.submit(
+                    text=str(msg.get("text", "")),
+                    client_message_id=str(msg.get("client_message_id", "")),
+                    generation=msg.get("generation"),
                 )
 
         def _on_data_received(packet) -> None:
@@ -648,12 +787,23 @@ async def entrypoint(ctx: JobContext) -> None:
                 return
             participant = getattr(packet, "participant", None)
             participant_identity = str(getattr(participant, "identity", "") or "")
+            topic = str(getattr(packet, "topic", "") or "")
             if session_live:
-                _dispatch_context_payload(msg, participant_identity)
+                _dispatch_context_payload(msg, participant_identity, topic)
             else:
-                pending_context_payloads.append((msg, participant_identity))
+                pending_context_payloads.append((msg, participant_identity, topic))
 
         ctx.room.on("data_received", _on_data_received)
+
+        arize_context_token = bind_arize_context(
+            session_id=session_id,
+            surface=surface,
+        )
+
+        async def _flush_arize_spans() -> None:
+            await asyncio.to_thread(flush_arize_tracing)
+
+        ctx.add_shutdown_callback(_flush_arize_spans)
 
         try:
             await session.start(
@@ -675,12 +825,17 @@ async def entrypoint(ctx: JobContext) -> None:
             # then let the handler dispatch live ones directly.
             session_live = True
             guide.start()
+            # Before any buffered packet can produce speech: detach the audio
+            # sink when the token asked for text output, and acknowledge the
+            # resolved mode either way so the desktop knows this worker
+            # understands output modes at all.
+            await output_mode_controller.apply_initial()
             # Announce HOLD before flushing buffered packets so hold_ready reaches the
             # desktop ahead of any handover reply and no early control packet is lost.
             if bridge is not None:
                 await bridge.start()
-            for _payload, _participant_identity in pending_context_payloads:
-                _dispatch_context_payload(_payload, _participant_identity)
+            for _payload, _participant_identity, _topic in pending_context_payloads:
+                _dispatch_context_payload(_payload, _participant_identity, _topic)
             pending_context_payloads.clear()
 
             # Free tier only: warn ~60s before the daily voice budget runs out,
@@ -772,10 +927,12 @@ async def entrypoint(ctx: JobContext) -> None:
             raise
         finally:
             await guide.close()
+            await typed_messages.close()
             if voice_limit_task is not None:
                 voice_limit_task.cancel()
             for task in context_tasks:
                 task.cancel()
+            reset_arize_context(arize_context_token)
 
 
 if __name__ == "__main__":
