@@ -37,7 +37,9 @@ async def notify_settled(uid: str, meeting_id: str) -> bool:
         body = "Open Aura to view them."
         severity = "success"
         dedup_key = f"meeting:{meeting_id}:ready:{revision}"
-    elif status == F.STATUS_FAILED and meeting.get(F.RETRYABLE) is True:
+    elif status == F.STATUS_NEEDS_ATTENTION or (
+        status == F.STATUS_FAILED and meeting.get(F.RETRYABLE) is True
+    ):
         notification_type = "meeting_needs_attention"
         title = "A meeting needs your attention"
         body = "Open Aura to review the next safe step."
@@ -46,24 +48,26 @@ async def notify_settled(uid: str, meeting_id: str) -> bool:
     else:
         return False
 
-    decision = await orchestrator.submit(NotificationProposal(
-        user_id=uid,
-        source=SOURCE_MEETING,
-        kind=ProposalKind.COMMITTED,
-        dedup_key=dedup_key,
-        title=title,
-        body=body,
-        notification_type=notification_type,
-        channels=frozenset({DeliveryChannel.DESKTOP}),
-        data={
-            "severity": severity,
-            "toast_policy": "when_hidden",
-            "action": "view_meeting",
-            "resource_id": meeting_id,
-            "sensitive": "true",
-            "notification_origin": SOURCE_MEETING,
-        },
-    ))
+    decision = await orchestrator.submit(
+        NotificationProposal(
+            user_id=uid,
+            source=SOURCE_MEETING,
+            kind=ProposalKind.COMMITTED,
+            dedup_key=dedup_key,
+            title=title,
+            body=body,
+            notification_type=notification_type,
+            channels=frozenset({DeliveryChannel.DESKTOP}),
+            data={
+                "severity": severity,
+                "toast_policy": "when_hidden",
+                "action": "view_meeting",
+                "resource_id": meeting_id,
+                "sensitive": "true",
+                "notification_origin": SOURCE_MEETING,
+            },
+        )
+    )
     if decision.disposition == Disposition.DROP and decision.reason == "duplicate":
         return True
     if decision.disposition != Disposition.SEND or decision.delivered is not True:

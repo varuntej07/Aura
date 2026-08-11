@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from ...lib.logger import logger
 from ..entitlement import get_user_effective_tier
 from ..model_provider import get_model_provider
-from . import deepgram, evidence, gcs_audio, notifications, quality, store
+from . import deepgram, evidence, gcs_audio, notifications, openai_stt, quality, store
 from . import fields as F
 
 # One segment is 5 minutes; 3 in flight keeps a 4-hour meeting under ~10
@@ -469,14 +469,29 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
                     f"FLAC validation failed for segment {seq}.",
                 )
             try:
-                result = await deepgram.transcribe_segment(audio)
+                try:
+                    result = await openai_stt.transcribe_segment(audio)
+                except deepgram.DeepgramError as exc:
+                    logger.warn(
+                        "meetings.synthesis: primary STT failed, using Deepgram fallback",
+                        {
+                            "meeting_id": meeting_id,
+                            "capture_run_id": lease.capture_run_id,
+                            "seq": seq,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    result = await deepgram.transcribe_segment(audio)
                 vad_ms = int(segment["audio_metrics"]["mic_vad_speech_ms"]) + int(
                     segment["audio_metrics"]["system_vad_speech_ms"]
                 )
                 if not result.utterances and vad_ms >= quality.EMPTY_WITH_SPEECH_MS:
-                    raise deepgram.ProviderEmptyError(
-                        "Provider returned empty output for speech-bearing audio."
-                    )
+                    if result.provider == "openai":
+                        result = await deepgram.transcribe_segment(audio)
+                    if not result.utterances:
+                        raise deepgram.ProviderEmptyError(
+                            "Providers returned empty output for speech-bearing audio."
+                        )
                 first_attempt_id = f"{job_id[:12]}-{lease.job_attempt}-{seq}-{uuid.uuid4().hex[:8]}"
                 first_pointer = await _persist_attempt(
                     lease,
@@ -486,7 +501,7 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
                     attempt_id=first_attempt_id,
                 )
                 attempt_pointers.append(first_pointer)
-                language_requires_retry = bool(result.language) and (
+                language_requires_retry = result.provider == "deepgram" and bool(result.language) and (
                     not str(result.language).lower().startswith("en")
                     or (
                         result.language_confidence is not None and result.language_confidence < 0.70
