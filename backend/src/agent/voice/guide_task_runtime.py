@@ -245,14 +245,16 @@ class GuideTaskRuntime:
                     reason="agent_speech_failed",
                 )
 
-    async def generate(self, chat_ctx: lk_llm.ChatContext) -> str:
+    async def generate(
+        self, chat_ctx: lk_llm.ChatContext, *, current_turn_context_id: str = ""
+    ) -> str:
         if not self._active:
             return ""
         self._turn_started_at = time.monotonic()
         self.cancel_generation()
         epoch = self._speech_epoch
         task = asyncio.create_task(
-            self._process(chat_ctx, epoch),
+            self._process(chat_ctx, epoch, current_turn_context_id),
             name=f"guide-decision-{self._voice_session_id[:8]}",
         )
         self._decision_task = task
@@ -264,11 +266,18 @@ class GuideTaskRuntime:
             if self._decision_task is task:
                 self._decision_task = None
 
-    async def _process(self, chat_ctx: lk_llm.ChatContext, speech_epoch: int) -> str:
+    async def _process(
+        self,
+        chat_ctx: lk_llm.ChatContext,
+        speech_epoch: int,
+        current_turn_context_id: str = "",
+    ) -> str:
         raw_transcript = _latest_user_text(chat_ctx)
         proactive = _is_proactive_text(raw_transcript)
         transcript = "" if proactive else raw_transcript
-        frame = await self._screen_frames.fresh_frame()
+        frame = await self._screen_frames.fresh_frame(
+            current_turn_context_id=current_turn_context_id
+        )
         if frame is None:
             await self._trace(
                 GuideStage.CAPTURE,
@@ -1053,6 +1062,7 @@ class GuideTaskRuntime:
                     frame_id=frame.frame_id,
                     session_id=self._voice_session_id,
                     user_id=self._user_id,
+                    coordinate_scale=frame.model_scale,
                 )
             await self._trace(
                 GuideStage.SPEECH,

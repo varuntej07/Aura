@@ -10,6 +10,12 @@ from typing import Any
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from ...prompts import (
+    GUIDE_DECISION_SYSTEM_PROMPT,
+    GUIDE_PLANNER_SYSTEM_PROMPT,
+    guide_decision_user_prompt,
+    guide_planning_user_prompt,
+)
 from ...services.model_provider import get_model_provider
 from .guide_kernel import (
     GuideDecisionProvider,
@@ -18,10 +24,6 @@ from .guide_kernel import (
     task_projection,
 )
 from .guide_models import GuidePlanningDecision, GuideTask, GuideVisualDecision
-from .guide_prompt import (
-    GUIDE_DECISION_SYSTEM_PROMPT,
-    GUIDE_PLANNER_SYSTEM_PROMPT,
-)
 
 
 class AuraGuideDecisionProvider(GuideDecisionProvider):
@@ -108,17 +110,14 @@ class AuraGuideDecisionProvider(GuideDecisionProvider):
         profile: GuideTaskProfile,
         correlation: dict[str, object],
     ) -> GuidePlanningDecision:
-        prompt = "\n\n".join(
-            [
-                f"Finalized user request:\n{transcript}",
-                f"Task-profile context:\n{profile.planning_context()}",
-                (
-                    "Existing durable task projection:\n"
-                    + json.dumps(task_projection(existing_task), separators=(",", ":"))
-                    if existing_task
-                    else "Existing durable task projection: none"
-                ),
-            ]
+        prompt = guide_planning_user_prompt(
+            transcript=transcript,
+            profile_context=profile.planning_context(),
+            task_projection=(
+                json.dumps(task_projection(existing_task), separators=(",", ":"))
+                if existing_task
+                else "none"
+            ),
         )
         provider = get_model_provider()
         result = await self._bounded(
@@ -152,15 +151,11 @@ class AuraGuideDecisionProvider(GuideDecisionProvider):
         profile: GuideTaskProfile,
         correlation: dict[str, object],
     ) -> GuideVisualDecision:
-        prompt = "\n\n".join(
-            [
-                "Durable task projection:\n"
-                + json.dumps(task_projection(task), separators=(",", ":")),
-                f"Finalized user turn:\n{transcript or '[none, proactive observation]'}",
-                "Frame metadata:\n"
-                + json.dumps(frame.metadata, separators=(",", ":")),
-                f"Task-profile context:\n{profile.decision_context(task)}",
-            ]
+        prompt = guide_decision_user_prompt(
+            task_projection=json.dumps(task_projection(task), separators=(",", ":")),
+            transcript=transcript,
+            frame_metadata=json.dumps(frame.metadata, separators=(",", ":")),
+            profile_context=profile.decision_context(task),
         )
         image = {
             "media_type": "image/jpeg",

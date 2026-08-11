@@ -32,8 +32,8 @@ from livekit.agents import AgentSession
 from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
+from ...prompts import GUIDE_INSTRUCTIONS
 from ...services.guide_usage_store import record_guide_usage
-from .guide_prompt import GUIDE_INSTRUCTIONS
 from .guide_task_runtime import GuideTaskRuntime
 from .screen_frames import ScreenFrame, strip_stale_images
 
@@ -63,7 +63,7 @@ class GuideBuddy(Protocol):
 
     async def update_chat_ctx(self, chat_ctx: lk_llm.ChatContext) -> None: ...
 
-    def set_guide_frame(self, frame_id: str) -> None: ...
+    def set_guide_frame(self, frame_id: str, model_scale: float = 1.0) -> None: ...
 
     async def apply_guide_persona(self, active: bool) -> None: ...
 
@@ -688,12 +688,16 @@ class GuideCoordinator:
                     role="user",
                     content=[
                         "The currently visible screen changed while Guide Mode is active.",
+                        # Pinned, not left at LiveKit's "auto": see the same note in
+                        # screen_frames.attach_screen_frame_to_turn. Guide reads small
+                        # UI labels, so provider-chosen fidelity is not acceptable.
                         lk_llm.ImageContent(
                             image=(
                                 "data:image/jpeg;base64,"
                                 + base64.b64encode(frame.jpeg_bytes).decode("ascii")
                             ),
                             mime_type="image/jpeg",
+                            inference_detail="high",
                         ),
                     ],
                 )
@@ -740,7 +744,7 @@ class GuideCoordinator:
         stripped = strip_stale_images(context)
         if stripped:
             await self._buddy.update_chat_ctx(context)
-        self._buddy.set_guide_frame(frame.frame_id)
+        self._buddy.set_guide_frame(frame.frame_id, frame.model_scale)
 
     async def _ack_frame(self, frame: ScreenFrame) -> None:
         """Publish a ``guide.step`` ack so the desktop frame handshake advances.
