@@ -3,7 +3,7 @@
 Same shape as handlers/history.py: read-only list + per-item hard delete,
 auth via the same Firebase ID token check, not consent-gated for the same
 reason handle_get_memory isn't — a user can always see and delete their own
-stored data. Writes happen ONLY from the voice tool
+stored data. Writes happen ONLY from the deterministic voice action
 (agent/voice/screen_saves.py); this module never writes a screen_saves item,
 only reads and deletes.
 

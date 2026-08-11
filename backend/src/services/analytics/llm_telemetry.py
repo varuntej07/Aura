@@ -1,11 +1,11 @@
 """
-Fail-safe LLM + tool-call telemetry to Langfuse, feeding the ops dashboard's
-cost-per-model and tool-call-analytics panels.
+Fail-safe LLM and tool-call telemetry. Langfuse feeds the ops dashboard while
+Arize adds privacy-preserving distributed traces.
 
 Contract (mirrors posthog_client.py):
   - NEVER raises into, or blocks, a caller. A Langfuse outage, a missing key, an
     import error, or a bad payload degrades to a no-op plus a log line.
-  - Both keys unset (dev, tests) -> every call is a silent no-op object.
+  - All telemetry credentials unset (dev, tests) -> calls are silent no-ops.
   - PRIVACY: prompt/completion text is NEVER sent. Only model id, provider,
     caller label, token usage, success/error, and latency (span duration) leave
     the backend. Langfuse infers cost from model id + usage for the standard
@@ -24,17 +24,24 @@ their own attempt, so nothing is double-counted):
     ... tool body ...
     recording.finish(success=True)
 
-The SDK batches in a background thread and flushes atexit; ``flush()`` is
-exposed for explicit drains (tests, shutdown hooks).
+The Langfuse SDK batches in a background thread and flushes atexit; ``flush()``
+is exposed for explicit drains (tests, shutdown hooks).
 """
 
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from typing import Any
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from .arize_tracing import (
+    bind_arize_context,
+    reset_arize_context,
+)
+from .arize_tracing import start_chain_span as start_arize_chain_span
+from .arize_tracing import start_tool_span as start_arize_tool_span
 
 # Memoised client. _init_attempted ensures we only try (and only log) once.
 _client: Any | None = None
@@ -45,17 +52,33 @@ _trace_context: ContextVar[dict[str, str]] = ContextVar(
 )
 
 
-def bind_trace_context(**values: str | None) -> Token[dict[str, str]]:
+@dataclass(frozen=True)
+class _TraceContextToken:
+    metadata: Token[dict[str, str]]
+    arize: Token[dict[str, str]]
+    chain_span: Any | None
+
+
+def bind_trace_context(**values: str | None) -> _TraceContextToken:
     """Bind non-sensitive correlation fields for the current async request."""
     current = dict(_trace_context.get())
     current.update(
         {key: value for key, value in values.items() if isinstance(value, str) and value}
     )
-    return _trace_context.set(current)
+    metadata_token = _trace_context.set(current)
+    arize_token = bind_arize_context(**values)
+    return _TraceContextToken(
+        metadata=metadata_token,
+        arize=arize_token,
+        chain_span=start_arize_chain_span("chat_turn"),
+    )
 
 
-def reset_trace_context(token: Token[dict[str, str]]) -> None:
-    _trace_context.reset(token)
+def reset_trace_context(token: _TraceContextToken) -> None:
+    if token.chain_span is not None:
+        token.chain_span.finish()
+    reset_arize_context(token.arize)
+    _trace_context.reset(token.metadata)
 
 
 def _get_client() -> Any | None:
@@ -99,12 +122,11 @@ _NOOP_RECORDING = _NoopRecording()
 
 
 class _Recording:
-    """A live Langfuse observation. finish() stamps usage/outcome and ends the
-    span, so the observation's duration is the real wall-clock latency of the
-    provider call or tool body it wraps. Every step is swallowed on failure."""
+    """A live telemetry observation whose failures never reach the caller."""
 
-    def __init__(self, observation: Any) -> None:
+    def __init__(self, observation: Any | None, arize_span: Any | None = None) -> None:
         self._observation = observation
+        self._arize_span = arize_span
         self._finished = False
 
     def finish(
@@ -122,22 +144,31 @@ class _Recording:
         if self._finished:
             return
         self._finished = True
-        try:
-            update_kwargs: dict[str, Any] = {
-                "level": "DEFAULT" if success else "ERROR",
-            }
-            if error_type:
-                update_kwargs["status_message"] = error_type
-            if tokens:
-                update_kwargs["usage_details"] = {
-                    key: int(value or 0) for key, value in tokens.items()
-                }
-            self._observation.update(**update_kwargs)
-        except Exception as exc:
-            logger.debug("llm_telemetry: observation update failed", {"error": str(exc)})
-        finally:
+        if self._observation is not None:
             try:
-                self._observation.end()
+                update_kwargs: dict[str, Any] = {
+                    "level": "DEFAULT" if success else "ERROR",
+                }
+                if error_type:
+                    update_kwargs["status_message"] = error_type
+                if tokens:
+                    update_kwargs["usage_details"] = {
+                        key: int(value or 0) for key, value in tokens.items()
+                    }
+                self._observation.update(**update_kwargs)
+            except Exception as exc:
+                logger.debug(
+                    "llm_telemetry: observation update failed",
+                    {"error": str(exc)},
+                )
+            finally:
+                try:
+                    self._observation.end()
+                except Exception:
+                    pass
+        if self._arize_span is not None:
+            try:
+                self._arize_span.finish(success=success, error_type=error_type)
             except Exception:
                 pass
 
@@ -201,22 +232,26 @@ def start_tool_span(
     """Open one span per tool call, named ``tool:{tool_name}`` so the ops
     dashboard can aggregate by name. ``source`` is text | voice | keyboard."""
     client = _get_client()
-    if client is None:
+    arize_span = start_arize_tool_span(tool_name)
+    if client is None and arize_span is None:
         return _NOOP_RECORDING
-    try:
-        metadata: dict[str, Any] = {"source": source, **_trace_context.get()}
-        if uid:
-            metadata["uid"] = uid
-        observation = _start_observation(
-            client,
-            name=f"tool:{tool_name}",
-            as_type="span",
-            metadata=metadata,
-        )
-        return _Recording(observation)
-    except Exception as exc:
-        logger.warn("llm_telemetry: start_tool_span failed", {"error": str(exc)})
+    observation = None
+    if client is not None:
+        try:
+            metadata: dict[str, Any] = {"source": source, **_trace_context.get()}
+            if uid:
+                metadata["uid"] = uid
+            observation = _start_observation(
+                client,
+                name=f"tool:{tool_name}",
+                as_type="span",
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warn("llm_telemetry: start_tool_span failed", {"error": str(exc)})
+    if observation is None and arize_span is None:
         return _NOOP_RECORDING
+    return _Recording(observation, arize_span)
 
 
 def anthropic_usage_tokens(usage: Any) -> dict[str, int]:
