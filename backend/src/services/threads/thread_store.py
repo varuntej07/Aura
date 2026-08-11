@@ -43,20 +43,27 @@ def _threads_state_ref(user_id: str) -> fs.DocumentReference:
     )
 
 
-async def create_thread(user_id: str, thread: Thread) -> None:
-    """Idempotent upsert keyed by ``thread.thread_id`` (re-recording is a no-op overwrite)."""
+async def create_thread(user_id: str, thread: Thread) -> bool:
+    """Idempotent upsert keyed by ``thread.thread_id`` (re-recording is a no-op overwrite).
+
+    Returns whether the write landed. Still never raises — callers are
+    fire-and-forget paths — but a caller that counts what it opened must not
+    report a swallowed failure as a success.
+    """
 
     def _write() -> None:
         _threads_ref(user_id).document(thread.thread_id).set(thread.to_dict())
 
     try:
         await asyncio.to_thread(_write)
+        return True
     except Exception as exc:
         logger.warn("threads.thread_store: create_thread failed", {
             "user_id": user_id,
             "thread_id": thread.thread_id,
             "error": str(exc),
         })
+        return False
 
 
 async def list_threads_for_subject_dedup(user_id: str) -> list[Thread]:

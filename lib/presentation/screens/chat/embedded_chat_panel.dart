@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
+import '../../../data/services/backend_api_service.dart';
 import '../../../data/services/buddy_pills_refresher.dart';
 import '../../../data/services/session_consolidator.dart';
 import '../../../data/services/subscription_service.dart';
@@ -95,11 +96,22 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
       // fire-and-forget, idempotent, and safe to retry.
       if (state == AppLifecycleState.paused) {
         context.read<BuddyPillsRefresher>().refreshIfActivity(uid);
+        final sessionId = chatVm.currentSessionId;
         context.read<SessionConsolidator>().consolidate(
           uid: uid,
-          sessionId: chatVm.currentSessionId,
+          sessionId: sessionId,
           messages: chatVm.messages,
         );
+        // Separate from consolidation on purpose: that call skips short and
+        // unchanged sessions, but session END has to be reported every time or
+        // the server waits out the full 30-minute idle timeout instead.
+        if (sessionId != null && sessionId.isNotEmpty) {
+          unawaited(
+            context
+                .read<BackendApiService>()
+                .markChatSessionBackgrounded(sessionId),
+          );
+        }
       }
     }
   }

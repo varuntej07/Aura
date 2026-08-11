@@ -49,7 +49,11 @@ FOLLOW_UP_COOLDOWN = timedelta(hours=20)
 REMINDER_SETTLE_BUFFER = timedelta(hours=2)
 
 # Hard ceiling on curiosity follow-ups per user per local day across all threads.
-THREAD_DAILY_CAP = 1
+# Two, not one: now that a conversation opens threads (thread_writer), curiosity
+# is the main way Buddy references what the user actually talked about, and a
+# cap of 1 let it supply at most a third of the daily budget. MAX_FOLLOW_UPS_
+# PER_THREAD above still stops this from becoming two pushes about one loop.
+THREAD_DAILY_CAP = 2
 
 NOTIFICATION_TYPE_THREAD_FOLLOW_UP = "thread_followup"
 

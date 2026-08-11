@@ -12,14 +12,17 @@ awaited on the tool-call response path — see ``tool_executor.py``).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 
 from pydantic import BaseModel
 
 from ...lib.logger import logger
 from ...prompts import (
+    CONVERSATION_WORTHINESS_SYSTEM_PROMPT,
     REMINDER_WORTHINESS_SYSTEM_PROMPT,
+    conversation_worthiness_user_prompt,
     reminder_worthiness_user_prompt,
 )
 from ..model_provider import get_model_provider
@@ -56,9 +59,18 @@ class _ReminderWorthinessJudgment(BaseModel):
     reason: str = ""
 
 
-async def _judge_worth_a_thread(message: str) -> tuple[bool, str]:
+async def _judge_worth_a_thread(
+    message: str,
+    *,
+    system: str = REMINDER_WORTHINESS_SYSTEM_PROMPT,
+    build_user_prompt: Callable[[str], str] = reminder_worthiness_user_prompt,
+) -> tuple[bool, str]:
     """Semantic worthiness judge (CLAUDE.md: teach a category, never a keyword
     list).
+
+    The prompt pair is injectable so a conversation topic is judged against a
+    stricter category than a reminder (a reminder is an explicit commitment; a
+    conversation topic is not), while sharing this fail-closed wrapper.
 
     Fails CLOSED toward False (skip the thread) on any judge error, timeout, or
     malformed output. A curiosity thread is the lowest-value PROACTIVE surface,
@@ -72,8 +84,8 @@ async def _judge_worth_a_thread(message: str) -> tuple[bool, str]:
     try:
         result = await asyncio.wait_for(
             get_model_provider().cheap(
-                reminder_worthiness_user_prompt(message),
-                system=REMINDER_WORTHINESS_SYSTEM_PROMPT,
+                build_user_prompt(message),
+                system=system,
                 response_model=_ReminderWorthinessJudgment,
                 temperature=0.0,
             ),
@@ -90,9 +102,14 @@ async def _judge_worth_a_thread(message: str) -> tuple[bool, str]:
 
 
 async def _find_existing_subject_thread(
-    user_id: str, message: str
+    user_id: str, message: str, *, existing: list[Thread] | None = None
 ) -> Thread | None:
     """Find an existing thread on the SAME subject as ``message``, ANY status.
+
+    ``existing`` lets a caller supply the thread list it already read (the
+    conversation path judges several topics against one snapshot, and must also
+    dedup each new topic against the threads it just created in the same pass).
+    When omitted the list is read here, so the reminder path is unchanged.
 
     Two layers, cheapest first (mirrors the reminder dedup in tool_executor):
       1. Exact casefolded ``trigger_text`` match — a pure re-set of the same loop.
@@ -105,7 +122,8 @@ async def _find_existing_subject_thread(
     window the reminder dedup uses does NOT apply here. Fails open to ``None`` (no
     match -> create the thread) on any read/embed error.
     """
-    existing = await thread_store.list_threads_for_subject_dedup(user_id)
+    if existing is None:
+        existing = await thread_store.list_threads_for_subject_dedup(user_id)
     if not existing:
         return None
 
@@ -222,3 +240,145 @@ async def record_reminder_thread(
         "user_id": user_id,
         "thread_id": reminder_id,
     })
+
+
+# ── Conversation-derived threads ─────────────────────────────────────────────
+# The reminder wedge above only ever fires for users who set a reminder, which
+# left the whole curiosity surface dark for everyone else — the single largest
+# reason a first conversation produced no notifications. These open the same
+# kind of loop from what the user actually talked about.
+
+CONVERSATION_CURIOSITY_ANGLES = [
+    "what is really going on with it",
+    "why it matters to them",
+    "where it has got to since",
+]
+
+# Most threads one session may open. A long session can cluster into many
+# topics; opening a thread for each would hand the reflector a backlog it
+# would drip out for weeks, long after the topics stopped being live.
+MAX_THREADS_PER_SESSION = 3
+
+# Topics judged per session, highest-turn-count first. Bounds the worthiness
+# calls (one cheap LLM call each) so a 15-topic session cannot fan out. At
+# hundreds of users with several sessions a day this ceiling is what keeps the
+# judge spend proportional to sessions rather than to conversation length.
+_MAX_TOPICS_JUDGED = 4
+
+# Below this, a "topic" is a fragment (a greeting, a one-word reply) that the
+# judge would only reject anyway. Filtered before the call, not after, so the
+# cheap check runs first.
+_MIN_TOPIC_SUMMARY_CHARS = 20
+
+
+def _conversation_thread_id(session_id: str, topic_id: str) -> str:
+    """Stable id for one topic of one session.
+
+    ``create_thread`` is an idempotent *overwrite*, so a re-evaluated session
+    must land on the same id rather than a fresh one — and the subject dedup
+    below must still run, because overwriting an existing thread would reset
+    ``follow_ups_sent`` and re-arm a follow-up budget the user already spent.
+    """
+    return f"conv_{session_id}_{topic_id}"
+
+
+async def record_conversation_threads(
+    user_id: str,
+    *,
+    session_id: str,
+    topics: list[dict[str, Any]],
+    surface: str = "",
+) -> int:
+    """Open curiosity threads for what the user talked about in one session.
+
+    Returns the number of threads created. Safe to call fire-and-forget: it
+    never raises, so session finalization is never affected by a judge timeout
+    or a Firestore write error.
+
+    Callers must already have applied the Aura consent gate — turns only exist
+    to cluster when consent was granted, and a curiosity follow-up enriches
+    UserAura, so the same GDPR gate that governs extraction governs this.
+    """
+    if not topics:
+        return 0
+
+    candidates = [
+        topic for topic in topics
+        if len(str(topic.get("summary") or "").strip()) >= _MIN_TOPIC_SUMMARY_CHARS
+    ]
+    candidates.sort(key=lambda topic: -int(topic.get("user_turn_count") or 0))
+    candidates = candidates[:_MAX_TOPICS_JUDGED]
+    if not candidates:
+        return 0
+
+    try:
+        verdicts = await asyncio.gather(*(
+            _judge_worth_a_thread(
+                str(topic["summary"]).strip(),
+                system=CONVERSATION_WORTHINESS_SYSTEM_PROMPT,
+                build_user_prompt=conversation_worthiness_user_prompt,
+            )
+            for topic in candidates
+        ))
+    except Exception as exc:
+        # _judge_worth_a_thread already fails closed per-topic; this only catches
+        # a gather-level surprise. Loud, because a silent outage here would look
+        # exactly like "no topics were interesting".
+        logger.error("threads.thread_writer: conversation worthiness gather failed", {
+            "user_id": user_id, "session_id": session_id, "error": str(exc),
+        })
+        return 0
+
+    # One snapshot for the whole pass, extended in-place with what we create so
+    # two similar topics in the same session cannot fork parallel threads.
+    existing = await thread_store.list_threads_for_subject_dedup(user_id)
+    now = datetime.now(UTC)
+    source = ThreadSource.VOICE if surface == "voice" else ThreadSource.CHAT
+    created = 0
+
+    for topic, (worth, reason) in zip(candidates, verdicts):
+        if created >= MAX_THREADS_PER_SESSION:
+            break
+        summary = str(topic["summary"]).strip()
+        if not worth:
+            logger.info("threads.thread_writer: topic skipped, not worth a thread", {
+                "user_id": user_id, "session_id": session_id, "reason": reason,
+            })
+            continue
+
+        duplicate = await _find_existing_subject_thread(
+            user_id, summary, existing=existing
+        )
+        if duplicate is not None:
+            if duplicate.status == ThreadStatus.OPEN:
+                await thread_store.touch_thread(user_id, duplicate.thread_id, now)
+            logger.info("threads.thread_writer: topic already covered by a thread", {
+                "user_id": user_id, "session_id": session_id,
+                "thread_id": duplicate.thread_id, "status": str(duplicate.status),
+            })
+            continue
+
+        thread = Thread(
+            thread_id=_conversation_thread_id(session_id, str(topic["topic_id"])),
+            trigger_text=summary,
+            source=source,
+            source_ref=session_id,
+            known_summary=f"The user talked about: {summary}",
+            unknown=list(CONVERSATION_CURIOSITY_ANGLES),
+            created_at=now,
+            last_touched_at=now,
+        )
+        if not await thread_store.create_thread(user_id, thread):
+            # The store logged the cause. Do not count it: a write that never
+            # landed must not look like an opened thread in the logs.
+            continue
+        existing.append(thread)
+        created += 1
+
+    logger.info("threads.thread_writer: conversation threads opened", {
+        "user_id": user_id,
+        "session_id": session_id,
+        "topics_judged": len(candidates),
+        "created": created,
+    })
+    return created
