@@ -147,6 +147,42 @@ never hands over manual steps for something a tool covers. A not-connected
 result means telling the user warmly that it isn't linked, pointing at
 Settings > Connectors, and offering to do it once linked. Never a bare refusal.
 
+### Copyable content: cards, not speech
+
+Buddy must never read a draft, command, prompt or snippet aloud. Three layers,
+in order of authority:
+
+1. **`ArtifactSession`** (`voice/artifact_session.py`) is the card on screen and
+   the authority for whether a turn is about it. It opens when a card renders
+   and stays open until the turn commits to a WRITE/PRESENT capability outside
+   the artifact pair, or ages out after `MAX_IDLE_TURNS`. Read-only capabilities
+   and the speech channel never close it: a lookup ("check what he posted") is
+   not the user moving on.
+2. **`tool_choice="required"`** on armed turns, set as a local `ModelSettings`
+   inside `llm_node`. Plain prose is not a representable answer, so the strict
+   tool schema carries every word.
+3. **`_card_narrated_artifact`** holds the stream and diverts a narrated body to
+   a card. Last resort, for unarmed turns and for a leg that ignores tool_choice.
+
+**Arming is session state, not wording.** This is the non-obvious part, and it
+was learned the hard way. Lexical arming matched 3 of 8 turns in a real failing
+session, and every one of those 3 carded correctly while 4 of the other 5
+recited the draft aloud. Two things defeat any lexicon here: revision turns do
+not restate the noun ("where is the hook?"), and endpointing splits one spoken
+thought across several finalized messages, so a keyword that matched can be
+discarded before the generation runs. `spoken_action_guard` now only recognizes
+the turn that OPENS a card, where the user does say the noun.
+
+**A constrained turn still needs a way to talk.** `speak_only` exists because
+forcing a tool without it would make a clarifying question impossible, and Buddy
+would render its own question to a card. It is exposed ONLY on armed turns, so
+ordinary turns keep streaming text into TTS from the first token.
+
+Structured output here is tool calls, never `response_format`:
+`lk_llm.FallbackAdapter.chat()` has no `response_format` parameter, so a JSON
+schema constraint would silently stop applying on failover to Anthropic or
+Google. `tool_choice` is on the FallbackAdapter and maps on every leg.
+
 ### Free-tier "1 minute left" warning
 
 The LLM must NOT track time. The server and client own the countdown. At T-60s

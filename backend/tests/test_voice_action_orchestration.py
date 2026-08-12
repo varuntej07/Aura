@@ -370,6 +370,7 @@ def test_every_current_voice_tool_has_registry_metadata():
         "draft_outbound_message",
         "present_visible_artifact",
         "set_guide_mode",
+        "speak_only",
     }
 
 
