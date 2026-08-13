@@ -44,6 +44,7 @@ REASON_STEP_TIMEOUT_S = max(
 )
 
 DESKTOP_CHAT_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "set_reminder",
     "list_reminders",
     "get_upcoming_events",
     "query_memory",

@@ -16,7 +16,10 @@ Terminated by: "data: [DONE]\n\n"
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import re
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -201,6 +204,12 @@ _SUPPORTED_DOCUMENT_MIME_TYPES: frozenset[str] = frozenset({
 _MAX_ATTACHMENTS_PER_REQUEST = 5
 _MAX_IMAGE_BASE64_SIZE = 7_000_000      # ~5 MB raw * 1.33 base64 overhead
 _MAX_DOCUMENT_BASE64_SIZE = 14_000_000  # ~10 MB raw * 1.33 base64 overhead
+_EXPLICIT_SCREEN_SAVE_REQUEST = re.compile(
+    r"\b(?:save|capture|keep|remember)\s+(?:(?:this|the|my|current)\s+)?(?:screen|screenshot)\b"
+    r"|\b(?:take|save)\s+(?:a\s+)?screenshot\b"
+    r"|\bscreenshot\s+(?:this|that|it)\b",
+    re.IGNORECASE,
+)
 
 
 class AttachmentRejection:
@@ -268,6 +277,59 @@ def _validate_and_filter_attachments(
         })
 
     return accepted, rejections
+
+
+async def _save_attached_desktop_screen(
+    *,
+    user_id: str,
+    session_id: str,
+    client_message_id: str,
+    attachments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    attachment = next(
+        (
+            item
+            for item in attachments
+            if item.get("type") == "image" and item.get("mime_type") == "image/jpeg"
+        ),
+        None,
+    )
+    if not attachment or not session_id or not client_message_id:
+        return {"ok": False, "code": "screen_unavailable"}
+    try:
+        jpeg_bytes = base64.b64decode(str(attachment.get("data") or ""), validate=True)
+        from ..agent.voice.screen_frames import ScreenFrame
+        from ..agent.voice.screen_saves import save_screen_capture
+
+        frame_id = hashlib.sha256(jpeg_bytes).hexdigest()[:32]
+        result = await save_screen_capture(
+            uid=user_id,
+            session_id=session_id,
+            finalized_message_id=client_message_id,
+            frame=ScreenFrame(
+                jpeg_bytes=jpeg_bytes,
+                attributes={
+                    "frame_id": frame_id,
+                    "active_window_title": "Screen capture",
+                },
+                received_at_monotonic=time.monotonic(),
+            ),
+        )
+    except Exception as exc:
+        logger.warn(
+            "Chat: explicit screen save failed",
+            {"user_id": user_id, "error_type": type(exc).__name__},
+        )
+        return {"ok": False, "code": "screen_save_failed"}
+    if not result.succeeded:
+        return {"ok": False, "code": "screen_save_failed"}
+    return {
+        "ok": True,
+        "item_id": result.item_id,
+        "collection_name": result.collection_name,
+        "image_path": result.image_path,
+        "already_saved": result.already_saved,
+    }
 
 
 _NOTIFICATION_REASON_MAX_CHARS = 600
@@ -731,6 +793,69 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             prompt_version="chat-v1",
         )
         try:
+            effective_system_prompt_blocks = system_prompt_blocks
+            screen_save_result: dict[str, Any] | None = None
+            if (
+                surface == "desktop"
+                and _EXPLICIT_SCREEN_SAVE_REQUEST.search(message)
+            ):
+                screen_tool_id = f"screen-save:{client_message_id or uuid4().hex}"
+                if contract_version >= 2:
+                    yield "data: " + json.dumps({
+                        "type": "tool_start",
+                        "id": screen_tool_id,
+                        "tool": "save_screen_item",
+                        "label": "Saving your screen",
+                        "detail": "",
+                    }) + "\n\n"
+                screen_save_result = await _save_attached_desktop_screen(
+                    user_id=user_id,
+                    session_id=session_id or "",
+                    client_message_id=client_message_id or "",
+                    attachments=validated_attachments,
+                )
+                screen_saved = screen_save_result.get("ok") is True
+                if contract_version >= 2:
+                    yield "data: " + json.dumps({
+                        "type": "tool_end",
+                        "id": screen_tool_id,
+                        "tool": "save_screen_item",
+                        "ok": screen_saved,
+                    }) + "\n\n"
+                if screen_saved:
+                    try:
+                        await turn_store.record_completed_tool(
+                            user_id,
+                            client_message_id or "",
+                            tool="save_screen_item",
+                            result=screen_save_result,
+                        )
+                    except Exception as exc:
+                        logger.warn(
+                            "Chat: screen save receipt recording failed",
+                            {"user_id": user_id, "error_type": type(exc).__name__},
+                        )
+                    screen_action_instruction = (
+                        "The exact attached screenshot was durably saved to the user's "
+                        "Screen Saves. Confirm that it was saved. Do not claim you cannot "
+                        "see or save the screen, and do not attempt a second screen save."
+                    )
+                else:
+                    screen_action_instruction = (
+                        "The user explicitly asked to save their screen, but the durable "
+                        "save could not be verified. Say the screen save failed and ask "
+                        "them to try again. Do not claim that screen capture is unavailable."
+                    )
+                effective_system_prompt_blocks = [
+                    *system_prompt_blocks,
+                    {
+                        "type": "text",
+                        "text": (
+                            f"<trusted_action_receipt>{screen_action_instruction}"
+                            "</trusted_action_receipt>"
+                        ),
+                    },
+                ]
             tool_executor = ToolExecutor(
                 user_id,
                 created_via="text",
@@ -746,7 +871,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             done_metadata: dict[str, Any] = {}
             stream_error_seen = False
             async for sse_event in claude.send_text_turn_stream(
-                system_prompt=system_prompt_blocks,
+                system_prompt=effective_system_prompt_blocks,
                 user_content=user_content,
                 history=history,
                 is_agent=False,
@@ -754,6 +879,15 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 extra_excluded_tools=action_tool_exclusions,
                 contract_version=contract_version,
             ):
+                if (
+                    sse_event.get("type") == "done"
+                    and screen_save_result
+                    and screen_save_result.get("ok") is True
+                ):
+                    metadata = sse_event.get("metadata") or {}
+                    tool_names = metadata.setdefault("tool_names", [])
+                    if isinstance(tool_names, list) and "save_screen_item" not in tool_names:
+                        tool_names.append("save_screen_item")
                 if reminder_create_requested and sse_event.get("type") == "text_delta":
                     buffered_text_events.append(sse_event)
                     continue

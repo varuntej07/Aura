@@ -48,6 +48,7 @@ _TOOL_CONFIRMATIONS: dict[str, str] = {
     "cancel_reminder": "Done, I cleared that reminder.",
     "cancel_tracker": "Done, I stopped tracking that one.",
     "report_feedback": "Thanks, I passed that along.",
+    "save_screen_item": "Done, I saved that screenshot to Screen Saves.",
 }
 
 _PREVIEW_MAX_CHARS = 140
