@@ -1,4 +1,4 @@
-"""Bounded Meeting V2 reconciliation metrics and alert hooks."""
+"""Bounded Meeting V2 reconciliation: metrics, repair, and alert hooks."""
 
 from __future__ import annotations
 
@@ -9,11 +9,13 @@ from typing import Any
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from . import fields as F
+from . import notifications, store, tasks
 
 
 async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
     now = datetime.now(UTC)
     stale_capture_before = (now - timedelta(minutes=5)).isoformat()
+    stall_deadline = (now - timedelta(minutes=F.STALL_DEADLINE_MINUTES)).isoformat()
 
     def _read() -> dict[str, Any]:
         db = admin_firestore()
@@ -26,6 +28,10 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
         ):
             row = snap.to_dict() or {}
             row["meeting_id"] = snap.id
+            # A collection-group hit knows its owner only through its path:
+            # users/{uid}/{SUBCOLLECTION}/{meeting_id}. Repair needs the uid.
+            parent = snap.reference.parent.parent
+            row["_uid"] = parent.id if parent is not None else ""
             meetings.append(row)
         jobs = [
             snap.to_dict() or {}
@@ -100,6 +106,7 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
             )
         ),
     }
+    repairs = await _repair(meetings, jobs, stall_deadline=stall_deadline)
     alerts = {key: value for key, value in metrics.items() if value}
     logger.info(
         "meetings.operations: reconciliation snapshot",
@@ -108,6 +115,7 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
             "meetings_scanned": len(meetings),
             "jobs_scanned": len(jobs),
             **metrics,
+            **{f"repaired_{key}": value for key, value in repairs.items()},
             "alert": bool(alerts),
             "alert_codes": sorted(alerts),
         },
@@ -120,4 +128,98 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
                 "alert": True,
             },
         )
-    return {"metrics": metrics, "alerts": alerts}
+    return {"metrics": metrics, "alerts": alerts, "repairs": repairs}
+
+
+async def _repair(
+    meetings: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    *,
+    stall_deadline: str,
+) -> dict[str, int]:
+    """Act on what the snapshot found.
+
+    This pass used to only count. A meeting could strand in ``capturing`` or
+    ``synthesizing`` indefinitely, get tallied here every hour, and still render
+    to the user as an ordinary spinner with no failure, no notification, and no
+    retry. Counting a known-broken row is not observability.
+    """
+    repairs = {"dispatched_jobs": 0, "stalled_meetings": 0}
+
+    # 1. Redeliver work that committed durably but never reached Cloud Tasks.
+    #    The job and outbox row are authoritative; dispatch is only the hint.
+    for job in jobs:
+        if job.get("state") not in (F.JOB_PENDING, F.JOB_RETRY):
+            continue
+        if job.get("dispatch_state") == "dispatched":
+            continue
+        uid = str(job.get("user_id", ""))
+        job_id = str(job.get("job_id", ""))
+        if not uid or not job_id:
+            continue
+        try:
+            await tasks.dispatch_job(uid, job_id)
+            repairs["dispatched_jobs"] += 1
+        except Exception as exc:
+            logger.error(
+                "meetings.operations: reconciliation dispatch failed",
+                {
+                    "meeting_id": job.get("meeting_id"),
+                    "job_id": job_id,
+                    "error_code": "reconciliation_dispatch_failed",
+                    "error": str(exc),
+                },
+            )
+
+    # 2. Stamp meetings that have been non-terminal past every legitimate
+    #    deadline. FAIL_PROCESSING_TIMEOUT existed for exactly this and had no
+    #    writer, which is why a stall was indistinguishable from progress.
+    for meeting in meetings:
+        if meeting.get(F.STATUS) not in F.ACTIVE_STATUSES:
+            continue
+        if meeting.get(F.DELETION_STATE):
+            continue
+        if str(meeting.get(F.UPDATED_AT, "")) > stall_deadline:
+            continue
+        uid = str(meeting.get("_uid", ""))
+        meeting_id = str(meeting.get("meeting_id", ""))
+        if not uid or not meeting_id:
+            continue
+        try:
+            transitioned, _status_now = await store.transition_status(
+                uid,
+                meeting_id,
+                from_statuses=F.ACTIVE_STATUSES,
+                to_status=F.STATUS_NEEDS_ATTENTION,
+                stage=F.STAGE_NEEDS_ATTENTION,
+                # The evidence is intact; only the handoff stalled. Leaving this
+                # retryable is what makes the user's retry affordance real.
+                extra=store.failure_meta(
+                    code=F.FAIL_PROCESSING_TIMEOUT, retryable=True
+                ),
+            )
+            if not transitioned:
+                continue
+            await notifications.notify_settled(uid, meeting_id)
+            repairs["stalled_meetings"] += 1
+            logger.warn(
+                "meetings.operations: stalled meeting marked needs_attention",
+                {
+                    "meeting_id": meeting_id,
+                    "prior_status": meeting.get(F.STATUS),
+                    "prior_stage": meeting.get(F.PROCESSING_STAGE),
+                    "updated_at": meeting.get(F.UPDATED_AT),
+                    "error_code": F.FAIL_PROCESSING_TIMEOUT,
+                    "alert": True,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "meetings.operations: stall repair failed",
+                {
+                    "meeting_id": meeting_id,
+                    "error_code": "reconciliation_stall_repair_failed",
+                    "error": str(exc),
+                },
+            )
+    return repairs

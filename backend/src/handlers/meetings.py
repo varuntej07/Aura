@@ -230,8 +230,20 @@ async def handle_claim(request: Request) -> JSONResponse:
     )
 
 
-def _integrity_error(code: str, status_code: int = 409) -> JSONResponse:
-    return JSONResponse({"detail": {"code": code}}, status_code=status_code)
+def _integrity_error(
+    code: str,
+    status_code: int = 409,
+    *,
+    capture_fence: int | None = None,
+) -> JSONResponse:
+    detail: dict[str, Any] = {"code": code}
+    # A fence rejection is recoverable when the client is merely behind, and
+    # unrecoverable when it has forked. The client cannot tell those apart
+    # without knowing where the server is, so always say so. Older clients
+    # ignore the extra field.
+    if capture_fence is not None:
+        detail[F.CAPTURE_FENCE] = capture_fence
+    return JSONResponse({"detail": detail}, status_code=status_code)
 
 
 def _strict_int_header(
@@ -337,7 +349,10 @@ async def handle_upload_segment_v2(
         meeting.get(F.CAPTURE_RUN_ID) != capture_run_id
         or int(meeting.get(F.CAPTURE_FENCE, -1)) != capture_fence
     ):
-        return _integrity_error(F.FAIL_STALE_CAPTURE_FENCE)
+        return _integrity_error(
+            F.FAIL_STALE_CAPTURE_FENCE,
+            capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+        )
 
     data = await request.body()
     if len(data) != byte_length or evidence.sha256_hex(data) != content_sha256:
@@ -423,7 +438,10 @@ async def handle_upload_segment_v2(
             )
         return _integrity_error(F.FAIL_IMMUTABLE_OBJECT_CONFLICT)
     except store.StaleCaptureFenceError:
-        return _integrity_error(F.FAIL_STALE_CAPTURE_FENCE)
+        return _integrity_error(
+            F.FAIL_STALE_CAPTURE_FENCE,
+            capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+        )
     except store.DeletedMeetingError:
         return _integrity_error(F.FAIL_DELETION_IN_PROGRESS)
     except store.MeetingIntegrityError as exc:
@@ -666,18 +684,15 @@ async def handle_complete_v2(
     except (KeyError, TypeError, ValueError, evidence.EvidenceValidationError) as exc:
         code = getattr(exc, "code", "invalid_manifest")
         return _integrity_error(code, 400)
+    server_fence = -1
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
         if meeting is None:
             return JSONResponse({"error": "Unknown meeting."}, status_code=404)
-        await store.finalize_capture_run(
-            user_id,
-            meeting_id,
-            capture_run_id,
-            capture_fence=capture_fence,
-            runtime_instance_id=str(meeting.get(F.RUNTIME_INSTANCE_ID, "")),
-            correlation_id=correlation_id,
-        )
+        server_fence = int(meeting.get(F.CAPTURE_FENCE, -1))
+        # Ingest is closed inside verify_v2_completion's transaction. Closing it
+        # first left a failed verification with a finalized run that refused
+        # further uploads and a meeting still marked capturing: unrecoverable.
         result = await store.verify_v2_completion(
             user_id,
             meeting_id,
@@ -694,7 +709,9 @@ async def handle_complete_v2(
             correlation_id=correlation_id,
         )
     except store.StaleCaptureFenceError:
-        return _integrity_error(F.FAIL_STALE_CAPTURE_FENCE)
+        return _integrity_error(
+            F.FAIL_STALE_CAPTURE_FENCE, capture_fence=server_fence
+        )
     except store.DeletedMeetingError:
         return _integrity_error(F.FAIL_DELETION_IN_PROGRESS)
     except Exception as exc:

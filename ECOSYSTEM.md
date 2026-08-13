@@ -105,9 +105,20 @@ The contract, all under Firebase-ID-token auth (`backend/src/handlers/meetings.p
 pro). It binds ownership to `installation_id`, retains `runtime_instance_id` for
 diagnostics, and returns `capture_run_id`, monotonic `capture_fence`,
 `lease_expires_at`, `protocol_version: 2`, and `max_capture_minutes`. A same-installation
-recovery retains the immutable run identity and increments the fence. A different
+recovery retains the immutable run identity; it retains the fence too when the
+`runtime_instance_id` is unchanged (a resume), and increments it only for a different
+runtime (a genuine second writer). The fence exists to lock out that second writer, and
+advancing it on a resume invalidated audio the desktop had already stamped and could not
+restamp, stranding the capture permanently. A different
 installation receives the existing `meeting_already_claimed` conflict. Stale-fence
-mutations return 409 `stale_capture_fence`.
+mutations return 409 `stale_capture_fence`, and that response body now also carries the
+server's current `capture_fence` so a client can distinguish "behind" (adopt and resume)
+from "forked" (unrecoverable); older clients ignore the additive field.
+
+The desktop separates the fence it ENCRYPTED segments under (part of the local AEAD
+associated data, immutable once any segment exists) from the wire fence it sends. Only
+the wire fence adopts a server advance; changing the encryption fence makes that run's
+own audio undecryptable.
 `PUT /meetings/{id}/capture-runs/{capture_run_id}/segments/{seq}` takes raw
 two-channel 16 kHz FLAC with the V2 integrity headers. It creates only
 `audio/v2/{uid}/{meeting_id}/{capture_run_id}/{seq:06}/{plaintext_sha256}.flac`

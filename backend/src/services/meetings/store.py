@@ -280,13 +280,27 @@ async def claim_meeting(
                         or meeting.get(F.CAPTURE_RUN_ID)
                         or uuid.uuid4().hex
                     )
-                    next_fence = (
-                        max(
-                            int(lock.get(F.CLAIM_CAPTURE_FENCE, 0)),
-                            int(meeting.get(F.CAPTURE_FENCE, 0)),
-                        )
-                        + 1
+                    # The fence exists to lock out a SECOND writer, so only a
+                    # genuinely different runtime advances it. The same runtime
+                    # re-claiming its own live run is a resume, and bumping the
+                    # fence there invalidated audio it had already recorded:
+                    # the desktop stamps segments at capture time and cannot
+                    # restamp them, so every later upload 409'd forever.
+                    current_fence = max(
+                        int(lock.get(F.CLAIM_CAPTURE_FENCE, 0)),
+                        int(meeting.get(F.CAPTURE_FENCE, 0)),
                     )
+                    prior_runtime = str(
+                        lock.get(F.CLAIM_RUNTIME_INSTANCE_ID)
+                        or meeting.get(F.RUNTIME_INSTANCE_ID)
+                        or ""
+                    )
+                    resumed = (
+                        bool(runtime_instance_id)
+                        and prior_runtime == runtime_instance_id
+                        and current_fence >= 1
+                    )
+                    next_fence = current_fence if resumed else current_fence + 1
                     sequence = int(meeting.get(F.AUDIT_SEQUENCE, 0)) + 1
                     txn.update(
                         _meetings_ref(uid).document(locked_meeting_id),
@@ -336,7 +350,7 @@ async def claim_meeting(
                         capture_fence=next_fence,
                         prior_state=F.STATUS_CAPTURING,
                         next_state=F.STATUS_CAPTURING,
-                        reason_code="capture_recovered",
+                        reason_code="capture_resumed" if resumed else "capture_recovered",
                         correlation_id=correlation_id,
                     )
                     return ClaimResult(
@@ -916,13 +930,28 @@ async def verify_v2_completion(
                 )
                 return CompletionResult(conflict_code=F.FAIL_COMPLETION_CONFLICT)
 
+            # Ingest is closed by THIS transaction, not a prior one. A run that is
+            # still ``capturing`` is the normal path; ``finalized`` is accepted so a
+            # run closed by the previous two-transaction implementation can still
+            # complete. Anything else (uploaded without a receipt, split_brain,
+            # deleted) is a genuine integrity conflict.
+            prior_run_state = str(run.get(F.CAPTURE_RUN_STATE, ""))
             code = ""
             if (
-                run.get(F.CAPTURE_RUN_STATE) != F.CAPTURE_RUN_FINALIZED
+                prior_run_state
+                not in (F.CAPTURE_RUN_CAPTURING, F.CAPTURE_RUN_FINALIZED)
                 or segment_count != len(segments)
                 or segment_count != len(segment_snaps)
                 or [segment["seq"] for segment in segments] != list(range(len(segments)))
-                or len(set(segment_digests)) != len(segment_digests)
+                # NOT checked: digest uniqueness. Two segments of pure silence
+                # encode to byte-identical FLAC, so a real meeting with any two
+                # quiet five-minute stretches produced duplicate digests and
+                # could never complete - the audio uploaded fine and the note
+                # never existed. A segment's identity is (seq, digest), never the
+                # digest alone: each seq is bound to its own persisted document
+                # and object path below, and manifest_sha256 covers the whole
+                # ordered list, so duplicate content at distinct sequences is
+                # both legitimate and unambiguous.
                 or segment_digests != [segment["content_sha256"] for segment in segments]
                 or computed_manifest != manifest_sha256
             ):
@@ -950,9 +979,23 @@ async def verify_v2_completion(
                         code = F.FAIL_MANIFEST_INTEGRITY
                         break
                     persisted.append(row)
-            claimed_duration = sum(segment["duration_ms"] for segment in segments)
+            # Compare against the captured SPAN, not the sum of segment
+            # durations. They differ by exactly the silent gaps, and a device
+            # reopen mid-meeting leaves a real one - a 52 second dropout at
+            # capture start made a 30 minute meeting permanently uncompletable
+            # even though every segment was present and verified.
+            #
+            # A gap is a QUALITY signal, and meeting-quality-v1 already scores it
+            # (`unaccounted_gap`). This check exists to catch a client
+            # misreporting its duration, and the span still does that.
+            if segments:
+                span = max(
+                    segment["start_ms"] + segment["duration_ms"] for segment in segments
+                ) - min(segment["start_ms"] for segment in segments)
+            else:
+                span = 0
             tolerance = evidence.duration_tolerance_ms(total_duration_ms)
-            if not code and abs(claimed_duration - total_duration_ms) > tolerance:
+            if not code and abs(span - total_duration_ms) > tolerance:
                 code = F.FAIL_MANIFEST_INTEGRITY
             if code:
                 return CompletionResult(conflict_code=code)
@@ -963,6 +1006,25 @@ async def verify_v2_completion(
                 "accepted_at": now,
             }
             sequence = int(meeting.get(F.AUDIT_SEQUENCE, 0)) + 1
+            if prior_run_state == F.CAPTURE_RUN_CAPTURING:
+                _audit_event(
+                    txn,
+                    uid=uid,
+                    meeting_id=meeting_id,
+                    sequence=sequence,
+                    event_type="capture_finalized",
+                    occurred_at=now,
+                    actor_type="runtime",
+                    actor_identity=runtime_instance_id or "unknown-runtime",
+                    runtime_instance_id=runtime_instance_id,
+                    capture_run_id=capture_run_id,
+                    capture_fence=capture_fence,
+                    prior_state=F.CAPTURE_RUN_CAPTURING,
+                    next_state=F.CAPTURE_RUN_FINALIZED,
+                    reason_code="completion_requested",
+                    correlation_id=correlation_id,
+                )
+                sequence += 1
             txn.update(
                 run_ref,
                 {
@@ -1074,90 +1136,6 @@ async def verify_v2_completion(
     if result.conflict_code == F.FAIL_DELETION_IN_PROGRESS:
         raise DeletedMeetingError
     return result
-
-
-async def finalize_capture_run(
-    uid: str,
-    meeting_id: str,
-    capture_run_id: str,
-    *,
-    capture_fence: int,
-    runtime_instance_id: str,
-    correlation_id: str,
-) -> None:
-    """Durably close ingest before the separate completion verification transaction."""
-    now = datetime.now(UTC).isoformat()
-
-    def _run() -> str:
-        db = admin_firestore()
-        meeting_ref = _meetings_ref(uid).document(meeting_id)
-        run_ref = _capture_run_ref(uid, meeting_id, capture_run_id)
-        transaction = db.transaction()
-
-        @gcloud_firestore.transactional
-        def _execute(txn) -> str:
-            meeting_snap = meeting_ref.get(transaction=txn)
-            run_snap = run_ref.get(transaction=txn)
-            if not meeting_snap.exists or not run_snap.exists:
-                return "unknown_capture_run"
-            meeting = meeting_snap.to_dict() or {}
-            run = run_snap.to_dict() or {}
-            if meeting.get(F.DELETION_STATE):
-                return F.FAIL_DELETION_IN_PROGRESS
-            if (
-                int(meeting.get(F.CAPTURE_FENCE, -1)) != capture_fence
-                or int(run.get(F.CAPTURE_FENCE, -1)) != capture_fence
-            ):
-                return F.FAIL_STALE_CAPTURE_FENCE
-            state = str(run.get(F.CAPTURE_RUN_STATE, ""))
-            if state in (F.CAPTURE_RUN_FINALIZED, F.CAPTURE_RUN_UPLOADED):
-                return ""
-            if state != F.CAPTURE_RUN_CAPTURING:
-                return F.FAIL_MANIFEST_INTEGRITY
-            sequence = int(meeting.get(F.AUDIT_SEQUENCE, 0)) + 1
-            txn.update(
-                run_ref,
-                {
-                    F.CAPTURE_RUN_STATE: F.CAPTURE_RUN_FINALIZED,
-                    "finalized_at": now,
-                    F.UPDATED_AT: now,
-                },
-            )
-            txn.update(
-                meeting_ref,
-                {
-                    F.AUDIT_SEQUENCE: sequence,
-                    F.UPDATED_AT: now,
-                },
-            )
-            _audit_event(
-                txn,
-                uid=uid,
-                meeting_id=meeting_id,
-                sequence=sequence,
-                event_type="capture_finalized",
-                occurred_at=now,
-                actor_type="runtime",
-                actor_identity=runtime_instance_id or "unknown-runtime",
-                runtime_instance_id=runtime_instance_id,
-                capture_run_id=capture_run_id,
-                capture_fence=capture_fence,
-                prior_state=F.CAPTURE_RUN_CAPTURING,
-                next_state=F.CAPTURE_RUN_FINALIZED,
-                reason_code="completion_requested",
-                correlation_id=correlation_id,
-            )
-            return ""
-
-        return _execute(transaction)
-
-    error = await asyncio.to_thread(_run)
-    if error == F.FAIL_STALE_CAPTURE_FENCE:
-        raise StaleCaptureFenceError
-    if error == F.FAIL_DELETION_IN_PROGRESS:
-        raise DeletedMeetingError
-    if error:
-        raise MeetingIntegrityError(error, error.replace("_", " "))
 
 
 async def transition_status(

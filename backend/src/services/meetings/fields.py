@@ -197,6 +197,14 @@ MAX_SEGMENT_START_MS = MAX_CAPTURE_MINUTES * 60_000
 SYNTHESIS_LEASE_MS = 30 * 60_000
 SYNTHESIS_STARTED_AT_MS = "synthesis_started_at_ms"
 
+# How long a meeting may sit in a non-terminal state before reconciliation calls
+# it stalled and stamps FAIL_PROCESSING_TIMEOUT. Deliberately far beyond the
+# worst legitimate path (a 30 minute lease, three job attempts, up to an hour of
+# backoff between them) so this can only ever fire on genuinely stuck work. The
+# rule it enforces: zero rows and healthy must never look identical, and a
+# spinner that renders forever is exactly that failure.
+STALL_DEADLINE_MINUTES = 6 * 60
+
 # --- V2 immutable evidence collections ---------------------------------------
 CAPTURE_RUNS_SUBCOLLECTION = "capture_runs"
 SEGMENTS_SUBCOLLECTION = "segments"

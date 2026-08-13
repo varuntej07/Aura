@@ -486,12 +486,34 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
                     segment["audio_metrics"]["system_vad_speech_ms"]
                 )
                 if not result.utterances and vad_ms >= quality.EMPTY_WITH_SPEECH_MS:
+                    # Worth a second opinion: the two providers disagree often
+                    # enough on hard audio to be worth one extra call.
                     if result.provider == "openai":
                         result = await deepgram.transcribe_segment(audio)
-                    if not result.utterances:
-                        raise deepgram.ProviderEmptyError(
-                            "Providers returned empty output for speech-bearing audio."
-                        )
+                if not result.utterances and vad_ms >= quality.EMPTY_WITH_SPEECH_MS:
+                    # Both providers succeeded and both found no speech. That is
+                    # a legitimate result, not a fault: the VAD is a bare RMS
+                    # energy threshold, so music, a hold tone, a video or room
+                    # noise all register as "speech" here while containing none.
+                    #
+                    # This used to raise and fail the WHOLE meeting. A single
+                    # such segment discarded every other segment's transcript -
+                    # one 60 minute meeting lost 7 successfully transcribed
+                    # segments to 30 seconds of non-speech system audio.
+                    # Publishability is meeting-wide and already belongs to
+                    # meeting-quality-v1, which scores this exact condition
+                    # (`empty_with_speech`) across the whole transcript.
+                    logger.warn(
+                        "meetings.synthesis: no speech recognized in energetic segment",
+                        {
+                            "meeting_id": meeting_id,
+                            "capture_run_id": lease.capture_run_id,
+                            "seq": seq,
+                            "vad_speech_ms": vad_ms,
+                            "provider": result.provider,
+                            "error_code": "segment_empty_with_energy",
+                        },
+                    )
                 first_attempt_id = f"{job_id[:12]}-{lease.job_attempt}-{seq}-{uuid.uuid4().hex[:8]}"
                 first_pointer = await _persist_attempt(
                     lease,
@@ -761,6 +783,33 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
             error_code=getattr(exc, "code", F.FAIL_MANIFEST_INTEGRITY),
             retryable=False,
         )
+        await notifications.notify_settled(uid, meeting_id)
+        return F.STATUS_NEEDS_ATTENTION
+    except Exception as exc:
+        # Anything unclassified - most realistically note generation exhausting
+        # every LLM tier - must still release the 30 minute lease. Without this
+        # the meeting stayed "synthesizing" forever: each Cloud Tasks retry found
+        # the lease still held, and the queue eventually stopped retrying with
+        # nothing recording that it had given up.
+        logger.error(
+            "meetings.synthesis: unclassified v2 failure",
+            {
+                "meeting_id": meeting_id,
+                "job_id": lease.job_id,
+                "job_attempt": lease.job_attempt,
+                "error_code": "synthesis_unclassified_failure",
+                "error": str(exc),
+            },
+        )
+        committed = await store.fail_job(
+            lease,
+            error_code=F.FAIL_INSIGHT_GENERATION_FAILED,
+            retryable=True,
+        )
+        if not committed:
+            raise SynthesisLeaseBusyError("Worker lease was lost during failure commit.") from exc
+        if lease.job_attempt < 3:
+            raise
         await notifications.notify_settled(uid, meeting_id)
         return F.STATUS_NEEDS_ATTENTION
 
