@@ -34,6 +34,19 @@ class ErrorHandler {
     };
   }
 
+  /// Records an uncaught error as FATAL. Used by the top-level zone handler.
+  ///
+  /// Routed through [_withCrashlytics] rather than touching
+  /// `FirebaseCrashlytics.instance` directly: Crashlytics has no Windows/Linux
+  /// plugin and the instance getter throws a synchronous assertion there, which
+  /// would turn the crash reporter into a second crash. See [FirebaseRuntime].
+  static void recordFatal(Object error, StackTrace stack) {
+    if (kDebugMode) return;
+    _withCrashlytics((crashlytics) {
+      crashlytics.recordError(error, stack, fatal: true);
+    });
+  }
+
   static void handle(Object error, [StackTrace? stack]) {
     AppLogger.error(
       'Handled error',
@@ -57,6 +70,23 @@ class ErrorHandler {
   static void setEnvironment(String env) {
     _withCrashlytics((crashlytics) {
       crashlytics.setCustomKey('environment', env);
+    });
+  }
+
+  /// Attaches several searchable keys to every subsequent crash report.
+  ///
+  /// Crashlytics only accepts String/bool/num values, so anything else is
+  /// stringified rather than silently dropped.
+  static void setCustomKeys(Map<String, Object?> keys) {
+    _withCrashlytics((crashlytics) {
+      keys.forEach((key, value) {
+        if (value == null) return;
+        final safeValue =
+            (value is String || value is bool || value is num)
+                ? value
+                : value.toString();
+        crashlytics.setCustomKey(key, safeValue);
+      });
     });
   }
 

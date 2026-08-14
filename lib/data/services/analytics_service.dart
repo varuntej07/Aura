@@ -1,17 +1,22 @@
 import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:flutter/foundation.dart';
 
-import '../../core/config/environment.dart';
 import '../../core/config/firebase_runtime.dart';
 
 /// Thin wrapper around Firebase Analytics.
 ///
 /// All methods are fire-and-forget — call with [unawaited] so analytics never
-/// blocks UI. Silently no-ops in dev mode and when Firebase is not initialised.
+/// blocks UI. Silently no-ops in debug builds and when Firebase is not initialised.
 /// Event schema is intentionally minimal at launch. Could add parameters here when in need of BigQuery
 class AnalyticsService {
   AnalyticsService._();
 
-  static bool get _canLog => FirebaseRuntime.hasApp && !Environment.isDev;
+  /// Gated on the BUILD MODE, not on [Environment]. This previously read
+  /// `!Environment.isDev`, and since `ENV` is a `--dart-define` that no build
+  /// command in this repo actually passes, every shipped Play build resolved to
+  /// `Env.dev` and analytics was silently dead in production. `kDebugMode` is
+  /// compiler truth: it cannot be forgotten at the build command line.
+  static bool get _canLog => FirebaseRuntime.hasApp && !kDebugMode;
 
   /// Events
 

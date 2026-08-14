@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -6,6 +8,7 @@ import 'package:provider/provider.dart';
 import 'core/router/router.dart';
 import 'core/theme/app_theme.dart';
 import 'data/services/posthog_analytics_service.dart';
+import 'data/services/startup_diagnostics_service.dart';
 import 'presentation/viewmodels/auth_viewmodel.dart';
 
 class AuraApp extends StatefulWidget {
@@ -46,6 +49,11 @@ class _AuraAppState extends State<AuraApp> {
     // Defer initialize() to after the first frame so notifyListeners() doesn't
     // fire while the widget tree is still being mounted (setState-during-build).
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // A rendered frame is the only unambiguous proof that this launch worked.
+      // It clears the native boot-stage breadcrumb and resets the consecutive-
+      // failure counter; a launch that never gets here leaves its stage on disk
+      // for the next launch to report. See StartupDiagnosticsService.
+      unawaited(StartupDiagnosticsService.markLaunchSucceeded());
       context.read<AuthViewModel>().initialize();
     });
   }
