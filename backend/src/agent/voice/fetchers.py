@@ -29,13 +29,22 @@ GRAPH_DIGEST_LIMIT = 8
 
 
 async def fetch_user_profile(user_id: str) -> dict[str, str]:
-    """Return {name, timezone} from users/{uid}. Defaults fill missing fields."""
+    """Return {name, timezone, voice_id} from users/{uid}. Defaults fill missing fields.
+
+    voice_id is the raw stored slug, deliberately unvalidated here — this reader
+    stays a dumb projection of the document and voice_catalog.resolve_voice() owns
+    the untrusted-input and entitlement decisions. It rides this existing read
+    rather than a new one: the app writes it into the same `settings` map that
+    already carries wake_word_enabled/tts_enabled.
+    """
     def _read() -> dict[str, str]:
         doc = admin_firestore().collection("users").document(user_id).get()
         data = doc.to_dict() or {}
+        settings = data.get("settings") or {}
         return {
             "name": (data.get("display_name") or data.get("name") or "").strip() or "there",
             "timezone": (data.get("timezone") or "UTC").strip() or "UTC",
+            "voice_id": str(settings.get("tts_voice_id") or "").strip(),
         }
     return await asyncio.to_thread(_read)
 

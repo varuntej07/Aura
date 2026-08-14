@@ -2,9 +2,15 @@ class UserSettings {
   final bool wakeWordEnabled;
   final bool ttsEnabled;
 
+  /// Which voice Buddy speaks in. A slug from `buddy_voices.dart`, read
+  /// server-side by the voice worker's fetch_user_profile. Empty means never
+  /// picked, which resolves to the default rather than to silence.
+  final String ttsVoiceId;
+
   const UserSettings({
     required this.wakeWordEnabled,
     required this.ttsEnabled,
+    this.ttsVoiceId = '',
   });
 
   factory UserSettings.defaults() {
@@ -18,21 +24,25 @@ class UserSettings {
     return UserSettings(
       wakeWordEnabled: json['wake_word_enabled'] as bool? ?? false,
       ttsEnabled: json['tts_enabled'] as bool? ?? true,
+      ttsVoiceId: json['tts_voice_id'] as String? ?? '',
     );
   }
 
   Map<String, dynamic> toJson() => {
         'wake_word_enabled': wakeWordEnabled,
         'tts_enabled': ttsEnabled,
+        'tts_voice_id': ttsVoiceId,
       };
 
   UserSettings copyWith({
     bool? wakeWordEnabled,
     bool? ttsEnabled,
+    String? ttsVoiceId,
   }) {
     return UserSettings(
       wakeWordEnabled: wakeWordEnabled ?? this.wakeWordEnabled,
       ttsEnabled: ttsEnabled ?? this.ttsEnabled,
+      ttsVoiceId: ttsVoiceId ?? this.ttsVoiceId,
     );
   }
 }

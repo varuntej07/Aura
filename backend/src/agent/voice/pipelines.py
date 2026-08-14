@@ -111,26 +111,45 @@ def describe_llm_fallback_legs(adapter: lk_llm.FallbackAdapter) -> list[str]:
     return [f"{instance.provider}:{instance.model}" for instance in adapter._llm_instances]
 
 
-def build_tts_pipeline(sonic3_controls: dict) -> lk_tts.FallbackAdapter:
-    """Cartesia Sonic 3.5 (conditioned) -> Deepgram Aura 2 -> Cartesia Sonic 3.
+def build_tts_pipeline(
+    sonic3_controls: dict, *, cartesia_voice: str, deepgram_model: str
+) -> lk_tts.FallbackAdapter:
+    """Cartesia Sonic 3.5 (conditioned) -> Cartesia Sonic 3 -> Deepgram Aura 2.
 
-    Only the Cartesia primary receives generation_config speed/emotion; the
-    Deepgram and Sonic 3 fallbacks are left unconditioned. `sonic3_controls` is
-    empty for a profile-less user so the primary constructs the exact default voice.
+    Every leg carries the user's chosen voice as far as its provider allows.
+    Both Cartesia legs take the same voice id, so a Sonic 3.5 failure keeps
+    Buddy sounding like himself; only prosody (speed/emotion, `sonic3_controls`)
+    is dropped on the Sonic 3 leg, matching its long-standing unconditioned
+    behaviour. `sonic3_controls` is empty for a profile-less user.
 
-    The Deepgram fallback is wrapped in SpeechMarkupStrippingTTS because the
-    reply stream can carry Cartesia inline markup that Deepgram would otherwise
-    read aloud. The Sonic 3 fallback understands that markup directly.
+    Deepgram cannot express voice, speed, or emotion at all — its plugin takes
+    only a model name — so it sits last and merely keeps Buddy talking through a
+    Cartesia outage in a coarsely gender-matched Aura-2 voice. It is wrapped in
+    SpeechMarkupStrippingTTS because the reply stream can carry Cartesia inline
+    markup it would otherwise read aloud; both Cartesia legs understand it.
+
+    Deepgram used to sit second, so that a Cartesia-wide outage failed over in a
+    single hop. It was moved last when voices became user-selectable: a transient
+    Sonic 3.5 hiccup is far more common than a Cartesia outage, and silently
+    swapping a companion's voice mid-call is worse than one extra fast connection
+    error on the rare outage path (max_retry_per_tts=0 keeps that hop cheap).
     """
     return lk_tts.FallbackAdapter(
         [
             cartesia.TTS(
-                api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3.5", **sonic3_controls
+                api_key=settings.CARTESIA_API_KEY.strip(),
+                model="sonic-3.5",
+                voice=cartesia_voice,
+                **sonic3_controls,
+            ),
+            cartesia.TTS(
+                api_key=settings.CARTESIA_API_KEY.strip(),
+                model="sonic-3",
+                voice=cartesia_voice,
             ),
             SpeechMarkupStrippingTTS(
-                deepgram.TTS(model="aura-2-andromeda-en", api_key=settings.DEEPGRAM_API_KEY.strip())
+                deepgram.TTS(model=deepgram_model, api_key=settings.DEEPGRAM_API_KEY.strip())
             ),
-            cartesia.TTS(api_key=settings.CARTESIA_API_KEY.strip(), model="sonic-3"),
         ],
         max_retry_per_tts=0,
     )

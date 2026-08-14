@@ -314,12 +314,16 @@ def test_pipeline_wraps_only_the_non_cartesia_fallback(monkeypatch):
     monkeypatch.setattr(settings, "CARTESIA_API_KEY", "fake-cartesia-key")
     monkeypatch.setattr(settings, "DEEPGRAM_API_KEY", "fake-deepgram-key")
 
-    adapter = build_tts_pipeline({})
+    adapter = build_tts_pipeline(
+        {}, cartesia_voice="fake-voice-id", deepgram_model="aura-2-andromeda-en"
+    )
     primary, first_fallback, second_fallback = adapter._tts_instances
     # Both Cartesia Sonic legs understand the markup and receive it unstripped.
+    # They now sit adjacent: Deepgram moved to last when voices became
+    # user-selectable, so the first failover keeps the user's chosen voice.
     assert isinstance(primary, cartesia.TTS)
     assert not isinstance(primary, SpeechMarkupStrippingTTS)
-    assert isinstance(first_fallback, SpeechMarkupStrippingTTS)
-    assert isinstance(first_fallback._wrapped_tts, deepgram.TTS)
-    assert isinstance(second_fallback, cartesia.TTS)
-    assert not isinstance(second_fallback, SpeechMarkupStrippingTTS)
+    assert isinstance(first_fallback, cartesia.TTS)
+    assert not isinstance(first_fallback, SpeechMarkupStrippingTTS)
+    assert isinstance(second_fallback, SpeechMarkupStrippingTTS)
+    assert isinstance(second_fallback._wrapped_tts, deepgram.TTS)

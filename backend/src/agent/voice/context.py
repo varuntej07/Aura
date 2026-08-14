@@ -93,7 +93,7 @@ async def gather_session_context(
     # (coroutine, default) pairs — the single source of truth for each fetch's
     # fallback value, used identically on timeout and on per-fetch failure.
     sources: list[tuple[Awaitable[Any], Any]] = [
-        (fetch_user_profile(user_id), {"name": "there", "timezone": "UTC"}),
+        (fetch_user_profile(user_id), {"name": "there", "timezone": "UTC", "voice_id": ""}),
         (fetch_memory_summary(user_id), ""),
         (fetch_last_session_summary(user_id), {"summary": "", "last_session_at": ""}),
         (fetch_archive_context(user_id), {"archive_summary": ""}),

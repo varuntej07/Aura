@@ -78,6 +78,12 @@ from .voice.pipelines import (
     describe_llm_fallback_legs,
 )
 from .voice.recorder import VoiceSessionRecorder
+from .voice.voice_catalog import (
+    REASON_TIER_LOCKED,
+    REASON_UNKNOWN,
+    BuddyVoice,
+    resolve_voice,
+)
 from .voice.revision import worker_revision_fields
 from .voice.screen_context import (
     CLIENT_EVENTS_TOPIC,
@@ -359,6 +365,32 @@ def _build_sonic3_controls(
     return sonic3_controls
 
 
+def _resolve_buddy_voice(
+    *, session_id: str, user_id: str, voice_id: str, user_tier: str
+) -> BuddyVoice:
+    """Resolve the user's stored voice slug, logging every fallback path.
+
+    A rejected slug or a tier-locked voice is logged at warn: the user picked a
+    voice and is not getting it, which must never look identical to a healthy
+    resolve. An unset slug is the normal state for everyone who has not picked
+    and stays at info.
+    """
+    voice, reason = resolve_voice(voice_id, user_tier)
+    fields = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "requested": voice_id,
+        "resolved": voice.slug,
+        "user_tier": user_tier,
+        "reason": reason,
+    }
+    if reason in (REASON_UNKNOWN, REASON_TIER_LOCKED):
+        logger.warn("VoiceSession: voice pick not honored, using default", fields)
+    else:
+        logger.info("VoiceSession: voice resolved", fields)
+    return voice
+
+
 async def entrypoint(ctx: JobContext) -> None:
     worker_started_mono = time.monotonic()
     logger.info("VoiceAgent: job dispatched", {"room": ctx.room.name})
@@ -524,6 +556,12 @@ async def entrypoint(ctx: JobContext) -> None:
             dominant_tone=session_context.dominant_tone,
             dominant_emotion=session_context.dominant_emotion,
         )
+        buddy_voice = _resolve_buddy_voice(
+            session_id=session_id,
+            user_id=user_id,
+            voice_id=session_context.profile.get("voice_id", ""),
+            user_tier=session_context.user_tier,
+        )
 
         stt_pipeline = build_stt_pipeline()
         llm_pipeline = build_llm_pipeline(user_id)
@@ -532,7 +570,11 @@ async def entrypoint(ctx: JobContext) -> None:
             fallback_legs=describe_llm_fallback_legs(llm_pipeline),
             openai_api_key_present=bool(settings.OPENAI_API_KEY),
         )
-        tts_pipeline = build_tts_pipeline(sonic3_controls)
+        tts_pipeline = build_tts_pipeline(
+            sonic3_controls,
+            cartesia_voice=buddy_voice.cartesia_voice_id,
+            deepgram_model=buddy_voice.deepgram_model,
+        )
         mcp_server = build_mcp_server(firebase_id_token, session_id)
 
         # Built inside the entrypoint (not prewarm): the detector binds to the
