@@ -43,6 +43,7 @@ dependencies:
   package_info_plus: 9.0.1  # runtime app version/build for feedback docs
   device_info_plus: 12.3.0  # sign-in device metadata; must match the release-build pin in dependency_overrides below
   app_links:  # aura://voice deep link (Voice Launcher: Siri / widgets / external links)
+  just_audio:  # voice-picker previews only; live call audio is livekit_client's
 
 dev_dependencies:
   flutter_test:
@@ -99,6 +100,9 @@ flutter:
     # Placeholder: using built-in keyword until custom model is added.
     - assets/wake_word/
     - assets/icons/
+    # Voice-picker previews, one MP3 per voice_catalog.CATALOG entry.
+    # Regenerate with: cd backend && python -m src.agent.generate_voice_previews
+    - assets/voices/
 
   fonts:
     - family: Outfit
