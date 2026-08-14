@@ -513,6 +513,29 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "start_research",
+        "description": (
+            "Start a durable background research run when the user explicitly asks for researched, "
+            "sourced, or comprehensive work. If an essential ambiguity would materially change the "
+            "research, use ask_clarification before calling this tool. Once called, research starts "
+            "automatically and continues in the background; tell the user they can walk away and "
+            "will be notified when the sourced brief is ready. Do not ask for confirmation after "
+            "calling this tool and do not claim findings yet."
+        ),
+        "strict": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "The user's complete research request.",
+                },
+                "depth": {"type": "string", "enum": ["quick"], "default": "quick"},
+            },
+            "required": ["request", "depth"],
+        },
+    },
+    {
         "name": "track_topic",
         "description": (
             "Subscribe the user to ONGOING live updates about an event, topic, or any "

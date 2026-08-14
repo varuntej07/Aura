@@ -90,10 +90,13 @@ class Settings(BaseSettings):
     ANTHROPIC_CHAT_MODEL_FALLBACK: str = "claude-haiku-4-5-20251001"
     ANTHROPIC_VOICE_MODEL: str = "claude-haiku-4-5"
     ANTHROPIC_MAX_TOKENS: int = 8096
+    ANTHROPIC_CHAT_EFFORT: str = "medium"
+    ANTHROPIC_MAX_TOKENS_THINKING: int = 12_000
 
     # OpenAI (primary voice LLM; Anthropic Haiku is the fallback)
     OPENAI_API_KEY: str = ""
     OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
+    OPENAI_TEXT_CHAT_MODEL: str = "gpt-5.6-luna"
 
     # OpenAI Realtime bridge: the instant speech-to-speech leg the desktop opens
     # while the LiveKit cascade worker cold-starts. The desktop connects direct to
@@ -108,6 +111,10 @@ class Settings(BaseSettings):
     # back to the plain (cold) LiveKit path.
     REALTIME_BRIDGE_ENABLED: bool = False
 
+    # Short-lived Deepgram credentials for Aura Desktop dictation.
+    DEEPGRAM_DICTATION_API_KEY: str = ""
+    DEEPGRAM_STT_TOKEN_TTL_S: int = 300
+
     # Google Calendar (optional)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
@@ -119,6 +126,47 @@ class Settings(BaseSettings):
 
     # Brave Search API (real-time chat + voice web_surf tool)
     BRAVE_API_KEY: str = ""
+
+    # Firecrawl — the research agent's PageReader. Brave discovers URLs, Firecrawl
+    # returns the page body. Injected in production from Secret Manager by deploy.sh
+    # (juno-firecrawl-api-key). Empty default keeps local import and dev working; the
+    # reader fails typed rather than crashing when the key is absent.
+    FIRECRAWL_API_KEY: str = ""
+    # NOTE: despite the name this is the FULL scrape endpoint, not a base. The reader
+    # POSTs this value directly (firecrawl_reader.py) rather than joining a path onto
+    # it, so pointing at a different API version is a settings change, not a code one.
+    FIRECRAWL_BASE_URL: str = "https://api.firecrawl.dev/v2/scrape"
+    # Per-read HTTP timeout. Bounded at 30s so a cancelled run's in-flight child
+    # finishes its current call quickly and the completion txn sees the cancellation.
+    # The reader keeps Firecrawl's own page-load budget under this by a 5s margin, so
+    # the provider answers with a classifiable 408 instead of us timing out blind.
+    FIRECRAWL_TIMEOUT_S: float = 30.0
+    # Bounds markdown held in the stage process's memory. Page bodies are never
+    # persisted (only content_sha256 and char_count survive), so this caps memory,
+    # not storage.
+    FIRECRAWL_MAX_CHARS: int = 120_000
+    # Concurrent reads within one extraction stage. acquire.py clamps this to its own
+    # hard ceiling, so raising it past that has no effect.
+    FIRECRAWL_CONCURRENCY: int = 3
+
+    # Project-wide daily ceiling on research provider spend, reserved before any
+    # billable call and enforced fail-closed. Setting this to 0 stops research
+    # admission entirely: it is the full-stop spend control, deliberately spelled as a
+    # budget value rather than RESEARCH_ENABLED because the backend forbids feature
+    # flags. Cloud billing budgets are the independent outer boundary, since this
+    # in-process cap only knows about spend the engine itself reserved.
+    PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD: int = 0
+
+    # Research runs on its OWN Cloud Tasks queue, not juno-engagement. The shared queue
+    # runs at 500 dispatches/s with maxAttempts 100; inheriting 100 retries on stages
+    # that each spend Brave queries, Firecrawl credits and model tokens is the failure
+    # this separation exists to prevent. juno-research is 10/s, 20 concurrent, and
+    # maxAttempts 3 to match store.STAGE_ATTEMPT_CAP.
+    CLOUD_TASKS_RESEARCH_QUEUE: str = "juno-research"
+    # Set EXPLICITLY per task. No other caller in this repo sets dispatch_deadline, so
+    # everything else rides the 10-minute HTTP default. 600s sits comfortably above the
+    # 150s quick stage bound and under Cloud Run's 3600s.
+    RESEARCH_TASK_DISPATCH_DEADLINE_S: int = 600
 
     # newsdata.io — free-tier general-news source for the content pool. Gives
     # DIRECT publisher URLs (unlike Google News RSS redirect wrappers), so the
@@ -404,15 +452,6 @@ class Settings(BaseSettings):
     # ships with Aura-Web (deep link back into the app + a plain fallback line).
     DODO_CHECKOUT_RETURN_URL: str = "https://auravoiceapp.com/checkout/success"
 
-    # In-app purchase steering, served to clients inside GET /entitlement so
-    # store-policy reactions are Cloud Run env flips, never app releases.
-    # LINK_OUT = the paywall may link to web checkout. SILENT = plan status only,
-    # no purchase mention (the always-legal Netflix model). US storefronts allow
-    # link-outs post-Epic; rest of world keeps the old anti-steering rules.
-    STEERING_ANDROID_US: str = "LINK_OUT"
-    STEERING_IOS_US: str = "LINK_OUT"
-    STEERING_ROW: str = "SILENT"
-
     @property
     def dodo_configured(self) -> bool:
         """True when checkout can be created: API key plus all four product IDs."""
@@ -440,28 +479,6 @@ class Settings(BaseSettings):
             ("pro", "yearly"): self.DODO_PRODUCT_PRO_YEARLY,
         }
 
-    @property
-    def steering_config(self) -> dict[str, str]:
-        """Validated steering block for the /entitlement response.
-
-        Checkout stays silent until both checkout creation and signed webhook
-        processing are configured. This prevents a user from reaching Dodo
-        before the backend can apply the resulting entitlement. An invalid env
-        value also falls back to SILENT rather than reaching the client.
-        """
-        if not (self.dodo_configured and self.dodo_webhook_configured):
-            return {"android_us": "SILENT", "ios_us": "SILENT", "row": "SILENT"}
-
-        config: dict[str, str] = {}
-        for key, raw in (
-            ("android_us", self.STEERING_ANDROID_US),
-            ("ios_us", self.STEERING_IOS_US),
-            ("row", self.STEERING_ROW),
-        ):
-            value = raw.strip().upper()
-            config[key] = value if value in ("LINK_OUT", "SILENT") else "SILENT"
-        return config
-
     # PostHog product analytics — server-side capture for the notification
     # re-engagement funnel. Reuses the same public project key the Flutter app
     # embeds (AndroidManifest / Info.plist). Left blank in dev so nothing is
@@ -477,6 +494,16 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: str = ""
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_HOST: str = "https://us.cloud.langfuse.com"
+
+    # Arize AX OpenTelemetry tracing. Both credentials unset keeps tracing off.
+    ARIZE_API_KEY: str = ""
+    ARIZE_SPACE_ID: str = ""
+    ARIZE_PROJECT_NAME: str = "aura"
+    ARIZE_COLLECTOR_ENDPOINT: str = "https://otlp.arize.com/v1"
+
+    # Backend Sentry. Blank in development; when configured, Meeting Recording
+    # V2 sends metadata-only operational failures with opaque correlation tags.
+    SENTRY_DSN: str = ""
 
     # Telegram bot for the founder feedback ping (Buddy's report_feedback tool, always on for every
     # user). Both unset -> the alert is a silent no-op, but the Firestore observed_feedback record is
@@ -668,6 +695,10 @@ class Settings(BaseSettings):
     @property
     def langfuse_configured(self) -> bool:
         return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
+
+    @property
+    def arize_configured(self) -> bool:
+        return bool(self.ARIZE_API_KEY and self.ARIZE_SPACE_ID and self.ARIZE_PROJECT_NAME)
 
     @property
     def telegram_feedback_configured(self) -> bool:

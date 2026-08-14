@@ -22,6 +22,7 @@ from .proposal import (
     SOURCE_ICEBREAKER,
     SOURCE_MEMORY_GRAPH,
     SOURCE_REENGAGE,
+    SOURCE_RESEARCH,
     SOURCE_THREAD,
     NotificationProposal,
 )
@@ -64,6 +65,12 @@ NOTIFICATION_TYPES = frozenset({
     "meeting_upload_pending",
     "update_ready",
     "auth_required",
+    # Research run outcomes. An UNKNOWN type degrades to "generic" on the way out, so an
+    # older desktop build still receives something openable rather than nothing.
+    "research_ready",
+    "research_partial",
+    "research_needs_input",
+    "research_failed",
     "generic",
 })
 SEVERITIES = frozenset({"info", "success", "warning", "error"})
@@ -72,8 +79,15 @@ ACTIONS = frozenset({
     "open_notifications",
     "view_meeting",
     "retry_meeting_upload",
+    # Unlike an unknown notification_type, an unknown ACTION raises ValueError in
+    # build_document. These two must therefore exist here before anything can emit them.
+    "view_research",
+    "answer_research_question",
 })
 SENSITIVE_SOURCES = frozenset({
+    # Research covers clinical, financial and legal questions by policy design, so the
+    # SUBJECT of a run is sensitive even though the notification carries no findings.
+    SOURCE_RESEARCH,
     SOURCE_FOLLOWUP,
     SOURCE_ICEBREAKER,
     SOURCE_MEMORY_GRAPH,

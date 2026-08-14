@@ -24,11 +24,17 @@ _REQUEST_TIMEOUT_S = 7.0  # real-time path: chat + voice (user is waiting)
 
 _BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 _RESULT_COUNT = 5  # "random recent news", not exhaustive research
+# Brave's own ceiling for the web-search `count` param. A caller that needs a wider
+# discovery wave (research) passes count explicitly; chat and voice never do.
+_RESULT_COUNT_MAX = 20
 _CACHE_TTL_S = 300.0  # 5 minutes
 _CACHE_MAX_ENTRIES = 256
 
-# Brave's freshness filter. 'fresh' -> last 24h; 'any' omits the param entirely.
-_FRESHNESS_BY_RECENCY = {"fresh": "pd"}
+# Brave's freshness filter; 'any' omits the param entirely. 'fresh' (last 24h) is the
+# only value the chat/voice web_surf schema offers, so widening this set is additive:
+# the wider windows exist for callers that pass them explicitly.
+_FRESHNESS_BY_RECENCY = {"fresh": "pd", "past_week": "pw", "past_month": "pm", "past_year": "py"}
+_RECENCY_VALUES = frozenset({"any", *_FRESHNESS_BY_RECENCY})
 
 _HTML_TAG = re.compile(r"<[^>]+>")
 
@@ -36,29 +42,45 @@ _PROMPT_INJECTION_PATTERN = re.compile(
     r"(?im)^\s*(ignore (all )?previous|system:|<\|.*\|>).*$"
 )
 
-# Module-level in-process cache: {(uid, normalized_query, recency): (expires_at_monotonic, result_dict)}.
-_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+# Module-level in-process cache:
+# {(uid, normalized_query, recency, count): (expires_at_monotonic, result_dict)}.
+_cache: dict[tuple[str, str, str, int], tuple[float, dict[str, Any]]] = {}
 
 
 def _normalize_query(query: str) -> str:
     return " ".join(query.lower().strip().split())
 
 
-def _cache_key(query: str, uid: str, recency: str) -> tuple[str, str, str]:
+def clamp_recency(recency: str) -> str:
+    """The ONE recency clamp. Anything unsupported falls back to 'any'.
+
+    Both the cache key and the outbound request go through this, so the entry a call
+    reads can never describe a different freshness window than the one it asked for.
+    """
+    return recency if recency in _RECENCY_VALUES else "any"
+
+
+def clamp_count(count: int) -> int:
+    """The ONE result-count clamp, bounded by Brave's own ceiling."""
+    return max(1, min(int(count), _RESULT_COUNT_MAX))
+
+
+def _cache_key(query: str, uid: str, recency: str, count: int) -> tuple[str, str, str, int]:
     """The cache key shared by brave_search and peek_cache so they can never drift.
 
-    Clamps recency to the supported set and normalizes the query identically, so a
-    peek_cache hit is guaranteed to hit the same entry brave_search would.
+    Clamps recency and count to the supported sets and normalizes the query
+    identically, so a peek_cache hit is guaranteed to hit the same entry brave_search
+    would. count is part of the key because a 5-result entry cannot answer a
+    15-result request.
     """
-    recency = recency if recency in {"any", "fresh"} else "any"
-    return (uid, _normalize_query(query), recency)
+    return (uid, _normalize_query(query), clamp_recency(recency), clamp_count(count))
 
 
 def _strip_prompt_injection(text: str) -> str:
     return _PROMPT_INJECTION_PATTERN.sub("", text).strip()
 
 
-def _cache_get(key: tuple[str, str, str]) -> dict[str, Any] | None:
+def _cache_get(key: tuple[str, str, str, int]) -> dict[str, Any] | None:
     entry = _cache.get(key)
     if not entry:
         return None
@@ -69,23 +91,25 @@ def _cache_get(key: tuple[str, str, str]) -> dict[str, Any] | None:
     return value
 
 
-def _cache_put(key: tuple[str, str, str], value: dict[str, Any]) -> None:
+def _cache_put(key: tuple[str, str, str, int], value: dict[str, Any]) -> None:
     if len(_cache) >= _CACHE_MAX_ENTRIES:
         oldest_key = min(_cache, key=lambda k: _cache[k][0])
         _cache.pop(oldest_key, None)
     _cache[key] = (time.monotonic() + _CACHE_TTL_S, value)
 
 
-def peek_cache(query: str, *, uid: str, recency: str = "any") -> dict[str, Any] | None:
+def peek_cache(
+    query: str, *, uid: str, recency: str = "any", count: int = _RESULT_COUNT
+) -> dict[str, Any] | None:
     """Read-only cache probe used by callers that meter usage (web_surf entitlement).
 
     Returns the cached result (with cached=True) when this query is already in the
     in-process cache, else None. Performs NO network call and never records usage, so a
     free-tier caller can serve a repeat query without burning a daily search. Mirrors the
-    exact cache key brave_search builds (same query normalization + recency clamp) so a
-    peek hit guarantees brave_search would also hit.
+    exact cache key brave_search builds (same query normalization + recency and count
+    clamps) so a peek hit guarantees brave_search would also hit.
     """
-    cached = _cache_get(_cache_key(query, uid, recency))
+    cached = _cache_get(_cache_key(query, uid, recency, count))
     if cached is not None:
         return {**cached, "cached": True}
     return None
@@ -137,13 +161,21 @@ async def brave_search(
     *,
     uid: str,
     recency: str = "any",
+    count: int = _RESULT_COUNT,
     timeout_s: float = _REQUEST_TIMEOUT_S,
     feature: str = "web_surf",
 ) -> dict[str, Any]:
     """Raw web search via Brave. Returns {text, sources, query, cached}.
 
-    recency: 'fresh' restricts to the last 24h (Brave freshness=pd). 'any' (default)
-             searches without a date filter.
+    recency: 'fresh' restricts to the last 24h (Brave freshness=pd). 'past_week',
+             'past_month' and 'past_year' widen that window (pw/pm/py). 'any'
+             (default) searches without a date filter. Chat and voice only ever pass
+             'any' or 'fresh': their tool schema offers no other value.
+
+    count:   results requested from Brave, clamped to [1, 20]. Defaults to the
+             5-snippet chat behavior; a caller that needs a wider discovery wave
+             (research) passes it explicitly. It is part of the cache key, because a
+             5-result entry cannot answer a 15-result request.
 
     Network/timeout/non-200 failures degrade to an empty result rather than raising, so a
     flaky search never breaks the chat or voice turn. A missing API key raises, because that
@@ -155,9 +187,12 @@ async def brave_search(
     if not settings.BRAVE_API_KEY:
         raise ValueError("BRAVE_API_KEY not configured — web search unavailable")
 
-    recency = recency if recency in {"any", "fresh"} else "any"
+    # Same two helpers _cache_key uses, so the entry read can never describe a
+    # different freshness window or result count than the request that follows.
+    recency = clamp_recency(recency)
+    count = clamp_count(count)
 
-    cache_key = _cache_key(query, uid, recency)
+    cache_key = _cache_key(query, uid, recency, count)
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info("brave_search cache hit", {
@@ -174,7 +209,7 @@ async def brave_search(
         )
         return {**cached, "cached": True}
 
-    params: dict[str, Any] = {"q": query, "count": _RESULT_COUNT, "extra_snippets": "true"}
+    params: dict[str, Any] = {"q": query, "count": count, "extra_snippets": "true"}
     freshness = _FRESHNESS_BY_RECENCY.get(recency)
     if freshness:
         params["freshness"] = freshness

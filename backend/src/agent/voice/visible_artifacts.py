@@ -12,11 +12,16 @@ richer renderer. These artifacts are never persisted or executed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
+from typing import TYPE_CHECKING
 
 from livekit.agents import get_job_context
+
+if TYPE_CHECKING:
+    from .artifact_delivery import ArtifactDeliveryTracker
 
 from ...lib.logger import logger
 from .artifact_contract import artifact_ready_event, new_request_id
@@ -32,6 +37,7 @@ CODE_ARTIFACT_KINDS: frozenset[str] = frozenset({"command", "code", "config"})
 MAX_EVENT_UTF8_BYTES = 14 * 1024
 MAX_TITLE_CHARS = 80
 MAX_LANGUAGE_CHARS = 32
+PUBLISH_TIMEOUT_S = 1.5
 _LANGUAGE = re.compile(r"^[A-Za-z0-9_+.-]+$")
 
 SPOKEN_ARTIFACT_READY = "Done, it's on your screen."
@@ -82,8 +88,14 @@ async def present_visible_artifact(
     title: str,
     content: str,
     language: str = "",
+    delivery: "ArtifactDeliveryTracker | None" = None,
 ) -> str:
-    """Validate and publish one visible artifact. Never raises."""
+    """Validate and publish one visible artifact. Never raises.
+
+    With a capable ``delivery`` tracker the returned line reflects what the
+    client confirmed drawing rather than what the worker managed to send.
+    Legacy clients omit the capability and retain optimistic delivery.
+    """
     event, reason = build_visible_artifact_event(
         kind=kind, title=title, content=content, language=language
     )
@@ -100,21 +112,53 @@ async def present_visible_artifact(
         )
         return SPOKEN_ARTIFACT_TOO_LARGE if reason == "too_large" else SPOKEN_ARTIFACT_INVALID
 
+    data = json.dumps(event, ensure_ascii=False).encode("utf-8")
+    artifact = event["payload"]["artifact"]
+
+    async def _publish() -> bool:
+        try:
+            room = get_job_context().room
+            await asyncio.wait_for(
+                room.local_participant.publish_data(data, reliable=True),
+                timeout=PUBLISH_TIMEOUT_S,
+            )
+            return True
+        except Exception as exc:
+            logger.warn(
+                "visible_artifact: publish failed",
+                {
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "kind": event["payload"]["artifact_kind"],
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return False
+
+    key = (
+        delivery.expect(artifact["id"], artifact["revision"])
+        if delivery is not None
+        else None
+    )
     try:
-        data = json.dumps(event, ensure_ascii=False).encode("utf-8")
-        room = get_job_context().room
-        await room.local_participant.publish_data(data, reliable=True)
-    except Exception as exc:
-        logger.warn(
-            "visible_artifact: publish failed",
-            {
-                "user_id": user_id,
-                "session_id": session_id,
-                "kind": event["payload"]["artifact_kind"],
-                "error_type": type(exc).__name__,
-            },
-        )
-        return SPOKEN_ARTIFACT_DELIVERY_FAILED
+        if not await _publish():
+            return SPOKEN_ARTIFACT_DELIVERY_FAILED
+        confirmed = True
+        if delivery is not None and key is not None:
+            if delivery.ack_required:
+                # Capable builds prove the first card too. Silence is evidence.
+                confirmed = await delivery.wait(key)
+                if not confirmed and await _publish():
+                    # Same id and revision, so a card that did render is deduped
+                    # by the client rather than drawn twice.
+                    confirmed = await delivery.wait(key)
+            else:
+                # Legacy clients omitted the capability and retain the shipped
+                # optimistic behavior. A late valid ack promotes the session.
+                confirmed = True
+    finally:
+        if delivery is not None and key is not None:
+            delivery.release(key)
 
     logger.info(
         "visible_artifact: published",
@@ -125,6 +169,9 @@ async def present_visible_artifact(
             "kind": event["payload"]["artifact_kind"],
             "content_chars": len(event["payload"]["text"]),
             "event_bytes": len(data),
+            "delivery_confirmed": confirmed,
+            "ack_required": delivery.ack_required if delivery is not None else None,
+            "client_proven": delivery.client_proven if delivery is not None else None,
         },
     )
-    return SPOKEN_ARTIFACT_READY
+    return SPOKEN_ARTIFACT_READY if confirmed else SPOKEN_ARTIFACT_DELIVERY_FAILED

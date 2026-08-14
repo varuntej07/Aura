@@ -422,6 +422,21 @@ async def web_surf(query: str, recency: str = "any") -> dict[str, Any]:
 # User context ------------------------------------------------------------
 
 @mcp_server.tool()
+async def start_research(request: str, depth: str = "quick") -> dict[str, Any]:
+    """Start a durable background research run and return before findings exist."""
+    result = await _run_tool("start_research", {"request": request, "depth": depth})
+    return _with_action_truth(
+        result,
+        success_say=(
+            "I started the research. You can keep working, and I'll notify you when "
+            "the sourced brief is ready."
+        ),
+    )
+
+
+# User context ------------------------------------------------------------
+
+@mcp_server.tool()
 async def get_user_context(
     include_memories: bool = True,
     include_reminders: bool = True,

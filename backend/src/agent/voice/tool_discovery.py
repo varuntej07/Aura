@@ -356,6 +356,7 @@ class EligibilityContext:
     fresh_frame_available: bool
     enabled_feature_rollouts: frozenset[str]
     authorization_state: IntentAuthorizationState
+    required_tools: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,6 +517,31 @@ class ToolCatalog:
                 control=control,
                 reason_codes=eligibility_reasons + ("no_eligible_tools",),
                 scores=(),
+            )
+        if effective_eligibility.required_tools:
+            eligible_by_name = {entry.name: entry for entry in eligible}
+            required_names = tuple(sorted(effective_eligibility.required_tools))
+            if any(name not in eligible_by_name for name in required_names):
+                return ToolSelection(
+                    tool_names=(),
+                    primary_tool=None,
+                    active_capability=None,
+                    fingerprint=self.selection_fingerprint(()),
+                    control=control,
+                    reason_codes=eligibility_reasons
+                    + ("required_tool_ineligible",),
+                    scores=(),
+                )
+            primary = eligible_by_name[required_names[0]]
+            return ToolSelection(
+                tool_names=required_names,
+                primary_tool=primary.name,
+                active_capability=primary.metadata.capability,
+                fingerprint=self.selection_fingerprint(required_names),
+                control=control,
+                reason_codes=eligibility_reasons
+                + ("required_tool_bundle",),
+                scores=tuple((name, 1.0) for name in required_names),
             )
 
         query = _selection_query(selection, active_intent, control)

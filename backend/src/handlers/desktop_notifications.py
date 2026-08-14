@@ -66,8 +66,14 @@ async def handle_update_preferences(request: Request) -> JSONResponse:
     fields = ("enabled", "committed_enabled", "proactive_enabled", "account_enabled")
     if not isinstance(body, dict) or any(not isinstance(body.get(key), bool) for key in fields):
         return JSONResponse({"error": "All preference fields must be booleans."}, status_code=400)
+    actions = body.get("supported_actions", [])
+    if not isinstance(actions, list) or any(not isinstance(item, str) for item in actions):
+        return JSONResponse({"error": "supported_actions must be strings."}, status_code=400)
     preferences = desktop_preferences.DesktopPreferences(
-        **{key: body[key] for key in fields}
+        **{key: body[key] for key in fields},
+        notification_contract_version=max(0, int(body.get("notification_contract_version", 0))),
+        research_ui_version=max(0, int(body.get("research_ui_version", 0))),
+        supported_actions=tuple(actions[:20]),
     )
     try:
         await desktop_preferences.update(user_id, preferences)

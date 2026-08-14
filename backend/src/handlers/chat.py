@@ -473,8 +473,6 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         )
 
     surface = str(body.get("surface") or "app")
-    surface_allowed_tools = resolve_chat_surface_allowed_tools(surface)
-    surface_tool_exclusions = excluded_tools_for_chat_surface(surface)
     # Which SSE frame types this client can parse. Absent means 1, which is every
     # build shipped before per-tool activity frames existed. A client that cannot
     # parse a frame renders it as a visible error, so new frame types are opt-in
@@ -483,6 +481,12 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         contract_version = int(body.get("contract_version") or 1)
     except (TypeError, ValueError):
         contract_version = 1
+    surface_allowed_tools = resolve_chat_surface_allowed_tools(
+        surface, contract_version=contract_version
+    )
+    surface_tool_exclusions = excluded_tools_for_chat_surface(
+        surface, contract_version=contract_version
+    )
 
     user_id = _resolve_user_id(event, body)
     if not user_id:

@@ -67,11 +67,6 @@ class SignalStoreState:
     # history. Without this flag, "empty" and "not yet backfilled" look identical.
     recent_sends_backfilled: bool = False
 
-    def is_empty(self) -> bool:
-        """True when no real signal has been recorded yet."""
-        return not self.bootstrap_done and self.last_updated is None
-
-
 def _state_doc_ref(user_id: str):
     return (
         admin_firestore()

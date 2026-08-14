@@ -38,6 +38,7 @@ SOURCE_WELCOME = "welcome"  # one-time day-0 welcome, fired once off first devic
 SOURCE_BILLING = "billing"  # entitlement-updated sync push after a payment webhook write
 SOURCE_MEETING = "meeting"  # durable desktop lifecycle updates for captured meetings
 SOURCE_MEMORY_GRAPH = "memory_graph"  # inferred graph sources A/B, gated by NOTIF_GRAPH
+SOURCE_RESEARCH = "research"  # a background research run the user started has finished
 
 ALL_SOURCES = (
     SOURCE_REMINDER,
@@ -55,6 +56,7 @@ ALL_SOURCES = (
     SOURCE_WELCOME,
     SOURCE_BILLING,
     SOURCE_MEETING,
+    SOURCE_RESEARCH,
     SOURCE_MEMORY_GRAPH,
 )
 
@@ -104,6 +106,10 @@ PRIORITY: dict[str, int] = {
     # sits right under their awaited chat reply, above calendar.
     SOURCE_BILLING: 92,
     SOURCE_MEETING: 97,
+    # The answer to a question the user explicitly asked and then walked away from.
+    # Ranks under the awaited chat reply (94) and the billing sync (92), above calendar
+    # (90): the user wants it, but they already accepted that it takes minutes.
+    SOURCE_RESEARCH: 91,
     SOURCE_CALENDAR: 90,
     # Trial ending/ended is important account info the user must see, akin to the
     # security alert above. COMMITTED, so it sends inline and bypasses arbitration;
@@ -154,6 +160,9 @@ FRESHNESS_MAX_AGE: dict[str, timedelta | None] = {
     SOURCE_WELCOME: None,     # a scripted greeting; not content, never stale
     SOURCE_BILLING: None,     # a plan-state sync nudge; not content, never stale
     SOURCE_MEETING: None,     # lifecycle state, not time-sensitive content
+    # The answer to the user's OWN question never goes stale. A run that took the slow
+    # path and finished late is still exactly what they asked for.
+    SOURCE_RESEARCH: None,
     SOURCE_MEMORY_GRAPH: None,
 }
 

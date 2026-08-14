@@ -20,6 +20,9 @@ class DesktopPreferences:
     committed_enabled: bool = True
     proactive_enabled: bool = True
     account_enabled: bool = True
+    notification_contract_version: int = 0
+    research_ui_version: int = 0
+    supported_actions: tuple[str, ...] = ()
 
 
 _cache: dict[str, tuple[datetime, DesktopPreferences]] = {}
@@ -41,6 +44,11 @@ def _from_doc(data: dict) -> DesktopPreferences:
         committed_enabled=data.get("committed_enabled") is not False,
         proactive_enabled=data.get("proactive_enabled") is not False,
         account_enabled=data.get("account_enabled") is not False,
+        notification_contract_version=max(0, int(data.get("notification_contract_version", 0))),
+        research_ui_version=max(0, int(data.get("research_ui_version", 0))),
+        supported_actions=tuple(
+            str(item) for item in (data.get("supported_actions") or []) if isinstance(item, str)
+        ),
     )
 
 

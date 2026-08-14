@@ -263,7 +263,7 @@ async def handle_mint_stt_token(request: Request) -> JSONResponse:
     uid = resolve_user_id_from_request(request)
     if not uid:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if not settings.DICTATION_CLOUD_ENABLED or not settings.DEEPGRAM_DICTATION_API_KEY:
+    if not settings.DEEPGRAM_DICTATION_API_KEY:
         return JSONResponse({"error": "Dictation is unavailable."}, status_code=503)
 
     import httpx
