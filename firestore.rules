@@ -80,6 +80,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Startup-failure forensics, written ONLY by juno-backend via the Admin SDK
+    // from POST /diagnostics/startup. The client that produces these reports is
+    // an unauthenticated raw-HTTP beacon that never touches Firestore, so a
+    // client has no reason to read or write here and must not be able to.
+    match /startup_diagnostics/{reportId} {
+      allow read, write: if false;
+    }
+
     // Default deny — every collection not matched above is backend-only. The
     // Admin SDK bypasses these rules, so the backend keeps full access.
     match /{document=**} {

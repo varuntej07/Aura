@@ -1,12 +1,15 @@
 """Country resolution from trusted edge headers.
 
-The mobile paywall must not decide purchase-link visibility from the device
-locale (user-configurable, unrelated to any storefront), so GET /entitlement
-serves a server-resolved country instead. Bare Cloud Run sets none of these
-headers, in which case this returns None and clients stay in their always-legal
-silent mode. Behind Google Cloud Load Balancer, add a custom request header
-X-Client-Geo-Country: {client_region} and real values flow with zero code
-change here.
+Served on GET /entitlement for observability: where the users actually are. It
+decides nothing. It used to gate paywall purchase-link visibility per storefront,
+and that mechanism is gone — Aura sells through web checkout in every country, so
+no caller may reintroduce a purchase decision here.
+
+Bare Cloud Run sets none of these headers, so this returns None in normal
+production today. Behind Google Cloud Load Balancer, add a custom request header
+X-Client-Geo-Country: {client_region} and real values flow with zero code change
+here. The device locale is deliberately never consulted: it is user-configurable
+and says nothing about where the request came from.
 """
 
 from __future__ import annotations

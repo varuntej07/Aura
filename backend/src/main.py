@@ -18,6 +18,7 @@ import json
 import re
 import time
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -91,6 +92,7 @@ from .handlers.desktop_notifications import (
 from .handlers.desktop_profile import handle_desktop_profile
 from .handlers.guide_usage import handle_guide_usage
 from .handlers.devices import register_device
+from .handlers.diagnostics import handle_startup_diagnostics
 from .handlers.dictation import (
     handle_delete_trace as handle_dictation_delete_trace,
     handle_get_quota as handle_dictation_get_quota,
@@ -143,6 +145,14 @@ from .handlers.memories import (
 )
 from .handlers.notification_reply import handle_notification_reply_request
 from .handlers.onboarding_profile import handle_onboarding_profile
+from .handlers.research import (
+    handle_activity as handle_research_activity,
+    handle_create as handle_research_create,
+    handle_get as handle_research_get,
+    handle_list as handle_research_list,
+    handle_research_step,
+    handle_signal as handle_research_signal,
+)
 from .handlers.pairing import (
     handle_pair_claim,
     handle_pair_start,
@@ -252,8 +262,21 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health() -> dict[str, bool]:
-    return {"ok": True}
+async def health() -> dict[str, object]:
+    """Liveness plus the billing-readiness facts that are otherwise invisible.
+
+    Production ran for months with Dodo pointed at test mode and all four
+    product IDs empty, so `dodo_configured` was false and every checkout request
+    was refused — with nothing anywhere to reveal it. These two fields make that
+    state readable without inspecting Cloud Run env vars or guessing.
+
+    Booleans and a hostname only. Never the API key, never the product IDs.
+    """
+    return {
+        "ok": True,
+        "dodo_configured": settings.dodo_configured,
+        "dodo_api_host": urlparse(settings.DODO_API_BASE).hostname or "",
+    }
 
 
 # Launch surfaces the voice worker understands (voice_agent._KNOWN_SURFACES). Anything
@@ -308,6 +331,8 @@ async def voice_token(request: Request) -> JSONResponse:
         and request.query_params.get("artifact_ack") == _ARTIFACT_ACK_CAPABILITY
     ):
         participant_metadata["artifact_ack"] = _ARTIFACT_ACK_CAPABILITY
+    if surface == "desktop" and request.query_params.get("research_ui") == "1":
+        participant_metadata["research_ui"] = 1
     if conversation_id:
         participant_metadata["conversation_id"] = conversation_id
     # Realtime bridge: only the API kill switch may admit a bridge-mode room.
@@ -489,6 +514,17 @@ async def devices_web_auth_start_endpoint(request: Request) -> JSONResponse:
 @app.post("/devices/web-auth/status")
 async def devices_web_auth_status_endpoint(request: Request) -> JSONResponse:
     return await handle_web_auth_status(request)
+
+
+# Startup-failure forensics. UNAUTHENTICATED by necessity (reviewed decision,
+# same structural reason as the web-auth endpoints above): this is posted from
+# Kotlin before the Flutter engine exists, by a client whose previous launch died
+# before it could sign in — so there is no session to authenticate with. Write
+# only, no user identity, allowlisted fields, per-install rate limit. See the
+# module docstring in handlers/diagnostics.py.
+@app.post("/diagnostics/startup")
+async def diagnostics_startup_endpoint(request: Request) -> JSONResponse:
+    return await handle_startup_diagnostics(request)
 
 
 @app.post("/chat")
@@ -1053,6 +1089,54 @@ async def meetings_synthesize_endpoint(
     return await handle_meeting_synthesize(request)
 
 
+@app.post("/research")
+async def research_create_endpoint(request: Request) -> JSONResponse:
+    return await handle_research_create(request)
+
+
+@app.get("/research")
+async def research_list_endpoint(request: Request) -> JSONResponse:
+    return await handle_research_list(request)
+
+
+@app.post("/research/{run_id}/answer")
+async def research_answer_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_signal(request, run_id, "answer")
+
+
+@app.post("/research/{run_id}/admit")
+async def research_admit_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_signal(request, run_id, "admit")
+
+
+@app.post("/research/{run_id}/cancel")
+async def research_cancel_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_signal(request, run_id, "cancel")
+
+
+@app.delete("/research/{run_id}")
+async def research_delete_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_signal(request, run_id, "delete")
+
+
+@app.get("/research/{run_id}")
+async def research_get_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_get(request, run_id)
+
+
+@app.get("/research/{run_id}/activity")
+async def research_activity_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_activity(request, run_id)
+
+
+@app.post("/internal/research/step")
+async def research_step_endpoint(
+    request: Request,
+    _: None = Depends(_verify_scheduler_token),
+) -> JSONResponse:
+    return await handle_research_step(request)
+
+
 def _check_env() -> None:
     """Log the status of every critical env var so you can spot missing config instantly."""
     checks = {
@@ -1091,6 +1175,12 @@ async def on_startup() -> None:
     from .services.analytics.arize_tracing import configure_arize_tracing
 
     configure_arize_tracing("api")
+    # Installed at startup, never at import: importing the research package must not by
+    # itself start delivering work. Until this runs the engine holds a NullDispatcher,
+    # which leaves outbox rows due for the sweeper rather than claiming a false delivery.
+    from .services.research.cloud_tasks import install as install_research_dispatcher
+
+    install_research_dispatcher()
     _check_env()
 
 

@@ -25,13 +25,14 @@ from fastapi.responses import JSONResponse
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..prompts import DESKTOP_REALTIME_GATHER_INSTRUCTIONS
+from ..prompts import DESKTOP_ONBOARDING_VOICE_MODIFIER, DESKTOP_REALTIME_GATHER_INSTRUCTIONS
 from ..services.request_auth import decode_firebase_claims
 
 # The mint sits on the tap-to-first-voice path, so cap each attempt and retry once
 # on a transient connection blip before dropping the desktop to the cold path.
 _MINT_TIMEOUT_S = 4.0
 _MINT_ATTEMPTS = 2
+_REALTIME_MODES = frozenset({"standard", "onboarding"})
 
 _client: Any = None
 
@@ -69,10 +70,17 @@ async def create_realtime_session(request: Request) -> JSONResponse:
     if not settings.REALTIME_BRIDGE_ENABLED:
         return JSONResponse({"detail": "realtime bridge disabled"}, status_code=503)
 
+    mode = request.query_params.get("mode", "standard")
+    if mode not in _REALTIME_MODES:
+        mode = "standard"
+    instructions = DESKTOP_REALTIME_GATHER_INSTRUCTIONS
+    if mode == "onboarding":
+        instructions += DESKTOP_ONBOARDING_VOICE_MODIFIER
+
     session_config = {
         "type": "realtime",
         "model": settings.OPENAI_REALTIME_MODEL,
-        "instructions": DESKTOP_REALTIME_GATHER_INSTRUCTIONS,
+        "instructions": instructions,
         "output_modalities": ["audio"],
         "audio": {
             "input": {

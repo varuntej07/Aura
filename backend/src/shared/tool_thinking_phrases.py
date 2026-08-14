@@ -44,6 +44,10 @@ SLOW_TOOL_THINKING_PHRASES: dict[str, list[str]] = {
         "one sec, looking that up real quick",
         "lemme make sure I get this right",
     ],
+    "start_research": [
+        "got it, setting up the research",
+        "on it, scoping that research now",
+    ],
 }
 
 
@@ -73,6 +77,7 @@ TOOL_ACTIVITY_LABELS: dict[str, str] = {
     "track_topic": "Setting up a tracker",
     "update_calendar_event": "Updating your calendar",
     "web_surf": "Searching the web",
+    "start_research": "Starting research",
 }
 
 # Which tools may echo one argument into the transcript, and which argument.
@@ -84,6 +89,7 @@ TOOL_ACTIVITY_LABELS: dict[str, str] = {
 # map shows its label alone, which is the safe default for anything added later.
 _ECHOABLE_TOOL_ARGUMENT: dict[str, str] = {
     "web_surf": "query",
+    "start_research": "request",
 }
 
 _MAX_DETAIL_CHARS = 80

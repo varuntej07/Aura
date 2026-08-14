@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
+from ...prompts import DESKTOP_BRIDGE_CONTINUATION_INSTRUCTIONS
 
 if TYPE_CHECKING:
     from livekit.agents import AgentSession
@@ -63,16 +64,6 @@ _MAX_TURN_CHARS = 4000
 # desktop does not leave the agent mute for long.
 _HEARTBEAT_TIMEOUT_S = 8.0
 
-# The continuation prompt when the Realtime leg gathered an actionable request. The seeded
-# transcript alone will NOT trigger a tool call - only a fresh generation does - so we
-# explicitly ask the agent to carry out what was just discussed.
-_CONTINUATION_INSTRUCTIONS = (
-    "You have just taken over this live conversation seamlessly. The user asked you to do "
-    "the following and you already have the details from the conversation so far: "
-    "{intent}\n"
-    "Carry it out now using your tools, then confirm briefly in one sentence. Do not "
-    "re-ask for information already established. Do not greet again."
-)
 
 
 class BridgeHandoverCoordinator:
@@ -177,8 +168,21 @@ class BridgeHandoverCoordinator:
         pending_intent = str(msg.get("pending_intent") or "").strip()
         if pending_intent:
             try:
+                capture = await self._buddy.handle_bridged_screen_capture(
+                    pending_intent,
+                    request_id=handover_id,
+                )
+                if capture is not None:
+                    command, result = capture
+                    await self._session.say(
+                        result.spoken_confirmation,
+                        allow_interruptions=True,
+                    )
+                    if command.command_only:
+                        return
+                    pending_intent = command.remainder
                 await self._session.generate_reply(
-                    instructions=_CONTINUATION_INSTRUCTIONS.format(
+                    instructions=DESKTOP_BRIDGE_CONTINUATION_INSTRUCTIONS.format(
                         intent=pending_intent[:_MAX_TURN_CHARS]
                     )
                 )

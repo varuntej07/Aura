@@ -707,7 +707,8 @@ async def entrypoint(ctx: JobContext) -> None:
             elif msg_type == ARTIFACT_DISPLAYED_TYPE:
                 artifact_delivery.handle_ack(msg, participant_identity, topic)
             elif msg_type == GUIDE_MODE_TYPE:
-                guide.apply_control(msg, participant_identity)
+                if guide.apply_control(msg, participant_identity):
+                    buddy.note_guide_arm_epoch(msg["generation"])
             elif msg_type == GUIDE_HEARTBEAT_TYPE:
                 guide.apply_heartbeat(msg, participant_identity)
             elif msg_type == SCREEN_CONTEXT_TYPE:

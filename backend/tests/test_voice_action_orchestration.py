@@ -371,6 +371,7 @@ def test_every_current_voice_tool_has_registry_metadata():
         "present_visible_artifact",
         "set_guide_mode",
         "speak_only",
+        "start_research",
     }
 
 

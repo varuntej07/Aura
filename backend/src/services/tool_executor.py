@@ -50,21 +50,30 @@ DESKTOP_CHAT_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "query_memory",
     "get_user_context",
     "web_surf",
+    "start_research",
     "list_emails",
     "read_email",
     "ask_clarification",
     "list_trackers",
     "reason_step",
     })
-def resolve_chat_surface_allowed_tools(surface: str) -> frozenset[str] | None:
+def resolve_chat_surface_allowed_tools(
+    surface: str, *, contract_version: int = 1
+) -> frozenset[str] | None:
     """Return None for the unrestricted app surface, otherwise fail closed."""
     if surface == "app":
         return None
+    if contract_version < 3:
+        return DESKTOP_CHAT_ALLOWED_TOOLS - {"start_research"}
     return DESKTOP_CHAT_ALLOWED_TOOLS
 
 
-def excluded_tools_for_chat_surface(surface: str) -> frozenset[str]:
-    allowed_tools = resolve_chat_surface_allowed_tools(surface)
+def excluded_tools_for_chat_surface(
+    surface: str, *, contract_version: int = 1
+) -> frozenset[str]:
+    allowed_tools = resolve_chat_surface_allowed_tools(
+        surface, contract_version=contract_version
+    )
     if allowed_tools is None:
         return frozenset()
     return frozenset(
@@ -361,6 +370,7 @@ class ToolExecutor:
             "configure_agent": self._configure_agent,
             "get_agent_config": self._get_agent_config,
             "web_surf": self._web_surf,
+            "start_research": self._start_research,
             "reason_step": self._reason_step,
             "report_feedback": self._report_feedback,
         }
@@ -1249,6 +1259,40 @@ class ToolExecutor:
                 }
 
         return await brave_search(query, uid=self._user_id, recency=recency)
+
+    async def _start_research(self, inp: dict[str, Any]) -> ToolResult:
+        from .research.engine import get_research_engine
+
+        request = str(inp.get("request") or "").strip()
+        depth = str(inp.get("depth") or "quick").strip().lower()
+        if not request or len(request) > 2_000:
+            raise ValueError("request must contain 1 to 2000 characters")
+        if depth != "quick":
+            return {
+                "error": True,
+                "code": "depth_not_available",
+                "retryable": False,
+                "user_message": (
+                    "Deep research is not available yet. Ask me to start a quick "
+                    "research run."
+                ),
+            }
+        client_run_id = self._client_message_id or str(uuid4())
+        handle = await get_research_engine().start(
+            self._user_id,
+            {"request": request, "preset": depth, "origin_surface": self._created_via},
+            client_run_id=client_run_id,
+        )
+        return {
+            "run_id": handle.run_id,
+            "state": handle.state,
+            "replayed": handle.replayed,
+            "requires_scope_confirmation": False,
+            "user_message": (
+                "I started the research. You can close Aura or keep working, and I'll "
+                "notify you when the sourced brief is ready."
+            ),
+        }
 
     # Clarification (chat-only — returns sentinel dict, not a Firestore call)
     async def _ask_clarification(self, inp: dict[str, Any]) -> ToolResult:

@@ -33,7 +33,7 @@ from . import tool_idempotency, turn_store
 from .prompt_builder import build_turn_system_blocks, build_user_content
 
 # Tools whose effect cannot be safely reproduced by a fresh, non-deterministic LLM run.
-_REGEN_EXCLUDED_TOOLS = frozenset({"send_email"})
+_REGEN_EXCLUDED_TOOLS = frozenset({"send_email", "start_research"})
 
 # Warm, deterministic confirmations used when a side effect already ran on the live turn,
 # so we never re-call the LLM (zero cost, zero risk of a double side effect).
@@ -49,6 +49,10 @@ _TOOL_CONFIRMATIONS: dict[str, str] = {
     "cancel_tracker": "Done, I stopped tracking that one.",
     "report_feedback": "Thanks, I passed that along.",
     "save_screen_item": "Done, I saved that screenshot to Screen Saves.",
+    "start_research": (
+        "I started the research. You can keep working, and I'll notify you when the "
+        "sourced brief is ready."
+    ),
 }
 
 _PREVIEW_MAX_CHARS = 140

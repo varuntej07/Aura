@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from functools import partial
 from types import SimpleNamespace
 
@@ -10,6 +11,12 @@ from livekit.agents import StopResponse
 
 from src.agent import buddy_agent as buddy
 from src.agent.voice.artifact_session import ArtifactSession
+from src.agent.voice.guide_intent import (
+    GuideDecisionIdentity,
+    GuideIntentDecision,
+    GuideIntentReason,
+    GuideIntentRoute,
+)
 
 
 class _Span:
@@ -190,7 +197,29 @@ async def test_guide_result_keeps_activation_caveat_with_result(monkeypatch):
 
     monkeypatch.setattr(buddy, "request_guide_mode", _request)
     monkeypatch.setattr(buddy, "start_tool_span", lambda **_kwargs: _Span())
-    agent = SimpleNamespace(_user_id="u", _session_id="s")
+    identity = GuideDecisionIdentity.from_turn(
+        message_id="m", transcript="Turn on Guide Mode.", turn_index=1, guide_arm_epoch=0
+    )
+    decision = GuideIntentDecision(
+        route=GuideIntentRoute.START_GUIDE,
+        task_summary="start screen guidance",
+        evidence_quote="Turn on Guide Mode.",
+        semantic_confidence=0.99,
+        depends_on_previous_assistant_offer=False,
+        previous_assistant_offer_confirmed=False,
+        reason_code=GuideIntentReason.EXPLICIT_ONGOING_GUIDANCE,
+        identity=identity,
+        decision_id="decision",
+        issued_at_monotonic=time.monotonic(),
+        expires_at_monotonic=time.monotonic() + 10,
+        valid=True,
+    )
+    agent = SimpleNamespace(
+        _user_id="u",
+        _session_id="s",
+        _finalized_guide_decision=decision,
+        _current_guide_identity=lambda: identity,
+    )
 
     result = await buddy.BuddyAgent.set_guide_mode.__wrapped__(agent, True)
 

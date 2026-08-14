@@ -28,6 +28,9 @@ import asyncio
 import hashlib
 import random
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -43,6 +46,94 @@ from .analytics.llm_telemetry import (
 )
 
 T = TypeVar("T")
+
+
+# --- caller-side usage capture ----------------------------------------------------
+#
+# The tier methods return only the parsed value, so a caller that has to METER what it
+# spent (rather than merely observe it in telemetry) had no way to see token counts. The
+# research engine needs exactly that: it reserves units before a call and has to commit
+# what the call actually consumed, or its ledger records a reservation and never a cost.
+#
+# A ContextVar rather than a parameter, for two reasons. It threads through the retry and
+# cross-provider fallback path without touching any of those signatures, so a call that
+# failed over from Anthropic to Gemini still reports the model that actually served it.
+# And it is inert when unset, so every other caller in the backend is unaffected.
+_usage_sink: ContextVar[list[tuple[str, Any]] | None] = ContextVar(
+    "model_provider_usage_sink", default=None
+)
+
+
+@contextmanager
+def capture_usage() -> Iterator[list[tuple[str, Any]]]:
+    """Collect ``(model_id, raw_usage)`` for every API attempt made inside this block.
+
+    One entry per ATTEMPT, not per call: a structured-output retry or a fallback hop
+    spent real tokens even though it produced no usable answer, and a meter that ignored
+    them would under-report spend, which is the one direction a cost guard must never
+    fail in.
+    """
+    sink: list[tuple[str, Any]] = []
+    token = _usage_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _usage_sink.reset(token)
+
+
+def _emit_usage(model_id: str, raw_usage: Any) -> None:
+    """Hand one attempt's raw usage object to the active sink, if there is one."""
+    sink = _usage_sink.get()
+    if sink is not None:
+        sink.append((model_id, raw_usage))
+
+
+# A caller-supplied ceiling on the TOTAL provider attempts one logical call may make,
+# spanning the per-model retry loop AND every cross-provider fallback hop.
+#
+# It exists because a metered caller has to reserve an envelope BEFORE the first attempt,
+# and the default envelope is not reservable: _MAX_RETRIES=3 across an expert-tier chain
+# of three models is nine attempts, and reserving nine times the prompt against a per-run
+# token ceiling would shrink every wave to nothing. The research engine sets a strict
+# budget instead, so the envelope it reserves is the envelope that can actually happen.
+#
+# Same ContextVar shape as _usage_sink, and for the same reason: it threads through
+# the retry and fallback path without touching any signature, and it is INERT when
+# unset, so chat, voice and every other caller keep the default behaviour exactly.
+_attempt_budget: ContextVar[dict[str, int] | None] = ContextVar(
+    "model_provider_attempt_budget", default=None
+)
+
+
+@contextmanager
+def attempt_budget(total_attempts: int) -> Iterator[None]:
+    """Cap total provider attempts inside this block. At least one attempt is always allowed."""
+    token = _attempt_budget.set({"remaining": max(1, int(total_attempts))})
+    try:
+        yield
+    finally:
+        _attempt_budget.reset(token)
+
+
+def _attempt_cap(default: int) -> int:
+    """How many attempts this model's retry loop may make. Never below one."""
+    budget = _attempt_budget.get()
+    if budget is None:
+        return default
+    return max(1, min(default, budget["remaining"]))
+
+
+def _spend_attempt() -> None:
+    """Record that one provider attempt happened. No-op when no budget is set."""
+    budget = _attempt_budget.get()
+    if budget is not None:
+        budget["remaining"] -= 1
+
+
+def _attempts_remaining() -> int:
+    """Attempts left in the budget, or a large number when unbudgeted."""
+    budget = _attempt_budget.get()
+    return 1 << 30 if budget is None else budget["remaining"]
 
 # Anthropic strict structured output (``output_config`` json_schema) rejects two
 # things pydantic's ``model_json_schema()`` produces: any ``object`` node without
@@ -246,6 +337,7 @@ class ModelProvider:
         response_model: type[T] | None = None,
         temperature: float = 0.7,
         model: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> str | T:
         """Cheap and fast. Use for: notification copy, summaries, classification.
         Defaults to Gemini Flash (TIER_CHEAP); pass ``model`` to pin a specific fast model
@@ -268,6 +360,7 @@ class ModelProvider:
             system=system,
             response_model=response_model,
             temperature=temperature,
+            max_output_tokens=max_output_tokens,
         )
 
     async def balanced(
@@ -279,6 +372,7 @@ class ModelProvider:
         images: list[dict] | None = None,
         response_model: type[T] | None = None,
         temperature: float = 0.5,
+        max_output_tokens: int | None = None,
     ) -> str | T:
         """Mid-tier reasoning. Use for: tool-calling background tasks, structured
         output that needs mild reasoning. Currently routes to Claude Haiku.
@@ -300,6 +394,7 @@ class ModelProvider:
             images=images,
             response_model=response_model,
             temperature=temperature,
+            max_output_tokens=max_output_tokens,
         )
 
     async def expert(
@@ -312,6 +407,7 @@ class ModelProvider:
         images: list[dict] | None = None,
         response_model: type[T] | None = None,
         temperature: float = 0.7,
+        max_output_tokens: int | None = None,
     ) -> str | T:
         """Full reasoning. Use for: main chat, complex multi-turn, high-stakes output.
         Most expensive — only use where quality matters. Currently Claude Sonnet.
@@ -335,6 +431,7 @@ class ModelProvider:
             images=images,
             response_model=response_model,
             temperature=temperature,
+            max_output_tokens=max_output_tokens,
         )
 
     async def grounded(
@@ -480,6 +577,7 @@ class ModelProvider:
         history: list[dict] | None = None,
         response_model: type[T] | None,
         temperature: float,
+        max_output_tokens: int | None = None,
     ) -> str | T:
         provider = _infer_provider(model_id)
         chain = list(fallback_chain or [])
@@ -497,6 +595,7 @@ class ModelProvider:
                     images=images,
                     response_model=response_model,
                     temperature=temperature,
+                    max_output_tokens=max_output_tokens,
                 )
             elif provider == "anthropic":
                 raw = await self._call_anthropic(
@@ -510,6 +609,7 @@ class ModelProvider:
                     history=history,
                     response_model=response_model,
                     temperature=temperature,
+                    max_output_tokens=max_output_tokens,
                 )
             else:
                 raise NotImplementedError(
@@ -523,6 +623,11 @@ class ModelProvider:
                 return self._parse_response(raw, response_model)
             except ValueError:
                 if structured_attempt + 1 >= structured_attempts:
+                    raise
+                if _attempts_remaining() <= 0:
+                    # A regeneration is a full extra API attempt. A caller that reserved a
+                    # bounded envelope has none left, so raising here keeps the envelope
+                    # exact rather than letting the schema retry spend past it.
                     raise
                 logger.warn("ModelProvider: regenerating invalid structured response", {
                     "provider": provider,
@@ -545,6 +650,7 @@ class ModelProvider:
         images: list[dict] | None = None,
         response_model: type[T] | None = None,
         temperature: float,
+        max_output_tokens: int | None = None,
     ) -> str:
         client = self._get_gemini_client()
         from google.genai import types  # type: ignore
@@ -557,7 +663,7 @@ class ModelProvider:
         # (_call_gemini_grounded) and keeps its own config.
         config_kwargs: dict[str, Any] = {
             "temperature": temperature,
-            "max_output_tokens": 4096,
+            "max_output_tokens": max(1, int(max_output_tokens or 4096)),
             "thinking_config": types.ThinkingConfig(thinking_budget=0),
         }
         if system:
@@ -587,6 +693,14 @@ class ModelProvider:
             return resp.text or "", getattr(resp, "usage_metadata", None)
 
         async def _use_next_in_chain(reason: str, log_extra: dict) -> str:
+            if _attempts_remaining() <= 0:
+                # A budgeted caller has spent its whole envelope. Hopping to the next
+                # model would spend beyond what was reserved before the first attempt,
+                # which is the one direction a metered call must never go.
+                logger.warn("ModelProvider: attempt budget spent, no fallback taken", {
+                    "from_model": model_id, "reason": reason, **log_extra,
+                })
+                raise RuntimeError(f"ModelProvider: attempt budget exhausted ({reason})")
             next_model = fallback_chain[0]
             logger.warn(f"ModelProvider: {reason}, falling back", {
                 "from_model": model_id,
@@ -602,23 +716,36 @@ class ModelProvider:
                 images=images,
                 response_model=response_model,
                 temperature=temperature,
+                max_output_tokens=max_output_tokens,
             )
             return result if isinstance(result, str) else result.model_dump_json()
 
         last_exc: BaseException | None = None
-        for attempt in range(1, _MAX_RETRIES + 1):
+        # Resolved once per model rather than read from the module constant, so a caller
+        # that reserved a bounded envelope gets exactly that envelope.
+        max_attempts = _attempt_cap(_MAX_RETRIES)
+        for attempt in range(1, max_attempts + 1):
             try:
                 # One telemetry generation per actual API attempt; the inner
                 # try re-raises into the existing retry/fallback handling.
                 recording = start_llm_generation(model=model_id, provider="gemini", caller=caller)
+                _spend_attempt()
                 try:
                     result, usage_metadata = await asyncio.wait_for(
                         asyncio.to_thread(_sync), timeout=_TIMEOUT_S
                     )
                 except BaseException as exc:
                     recording.finish(success=False, error_type=type(exc).__name__)
+                    # A failed attempt still consumed provider work. Emitting None records
+                    # it as an attempt of UNKNOWN cost rather than leaving it invisible,
+                    # which would let a meter read zero for a call that burned a full
+                    # prompt. normalize_provider_usage(model_id, None) reports
+                    # usage_reported=False and cost_known=False, so a consumer treats it
+                    # as unknown, never as free.
+                    _emit_usage(model_id, None)
                     raise
                 recording.finish(tokens=gemini_usage_tokens(usage_metadata))
+                _emit_usage(model_id, usage_metadata)
                 if attempt > 1:
                     # One visible line per call when retries eventually succeeded, so a
                     # recovered-after-transient-error call isn't completely silent.
@@ -630,7 +757,7 @@ class ModelProvider:
                 return result
             except TimeoutError as exc:
                 last_exc = exc
-                if attempt == _MAX_RETRIES:
+                if attempt == max_attempts:
                     if fallback_chain:
                         return await _use_next_in_chain(
                             "timeout after retries",
@@ -679,7 +806,7 @@ class ModelProvider:
                         "error": str(exc),
                     })
                     raise
-                if not retryable or attempt == _MAX_RETRIES:
+                if not retryable or attempt == max_attempts:
                     # Resolution point for this model — make a depleted-credits outage scream
                     # in plain terms instead of hiding in a wall of identical backoff lines.
                     if is_quota_exhausted(exc):
@@ -695,7 +822,7 @@ class ModelProvider:
                             },
                         )
                     if fallback_chain:
-                        reason = "retries exhausted" if attempt == _MAX_RETRIES else "non-retryable error"
+                        reason = "retries exhausted" if attempt == max_attempts else "non-retryable error"
                         return await _use_next_in_chain(
                             reason,
                             {
@@ -847,6 +974,7 @@ class ModelProvider:
         history: list[dict] | None,
         response_model: type[T] | None = None,
         temperature: float,
+        max_output_tokens: int | None = None,
     ) -> str:
         client = self._get_anthropic_client()
 
@@ -874,7 +1002,7 @@ class ModelProvider:
 
         kwargs: dict[str, Any] = {
             "model": model_id,
-            "max_tokens": 2048,
+            "max_tokens": max(1, int(max_output_tokens or 2048)),
             "messages": messages,
             "temperature": temperature,
         }
@@ -896,6 +1024,13 @@ class ModelProvider:
             # lands in _call_gemini automatically. response_model=None keeps parsing
             # in the OUTER _call so we never double-parse. A Gemini terminal hop drops
             # tools (flatten-to-text), an acceptable degradation for these paths.
+            if _attempts_remaining() <= 0:
+                # Same rule as the Gemini chain: a budgeted caller reserved an envelope
+                # before its first attempt, and hopping past it would spend unreserved.
+                logger.warn("ModelProvider: attempt budget spent, no fallback taken", {
+                    "from_model": model_id, "reason": reason, **log_extra,
+                })
+                raise RuntimeError(f"ModelProvider: attempt budget exhausted ({reason})")
             next_model = fallback_chain[0]
             logger.warn(f"ModelProvider: {reason}, falling back", {
                 "from_model": model_id,
@@ -913,22 +1048,33 @@ class ModelProvider:
                 history=history,
                 response_model=response_model,
                 temperature=temperature,
+                max_output_tokens=max_output_tokens,
             )
             return result if isinstance(result, str) else result.model_dump_json()
 
-        for attempt in range(1, _MAX_RETRIES + 1):
+        # Resolved once per model rather than read from the module constant, so a caller
+        # that reserved a bounded envelope gets exactly that envelope.
+        max_attempts = _attempt_cap(_MAX_RETRIES)
+        for attempt in range(1, max_attempts + 1):
             try:
                 # One telemetry generation per actual API attempt; the inner
                 # try re-raises into the existing retry/fallback handling.
                 recording = start_llm_generation(model=model_id, provider="anthropic", caller=caller)
+                _spend_attempt()
                 try:
                     response = await asyncio.wait_for(
                         client.messages.create(**kwargs), timeout=_TIMEOUT_S
                     )
                 except BaseException as exc:
                     recording.finish(success=False, error_type=type(exc).__name__)
+                    # Same reason as the Gemini path: an attempt that raised still spent
+                    # tokens, and an unrecorded attempt is indistinguishable from a free
+                    # one to every downstream meter.
+                    _emit_usage(model_id, None)
                     raise
-                recording.finish(tokens=anthropic_usage_tokens(getattr(response, "usage", None)))
+                raw_usage = getattr(response, "usage", None)
+                recording.finish(tokens=anthropic_usage_tokens(raw_usage))
+                _emit_usage(model_id, raw_usage)
                 text_blocks = [b.text for b in response.content if b.type == "text"]
                 if attempt > 1:
                     logger.warn("ModelProvider: Anthropic recovered after retries", {
@@ -973,7 +1119,7 @@ class ModelProvider:
                 })
                 raise
             except TimeoutError:
-                if attempt == _MAX_RETRIES:
+                if attempt == max_attempts:
                     if fallback_chain:
                         return await _use_next_in_chain(
                             "timeout after retries", {"attempt": attempt, "timeout_s": _TIMEOUT_S}
@@ -993,7 +1139,7 @@ class ModelProvider:
                 })
                 await asyncio.sleep(delay)
             except _ANTHROPIC_RETRYABLE as exc:
-                if attempt == _MAX_RETRIES:
+                if attempt == max_attempts:
                     # Resolution point — make a depleted-credits outage scream in plain
                     # terms before we fall back / give up.
                     if is_quota_exhausted(exc):

@@ -64,6 +64,7 @@ class Capability(StrEnum):
     MEMORY_READ = "memory_read"
     MEMORY_WRITE = "memory_write"
     WEB_READ = "web_read"
+    RESEARCH_WRITE = "research_write"
     USER_CONTEXT_READ = "user_context_read"
     FEEDBACK_WRITE = "feedback_write"
     TRACKING_WRITE = "tracking_write"
@@ -255,6 +256,17 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             namespace="research.web",
             latency=ToolLatency.HIGH,
             complex_eligible=True,
+        ),
+        _tool(
+            "start_research",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            latency=ToolLatency.HIGH,
+            concurrent=False,
+            complex_eligible=True,
+            required=("request", "depth"),
         ),
         _tool(
             "get_user_context",

@@ -365,6 +365,31 @@ async def _run_meeting_job_sweep() -> None:
         })
 
 
+async def _run_research_sweep() -> None:
+    """Recover research work that Cloud Tasks did not deliver, or that died mid-stage.
+
+    Five passes, all bounded and per-run isolated: outbox redelivery (the commit-then-
+    crash window), stale-lease recovery, clarification expiry, stuck fan-out collapse,
+    and deletion drain. Without this a crash between an advance commit and its inline
+    dispatch would strand a run forever, because the durable state says work exists and
+    nothing is delivering it.
+    """
+    from ..services.research.engine import get_research_engine
+
+    try:
+        result = await get_research_engine().sweep(limit=100)
+        logger.info("scheduler: research sweep", {
+            **result,
+            "metric": "research_sweep",
+        })
+    except Exception as exc:
+        logger.error("scheduler: research sweep failed", {
+            "error_code": "research_sweep_failed",
+            "error": str(exc),
+            "alert": True,
+        })
+
+
 async def _run_dictation_audio_reconciliation() -> None:
     """Confirm 180-day lifecycle deletions and retire stale export pointers."""
     from ..services.dictation import store as dictation_store
@@ -573,6 +598,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # delivery hint. This is the commit/dispatch crash recovery path.
         if now_minute % 5 == 2:
             asyncio.create_task(_run_meeting_job_sweep())
+
+        # Same contract as the meeting sweep above, on its own free slot so the two
+        # never share a tick. AWAITED, unlike the meeting sweep: this is the research
+        # engine's only recovery path for a stage whose inline dispatch failed, and Cloud
+        # Run may suspend CPU the moment this response ends, so a detached task is not
+        # reliably allowed to finish. Same reasoning as the dictation reconciliation.
+        if now_minute % 5 == 4:
+            await _run_research_sweep()
 
         # Await this too: it now REPAIRS (redelivers stranded jobs, stamps
         # stalled meetings) rather than only counting, and a detached task can be

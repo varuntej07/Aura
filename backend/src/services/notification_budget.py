@@ -110,8 +110,9 @@ def resolve_adaptive_limits(delivered: int, opened: int) -> tuple[int, timedelta
 # day 0. A genuinely new account gets a deliberately lower, flat ceiling for its
 # first week — no engagement signal exists yet to personalize on, so don't guess.
 NEW_ACCOUNT_WINDOW_DAYS = 7
-_NEW_ACCOUNT_CAP = 1
-_NEW_ACCOUNT_SPACING = timedelta(hours=4)
+# Match the adaptive default cap while retaining gentler spacing for new users.
+_NEW_ACCOUNT_CAP = 3
+_NEW_ACCOUNT_SPACING = timedelta(hours=2)
 
 
 def resolve_effective_limits(

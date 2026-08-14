@@ -46,6 +46,7 @@ FIELD_HISTORY = "history"
 FIELD_HAS_ATTACHMENTS = "has_attachments"
 FIELD_TIER = "tier"
 FIELD_NOTIFICATION_REASON = "notification_reason"
+FIELD_SURFACE = "surface"
 FIELD_CREATED_AT = "created_at"
 FIELD_CLAIMED_AT = "claimed_at"
 FIELD_ATTEMPTS = "attempts"
@@ -112,6 +113,7 @@ async def start_turn(
     has_attachments: bool,
     tier: str,
     notification_reason: str = "",
+    surface: str = "app",
     now: datetime | None = None,
 ) -> bool:
     """Write the turn doc as ``generating`` at the start of a chat turn. Fail-open:
@@ -134,6 +136,7 @@ async def start_turn(
                 FIELD_HAS_ATTACHMENTS: bool(has_attachments),
                 FIELD_TIER: tier,
                 FIELD_NOTIFICATION_REASON: notification_reason,
+                FIELD_SURFACE: surface,
                 FIELD_CREATED_AT: now,
                 FIELD_ATTEMPTS: 0,
                 FIELD_PUSHED: False,
@@ -264,6 +267,7 @@ async def mark_complete(
             FIELD_HAS_ATTACHMENTS: fs.DELETE_FIELD,
             FIELD_TIER: fs.DELETE_FIELD,
             FIELD_NOTIFICATION_REASON: fs.DELETE_FIELD,
+            FIELD_SURFACE: fs.DELETE_FIELD,
             FIELD_CREATED_AT: fs.DELETE_FIELD,
             FIELD_CLAIMED_AT: fs.DELETE_FIELD,
             FIELD_ATTEMPTS: fs.DELETE_FIELD,
@@ -293,6 +297,7 @@ async def mark_failed(user_id: str, cmid: str) -> None:
             FIELD_HAS_ATTACHMENTS: fs.DELETE_FIELD,
             FIELD_TIER: fs.DELETE_FIELD,
             FIELD_NOTIFICATION_REASON: fs.DELETE_FIELD,
+            FIELD_SURFACE: fs.DELETE_FIELD,
             FIELD_CREATED_AT: fs.DELETE_FIELD,
             FIELD_CLAIMED_AT: fs.DELETE_FIELD,
             FIELD_ATTEMPTS: fs.DELETE_FIELD,
@@ -396,6 +401,49 @@ async def list_stuck_turns(
     except Exception as exc:
         logger.error("turn_store: list_stuck_turns FAILED (check the chat_turns index)", {
             "error": str(exc),
+        })
+        return []
+
+
+async def list_recent_turns(
+    user_id: str, *, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Return one user's in-flight turns, newest first, for desktop recovery."""
+    if limit < 1:
+        return []
+
+    def _query() -> list[dict[str, Any]]:
+        collection = (
+            admin_firestore()
+            .collection("users")
+            .document(user_id)
+            .collection(COLLECTION)
+        )
+        rows = collection.order_by(
+            FIELD_CREATED_AT, direction=fs.Query.DESCENDING
+        ).limit(limit).stream()
+        out: list[dict[str, Any]] = []
+        for doc in rows:
+            data = doc.to_dict() or {}
+            status = str(data.get(FIELD_STATUS) or "")
+            if status in TERMINAL_STATUSES:
+                continue
+            created_at = data.get(FIELD_CREATED_AT)
+            out.append({
+                "client_message_id": doc.id,
+                FIELD_SESSION_ID: str(data.get(FIELD_SESSION_ID) or ""),
+                FIELD_STATUS: status,
+                FIELD_CREATED_AT: (
+                    created_at.isoformat() if isinstance(created_at, datetime) else None
+                ),
+            })
+        return out
+
+    try:
+        return await asyncio.to_thread(_query)
+    except Exception as exc:
+        logger.warn("turn_store: list_recent_turns failed", {
+            "user_id": user_id, "error": str(exc),
         })
         return []
 

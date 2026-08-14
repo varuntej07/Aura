@@ -34,6 +34,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from ..config.settings import settings
 from ..lib.logger import logger
 from .firebase import admin_firestore
 from .notifications import orchestrator
@@ -52,16 +53,56 @@ TIER_FREE = "free"
 
 WARNING_WINDOW = timedelta(days=3)
 
+def _upgrading_is_possible() -> bool:
+    """Whether "upgrade" is something the user can actually act on right now.
+
+    Checkout creation AND signed webhook processing must both be configured, or
+    a user who tries to pay reaches Dodo before the backend can apply the
+    resulting entitlement. Stricter than the ``checkout_available`` the paywall
+    reads (which needs only checkout creation), deliberately: a notification
+    that nudges someone to buy should not fire until the purchase can complete
+    end to end.
+
+    This gates the COPY as well, because for months these notices told every
+    user to "upgrade anytime" while Dodo was unconfigured — so the notification
+    promised an action that did not exist anywhere in the app. Telling someone
+    their trial ended is fine. Telling them to buy something they cannot buy is
+    not.
+
+    Country is deliberately not consulted: web checkout is offered everywhere.
+    """
+    return settings.dodo_configured and settings.dodo_webhook_configured
+
+
 _3D_TITLE = "3 days left in your trial"
-_3D_BODY = (
-    "Your free Buddy trial ends in 3 days. After that you'll keep chatting on the "
-    "free plan with some daily limits, or upgrade anytime for full access."
-)
+
+
+def _3d_body() -> str:
+    if _upgrading_is_possible():
+        return (
+            "Your free Buddy trial ends in 3 days. After that you'll keep chatting "
+            "on the free plan with some daily limits, or upgrade anytime for full "
+            "access."
+        )
+    return (
+        "Your free Buddy trial ends in 3 days. After that you'll keep chatting on "
+        "the free plan, with a daily limit on messages. I'm not going anywhere."
+    )
+
+
 _EXPIRED_TITLE = "Your trial just ended"
-_EXPIRED_BODY = (
-    "You're on the free plan now (25 messages/day). Upgrade anytime to keep "
-    "unlimited access to Buddy."
-)
+
+
+def _expired_body() -> str:
+    if _upgrading_is_possible():
+        return (
+            "You're on the free plan now (25 messages/day). Upgrade anytime to keep "
+            "unlimited access to Buddy."
+        )
+    return (
+        "You're on the free plan now, so we've got 25 messages a day together. "
+        "Open Buddy to see where you're at."
+    )
 
 TRIAL_NOTICE_CONCURRENCY = 10
 
@@ -196,7 +237,7 @@ async def run_trial_lifecycle_tick() -> TrialLifecycleTickSummary:
                         kind=ProposalKind.COMMITTED,
                         dedup_key=f"trial_3d_warning_{user_id}",
                         title=_3D_TITLE,
-                        body=_3D_BODY,
+                        body=_3d_body(),
                         data={"deep_link": "paywall", "trial_variant": "3d_warning"},
                         collapse_key=f"trial_3d_warning_{user_id}",
                     )
@@ -221,7 +262,7 @@ async def run_trial_lifecycle_tick() -> TrialLifecycleTickSummary:
                         kind=ProposalKind.COMMITTED,
                         dedup_key=f"trial_expired_{user_id}",
                         title=_EXPIRED_TITLE,
-                        body=_EXPIRED_BODY,
+                        body=_expired_body(),
                         data={"deep_link": "paywall", "trial_variant": "expired"},
                         collapse_key=f"trial_expired_{user_id}",
                     )

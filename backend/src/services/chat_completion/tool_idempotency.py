@@ -48,6 +48,7 @@ SIDE_EFFECTING_TOOLS = frozenset(
         "track_topic",
         "cancel_tracker",
         "report_feedback",
+        "start_research",
     }
 )
 

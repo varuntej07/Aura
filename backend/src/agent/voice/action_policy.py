@@ -1,9 +1,4 @@
-"""Structural tool exposure and execution safety for the LiveKit voice agent.
-
-This module deliberately does not inspect transcript language. Buddy's existing
-system prompt and native tool calling own intent, continuation, clarification,
-and tool choice. Code here validates only platform facts and tool-call shape.
-"""
+"""Tool exposure and execution safety for the LiveKit voice agent."""
 
 from __future__ import annotations
 
@@ -15,8 +10,13 @@ from typing import Any
 from livekit.agents import llm as lk_llm
 
 from .capabilities import VOICE_TOOL_REGISTRY, Capability, ToolEffect, VoiceSurface
+from .guide_intent import (
+    GuideDecisionIdentity,
+    GuideIntentDecision,
+    guide_start_admission,
+)
 
-ACTION_POLICY_VERSION = "2026-07-28.1"
+ACTION_POLICY_VERSION = "2026-08-13.1"
 UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"})
 
 
@@ -28,6 +28,8 @@ class TurnCapabilityPolicy:
     allowed_tools: frozenset[str]
     reason_codes: tuple[str, ...]
     finalized_turn: bool
+    guide_intent_decision: GuideIntentDecision | None = None
+    required_tools: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,17 +48,18 @@ def derive_turn_policy(
     previous_visible_output_failed: bool = False,
     source_message_id: str = "",
     turn_index: int = 0,
+    guide_intent_decision: GuideIntentDecision | None = None,
+    guide_decision_identity: GuideDecisionIdentity | None = None,
 ) -> TurnCapabilityPolicy:
-    """Expose tools from structural runtime state, never from transcript wording.
-
-    The unused conversational parameters remain in the call contract so callers can
-    pass finalized-turn context without creating a second semantic interpretation
-    path. They must not influence the result.
-    """
+    """Expose structurally eligible tools plus one trusted Guide admission."""
     del transcript, chat_ctx, previous_visible_output_failed, source_message_id, turn_index
 
     allowed: set[str] = set()
     reasons: list[str] = ["stable_surface_toolset"]
+    required: set[str] = set()
+    guide_admission = guide_start_admission(
+        guide_intent_decision, guide_decision_identity
+    )
     for name, registration in VOICE_TOOL_REGISTRY.items():
         if surface not in registration.allowed_surfaces:
             reasons.append(f"surface_blocked:{name}")
@@ -67,6 +70,12 @@ def derive_turn_policy(
         if not finalized_turn and registration.effect is not ToolEffect.READ:
             reasons.append(f"finalized_turn_required:{name}")
             continue
+        if name == "set_guide_mode":
+            if not guide_admission.allowed:
+                reasons.append(guide_admission.reason_code)
+                continue
+            required.add(name)
+            reasons.append(guide_admission.reason_code)
         allowed.add(name)
 
     if not finalized_turn:
@@ -78,6 +87,8 @@ def derive_turn_policy(
         allowed_tools=frozenset(allowed),
         reason_codes=tuple(reasons),
         finalized_turn=finalized_turn,
+        guide_intent_decision=guide_intent_decision,
+        required_tools=frozenset(required),
     )
 
 
@@ -120,8 +131,10 @@ def evaluate_execution(
     arguments: str,
     policy: TurnCapabilityPolicy,
     chat_ctx: lk_llm.ChatContext,
+    *,
+    guide_decision_identity: GuideDecisionIdentity | None = None,
 ) -> ExecutionDecision:
-    """Validate a model-emitted call without interpreting user language."""
+    """Validate a model-emitted call against immutable turn authorization."""
     registration = VOICE_TOOL_REGISTRY.get(tool_name)
     if registration is None:
         return ExecutionDecision(False, "unregistered_voice_tool")
@@ -149,4 +162,13 @@ def evaluate_execution(
         for field_name in registration.required_fields
     ):
         return ExecutionDecision(False, "missing_required_tool_field")
+    if tool_name == "set_guide_mode":
+        if parsed.get("enable") is not True:
+            return ExecutionDecision(False, "guide_start_only")
+        guide_admission = guide_start_admission(
+            policy.guide_intent_decision,
+            guide_decision_identity,
+        )
+        if not guide_admission.allowed:
+            return ExecutionDecision(False, guide_admission.reason_code)
     return ExecutionDecision(True, "execution_allowed")

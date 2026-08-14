@@ -39,6 +39,7 @@ from livekit.agents import (
     RunContext,
     StopResponse,
     function_tool,
+    stt,
 )
 from livekit.agents import llm as lk_llm
 
@@ -82,6 +83,14 @@ from .voice.draft_outbound import (
 )
 from .voice.emotion_tags import convert_audio_cue_stream
 from .voice.guide_control import SPOKEN_GUIDE_REQUEST_FAILED, request_guide_mode
+from .voice.guide_intent import (
+    GuideDecisionIdentity,
+    GuideIntentClassifier,
+    GuideIntentDecision,
+    GuideIntentRoute,
+    guide_decision_currency,
+    guide_start_admission,
+)
 from .voice.guide_task_runtime import GuideTaskRuntime
 from .voice.point_tag import PointTarget, filter_point_tags, publish_element_point
 from .voice.screen_capture_command import (
@@ -145,6 +154,10 @@ _TURN_INSTRUCTION_MAX_CHARS = 1000
 # treated as an accidental double-fire unless the user asks for another copy.
 _DUPLICATE_SAVE_WINDOW_S = 6.0
 _SCREEN_CAPTURE_RETRY_WINDOW_S = 30.0
+_GUIDE_CLARIFICATION_REPLY = (
+    "Do you want me to start Guide Mode and stay with you while you work, "
+    "or just answer once?"
+)
 
 # Shortest interim transcript worth firing early memory retrieval against. An
 # interim of two or three characters is the leading edge of a word, not a query,
@@ -289,6 +302,11 @@ class BuddyAgent(agents.Agent):
         # list lazily (tools resolve only once the agent is active).
         self._guide_active = False
         self._guide_runtime: GuideTaskRuntime | None = None
+        self._guide_arm_epoch = -1
+        self._guide_intent_classifier = GuideIntentClassifier()
+        self._finalized_guide_decision: GuideIntentDecision | None = None
+        self._final_stt_confidences: list[float] = []
+        self._guide_stop_result: tuple[str, str] | None = None
         self._guide_name = context_vars.get("name") or "there"
         self._companion_instructions = instructions
         self._companion_tools: list | None = None
@@ -481,6 +499,50 @@ class BuddyAgent(agents.Agent):
     def is_guide_active(self) -> bool:
         return self._guide_active
 
+    def note_guide_arm_epoch(self, generation: int) -> None:
+        """Observe the last native Guide generation accepted by the coordinator."""
+        if generation > self._guide_arm_epoch:
+            self._guide_arm_epoch = generation
+
+    async def stt_node(self, audio, model_settings: ModelSettings):
+        """Preserve provider STT confidence for the finalized admission decision."""
+        source = Agent.default.stt_node(self, audio, model_settings)
+        if hasattr(source, "__await__"):
+            source = await source
+        if source is None:
+            return
+        async for event in source:
+            if (
+                isinstance(event, stt.SpeechEvent)
+                and event.type is stt.SpeechEventType.FINAL_TRANSCRIPT
+                and event.alternatives
+            ):
+                confidence = event.alternatives[0].confidence
+                if isinstance(confidence, (int, float)) and not isinstance(
+                    confidence, bool
+                ):
+                    self._final_stt_confidences.append(
+                        min(1.0, max(0.0, float(confidence)))
+                    )
+            yield event
+
+    def _consume_stt_confidence(self) -> float | None:
+        confidences = self._final_stt_confidences
+        self._final_stt_confidences = []
+        if not confidences:
+            return None
+        return sum(confidences) / len(confidences)
+
+    def _current_guide_identity(self) -> GuideDecisionIdentity | None:
+        if not self._finalized_message_id:
+            return None
+        return GuideDecisionIdentity.from_turn(
+            message_id=self._finalized_message_id,
+            transcript=self._finalized_transcript,
+            turn_index=self._action_telemetry.turn_index,
+            guide_arm_epoch=self._guide_arm_epoch,
+        )
+
     def set_text_output(self, text_output: bool) -> None:
         """Text-output mode toggled mid-session (voice/output_mode.py)."""
         self._text_output = text_output
@@ -508,25 +570,20 @@ class BuddyAgent(agents.Agent):
         subgraph, no compaction -- mutates nothing and keeps the speculation.
         That is the entire point of the vocabulary in voice/speculation.py.
 
-        Side-effect safety does NOT depend on invalidating here, but be precise
-        about what does carry it, because the exposure filter no longer does.
-        llm_node deliberately derives the EXPOSURE policy with finalized_turn=True
-        on both passes so the model sees identical tool schemas (a speculation
-        generated against a smaller tool set is not a safe substitute for the
-        finalized reply). derive_turn_policy therefore cannot tell the passes
-        apart any more. Authorization moved to the separate EXECUTION policy,
-        which carries the real finalized flag: evaluate_execution refuses every
-        non-READ call a speculative pass emits, and that refusal sets
-        _speculative_write_attempt, which invalidates this turn so the finalized
-        pass performs the action properly. LiveKit's scheduling boundary (tools
-        run only after the speech handle is scheduled) is a third layer, not the
-        only one.
+        Side-effect safety does NOT depend on invalidating here. General tools
+        keep identical speculative/final exposure, while set_guide_mode is the
+        deliberate exception: it is absent until this exact finalized message
+        receives a trusted START_GUIDE decision. That selection change forces a
+        cold finalized pass. The separate EXECUTION policy still carries the
+        real finalized flag and refuses every non-READ speculative call.
 
         Never raises: a raised hook drops the user's whole reply.
         """
         turn_finalize_started = time.monotonic()
         self._resolve_previous_speculation()
         self._turn_context_id = ""
+        self._finalized_guide_decision = None
+        self._guide_stop_result = None
 
         compacted_context = self._context_compactor.apply_ready(turn_ctx)
         if compacted_context is None:
@@ -680,6 +737,25 @@ class BuddyAgent(agents.Agent):
                 ],
             )
         current_turn_index = self._action_telemetry.turn_index
+        stt_confidence = self._consume_stt_confidence()
+        guide_decision_identity = GuideDecisionIdentity.from_turn(
+            message_id=new_message.id,
+            transcript=finalized_transcript,
+            turn_index=current_turn_index,
+            guide_arm_epoch=self._guide_arm_epoch,
+        )
+        if self._launch_surface is VoiceSurface.DESKTOP:
+            previous_assistant, recent_dialogue = self._guide_dialogue_context(
+                turn_ctx, new_message.id
+            )
+            self._finalized_guide_decision = await self._guide_intent_classifier.classify(
+                transcript=finalized_transcript,
+                identity=guide_decision_identity,
+                stt_confidence=stt_confidence,
+                guide_active=self._guide_active,
+                previous_assistant_text=previous_assistant,
+                recent_dialogue=recent_dialogue,
+            )
         if self._turn_metrics is not None:
             self._turn_metrics.start_turn(
                 turn_index=current_turn_index,
@@ -693,11 +769,18 @@ class BuddyAgent(agents.Agent):
             self._fresh_frame_for_turn,
             source_message_id=new_message.id,
             turn_index=current_turn_index,
+            guide_intent_decision=self._finalized_guide_decision,
+            guide_decision_identity=self._current_guide_identity(),
         )
         self._finalized_tool_selection = None
         self._finalized_selection_context = None
         selection_changed = False
-        finalized_side_effect = copyable_output_requested
+        finalized_side_effect = copyable_output_requested or (
+            self._finalized_guide_decision is not None
+            and self._finalized_guide_decision.valid
+            and self._finalized_guide_decision.route
+            in {GuideIntentRoute.CLARIFY, GuideIntentRoute.STOP_GUIDE}
+        )
         if self._tool_catalog is not None:
             (
                 policy,
@@ -1518,26 +1601,52 @@ class BuddyAgent(agents.Agent):
 
     @function_tool
     async def set_guide_mode(self, enable: bool) -> dict[str, object]:
-        """Turn Guide Mode on or off when the user asks for it.
+        """Request Guide Mode after this finalized turn was explicitly admitted.
 
         Guide Mode is the hands-free screen-guidance mode where Buddy watches
-        the user's screen and gives one short nudge as it changes. This is the
-        ONLY way you can control it. Call set_guide_mode(enable=true) to start
-        it and set_guide_mode(enable=false) to stop it, whenever the user asks
-        ("start guide mode", "turn on guide mode", "stop guiding me").
+        the user's screen and gives one short nudge as it changes. This tool is
+        exposed only after an independent admission decision authorized a start.
+        Call it with enable=true. Stop requests are handled by the existing
+        deterministic disarm path and never by this tool.
 
-        Because this is the only control you have, NEVER say you turned Guide Mode
-        on or off, flipped a switch, or that it is now running, unless you called
-        this tool on this turn and it returned success. Arming is owned natively by
-        the desktop, so a call only REQUESTS the change and can fail after you ask.
+        Because this is the only start control you have, NEVER say you turned Guide
+        Mode on, flipped a switch, or that it is now running, unless you called this
+        tool on this turn and it returned success. Arming is owned natively by the
+        desktop, so a call only REQUESTS the change and can fail after you ask.
 
         Args:
-            enable: True to start Guide Mode, False to stop it.
+            enable: True to request Guide Mode.
         """
         span = start_tool_span(tool_name="set_guide_mode", source="voice", uid=self._user_id)
+        admission = guide_start_admission(
+            self._finalized_guide_decision,
+            self._current_guide_identity(),
+        )
+        if enable is not True or not admission.allowed:
+            decision = self._finalized_guide_decision
+            logger.warn(
+                "GuideAdmission: direct execution rejected",
+                {
+                    "decision_id": decision.decision_id if decision is not None else None,
+                    "route": decision.route if decision is not None else None,
+                    "reason_code": (
+                        "guide_start_only" if enable is not True else admission.reason_code
+                    ),
+                    "turn_index": self._action_telemetry.turn_index,
+                    "guide_arm_epoch": self._guide_arm_epoch,
+                },
+            )
+            span.finish(success=False, error_type="GuideAdmissionRejected")
+            return action_truth_envelope(
+                ok=False,
+                say="I need a clear Guide Mode request before I can start watching.",
+                render_mode="verbatim",
+                render_channel="voice",
+                then="Speak only `say`. Do not claim Guide Mode is active.",
+            )
         try:
             spoken_reply = await request_guide_mode(
-                user_id=self._user_id, session_id=self._session_id, enable=enable
+                user_id=self._user_id, session_id=self._session_id, enable=True
             )
         except Exception as exc:
             span.finish(success=False, error_type=type(exc).__name__)
@@ -1616,6 +1725,7 @@ class BuddyAgent(agents.Agent):
                 fresh_frame_available=fresh_frame_available,
                 enabled_feature_rollouts=self._enabled_feature_rollouts,
                 authorization_state=self._active_intent.authorization_state,
+                required_tools=policy.required_tools,
             ),
             policy.allowed_tools,
             self._active_intent,
@@ -1850,6 +1960,50 @@ class BuddyAgent(agents.Agent):
                 return
             capture_remainder = capture_command.remainder
 
+        guide_decision = self._finalized_guide_decision if finalized else None
+        if (
+            guide_decision is not None
+            and guide_decision.route is GuideIntentRoute.STOP_GUIDE
+            and guide_decision_currency(
+                guide_decision, self._current_guide_identity()
+            ).allowed
+        ):
+            cached_stop = self._guide_stop_result
+            if cached_stop is not None and cached_stop[0] == guide_decision.decision_id:
+                spoken_stop = cached_stop[1]
+            else:
+                spoken_stop = await request_guide_mode(
+                    user_id=self._user_id,
+                    session_id=self._session_id,
+                    enable=False,
+                )
+                self._guide_stop_result = (guide_decision.decision_id, spoken_stop)
+                logger.info(
+                    "GuideAdmission: stop dispatched",
+                    {
+                        "decision_id": guide_decision.decision_id,
+                        "route": guide_decision.route,
+                        "reason_code": guide_decision.reason_code,
+                        "turn_index": guide_decision.identity.turn_index,
+                        "guide_arm_epoch": guide_decision.identity.guide_arm_epoch,
+                    },
+                )
+            self._finalized_pass_ran = True
+            self._action_telemetry.first_response()
+            yield spoken_stop
+            return
+        if (
+            guide_decision is not None
+            and guide_decision.route is GuideIntentRoute.CLARIFY
+            and guide_decision_currency(
+                guide_decision, self._current_guide_identity()
+            ).allowed
+        ):
+            self._finalized_pass_ran = True
+            self._action_telemetry.first_response()
+            yield _GUIDE_CLARIFICATION_REPLY
+            return
+
         if self._guide_active:
             if self._guide_runtime is not None and self._guide_runtime.should_delegate():
                 logger.info(
@@ -1946,11 +2100,9 @@ class BuddyAgent(agents.Agent):
         catalog = self._refresh_tool_catalog(tools)
         policy = self._finalized_policy if finalized else None
         if policy is None:
-            # EXPOSURE policy. finalized_turn=True on both passes deliberately,
-            # because the tool SCHEMAS the model sees must be identical for a
-            # speculation to be reusable at all - and because a reused
-            # speculation generated against a read-only tool set would silently
-            # answer a side-effecting request without acting.
+            # EXPOSURE policy. General tool schemas stay stable across passes.
+            # set_guide_mode is intentionally absent here unless this is the
+            # finalized path carrying its already-computed START_GUIDE decision.
             policy = derive_turn_policy(
                 transcript,
                 chat_ctx,
@@ -1959,6 +2111,12 @@ class BuddyAgent(agents.Agent):
                 finalized_turn=True,
                 source_message_id=latest_user.id if latest_user is not None else "",
                 turn_index=self._action_telemetry.turn_index,
+                guide_intent_decision=(
+                    self._finalized_guide_decision if finalized else None
+                ),
+                guide_decision_identity=(
+                    self._current_guide_identity() if finalized else None
+                ),
             )
         selection = self._finalized_tool_selection if finalized else None
         selection_context = self._finalized_selection_context if finalized else None
@@ -1989,13 +2147,10 @@ class BuddyAgent(agents.Agent):
                 if selection.active_capability is not None
                 else ""
             )
-        # EXECUTION policy, kept separate on purpose. Identical exposure means
-        # action_policy's finalized_turn check can no longer distinguish the two
-        # passes, so authorization is carried here instead: a speculative pass
-        # gets finalized_turn=False and evaluate_execution refuses every non-READ
-        # call it emits. That restores a real gate that does not depend on
-        # LiveKit's scheduling behaviour, while leaving the model's view of the
-        # tools byte-identical between passes.
+        # EXECUTION policy, kept separate on purpose. A speculative pass gets
+        # finalized_turn=False and evaluate_execution refuses every non-READ call
+        # it emits. Guide admission is stricter still: speculative exposure omits
+        # set_guide_mode, and finalized execution rechecks the bound decision.
         execution_policy = replace(policy, finalized_turn=finalized)
         # Captured once, at the start of this generation, and carried with it.
         # If this stream outlives its turn, the epoch it reports will no longer
@@ -2299,6 +2454,27 @@ class BuddyAgent(agents.Agent):
         return None
 
     @staticmethod
+    def _guide_dialogue_context(
+        chat_ctx: lk_llm.ChatContext, current_message_id: str
+    ) -> tuple[str, list[dict[str, str]]]:
+        dialogue: list[dict[str, str]] = []
+        previous_assistant = ""
+        for item in chat_ctx.items:
+            if not isinstance(item, lk_llm.ChatMessage):
+                continue
+            if item.role not in {"user", "assistant"}:
+                continue
+            if item.id == current_message_id:
+                continue
+            text = (item.text_content or "").strip()
+            if not text:
+                continue
+            dialogue.append({"role": item.role, "text": text[:500]})
+            if item.role == "assistant":
+                previous_assistant = text[:500]
+        return previous_assistant, dialogue[-6:]
+
+    @staticmethod
     def _turn_instruction(chat_ctx: lk_llm.ChatContext) -> str:
         """Everything the user said since Buddy last spoke, joined in order.
 
@@ -2507,6 +2683,7 @@ class BuddyAgent(agents.Agent):
                     getattr(call, "arguments", "{}"),
                     policy,
                     chat_ctx,
+                    guide_decision_identity=self._current_guide_identity(),
                 )
                 if (
                     decision.reason_code == "stale_turn_side_effect"
