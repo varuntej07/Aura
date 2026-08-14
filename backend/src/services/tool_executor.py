@@ -23,6 +23,7 @@ from ..lib.logger import logger
 from ..prompts import REASON_STEP_SYSTEM_PROMPT, reason_step_user_prompt
 from ..shared.tools import (
     MEMORY_CATEGORIES,
+    TIER_GATED_TOOLS,
     claude_tool_definitions,
     validate_and_coerce_tool_input,
 )
@@ -43,29 +44,38 @@ REASON_STEP_TIMEOUT_S = max(
     min(40.0, TOOL_TIMEOUT_S * settings.REASON_STEP_MAX_TURNS),
 )
 
-DESKTOP_CHAT_ALLOWED_TOOLS: frozenset[str] = frozenset({
-    "set_reminder",
-    "list_reminders",
-    "get_upcoming_events",
-    "query_memory",
-    "get_user_context",
-    "web_surf",
-    "start_research",
-    "list_emails",
-    "read_email",
-    "ask_clarification",
-    "list_trackers",
-    "reason_step",
-    })
+# Desktop text chat is the SAME authenticated user reading and writing the same
+# users/{uid} documents as the phone, so it starts from the full canonical toolset and
+# subtracts, rather than naming what it is allowed to have.
+#
+# This used to be a hand-maintained 12-name allowlist, and that is exactly how
+# cancel_reminder, store_memory, track_topic, report_feedback and the calendar writes
+# went missing on desktop without anyone noticing. The user-visible result was Buddy
+# explaining that the two apps are "kind of like separate notebooks", which is false and
+# undercuts the one thing that makes Aura worth having on two devices. A denylist means a
+# new tool reaches desktop by default; forgetting now costs a redundant capability rather
+# than a silent hole.
+DESKTOP_CHAT_DENIED_TOOLS: frozenset[str] = frozenset({
+    # Irreversible, no dedup, and the desktop confirmation UX is unproven. This is the
+    # only entry that is a real product decision rather than an oversight.
+    "send_email",
+})
+
+
 def resolve_chat_surface_allowed_tools(
     surface: str, *, contract_version: int = 1
 ) -> frozenset[str] | None:
     """Return None for the unrestricted app surface, otherwise fail closed."""
     if surface == "app":
         return None
+    denied = DESKTOP_CHAT_DENIED_TOOLS
     if contract_version < 3:
-        return DESKTOP_CHAT_ALLOWED_TOOLS - {"start_research"}
-    return DESKTOP_CHAT_ALLOWED_TOOLS
+        # A real client-rendering capability, not a policy guess: builds before v3
+        # cannot draw research frames.
+        denied = denied | {"start_research"}
+    return frozenset(
+        tool["name"] for tool in claude_tool_definitions() if tool["name"] not in denied
+    )
 
 
 def excluded_tools_for_chat_surface(
@@ -295,12 +305,18 @@ class ToolExecutor:
         client_message_id: str = "",
         session_id: str = "",
         allowed_tools: frozenset[str] | None = None,
+        blocked_write_reasons: dict[str, str] | None = None,
+        user_tier: str = "pro",
     ) -> None:
         self._user_id = user_id
         self._created_via = created_via     # How reminders created in this session are tagged
         self._client_message_id = client_message_id
         self._session_id = session_id
         self._allowed_tools = allowed_tools
+        # Per-turn execution denials (tool -> reason code). The tool STAYS exposed to the
+        # model; only the call is refused, with an envelope Buddy can speak truthfully.
+        self._blocked_write_reasons = dict(blocked_write_reasons or {})
+        self._user_tier = user_tier
 
     @property
     def user_id(self) -> str:
@@ -329,7 +345,49 @@ class ToolExecutor:
                 "error": True,
                 "code": "tool_not_allowed",
                 "retryable": False,
-                "user_message": f"Tool '{tool_name}' is not allowed for this chat surface.",
+                # Buddy speaks user_message almost verbatim, so it says what the person
+                # can do about it. It must never imply Aura lacks the feature: the same
+                # action works on their phone, and claiming otherwise is the exact
+                # confabulation shared/capability_claims.py exists to catch.
+                "user_message": (
+                    "I can't do that from this app yet, but I can do it when you're "
+                    "on your phone."
+                ),
+            }
+        blocked_reason = self._blocked_write_reasons.get(tool_name)
+        if blocked_reason is not None:
+            logger.info(
+                "Tool: write refused, current turn contradicts it",
+                {"tool": tool_name, "reason": blocked_reason, "user_id": self._user_id},
+            )
+            return {
+                "ok": False,
+                "error": True,
+                "code": "not_authorized_this_turn",
+                "retryable": False,
+                "user_message": (
+                    "You were asking about a reminder you already have, so I didn't "
+                    "create a new one."
+                    if blocked_reason == "status_question"
+                    else "You said not to, so I didn't set that reminder."
+                ),
+            }
+        if self._user_tier == "free" and tool_name in TIER_GATED_TOOLS:
+            # The tool stays in the model's list on purpose. Hiding it produced "Aura
+            # doesn't do calendar", which is both false and the opposite of a sell.
+            logger.info(
+                "Tool: refused, plan does not include it",
+                {"tool": tool_name, "user_id": self._user_id},
+            )
+            return {
+                "ok": False,
+                "error": True,
+                "code": "upgrade_required",
+                "retryable": False,
+                "user_message": (
+                    "Calendar is part of the paid plan, so I can't write to it on the "
+                    "free one. Upgrading in Settings turns it on right away."
+                ),
             }
         if not isinstance(input_data, dict):
             return {

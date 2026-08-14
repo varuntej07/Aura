@@ -400,7 +400,13 @@ async def test_original_followup_reaches_existing_model_with_reminder_tool(monke
     output = await _collect_llm(agent, context, tools)
 
     assert output == ["model decides from the existing conversation"]
-    assert [tool.info.name for tool in captured["tools"]] == ["set_reminder"]
+    # The point of this test is that "Or tonight" still reaches the model holding
+    # set_reminder. It is no longer the ONLY tool: the core floor (tool_discovery)
+    # keeps a small read set exposed on every turn, because an empty or minimal list is
+    # what let Buddy tell a user it had no reminder tool.
+    passed_tool_names = [tool.info.name for tool in captured["tools"]]
+    assert "set_reminder" in passed_tool_names
+    assert "web_surf" not in passed_tool_names
     passed_context = captured["context"]
     passed_text = [item.text_content for item in passed_context.items]
     assert passed_text[:3] == [

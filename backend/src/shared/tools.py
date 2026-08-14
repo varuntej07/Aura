@@ -57,6 +57,31 @@ MEMORY_CATEGORIES: list[str] = [
     "interests",
 ]
 
+# Tools a free account may not EXECUTE. They are still exposed to the model on every
+# tier: the executor refuses the call with an upgrade envelope instead. Removing them
+# from the tools array is what taught Buddy to answer "Aura doesn't do calendar", which
+# is false and loses the sale. See ToolExecutor.execute.
+# Same membership as the old claude_client.STARTER_ONLY_TOOLS: this change moves where
+# the gate is enforced, it does not change who is entitled to what.
+TIER_GATED_TOOLS: frozenset[str] = frozenset({
+    "create_calendar_event",
+    "get_upcoming_events",
+})
+
+# The capabilities Buddy must never appear to lack, on any surface, on any turn. No
+# per-turn wording heuristic, semantic selector, or surface allowlist may remove one of
+# these while it is structurally eligible. Checked at startup (main.py) so a regression
+# is loud instead of silent.
+#
+# Deliberately one write and three reads. Every additional write in the floor is a real
+# risk of an unprompted call, and set_reminder is the one with evidence behind it.
+CORE_TOOLS: frozenset[str] = frozenset({
+    "set_reminder",
+    "list_reminders",
+    "get_upcoming_events",
+    "query_memory",
+})
+
 # Canonical tool specs
 
 SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {

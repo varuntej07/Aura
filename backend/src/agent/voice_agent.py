@@ -48,6 +48,8 @@ from .voice.auth import mint_firebase_id_token
 from .voice.bridge_handover import BRIDGE_CONTROL_TYPES, BridgeHandoverCoordinator
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
+from .voice.greeting import start_opener_task
+from .voice.input_liveness import InputLiveness, watch_input_liveness
 from .voice.guide_default_profile import GenericGuideProfile
 from .voice.guide_mode import (
     GUIDE_HEARTBEAT_TYPE,
@@ -238,6 +240,9 @@ def prewarm(process: JobProcess) -> None:
     # Prewarm runs inside each LiveKit job process. Configure tracing here so
     # its provider exists in the same process that creates agent spans.
     configure_arize_tracing("voice")
+    from ..shared.tool_exposure import verify_core_tool_exposure
+
+    verify_core_tool_exposure(component="voice")
     logger.info("VoiceWorker: prewarming VAD model")
     # Bundled local silero VAD (livekit-local-inference); replaces the deprecated
     # livekit-plugins-silero. Loaded here so the model isn't cold on the first job.
@@ -277,6 +282,51 @@ async def _connect_to_room(ctx: JobContext, candidate_user_id: str) -> bool:
             room_name=ctx.room.name,
             session_id=None,
             exc=exc,
+        )
+        return False
+
+
+async def _wait_for_user_participant(ctx: JobContext, user_id: str) -> bool:
+    """Block until the user's participant is in the room. False means they never came.
+
+    ``ctx.connect()`` connects the AGENT, nothing more. Every launch parameter this
+    worker reads (surface, conversation_id, bridged, output_mode, voice_request_id) lives
+    in the USER's participant token metadata, and all eight ``_resolve_*`` helpers below
+    iterate ``ctx.room.remote_participants`` and quietly return their defaults when that
+    dict is still empty. The old code asserted in a comment that connect implied the
+    participant existed; it does not, and the resulting doc reads
+    ``surface: "unknown", conversation_id: ""`` with no error anywhere.
+
+    Returns immediately when the participant already joined, which is the common case.
+    """
+    try:
+        await asyncio.wait_for(
+            ctx.wait_for_participant(identity=user_id),
+            timeout=settings.VOICE_PARTICIPANT_WAIT_S,
+        )
+        return True
+    except TimeoutError:
+        # Nobody to serve. Holding the room open just buys a 5-minute empty session.
+        logger.error(
+            "voice_run_participant_never_joined",
+            {
+                "room": ctx.room.name,
+                "user_id": user_id,
+                "waited_s": settings.VOICE_PARTICIPANT_WAIT_S,
+            },
+        )
+        log_voice_failure(
+            code="participant_never_joined",
+            user_id=user_id,
+            room_name=ctx.room.name,
+            session_id=None,
+            exc=TimeoutError("user participant never joined"),
+        )
+        return False
+    except Exception as exc:
+        logger.exception(
+            "VoiceAgent: participant wait failed",
+            {"room": ctx.room.name, "user_id": user_id, "error": str(exc)},
         )
         return False
 
@@ -328,6 +378,11 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         return
 
+    # Before ANY participant metadata is read. Everything below this line depends on
+    # the user's participant actually being in the room.
+    if not await _wait_for_user_participant(ctx, user_id):
+        return
+
     from ..services.session_followup.lifecycle import session_lifecycle_service
 
     origin, origin_candidate_id, lineage_chain = _resolve_followup_metadata(ctx)
@@ -350,14 +405,24 @@ async def entrypoint(ctx: JobContext) -> None:
         # task-focused for the whole session, not just the first turn.
         # Resolved BEFORE the context fetch, not after: conversation_id is what lets the
         # fetch pick up the text exchanges this same conversation typed just before
-        # starting the call. Safe here because _connect_to_room already returned, so the
-        # remote participant and its metadata exist.
+        # starting the call. Safe because _wait_for_user_participant has returned, so the
+        # participant carrying this metadata is genuinely in the room. Do not move this
+        # above that wait: an empty remote_participants map reads as "client sent
+        # nothing" and is indistinguishable from a client that sent everything.
         persisted_surface, conversation_id = _resolve_participant_metadata(ctx)
 
         # Fetch profile, memory, last session, archive, aura, and tier in
         # parallel under a hard ceiling. Each source defaults independently.
         session_context = await gather_session_context(user_id, session_id, conversation_id)
         context_vars = session_context.prompt_context_vars
+
+        # Memory-seeded opener, raced against the static greeting: it runs in
+        # parallel with the pipeline build below, and on_enter waits at most
+        # VOICE_GREETING_SEED_BUDGET_S for it before falling back to a static
+        # casual line (sub-1s first-audio feel preserved).
+        opener_task = start_opener_task(
+            session_context, session_id=session_id, user_id=user_id
+        )
 
         voice_request_id, voice_requested_at_ms = _resolve_voice_request_timing(ctx)
         surface = persisted_surface or "app"
@@ -396,11 +461,18 @@ async def entrypoint(ctx: JobContext) -> None:
                 },
             )
         if not conversation_id:
+            # Mint one rather than run without a thread. Transcript reconciliation is
+            # gated on a non-empty conversation_id (voice_session_summarizer), so a run
+            # without one keeps its turns in raw_turns and they never reach the user's
+            # chat history. Losing the transcript of a call that happened is worse than
+            # creating a thread the client did not ask for.
+            conversation_id = f"voice-{session_id}"[:128]
             logger.warn(
                 "voice_run_missing_conversation_id",
                 {
                     "session_id": session_id,
                     "user_id": user_id,
+                    "minted_conversation_id": conversation_id,
                 },
             )
         if surface != "app":
@@ -553,6 +625,7 @@ async def entrypoint(ctx: JobContext) -> None:
             bridged=bridged,
             text_output=output_mode == "text",
             turn_metrics=turn_metrics,
+            opener_task=opener_task,
         )
 
         bridge = (
@@ -618,6 +691,7 @@ async def entrypoint(ctx: JobContext) -> None:
             lambda ev: buddy.ingest_partial_transcript(ev.transcript, ev.is_final),
         )
 
+        liveness = InputLiveness()
         recorder = VoiceSessionRecorder(
             session=session,
             ctx=ctx,
@@ -632,6 +706,7 @@ async def entrypoint(ctx: JobContext) -> None:
             voice_request_id=voice_request_id,
             surface=surface,
             turn_metrics=turn_metrics,
+            liveness=liveness,
         )
         buddy.bind_direct_action_recorder(recorder.record_direct_action)
         recorder.attach()
@@ -642,6 +717,8 @@ async def entrypoint(ctx: JobContext) -> None:
         # Free-tier voice budget task (warn at T-60s, wind down and close at the
         # cap), armed after start, cancelled on session end.
         voice_limit_task: asyncio.Task | None = None
+        # Inbound-audio watchdog, armed after start, cancelled on session end.
+        liveness_task: asyncio.Task | None = None
 
         # On-screen / field context handed in over the data channel: the keyboard's
         # "talk about what's on my screen", an OCR snapshot, or a typed message. The
@@ -825,6 +902,19 @@ async def entrypoint(ctx: JobContext) -> None:
             # The session is live: process any context packet that arrived during startup,
             # then let the handler dispatch live ones directly.
             session_live = True
+            # Armed from here, not earlier: before start there is no pipeline to hear
+            # anything with, so a grace period measured from before this point would
+            # accuse a session that was merely still building.
+            liveness_task = asyncio.create_task(
+                watch_input_liveness(
+                    session=session,
+                    ctx=ctx,
+                    liveness=liveness,
+                    session_id=session_id,
+                    user_id=user_id,
+                ),
+                name=f"voice-input-liveness-{session_id[:8]}",
+            )
             guide.start()
             # Before any buffered packet can produce speech: detach the audio
             # sink when the token asked for text output, and acknowledge the
@@ -898,6 +988,12 @@ async def entrypoint(ctx: JobContext) -> None:
                     tool_calls=recorder.tool_calls,
                     action_receipts=recorder.action_receipts,
                     screen_sight_frame_count=screen_frames.frame_count,
+                    # What the inbound path actually did, so a zero-turn session can
+                    # say WHY it was silent instead of only that it was.
+                    liveness_verdict=liveness.verdict,
+                    participant_linked=liveness.participant_linked,
+                    audio_track_seen=liveness.audio_track_seen,
+                    closed_by_idle_timeout=recorder.closed_by_idle_timeout,
                 )
             except Exception as exc:
                 logger.error(
@@ -931,6 +1027,8 @@ async def entrypoint(ctx: JobContext) -> None:
             await typed_messages.close()
             if voice_limit_task is not None:
                 voice_limit_task.cancel()
+            if liveness_task is not None:
+                liveness_task.cancel()
             for task in context_tasks:
                 task.cancel()
             reset_arize_context(arize_context_token)

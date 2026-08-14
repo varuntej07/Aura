@@ -43,12 +43,11 @@ _RETRYABLE_ERRORS = (
 EXCLUDED_TOOLS_FOR_GENERAL_CHAT: set[str] = set()
 EXCLUDED_TOOLS_FOR_AGENT_CHAT: set[str] = set()
 
-# Tools that require Starter tier or above.
-# Free users only get reminder + memory + clarification tools.
-STARTER_ONLY_TOOLS: frozenset[str] = frozenset({
-    "create_calendar_event",
-    "get_upcoming_events",
-})
+# Tier gating moved to ToolExecutor.execute (shared.tools.TIER_GATED_TOOLS). The tools
+# stay in the array for free users and the CALL is refused with an upgrade envelope.
+# Removing them here meant a free user asking about their calendar met a model with no
+# calendar tool, which answered that Aura has no calendar. False, and it talks the user
+# out of the thing they would have paid for.
 
 # Text Claude generates before a tool call is typically a brief narration sentence.
 # Anything longer than this is almost certainly the start of a final response, not narration.
@@ -70,7 +69,6 @@ class ClaudeClient:
         user_content: str | list[dict[str, Any]],
         history: list[dict[str, Any]] | None = None,
         is_agent: bool = False,
-        user_tier: str = "pro",
         extra_excluded_tools: frozenset[str] = frozenset(),
     ) -> dict[str, Any]:
         """
@@ -97,8 +95,6 @@ class ClaudeClient:
             t for t in claude_tool_definitions()
             if t["name"] not in excluded and t["name"] not in extra_excluded_tools
         ]
-        if user_tier == "free":
-            tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
         if tools:
             tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
 
@@ -334,7 +330,6 @@ class ClaudeClient:
         user_content: str | list[dict[str, Any]],
         history: list[dict[str, Any]] | None = None,
         is_agent: bool = False,
-        user_tier: str = "pro",
         extra_excluded_tools: frozenset[str] = frozenset(),
         contract_version: int = 1,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -366,8 +361,6 @@ class ClaudeClient:
             t for t in claude_tool_definitions()
             if t["name"] not in excluded and t["name"] not in extra_excluded_tools
         ]
-        if user_tier == "free":
-            tools = [t for t in tools if t["name"] not in STARTER_ONLY_TOOLS]
         if tools:
             tools = [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         prior: list[dict[str, Any]] = history or []

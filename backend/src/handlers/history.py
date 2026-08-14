@@ -20,6 +20,7 @@ immediately after rolling them up (voice_session_summarizer._cleanup_archived_do
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -42,6 +43,18 @@ _ARCHIVE_DOC = "archive"
 # holds meaningfully more than this many non-archived docs, so this is a safety cap,
 # not a real pagination limit.
 _LIST_LIMIT = 30
+
+
+def _as_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    return None
 
 
 def _sessions_collection(uid: str):
@@ -90,6 +103,10 @@ async def handle_list_sessions(request: Request) -> JSONResponse:
     user_id = resolve_user_id_from_request(request)
     if not user_id:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    since_raw = (request.query_params.get("since") or "").strip()
+    since = _as_datetime(since_raw) if since_raw else None
+    if since_raw and since is None:
+        return JSONResponse({"error": "Invalid since timestamp."}, status_code=400)
 
     def _read_sessions() -> list[dict]:
         query = (
@@ -101,6 +118,9 @@ async def handle_list_sessions(request: Request) -> JSONResponse:
         for snap in query.stream():
             data = snap.to_dict() or {}
             if data.get("archived"):
+                continue
+            started_at = _as_datetime(data.get("started_at"))
+            if since is not None and (started_at is None or started_at < since):
                 continue
             rows.append(_session_summary_row(snap.id, data))
         return rows

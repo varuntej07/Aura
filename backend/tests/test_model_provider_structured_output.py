@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel
 
+from src.prompts import STRUCTURED_OUTPUT_RETRY_INSTRUCTION
 from src.services import model_provider as module
 
 
@@ -25,7 +26,10 @@ async def test_structured_output_regenerates_once_after_invalid_json(monkeypatch
 
     assert result == Result(value=7)
     assert call.await_count == 2
-    assert "previous response violated" in call.await_args_list[1].kwargs["prompt"]
+    # Assert against the shipped constant, not a copy of its wording. The literal this
+    # used to hardcode went stale when 7e59119 moved the instruction into prompts.py and
+    # reworded it, so the test failed while the behaviour it guards was still correct.
+    assert STRUCTURED_OUTPUT_RETRY_INSTRUCTION in call.await_args_list[1].kwargs["prompt"]
 
 
 def test_parse_failure_logs_metadata_but_never_generated_text(monkeypatch):

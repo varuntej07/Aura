@@ -11,8 +11,18 @@ LiveKit's ``Agent`` auto-discovers ``@function_tool``-decorated methods on
 ``self`` (``find_function_tools``), merging them with the MCP-provided tools
 into one tool list for the model — no separate registration needed. Lifecycle:
 
-* on_enter -> stay silent. The first finalized user turn starts the
-              conversation; the recorder owns the one silence nudge.
+* on_enter -> open the call. Buddy speaks first, always, within about a second:
+              the memory-seeded opener (voice/greeting.py) when it resolves
+              inside VOICE_GREETING_SEED_BUDGET_S, otherwise a static casual
+              line. Bridge mode is the one exception and stays silent.
+
+              This used to be "stay silent until the user's first finalized
+              turn", and that policy is why a dead microphone was
+              indistinguishable from a working call: Buddy said nothing, the
+              user said something nobody heard, and the session sat mute for
+              five minutes until the idle watchdog killed it. An opening line
+              is also the cheapest possible proof to the user that the call is
+              actually live.
 
 Slow-tool filler phrases are spoken from ``llm_node`` below: a tool call
 surfacing in the LLM stream is the only pre-execution signal on this stack, so
@@ -26,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
 import time
 from collections.abc import AsyncIterable, Callable
 from copy import deepcopy
@@ -43,9 +54,11 @@ from livekit.agents import (
 )
 from livekit.agents import llm as lk_llm
 
+from ..config.settings import settings
 from ..lib.logger import logger
 from ..prompts import GUIDE_SYSTEM_PROMPT, voice_system_prompt
 from ..services.analytics.llm_telemetry import start_tool_span
+from ..shared.capability_claims import log_false_capability_claims
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import (
     VOICE_FEEDBACK_TOOL_DEFINITION,
@@ -82,6 +95,7 @@ from .voice.draft_outbound import (
     run_draft_tool,
 )
 from .voice.emotion_tags import convert_audio_cue_stream
+from .voice.greeting import resolve_opener
 from .voice.guide_control import SPOKEN_GUIDE_REQUEST_FAILED, request_guide_mode
 from .voice.guide_intent import (
     GuideDecisionIdentity,
@@ -239,6 +253,23 @@ _DRAFT_OUTBOUND_MESSAGE_TOOL_DEFINITION = {
 }
 
 
+# The sub-1s floor for the opening line. The memory-seeded opener
+# (voice/greeting.py) is better when it lands inside its budget, but it needs an
+# LLM round trip and a user with history; this list is what guarantees Buddy says
+# SOMETHING the moment the call connects, for a brand-new user on a bad network.
+CASUAL_GREETINGS = [
+    "whatsup buddy",
+    "what's going on",
+    "Yooo!! what's good",
+    "Heyyy, what's happening",
+    "how you doin",
+    "hey, what's up",
+    "how's it going buddy",
+    "what's new with you",
+    "hey you, sup?",
+]
+
+
 class BuddyAgent(agents.Agent):
     def __init__(
         self,
@@ -257,6 +288,7 @@ class BuddyAgent(agents.Agent):
         bridged: bool = False,
         text_output: bool = False,
         turn_metrics: VoiceTurnMetrics | None = None,
+        opener_task: "asyncio.Task[str] | None" = None,
     ) -> None:
         voice_surface = VoiceSurface(launch_surface)
         # Per-tool selection guidance is NOT assembled here. It lives in each tool's
@@ -281,6 +313,9 @@ class BuddyAgent(agents.Agent):
             chat_ctx=chat_ctx,
         )
         self._user_id = user_id
+        # Raced against CASUAL_GREETINGS in greet(); None simply means the static
+        # line speaks, which is the correct behaviour for a user with no history.
+        self._opener_task = opener_task
         self._screen_frames = screen_frames
         self._screen_context = screen_context
         self._session_id = session_id
@@ -548,14 +583,22 @@ class BuddyAgent(agents.Agent):
         self._text_output = text_output
 
     async def on_enter(self) -> None:
-        # Conversation starts with the user's first finalized turn. A model-picked
-        # memory opener is not allowed to manufacture relevance before they speak.
-        return
+        # In bridge mode the desktop's Realtime leg is already talking; stay silent and
+        # let BridgeHandoverCoordinator drive greet() (on skip) or seed context (on
+        # handover). on_enter MUST return promptly here - blocking would stall
+        # session.start and deadlock the very hold_ready/handover it is waiting for.
+        if self._bridged:
+            return
+        await self.greet()
 
     async def greet(self) -> None:
-        # Kept for bridge-handover compatibility. Silence remains server policy
-        # until a finalized user turn or the 45-second away event.
-        return
+        # Prefer the memory-seeded opener when it resolves inside the budget;
+        # otherwise the static list keeps the sub-1s hello. resolve_opener is
+        # fail-open ("" on timeout/error), so the greeting can never hang.
+        opener = await resolve_opener(
+            self._opener_task, settings.VOICE_GREETING_SEED_BUDGET_S
+        )
+        await self.session.say(opener or random.choice(CASUAL_GREETINGS))
 
     async def on_user_turn_completed(
         self, turn_ctx: lk_llm.ChatContext, new_message: lk_llm.ChatMessage
@@ -2419,7 +2462,14 @@ class BuddyAgent(agents.Agent):
 
             stream = _prepend_screen_visibility()
         first_output_logged = False
+        spoken_parts: list[str] = []
         async for item in stream:
+            if isinstance(item, str):
+                spoken_parts.append(item)
+            else:
+                spoken_parts.append(
+                    getattr(getattr(item, "delta", None), "content", None) or ""
+                )
             if not first_output_logged:
                 first_output_logged = True
                 now = time.monotonic()
@@ -2445,6 +2495,17 @@ class BuddyAgent(agents.Agent):
                     )
             self._action_telemetry.first_response()
             yield item
+
+        # Log-only, after the words are already on their way to TTS. Voice is where a
+        # false product claim does the most damage, because it sounds like Buddy simply
+        # knows. Nothing here alters speech; it makes the failure countable.
+        log_false_capability_claims(
+            "".join(spoken_parts),
+            exposed_tools=frozenset(execution_policy.allowed_tools),
+            surface=str(self._launch_surface),
+            user_id=self._user_id,
+            session_id=self._session_id,
+        )
 
     @staticmethod
     def _latest_user_message(chat_ctx: lk_llm.ChatContext) -> lk_llm.ChatMessage | None:

@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from livekit.agents import AgentSession, JobContext
 
 if TYPE_CHECKING:
+    from .input_liveness import InputLiveness
     from .screen_frames import ScreenFrameStore
 
 from ...lib.logger import logger
@@ -91,6 +92,7 @@ class VoiceSessionRecorder:
         voice_request_id: str = "",
         surface: str = "unknown",
         turn_metrics: VoiceTurnMetrics | None = None,
+        liveness: "InputLiveness | None" = None,
     ) -> None:
         self._session = session
         self._ctx = ctx
@@ -108,6 +110,9 @@ class VoiceSessionRecorder:
         self._voice_request_id = voice_request_id
         self._surface = surface
         self._turn_metrics = turn_metrics
+        # Shared with the input-liveness watchdog: a real transcript is proof the
+        # inbound path works and calls off the "I can't hear you" nudge.
+        self._liveness = liveness
         self._first_talk_logged = False
         # ScreenFrameStore on desktop sessions (None elsewhere); lets the away
         # nudge pick the screen-aware instruction only when a fresh frame exists.
@@ -117,6 +122,9 @@ class VoiceSessionRecorder:
         self.action_receipts: list[dict[str, Any]] = []
         self._receipt_tasks: set[asyncio.Task[None]] = set()
         self.done = asyncio.Event()
+        # True when the 5-minute no-transcript watchdog is what ended the call, rather
+        # than the user hanging up. Read at teardown to explain a zero-turn session.
+        self.closed_by_idle_timeout = False
         self._followup_idle_task: asyncio.Task | None = None
         # Latched True once Buddy has checked in during the CURRENT silence span;
         # released only by a real final user transcript. Stops LiveKit's repeated
@@ -149,6 +157,20 @@ class VoiceSessionRecorder:
 
             try:
                 await asyncio.sleep(followup_fields.VOICE_IDLE_TIMEOUT.total_seconds())
+                # This timer is reset ONLY by a final user transcript, so reaching
+                # here means the whole window passed without one. On a session that
+                # also captured no turns it is the signature of a dead inbound audio
+                # path, and it used to end the call with no trace of why.
+                logger.warn(
+                    "voice_session_closed_by_idle_timeout",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "idle_s": followup_fields.VOICE_IDLE_TIMEOUT.total_seconds(),
+                        "turns_captured": len(self.turns),
+                    },
+                )
+                self.closed_by_idle_timeout = True
                 await session_lifecycle_service.finalize_session(
                     self._user_id,
                     self._session_id,
@@ -244,6 +266,10 @@ class VoiceSessionRecorder:
             "is_final": ev.is_final,
         })
         if ev.is_final and ev.transcript:
+            # Proof the inbound audio path works end to end. Recorded before anything
+            # else so the liveness watchdog can never accuse a working session.
+            if self._liveness is not None:
+                self._liveness.note_transcript()
             # The user actually spoke: this silence span is over, re-open nudging
             # so the next quiet stretch can check in once again.
             self._away_nudged = False

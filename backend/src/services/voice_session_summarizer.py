@@ -107,6 +107,8 @@ async def _write_session_doc(
     conversation_id: str,
     surface: str,
     action_receipts: list[dict],
+    health: str,
+    closed_by_idle_timeout: bool,
 ) -> None:
     def _write() -> None:
         ref = (
@@ -155,6 +157,8 @@ async def _write_session_doc(
             vf.FOLLOW_UP: memory.follow_up,
             vf.MEMORY_CONTEXT: memory.compact_context(),
             vf.ACTIONS: actions,
+            vf.HEALTH: health,
+            vf.CLOSED_BY_IDLE_TIMEOUT: closed_by_idle_timeout,
             "archived": False,
             "raw_turns": raw_turns,
             # Count only — never the frame bytes themselves, which are never
@@ -353,11 +357,37 @@ async def run_post_session_pipeline(
     tool_calls: list[str],
     action_receipts: list[dict] | None = None,
     screen_sight_frame_count: int = 0,
+    liveness_verdict: str = "",
+    participant_linked: bool = True,
+    audio_track_seen: bool = True,
+    closed_by_idle_timeout: bool = False,
 ) -> None:
     logger.info("VoiceSession: post-session pipeline started", {
         "user_id": user_id, "session_id": session_id,
         "turn_count": len(turns), "duration_ms": duration_ms,
     })
+
+    # A run this long that captured nothing is a defect, not a short call. The line
+    # above has always carried both numbers, but at INFO among thousands of INFO
+    # lines, which is how a five-minute silent session stayed invisible until the
+    # user complained. Say it once, at error, with what was observed on the way in.
+    health = vf.HEALTH_OK
+    if not turns and duration_ms >= settings.VOICE_ZERO_TURN_ALERT_MS:
+        health = {
+            "no_user_audio": vf.HEALTH_NO_USER_AUDIO,
+            "no_transcript": vf.HEALTH_NO_TRANSCRIPT,
+        }.get(liveness_verdict, vf.HEALTH_ZERO_TURNS)
+        logger.error("voice_session_zero_turns", {
+            "user_id": user_id,
+            "session_id": session_id,
+            "duration_ms": duration_ms,
+            "health": health,
+            "surface": surface,
+            "has_conversation_id": bool(conversation_id),
+            "participant_linked": participant_linked,
+            "audio_track_seen": audio_track_seen,
+            "closed_by_idle_timeout": closed_by_idle_timeout,
+        })
 
     # Step A: summary + count in parallel
     results_a = await asyncio.gather(
@@ -403,6 +433,8 @@ async def run_post_session_pipeline(
             conversation_id=conversation_id,
             surface=surface,
             action_receipts=action_receipts or [],
+            health=health,
+            closed_by_idle_timeout=closed_by_idle_timeout,
         ),
         _write_latest_summary(
             user_id, memory, session_id, len(turns), duration_ms,
@@ -453,6 +485,16 @@ async def run_post_session_pipeline(
             voice_run_id=session_id,
             turns=turns,
         )
+    elif turns:
+        # A call that happened whose transcript never reached the user's chat history.
+        # The worker now mints a conversation_id when the client omits one, so this
+        # should be unreachable; if it fires, that fallback has a hole in it.
+        logger.error("voice_transcript_reconciliation_skipped", {
+            "user_id": user_id,
+            "session_id": session_id,
+            "turn_count": len(turns),
+            "reason": "missing_conversation_id",
+        })
 
     # Step C: archive check
     if session_count > _ACTIVE_SESSION_THRESHOLD:

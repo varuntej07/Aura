@@ -147,13 +147,25 @@ class HomeViewModel extends SafeChangeNotifier {
         userId: _currentUserId ?? '',
       );
     } catch (e) {
-      AppLogger.error('Failed to create voice chat session', error: e, tag: 'HomeViewModel');
+      // Not fatal, but not free either: without a conversation id the voice run
+      // has no thread to write its transcript into, so the call happens and never
+      // shows up in Recent Chats. Log it as an error so the rate is visible.
+      _currentVoiceChatSessionId = null;
+      AppLogger.error(
+        'Failed to create voice chat session, run will have no thread',
+        error: e,
+        tag: 'HomeViewModel',
+      );
     }
 
     final result = await _voiceService.startSession(
       VoiceSessionConfig(
         userId: userId,
         screenContext: screenContext,
+        // Always stamped. This was never set anywhere in the app, so every voice
+        // run in Firestore recorded surface "unknown" and the worker could not
+        // tell a phone call from a keyboard tap.
+        surface: screenContext != null ? 'keyboard' : 'app',
         // Reuse the Drift chat session id as the conversation id so the voice run
         // links to this thread instead of forking a second permanent transcript.
         conversationId: _currentVoiceChatSessionId,

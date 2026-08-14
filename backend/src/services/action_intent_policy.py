@@ -1,4 +1,25 @@
-"""Deterministic current-turn authorization for text-chat reminder writes."""
+"""Deterministic current-turn authorization for text-chat reminder writes.
+
+This module used to decide which tools Buddy was SHOWN. It no longer does, and that
+inversion is the whole point of the file.
+
+The old `excluded_tools_for_text_turn` deleted `set_reminder` from the tools array on
+every turn whose wording did not match `_EXPLICIT_REMINDER_CREATE`. The model then
+truthfully reported what it saw: "I don't have a set_reminder tool exposed to me right
+now", fifty minutes after the same account used that tool successfully on another
+surface. Worse, a user answering Buddy's own reminder question ("yeah, 7am works") fell
+outside the regex, so the follow-up turn documented in architectures/chat-and-tools.md
+could not complete the write it was designed for.
+
+The gate had the right worry and the wrong polarity. Requiring a rare positive phrasing
+to ALLOW makes capability presence a lottery on wording. Requiring a clear contradiction
+to DENY keeps the protection and costs nothing: `_NEGATED` and `_REMINDER_STATUS` are
+high-precision for the case that actually matters, a status question or a refusal being
+misread as a fresh command.
+
+So the tool is always exposed and the refusal happens at execution, where it can return a
+truthful envelope Buddy can speak. Never hide a capability to prevent its misuse.
+"""
 
 from __future__ import annotations
 
@@ -58,13 +79,48 @@ def has_unreceipted_reminder_success_claim(text: str) -> bool:
     return False
 
 
-def excluded_tools_for_text_turn(message: str) -> frozenset[str]:
-    """Hide reminder creation unless the current turn explicitly requests it."""
-    if explicitly_requests_reminder_create(message):
-        return frozenset()
-    if _REMINDER_CONTEXT.search(message or ""):
-        logger.info(
-            "reminder_write_tool_denied_by_intent_gate",
-            {"reason": "no_explicit_current_turn_create"},
-        )
-    return frozenset({SET_REMINDER_TOOL})
+def reminder_write_contradicted_by_turn(message: str) -> str | None:
+    """Return a reason code when this turn plainly does NOT authorize a new reminder.
+
+    Only the two high-precision negatives fire: an explicit negation ("don't remind me")
+    and a status question ("did you set that reminder?"). Everything else, including a
+    bare continuation that answers Buddy's own question, is allowed through to the model,
+    which the tool description and the prompt's conversation-authority rule already
+    govern. This is a backstop against one specific misread, not a general permission
+    system.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    if _NEGATED.search(text):
+        return "negated_request"
+    if _REMINDER_STATUS.search(text):
+        return "status_question"
+    return None
+
+
+def blocked_write_reasons_for_text_turn(message: str) -> dict[str, str]:
+    """Per-turn execution denials, keyed by tool name, for the shared ToolExecutor."""
+    reason = reminder_write_contradicted_by_turn(message)
+    if reason is None:
+        return {}
+    logger.info(
+        "reminder_write_denied_by_turn_contradiction",
+        {"reason": reason},
+    )
+    return {SET_REMINDER_TOOL: reason}
+
+
+def reminder_receipt_guard_armed(message: str, previous_assistant_reply: str = "") -> bool:
+    """Whether to buffer this reply and check any reminder-success claim for a receipt.
+
+    Armed on reminder CONTEXT rather than an explicit create command, in either this turn
+    or the reply it answers. A write can now land on a turn that never says the word
+    ("yeah, 7am works" after Buddy asked), and that turn is exactly where an unreceipted
+    "all set" would slip through. Buffering costs the streaming feel, so it stays scoped
+    to turns where a reminder is genuinely in play rather than running on every reply.
+    """
+    return bool(
+        _REMINDER_CONTEXT.search(message or "")
+        or _REMINDER_CONTEXT.search(previous_assistant_reply or "")
+    )

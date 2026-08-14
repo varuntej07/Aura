@@ -1182,6 +1182,11 @@ async def on_startup() -> None:
 
     install_research_dispatcher()
     _check_env()
+    # Loud on a capability hole rather than waiting for a user to be told Aura cannot
+    # do something it can.
+    from .shared.tool_exposure import verify_core_tool_exposure
+
+    verify_core_tool_exposure(component="api")
 
 
 @app.on_event("shutdown")  # pyright: ignore[reportDeprecated]

@@ -92,7 +92,45 @@ async def test_missing_task_resolves_to_static_fallback():
     assert await greeting.resolve_opener(None, budget_s=1.0) == ""
 
 
-async def test_buddy_lifecycle_starts_silent():
-    placeholder = object()
-    assert await BuddyAgent.on_enter(placeholder) is None
-    assert await BuddyAgent.greet(placeholder) is None
+class _FakeSession:
+    def __init__(self) -> None:
+        self.said: list[str] = []
+
+    async def say(self, line: str) -> None:
+        self.said.append(line)
+
+
+class _FakeAgent:
+    """Just the attributes on_enter/greet touch, plus the real greet()."""
+
+    greet = BuddyAgent.greet
+
+    def __init__(self, *, bridged: bool, opener_task=None) -> None:
+        self._bridged = bridged
+        self._opener_task = opener_task
+        self.session = _FakeSession()
+
+
+async def test_buddy_opens_the_call_and_bridge_mode_stays_silent(monkeypatch):
+    # Buddy speaking first is what makes a connected call audibly connected. While
+    # on_enter returned silently, a session with no inbound audio was
+    # indistinguishable from a working one and ran mute until the idle watchdog.
+    provider = _FakeProvider(reply="yo, how'd the annapurna thing go?")
+    monkeypatch.setattr(greeting, "get_model_provider", lambda: provider)
+    seeded = greeting.start_opener_task(
+        _session_context(), session_id="s1", user_id="u1"
+    )
+    agent = _FakeAgent(bridged=False, opener_task=seeded)
+    await BuddyAgent.on_enter(agent)
+    assert agent.session.said == ["yo, how'd the annapurna thing go?"]
+
+    # No seeded line: the static list still guarantees an opening word.
+    plain = _FakeAgent(bridged=False)
+    await BuddyAgent.on_enter(plain)
+    assert plain.session.said and plain.session.said[0]
+
+    # Bridge mode is the one exception: the desktop's Realtime leg is already
+    # talking, so greeting here would speak over it.
+    bridged = _FakeAgent(bridged=True)
+    await BuddyAgent.on_enter(bridged)
+    assert bridged.session.said == []

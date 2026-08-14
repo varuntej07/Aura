@@ -49,6 +49,8 @@ from ..services.tool_executor import (
     resolve_chat_surface_allowed_tools,
 )
 from ..services.user_aura_extractor import extract_and_update_user_aura
+from ..shared.capability_claims import log_false_capability_claims
+from ..shared.tools import claude_tool_definitions
 
 _build_user_content = _prompt_builder.build_user_content
 _NOTIFICATION_REASON_MAX_CHARS = _prompt_builder.NOTIFICATION_REASON_MAX_CHARS
@@ -735,14 +737,27 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
 
     user_content = _build_user_content(message, validated_attachments)
     from ..services.action_intent_policy import (
-        excluded_tools_for_text_turn,
-        explicitly_requests_reminder_create,
+        blocked_write_reasons_for_text_turn,
         has_unreceipted_reminder_success_claim,
+        reminder_receipt_guard_armed,
     )
 
-    action_tool_exclusions = excluded_tools_for_text_turn(message)
-    action_tool_exclusions |= surface_tool_exclusions
-    reminder_create_requested = explicitly_requests_reminder_create(message)
+    # Nothing about the user's WORDING removes a tool any more. The only exclusions left
+    # are structural (which surface this is), and a write the turn plainly contradicts is
+    # refused at execution with an envelope Buddy can speak. Hiding set_reminder per turn
+    # is what taught Buddy to say it has no reminder tool.
+    action_tool_exclusions = surface_tool_exclusions
+    # What the model will actually be handed this turn, kept so the post-stream check can
+    # tell an honest "I can't" from a denial of a tool that was sitting right there.
+    exposed_tool_names = frozenset(
+        tool["name"]
+        for tool in claude_tool_definitions()
+        if tool["name"] not in action_tool_exclusions
+    )
+    blocked_write_reasons = blocked_write_reasons_for_text_turn(message)
+    reminder_receipt_check_armed = reminder_receipt_guard_armed(
+        message, prev_buddy_response or ""
+    )
 
     logger.info(
         "Chat: stream request received",
@@ -866,6 +881,8 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 client_message_id=client_message_id or "",
                 session_id=session_id or "",
                 allowed_tools=surface_allowed_tools,
+                blocked_write_reasons=blocked_write_reasons,
+                user_tier=effective_tier,
             )
             claude = ClaudeClient(tool_executor)
             buffered_text_events: list[dict[str, Any]] = []
@@ -879,7 +896,6 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 user_content=user_content,
                 history=history,
                 is_agent=False,
-                user_tier=effective_tier,
                 extra_excluded_tools=action_tool_exclusions,
                 contract_version=contract_version,
             ):
@@ -892,10 +908,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     tool_names = metadata.setdefault("tool_names", [])
                     if isinstance(tool_names, list) and "save_screen_item" not in tool_names:
                         tool_names.append("save_screen_item")
-                if reminder_create_requested and sse_event.get("type") == "text_delta":
+                if reminder_receipt_check_armed and sse_event.get("type") == "text_delta":
                     buffered_text_events.append(sse_event)
                     continue
-                if reminder_create_requested and sse_event.get("type") == "done":
+                if reminder_receipt_check_armed and sse_event.get("type") == "done":
                     metadata = sse_event.get("metadata") or {}
                     reminder_receipt = metadata.get("reminder")
                     buffered_text = "".join(
@@ -939,6 +955,17 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     "user_id": user_id,
                     "duration_ms": duration_ms,
                 },
+            )
+            # Log-only, after delivery: did Buddy just tell this user Aura cannot do
+            # something it can? A confirmed hit means tool exposure regressed and the
+            # user was told a falsehood about the product, which nothing else here
+            # would ever surface.
+            log_false_capability_claims(
+                "".join(answer_parts),
+                exposed_tools=exposed_tool_names,
+                surface=surface,
+                user_id=user_id,
+                session_id=session_id or "",
             )
             # The full stream was delivered to the client: mark the turn done so the
             # pending completion task becomes a no-op. Reached only when the loop finishes

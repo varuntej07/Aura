@@ -47,11 +47,28 @@ FACTS = "facts"
 FOLLOW_UP = "follow_up"
 MEMORY_CONTEXT = "memory_context"
 
+# --- session health (added alongside the zero-turn alarm) --------------------
+# Why this is a persisted FIELD and not only a log line: a five-minute run that
+# captured zero turns was indistinguishable from a healthy short call in every
+# query we could write, which is exactly the trap CLAUDE.md names. A log can be
+# grepped for a fortnight; a field can be counted for all time.
+HEALTH = "health"
+# Whether the 5-minute no-transcript watchdog ended the call rather than the user.
+CLOSED_BY_IDLE_TIMEOUT = "closed_by_idle_timeout"
+
 # --- values ------------------------------------------------------------------
 # Any doc written with the identity + structured-memory fields above.
 SCHEMA_VERSION_V2 = 2
 # Reader fallback when a legacy doc predates the surface field.
 SURFACE_UNKNOWN = "unknown"
+
+# HEALTH values. "ok" is any run that captured at least one turn, or one too short
+# to judge. The rest are defects, and each names what was actually observed rather
+# than guessing at a cause.
+HEALTH_OK = "ok"
+HEALTH_ZERO_TURNS = "zero_turns"          # ran long enough to matter, captured nothing
+HEALTH_NO_USER_AUDIO = "no_user_audio"    # participant published no audio track
+HEALTH_NO_TRANSCRIPT = "no_transcript"    # audio arrived, STT produced nothing
 
 # Action receipt keys (persisted verbatim in the ACTIONS list). Deliberately a
 # closed set: never store unrestricted tool outputs, only these four fields.

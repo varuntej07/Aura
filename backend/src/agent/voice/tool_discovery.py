@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
-from ...shared.tools import tool_definition
+from ...shared.tools import CORE_TOOLS, tool_definition
 from .capabilities import (
     VOICE_TOOL_REGISTRY,
     Capability,
@@ -24,7 +24,7 @@ from .capabilities import (
     tool_name,
 )
 
-TOOL_DISCOVERY_VERSION = "2026-08-02.1"
+TOOL_DISCOVERY_VERSION = "2026-08-13.1"
 DEFAULT_MAX_RESULTS = 7
 INTENT_EXPIRY_TURNS = 6
 INTENT_EXPIRY_SECONDS = 300.0
@@ -470,6 +470,31 @@ class ToolCatalog:
             eligible.append(entry)
         return eligible, tuple(reasons)
 
+    @staticmethod
+    def _core_floor(
+        eligible: Sequence[ToolCatalogEntry], *, reads_only: bool = False
+    ) -> tuple[str, ...]:
+        """The core tools this turn must expose no matter how the selector scored.
+
+        Semantic narrowing keeps the voice model focused, but it must never be able to
+        make Buddy look like it lost a capability: on a turn where BM25 found nothing,
+        the model saw an empty tool list and told the user it had no reminder tool, 50
+        minutes after the same account used that tool. Wording decides which tools are
+        SUGGESTED, never which ones EXIST.
+
+        Intersected with ``eligible``, so every structural rule still holds. A
+        speculative (non-finalized) turn has already had its writes stripped upstream by
+        derive_turn_policy, so the floor cannot smuggle a side effect into one.
+        """
+        return tuple(
+            sorted(
+                entry.name
+                for entry in eligible
+                if entry.name in CORE_TOOLS
+                and not (reads_only and entry.metadata.effect is not ToolEffect.READ)
+            )
+        )
+
     def select(
         self,
         selection: SelectionContext,
@@ -499,13 +524,18 @@ class ToolCatalog:
             effective_eligibility, structurally_allowed
         )
         if control is IntentControl.CANCEL:
+            # Reads only. The user calling off an action must not leave Buddy unable to
+            # answer a question about their own data, but re-exposing the write they
+            # just cancelled is how you re-create the thing they cancelled.
+            cancel_floor = self._core_floor(eligible, reads_only=True)
             return ToolSelection(
-                tool_names=(),
+                tool_names=cancel_floor,
                 primary_tool=None,
                 active_capability=None,
-                fingerprint=self.selection_fingerprint(()),
+                fingerprint=self.selection_fingerprint(cancel_floor),
                 control=control,
-                reason_codes=eligibility_reasons + ("active_intent_cancelled",),
+                reason_codes=eligibility_reasons
+                + ("active_intent_cancelled", "core_floor_applied"),
                 scores=(),
             )
         if not eligible:
@@ -572,14 +602,15 @@ class ToolCatalog:
                 default=0.0,
             )
             if top_ineligible_score > max(top_eligible_score * 1.25, 0.0):
+                floor = self._core_floor(eligible)
                 return ToolSelection(
-                    tool_names=(),
+                    tool_names=floor,
                     primary_tool=None,
                     active_capability=None,
-                    fingerprint=self.selection_fingerprint(()),
+                    fingerprint=self.selection_fingerprint(floor),
                     control=control,
                     reason_codes=eligibility_reasons
-                    + ("higher_scoring_tool_ineligible",),
+                    + ("higher_scoring_tool_ineligible", "core_floor_applied"),
                     scores=(),
                 )
         if active_intent.active_capability is not None and control is not IntentControl.NEW:
@@ -603,13 +634,15 @@ class ToolCatalog:
         )
         top_score = ranked[0][1]
         if top_score <= 0:
+            floor = self._core_floor(eligible)
             return ToolSelection(
-                tool_names=(),
+                tool_names=floor,
                 primary_tool=None,
                 active_capability=None,
-                fingerprint=self.selection_fingerprint(()),
+                fingerprint=self.selection_fingerprint(floor),
                 control=control,
-                reason_codes=eligibility_reasons + ("no_semantic_match",),
+                reason_codes=eligibility_reasons
+                + ("no_semantic_match", "core_floor_applied"),
                 scores=tuple((entry.name, round(score, 4)) for entry, score in ranked),
             )
 
@@ -664,7 +697,10 @@ class ToolCatalog:
                 if entry.metadata.namespace in secondary_namespaces:
                     _choose(entry)
 
-        selected_names = tuple(sorted(chosen_names))
+        # Added AFTER max_results is spent, not competing for its slots, so the semantic
+        # bundle is exactly what it would have been without the floor.
+        floor = self._core_floor(eligible)
+        selected_names = tuple(sorted(chosen_names | set(floor)))
         return ToolSelection(
             tool_names=selected_names,
             primary_tool=primary.name,
@@ -673,6 +709,7 @@ class ToolCatalog:
             control=control,
             reason_codes=eligibility_reasons
             + (
+                "core_floor_applied",
                 f"semantic_bundle:{primary.metadata.namespace}",
                 f"intent_control:{control.value}",
             ),

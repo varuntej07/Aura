@@ -198,11 +198,15 @@ async def test_schema_v2_writer_reader_round_trip_uses_shared_field_contract():
             conversation_id="conversation-1",
             surface="app",
             action_receipts=receipts,
+            health="ok",
+            closed_by_idle_timeout=False,
         )
 
     payload = session_ref.set.call_args.args[0]
     row = _session_summary_row("run-1", payload)
     assert row["voice_run_id"] == "run-1"
+    # Persisted, not just logged: a zero-turn run has to be countable in Firestore.
+    assert payload["health"] == "ok"
     assert row["conversation_id"] == "conversation-1"
     assert row["surface"] == "app"
     assert row["schema_version"] == 2

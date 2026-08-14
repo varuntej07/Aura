@@ -22,7 +22,7 @@ from typing import Any
 
 from ...lib.logger import logger
 from .. import desktop_chat_store
-from ..action_intent_policy import excluded_tools_for_text_turn
+from ..action_intent_policy import blocked_write_reasons_for_text_turn
 from ..claude_client import ClaudeClient
 from ..tool_executor import (
     ToolExecutor,
@@ -254,6 +254,8 @@ async def _regenerate(
         client_message_id=cmid,
         session_id=str(turn.get(turn_store.FIELD_SESSION_ID) or ""),
         allowed_tools=surface_allowed_tools,
+        blocked_write_reasons=blocked_write_reasons_for_text_turn(message),
+        user_tier=tier,
     )
     claude = ClaudeClient(tool_executor)
 
@@ -266,10 +268,8 @@ async def _regenerate(
             user_content=user_content,
             history=history,
             is_agent=False,
-            user_tier=tier,
             extra_excluded_tools=(
-                _REGEN_EXCLUDED_TOOLS | excluded_tools_for_text_turn(message)
-                | excluded_tools_for_chat_surface(surface)
+                _REGEN_EXCLUDED_TOOLS | excluded_tools_for_chat_surface(surface)
             ),
         ):
             etype = ev.get("type")

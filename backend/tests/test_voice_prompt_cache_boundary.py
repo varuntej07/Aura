@@ -23,9 +23,14 @@ from src.agent.voice_prompt import (
 )
 
 _ENCODING = tiktoken.get_encoding("o200k_base")
+# A bloat ceiling, not a hard API limit: the whole prompt is spoken-turn latency and it
+# is paid on every session. Raised once, by the measured cost of _AURA_PRODUCT_TRUTH,
+# after Buddy invented a cross-device limitation it does not have because no prompt on
+# any surface stated a single fact about Aura. Anything added here has to earn its
+# tokens the same way; do not raise these to make a comfortable prompt fit.
 _BEFORE_TOTAL_TOKENS = {
-    "app": 1600,
-    "keyboard": 1650,
+    "app": 1720,
+    "keyboard": 1760,
     "desktop": 2000,
 }
 

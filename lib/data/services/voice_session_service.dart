@@ -51,6 +51,11 @@ class VoiceSessionService {
   // Token prefetched at app open (see prewarm), reused by startSession while fresh.
   Map<String, dynamic>? _prewarmedToken;
   DateTime? _prewarmedTokenAt;
+  // The parameters the prewarmed token was actually minted with. A token carries
+  // its surface and conversation id inside signed participant metadata, so it is
+  // only reusable for a session declaring the same pair.
+  String? _prewarmedSurface;
+  String? _prewarmedConversationId;
   // On-screen context handed from the Buddy Keyboard, sent to the agent once it joins.
   // A few timed retries beat the agent's data-handler registration delay; the agent
   // dedupes repeats (one-shot). Session-lifecycle state, cleared on teardown.
@@ -89,6 +94,10 @@ class VoiceSessionService {
       if (token != null) {
         _prewarmedToken = token;
         _prewarmedTokenAt = DateTime.now();
+        // Minted with no query params, so only a session declaring neither can
+        // use it. Recorded rather than assumed.
+        _prewarmedSurface = null;
+        _prewarmedConversationId = null;
         AppLogger.info('Prewarmed LiveKit token', tag: _tag);
       }
     } catch (e) {
@@ -112,6 +121,79 @@ class VoiceSessionService {
     }
   }
 
+  /// Null when the microphone is usable, otherwise the error to show the user.
+  ///
+  /// Prewarm also asks for this permission, but fire-and-forget and without ever
+  /// inspecting the answer, so a denial there was completely invisible. The result
+  /// has to be checked on the path that actually joins a room.
+  Future<AppException?> _ensureMicrophonePermission() async {
+    PermissionStatus status;
+    try {
+      status = await Permission.microphone.status;
+      if (status.isDenied) {
+        // Undecided on this platform's first ask: prompt now rather than failing
+        // a user who has simply never been asked.
+        status = await Permission.microphone.request();
+      }
+    } catch (e) {
+      // A permission plugin failure is not proof of denial. Let the connect
+      // attempt proceed and surface any real capture error there.
+      AppLogger.warning(
+        'Mic permission check failed, continuing',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
+      return null;
+    }
+    if (status.isGranted || status.isLimited) return null;
+
+    AppLogger.warning(
+      'Voice start blocked, microphone unavailable',
+      tag: _tag,
+      metadata: {'status': status.toString()},
+    );
+    unawaited(
+      _postHogAnalyticsService.trackEvent(
+        'voice_session_blocked_no_microphone',
+        properties: {'status': status.toString()},
+      ),
+    );
+    // Permanently denied and restricted both mean the OS will not prompt again,
+    // so the only way out is Settings and the copy has to say so.
+    if (status.isPermanentlyDenied || status.isRestricted) {
+      return AppException.unexpected(
+        'Buddy needs your microphone to talk. Turn it on in Settings and tap again.',
+      );
+    }
+    return AppException.unexpected(
+      "Buddy can't hear you without microphone access. Mind allowing it?",
+    );
+  }
+
+  /// True when this permission state means the OS will not prompt again, so the
+  /// UI should offer a jump to Settings rather than repeating the request.
+  Future<bool> microphoneNeedsSettings() async {
+    try {
+      final status = await Permission.microphone.status;
+      return status.isPermanentlyDenied || status.isRestricted;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Open the OS settings page so the user can grant the microphone.
+  Future<void> openMicrophoneSettings() async {
+    try {
+      await openAppSettings();
+    } catch (e) {
+      AppLogger.warning(
+        'Could not open app settings',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
+    }
+  }
+
   /// Return the prewarmed token if one was fetched recently enough to still be
   /// valid, otherwise null so the caller fetches a fresh one.
   Map<String, dynamic>? _freshPrewarmedToken() {
@@ -121,6 +203,8 @@ class VoiceSessionService {
     if (DateTime.now().difference(at) > _prewarmedTokenTtl) {
       _prewarmedToken = null;
       _prewarmedTokenAt = null;
+      _prewarmedSurface = null;
+      _prewarmedConversationId = null;
       return null;
     }
     return token;
@@ -134,6 +218,17 @@ class VoiceSessionService {
       );
       return const Result.success(null);
     }
+    // Before the room, not after. Joining without a microphone produces a call
+    // that looks completely healthy and is completely dead: the orb pulses
+    // "Listening", the agent hears nothing, and the server kills it five minutes
+    // later with zero turns. A user hit exactly that and reported "why don't you
+    // respond when I use voice chat?". Never connect without an input device.
+    final micPermission = await _ensureMicrophonePermission();
+    if (micPermission != null) {
+      _isConnecting = false;
+      return Result.failure(micPermission);
+    }
+
     _isConnecting = true;
     _sessionStartToTalkStopwatch
       ..reset()
@@ -148,12 +243,18 @@ class VoiceSessionService {
     );
 
     try {
-      // Reuse the token prefetched at app open if it's still fresh; otherwise
-      // fetch one now. A prewarmed token was minted WITHOUT a surface or
-      // conversation id (it predates the session), so a session that declares
-      // either must always fetch fresh or the worker would miss that metadata.
+      // Reuse the token prefetched at app open only when it was minted for
+      // exactly this session's parameters. The prewarm fetch sends none, so in
+      // practice a session that carries a conversation id always fetches fresh.
+      //
+      // That is the correct trade and it is the point of the check. Reusing a
+      // paramless token stamped participant metadata with no surface and no
+      // conversation id, which reached Firestore as `surface: "unknown",
+      // conversation_id: ""` and cost the run its transcript thread. A saved
+      // round-trip is not worth a session we cannot identify.
       final canReusePrewarm =
-          config.surface == null && config.conversationId == null;
+          config.surface == _prewarmedSurface &&
+          config.conversationId == _prewarmedConversationId;
       var tokenResult = canReusePrewarm ? _freshPrewarmedToken() : null;
       if (tokenResult == null) {
         final idToken = await _tokenProvider();
@@ -246,7 +347,9 @@ class VoiceSessionService {
               const VoiceServerEvent(type: 'session.ended'),
             );
           }
-          _cleanupRoom();
+          // Already disconnected by definition; cleanup's own disconnect is a
+          // harmless no-op, so this stays fire-and-forget inside the listener.
+          unawaited(_cleanupRoom());
         })
         ..on<ParticipantConnectedEvent>((e) {
           AppLogger.info(
@@ -347,6 +450,7 @@ class VoiceSessionService {
       // the watchdog (with its friendly coded error) always owns the no-show case;
       // the room resets the buffer automatically on disconnect. A real
       // connect failure inside the operation still propagates to the catch below.
+      LocalTrackPublication? micPublication;
       await _room!.withPreConnectAudio(
         () async {
           await _room!.connect(
@@ -354,7 +458,8 @@ class VoiceSessionService {
             lkToken,
             connectOptions: const ConnectOptions(autoSubscribe: true),
           );
-          await _room!.localParticipant?.setMicrophoneEnabled(true);
+          micPublication = await _room!.localParticipant
+              ?.setMicrophoneEnabled(true);
         },
         timeout: const Duration(seconds: 25),
         onError: (e) => AppLogger.warning(
@@ -363,6 +468,32 @@ class VoiceSessionService {
           metadata: {'error': e.toString()},
         ),
       );
+
+      // The return value used to be discarded and success logged unconditionally.
+      // A connected room with no published track is the worst possible state: the
+      // UI says "Listening", the agent waits on audio that will never arrive, and
+      // the whole thing dies silently five minutes later. Treat it as the failure
+      // it is, and tear the room down so no ghost participant is left behind.
+      if (micPublication == null &&
+          _room?.localParticipant?.isMicrophoneEnabled() != true) {
+        AppLogger.error(
+          'LiveKit mic track never published',
+          tag: _tag,
+          metadata: {'room': roomName},
+        );
+        unawaited(
+          _postHogAnalyticsService.trackEvent('voice_mic_publish_failed'),
+        );
+        await _cleanupRoom();
+        return Result.failure(
+          AppException.unexpected(
+            voiceErrorMessageForCode(
+              code: micCaptureFailedCode,
+              fallbackMessage: null,
+            ),
+          ),
+        );
+      }
 
       AppLogger.info('LiveKit mic enabled', tag: _tag);
       unawaited(AnalyticsService.logVoiceStarted());
@@ -375,7 +506,7 @@ class VoiceSessionService {
         tag: _tag,
         metadata: {'userId': config.userId},
       );
-      _cleanupRoom();
+      await _cleanupRoom();
       final errorText = e.toString();
       final isIceFailure =
           errorText.contains('MediaConnectException') ||
@@ -544,7 +675,7 @@ class VoiceSessionService {
         metadata: {'error': e.toString()},
       );
     }
-    _cleanupRoom();
+    await _cleanupRoom();
   }
 
   void _handleDataMessage(List<int> data) {
@@ -728,7 +859,15 @@ class VoiceSessionService {
     );
   }
 
-  void _cleanupRoom() {
+  /// Tear down local session state AND leave the room.
+  ///
+  /// This used to null out `_room` without disconnecting, which meant an error
+  /// after `connect()` succeeded (a mic that failed to publish, say) left a
+  /// connected participant in the room with no audio track. The app showed an
+  /// error, the user moved on, and the worker sat waiting on that ghost until its
+  /// five-minute idle watchdog gave up. Always leave the room you joined.
+  Future<void> _cleanupRoom() async {
+    final room = _room;
     _releaseScreenWakeLock();
     _agentJoinWatchdog?.cancel();
     _agentJoinWatchdog = null;
@@ -755,6 +894,17 @@ class VoiceSessionService {
       ..stop()
       ..reset();
     _closingByClient = false;
+    if (room != null) {
+      try {
+        await room.disconnect();
+      } catch (e) {
+        AppLogger.warning(
+          'Room disconnect during cleanup failed',
+          tag: _tag,
+          metadata: {'error': e.toString()},
+        );
+      }
+    }
   }
 
   Future<Map<String, dynamic>?> _fetchLiveKitToken(
