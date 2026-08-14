@@ -880,9 +880,32 @@ abstract class ChatViewModel extends SafeChangeNotifier {
                   ),
                 );
 
-              case ChatLimitReachedEvent():
+              case ChatLimitReachedEvent(:final message):
                 _isStreaming = false;
                 _streamingOutput.value = StreamingSnapshot.empty;
+
+                // Show the backend's copy, which is already written in Buddy's
+                // voice for exactly this moment, the same way a server-emitted
+                // ErrorStreamEvent is shown verbatim below. Dropping it meant
+                // the user's message simply vanished and the paywall appeared
+                // with no explanation of what had just happened.
+                final limitText = message.trim().isNotEmpty
+                    ? message.trim()
+                    : "That's your free messages for today. They reset at "
+                          "midnight UTC.";
+                unawaited(
+                  _persistMessage(
+                    ChatMessageModel(
+                      id: replyId,
+                      text: limitText,
+                      isUser: false,
+                      timestamp: DateTime.now(),
+                      channel: ChatMessageChannel.text,
+                      sessionId: _currentSessionId,
+                    ),
+                  ),
+                );
+
                 _chatLimitReached = true;
                 _setState(
                   _messages.isEmpty ? ViewState.idle : ViewState.loaded,

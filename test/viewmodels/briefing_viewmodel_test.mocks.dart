@@ -220,6 +220,30 @@ class MockBackendApiService extends _i1.Mock implements _i2.BackendApiService {
           as _i3.Future<_i4.Result<Map<String, dynamic>>>);
 
   @override
+  _i3.Future<_i4.Result<Map<String, dynamic>>> markChatSessionBackgrounded(
+    String? sessionId,
+  ) =>
+      (super.noSuchMethod(
+            Invocation.method(#markChatSessionBackgrounded, [sessionId]),
+            returnValue: _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+              _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                this,
+                Invocation.method(#markChatSessionBackgrounded, [sessionId]),
+              ),
+            ),
+            returnValueForMissingStub:
+                _i3.Future<_i4.Result<Map<String, dynamic>>>.value(
+                  _i5.dummyValue<_i4.Result<Map<String, dynamic>>>(
+                    this,
+                    Invocation.method(#markChatSessionBackgrounded, [
+                      sessionId,
+                    ]),
+                  ),
+                ),
+          )
+          as _i3.Future<_i4.Result<Map<String, dynamic>>>);
+
+  @override
   _i3.Future<_i4.Result<Map<String, dynamic>>> consolidateSession({
     required String? sessionId,
     required List<Map<String, dynamic>>? turns,

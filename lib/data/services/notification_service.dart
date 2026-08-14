@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../core/analytics/funnel_events.dart';
@@ -153,6 +153,7 @@ const _tag = 'NotificationService';
 /// Must match the `channel_id` sent by the backend (`aura_default`).
 const _kAndroidChannelId = 'aura_default';
 const _kAndroidChannelName = 'Aura Notifications';
+const _kTokenResumeSyncInterval = Duration(minutes: 5);
 
 /// Centralized FCM notification service.
 ///
@@ -183,6 +184,9 @@ class NotificationService {
   StreamSubscription<String>? _tokenRefreshSubscription;
   StreamSubscription<RemoteMessage>? _foregroundSubscription;
   StreamSubscription<Map<String, dynamic>>? _threadBodyTapSub;
+  AppLifecycleListener? _appLifecycleListener;
+  Future<void>? _tokenSyncInFlight;
+  DateTime? _lastTokenSyncStartedAt;
 
   final _localNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
@@ -255,11 +259,9 @@ class NotificationService {
     if (_initialized) {
       // Already running, so just ensure the current token is registered in
       // case the user signed in with a different account.
-      final token = await FirebaseMessaging.instance.getToken();
-      if (token != null) unawaited(_registerToken(token));
+      await _syncCurrentToken(reason: 'authentication', force: true);
       return;
     }
-    _initialized = true;
 
     // 1. Request OS permission (required for iOS 14+ and Android 13+)
     final settings = await FirebaseMessaging.instance.requestPermission(
@@ -275,14 +277,33 @@ class NotificationService {
         tag: _tag,
         metadata: {'userId': userId},
       );
+      // Watch for resume anyway. initialize() is otherwise only re-driven by an
+      // auth-state emission, so without this a user who flips the switch in OS
+      // Settings stays unreachable until the next full app restart — and since
+      // no token is registered while denied, the backend sees them as having no
+      // device at all.
+      _installLifecycleListener();
       return;
     }
+
+    await _completeInitialization(userId, settings.authorizationStatus);
+  }
+
+  /// Everything that requires a granted notification permission.
+  ///
+  /// Split out of [initialize] so the resume path can complete initialization
+  /// after a permission was granted in OS Settings, without re-prompting.
+  Future<void> _completeInitialization(
+    String userId,
+    AuthorizationStatus status,
+  ) async {
+    _initialized = true;
 
     AppLogger.info(
       'Notification permission granted',
       tag: _tag,
       metadata: {
-        'status': settings.authorizationStatus.name,
+        'status': status.name,
         'userId': userId,
       },
     );
@@ -301,27 +322,11 @@ class NotificationService {
     _threadBodyTapSub = threadBodyTapStream.listen(_relayThreadBodyTap);
     unawaited(handleThreadNotificationColdLaunch());
 
-    // 3. Get current token and register with backend.
-    // On the iOS simulator APNS is unavailable, so getToken() throws
-    // firebase_messaging/apns-token-not-set. Treat that one case as an expected
-    // warning instead of letting it surface as an uncaught Crashlytics error.
-    String? token;
-    try {
-      token = await FirebaseMessaging.instance.getToken();
-    } on FirebaseException catch (e) {
-      if (e.code != 'apns-token-not-set') rethrow;
-      AppLogger.warning(
-        'APNS token not set (expected on iOS simulator), skipping FCM token registration',
-        tag: _tag,
-        metadata: {'userId': userId, 'code': e.code},
-      );
-    }
-    AppLogger.info(
-      'FCM token retrieved',
-      tag: _tag,
-      metadata: {'tokenPreview': token?.substring(0, 20)},
-    );
-    if (token != null) unawaited(_registerToken(token));
+    // 3. Register the current token before initialization completes. Recheck it
+    // whenever the app resumes so a token invalidated by FCM, or a registration
+    // missed while offline, heals without requiring a cold restart.
+    _installLifecycleListener();
+    await _syncCurrentToken(reason: 'initialization', force: true);
 
     // 4. Auto-register on token refresh
     await _tokenRefreshSubscription?.cancel();
@@ -332,7 +337,7 @@ class NotificationService {
         tag: _tag,
         metadata: {'tokenPreview': newToken.substring(0, 20)},
       );
-      unawaited(_registerToken(newToken));
+      unawaited(_registerToken(newToken, reason: 'token_refresh'));
     });
 
     // 5. Foreground messages → show local notification
@@ -351,6 +356,34 @@ class NotificationService {
     }
   }
 
+  /// Stop associating refresh events with the previous account and revoke the
+  /// installation token so a later account receives a distinct FCM token.
+  Future<void> deactivateForSignOut() async {
+    _userId = null;
+    _lastTokenSyncStartedAt = null;
+    try {
+      await FirebaseMessaging.instance.deleteToken().timeout(
+        const Duration(seconds: 5),
+      );
+      AppLogger.info('FCM token revoked on sign-out', tag: _tag);
+    } catch (error) {
+      // Notification cleanup must never trap the user in a signed-in session.
+      // The backend will still retire the stale token on its next failed send.
+      AppLogger.warning(
+        'Failed to revoke FCM token on sign-out',
+        tag: _tag,
+        metadata: {'reason': error.runtimeType.toString()},
+      );
+    }
+  }
+
+  /// Clear account ownership when auth becomes null outside the explicit
+  /// sign-out path (for example, token revocation on another device).
+  void clearUser() {
+    _userId = null;
+    _lastTokenSyncStartedAt = null;
+  }
+
   /// Call on sign-out to clean up listeners.
   Future<void> dispose() async {
     await _tokenRefreshSubscription?.cancel();
@@ -359,6 +392,10 @@ class NotificationService {
     _tokenRefreshSubscription = null;
     _foregroundSubscription = null;
     _threadBodyTapSub = null;
+    _appLifecycleListener?.dispose();
+    _appLifecycleListener = null;
+    _tokenSyncInFlight = null;
+    _lastTokenSyncStartedAt = null;
     _userId = null;
     _initialized = false;
     await _engagementTapController.close();
@@ -373,6 +410,48 @@ class NotificationService {
   }
 
   // Private helpers
+
+  void _installLifecycleListener() {
+    _appLifecycleListener ??= AppLifecycleListener(
+      onResume: () {
+        unawaited(_onAppResumed());
+      },
+    );
+  }
+
+  /// Resume handler for both the initialized and permission-denied cases.
+  ///
+  /// When initialized, this rechecks the FCM token so one invalidated by FCM, or
+  /// a registration missed while offline, heals without a cold restart. When not
+  /// initialized, the user previously denied the permission: if they have since
+  /// granted it in OS Settings, finish initialization now rather than leaving
+  /// them permanently unreachable.
+  Future<void> _onAppResumed() async {
+    if (_initialized) {
+      await _syncCurrentToken(reason: 'app_resume');
+      return;
+    }
+
+    final userId = _userId;
+    if (userId == null) return;
+
+    // getNotificationSettings reads the current OS state without prompting, so
+    // this cannot re-trigger a dialog the user already dismissed.
+    final settings =
+        await FirebaseMessaging.instance.getNotificationSettings();
+    final status = settings.authorizationStatus;
+    if (status != AuthorizationStatus.authorized &&
+        status != AuthorizationStatus.provisional) {
+      return;
+    }
+
+    AppLogger.info(
+      'Notification permission granted in OS settings, completing setup',
+      tag: _tag,
+      metadata: {'status': status.name, 'userId': userId},
+    );
+    await _completeInitialization(userId, status);
+  }
 
   Future<void> _initializeLocalNotificationsPlugin() async {
     const initSettingsAndroid = AndroidInitializationSettings('@drawable/ic_notification');
@@ -394,11 +473,105 @@ class NotificationService {
   }
 
   void _handleLocalNotificationTap(NotificationResponse response) {
-    // No app-shown local notifications currently route here. The plugin is
-    // initialized only so the Android FCM channel can be created.
+    // Foreground pushes on Android are rendered by us (see
+    // _handleForegroundMessage), so their taps arrive here rather than through
+    // onMessageOpenedApp. Route them exactly like a background tap.
+    final payload = response.payload;
+    if (payload == null || payload.isEmpty) return;
+
+    Map<String, dynamic> decoded;
+    try {
+      decoded = jsonDecode(payload) as Map<String, dynamic>;
+    } catch (e) {
+      AppLogger.warning(
+        'Local notification tap payload could not be decoded',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
+      return;
+    }
+
+    final data = Map<String, dynamic>.from(
+      (decoded['data'] as Map?) ?? const <String, dynamic>{},
+    );
+    _reportNotificationOpened(data);
+    dispatchNotificationTap(data, fallbackBody: decoded['body'] as String?);
   }
 
-  Future<void> _registerToken(String token) async {
+  Future<void> _syncCurrentToken({
+    required String reason,
+    bool force = false,
+  }) {
+    if (_userId == null) return Future.value();
+
+    final existing = _tokenSyncInFlight;
+    if (existing != null) return existing;
+
+    final now = DateTime.now();
+    final lastStartedAt = _lastTokenSyncStartedAt;
+    if (!force &&
+        lastStartedAt != null &&
+        now.difference(lastStartedAt) < _kTokenResumeSyncInterval) {
+      return Future.value();
+    }
+    _lastTokenSyncStartedAt = now;
+
+    late final Future<void> operation;
+    operation = _fetchAndRegisterCurrentToken(reason).whenComplete(() {
+      if (identical(_tokenSyncInFlight, operation)) {
+        _tokenSyncInFlight = null;
+      }
+    });
+    _tokenSyncInFlight = operation;
+    return operation;
+  }
+
+  Future<void> _fetchAndRegisterCurrentToken(String reason) async {
+    final uid = _userId;
+    if (uid == null) return;
+
+    // On the iOS simulator APNS is unavailable, so getToken() throws
+    // firebase_messaging/apns-token-not-set. Treat that one case as expected.
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token == null || _userId != uid) return;
+      AppLogger.info(
+        'FCM token retrieved',
+        tag: _tag,
+        metadata: {
+          'reason': reason,
+          'tokenPreview': token.substring(0, 20),
+        },
+      );
+      await _registerToken(token, reason: reason);
+    } on FirebaseException catch (error, stackTrace) {
+      if (error.code == 'apns-token-not-set') {
+        AppLogger.warning(
+          'APNS token not set (expected on iOS simulator), skipping FCM token registration',
+          tag: _tag,
+          metadata: {'code': error.code, 'reason': reason},
+        );
+        return;
+      }
+      AppLogger.error(
+        'Failed to retrieve FCM token',
+        error: error,
+        stackTrace: stackTrace,
+        tag: _tag,
+        metadata: {'reason': reason},
+      );
+    } catch (error, stackTrace) {
+      AppLogger.error(
+        'Failed to retrieve FCM token',
+        error: error,
+        stackTrace: stackTrace,
+        tag: _tag,
+        metadata: {'reason': reason},
+      );
+    }
+  }
+
+  Future<void> _registerToken(String token, {required String reason}) async {
     final uid = _userId;
     if (uid == null) return;
 
@@ -418,12 +591,17 @@ class NotificationService {
       success: (_) => AppLogger.info(
         'FCM token registered with backend',
         tag: _tag,
-        metadata: {'platform': platform, 'tokenPreview': token.substring(0, 20)},
+        metadata: {
+          'platform': platform,
+          'reason': reason,
+          'tokenPreview': token.substring(0, 20),
+        },
       ),
       failure: (error) => AppLogger.error(
         'Failed to register FCM token',
         error: error,
         tag: _tag,
+        metadata: {'reason': reason},
       ),
     );
   }
@@ -477,12 +655,50 @@ class NotificationService {
       },
     );
 
-    // Let FCM render the native OS banner even while the app is foregrounded.
-    await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
-      alert: true,
-      badge: true,
-      sound: true,
+    // iOS/macOS render the FCM banner themselves once these presentation
+    // options are set. Android does NOT, and this API is a no-op there: Android
+    // suppresses FCM's own display while the app is foregrounded, so unless the
+    // banner is built locally the push is invisible to anyone with the app open.
+    if (Platform.isIOS || Platform.isMacOS) {
+      await FirebaseMessaging.instance
+          .setForegroundNotificationPresentationOptions(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      return;
+    }
+
+    const androidDetails = AndroidNotificationDetails(
+      _kAndroidChannelId,
+      _kAndroidChannelName,
+      importance: Importance.high,
+      priority: Priority.high,
     );
+
+    await _localNotificationsPlugin.show(
+      id: _foregroundNotificationId(message),
+      title: notification.title,
+      body: notification.body,
+      notificationDetails: const NotificationDetails(android: androidDetails),
+      // The single payload slot has to carry everything the tap needs, since the
+      // local plugin hands back only this string. Body included, because types
+      // like `reminder` carry their text nowhere else.
+      payload: jsonEncode({
+        'data': message.data,
+        'body': notification.body,
+      }),
+    );
+  }
+
+  /// Stable-per-message notification id.
+  ///
+  /// Keyed on the FCM message id so a redelivery of the same message replaces
+  /// its banner instead of stacking a duplicate. `abs()` and the modulo keep it
+  /// inside the 32-bit range Android requires.
+  int _foregroundNotificationId(RemoteMessage message) {
+    final key = message.messageId ?? message.hashCode.toString();
+    return key.hashCode.abs() % 0x7FFFFFFF;
   }
 
   /// Handle notification tap (from background or terminated state).
@@ -522,7 +738,10 @@ class NotificationService {
       },
     ));
     _reportNotificationOpened(message.data);
-    dispatchNotificationTap(message.data);
+    dispatchNotificationTap(
+      message.data,
+      fallbackBody: message.notification?.body,
+    );
   }
 
   /// Public hook the chat/feed surfaces can call when the user dismisses a
@@ -579,15 +798,23 @@ class NotificationService {
   }
 
   void _reportNotificationOpened(Map<String, dynamic> data) {
-    if ((data['notification_origin'] as String?) != 'signal_engine') return;
-    final contentId = data['content_id'] as String?;
-    if (contentId == null || contentId.isEmpty) return;
-    final notificationId = data['notification_id'] as String? ?? contentId;
+    // Reported for EVERY notification type, not just signal-engine ones. The
+    // backend stamps the ledger's notification_id into every payload
+    // (notification_service.py) and the /events ingest path mirrors an opened
+    // event into notification_ledger.record_tap regardless of source. Filtering
+    // to signal_engine here left `outcome` and `led_to_session` unwritten for
+    // every other push, which made "did this actually bring the user back"
+    // unanswerable for precisely the notifications meant to bring them back.
+    final notificationId = (data['notification_id'] as String?)?.trim() ??
+        (data['content_id'] as String?)?.trim() ??
+        '';
+    if (notificationId.isEmpty) return;
     unawaited(_postSignalEvents([
       _buildEventPayload(
         eventType: 'notification_opened',
-        // Outcome rows are keyed on the notification_id; the backend expects
-        // it in content_id so resolve_outcome can find the right row.
+        // Ledger and outcome rows are both keyed on the notification_id; the
+        // backend expects it in content_id so record_tap and resolve_outcome
+        // find the right row.
         contentId: notificationId,
         category: data['category'] as String?,
       ),
@@ -631,8 +858,14 @@ class NotificationService {
   ///
   /// Extracted for testability, production code calls [_handleNotificationTap]
   /// which delegates here after logging.
+  ///
+  /// [fallbackBody] is the notification's own body text, used to seed a chat for
+  /// types that carry no explicit `opening_chat_message`.
   @visibleForTesting
-  void dispatchNotificationTap(Map<String, dynamic> data) {
+  void dispatchNotificationTap(
+    Map<String, dynamic> data, {
+    String? fallbackBody,
+  }) {
     final notificationType = data['notification_type'] as String?;
 
     if (notificationType == 'engagement') {
@@ -734,6 +967,39 @@ class NotificationService {
       // Entitlement-updated tapped (iOS shows it as a visible alert): same
       // refetch as the on-receipt path, no navigation.
       _emitEntitlementUpdated(data);
+    } else {
+      // Everything else opens a seeded chat. This branch is deliberately generic
+      // rather than one arm per type: `welcome`, `reengage`, `session_followup`,
+      // `intent_followup`, `reminder` and `memory_graph` all previously fell off
+      // the end of this chain and dropped the user on the home screen's empty
+      // state, which looked identical to a tap that worked. A new backend type
+      // now lands somewhere sensible by default instead of silently nowhere.
+      final opener = (data['opening_chat_message'] as String?)?.trim() ?? '';
+      // The notification body is the last resort: types like `reminder` carry
+      // their text only in the body, never in data.
+      final seed = opener.isNotEmpty ? opener : (fallbackBody ?? '').trim();
+
+      if (seed.isEmpty) {
+        // Never silent. A tap that cannot be routed is a real defect, and it
+        // must not be indistinguishable from a healthy tap in the logs.
+        AppLogger.warning(
+          'Notification tap could not be routed: no opener and no body',
+          tag: _tag,
+          metadata: {
+            'notificationType': notificationType,
+            'deepLink': data['deep_link'],
+          },
+        );
+        return;
+      }
+
+      _engagementTapController.add(EngagementTapPayload(
+        engagementId: '',
+        initialMessage: seed,
+        // Buddy-facing "why I reached out", so a tap into chat keeps Buddy
+        // oriented instead of disowning its own opener.
+        agentContext: (data['notification_reason'] as String?) ?? '',
+      ));
     }
   }
 

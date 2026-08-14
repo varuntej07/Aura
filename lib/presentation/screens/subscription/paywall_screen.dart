@@ -6,8 +6,10 @@ import 'package:provider/provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/models/subscription_plan.dart';
+import '../../../data/services/app_feedback_service.dart';
 import '../../../data/services/notification_service.dart';
 import '../../../data/services/posthog_analytics_service.dart';
+import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/subscription_viewmodel.dart';
 
 enum _PlanToggle { free, companion, pro }
@@ -31,6 +33,11 @@ class _PaywallScreenState extends State<PaywallScreen>
     with WidgetsBindingObserver {
   _PlanToggle _activePlan = _PlanToggle.companion;
   _BillingPeriod _billingPeriod = _BillingPeriod.annual;
+
+  /// Whether this visit already registered upgrade interest. Session-scoped on
+  /// purpose: the write is idempotent per user and re-tapping costs nothing, so
+  /// this only exists to give immediate feedback rather than to enforce a rule.
+  bool _interestRegistered = false;
   final PageController _togglePageController = PageController(initialPage: 1);
 
   @override
@@ -158,10 +165,9 @@ class _PaywallScreenState extends State<PaywallScreen>
                           ),
                           const SizedBox(height: 24),
 
-                          // Purchase UI appears only after the free trial ends,
-                          // Dodo is fully configured, and backend-served
-                          // steering allows web checkout for this storefront.
-                          // Trial, paid, and SILENT users see plan status only.
+                          // Purchase UI appears once the free trial has ended
+                          // and Dodo is configured, in every country. Trial and
+                          // paid accounts see plan status only.
                           if (vm.canPurchaseSubscription) ...[
                             // Side-by-side billing cards
                             Row(
@@ -222,6 +228,17 @@ class _PaywallScreenState extends State<PaywallScreen>
                           ] else ...[
                             _PlanStatusCard(vm: vm),
                             const SizedBox(height: 20),
+                            // No purchase path yet: still inside the trial, or
+                            // checkout is not configured. Capture the demand
+                            // instead of showing a dead end. This is the only
+                            // signal for how many people would pay early.
+                            if (vm.showFreePlanStatus) ...[
+                              _UpgradeInterestButton(
+                                registered: _interestRegistered,
+                                onTap: () => _registerUpgradeInterest(context),
+                              ),
+                              const SizedBox(height: 12),
+                            ],
                             _GhostButton(
                               label: 'Done',
                               onTap: () => Navigator.pop(context),
@@ -248,6 +265,39 @@ class _PaywallScreenState extends State<PaywallScreen>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// Records that this user wants to pay but cannot yet.
+  ///
+  /// Reuses [AppFeedbackService] rather than adding a bespoke endpoint: it
+  /// already pairs one Firestore write with one PostHog event, which is exactly
+  /// the shape needed, and keeps interest capture on the same path as every
+  /// other piece of user-volunteered signal.
+  ///
+  /// Optimistic: the button confirms immediately. A failed write costs a
+  /// datapoint, and making someone watch a spinner to say "I'd pay you" is a
+  /// worse trade than losing one record.
+  Future<void> _registerUpgradeInterest(BuildContext context) async {
+    if (_interestRegistered) return;
+    setState(() => _interestRegistered = true);
+
+    final uid = context.read<AuthViewModel>().user?.uid;
+    if (uid == null) return;
+
+    unawaited(
+      context.read<AppFeedbackService>().submit(
+        uid: uid,
+        category: 'upgrade_interest',
+        extraFields: {
+          'tier_of_interest': _activePlan.name,
+          'billing_period': _billingPeriod.name,
+        },
+        extraEventProperties: {
+          'tier_of_interest': _activePlan.name,
+          'billing_period': _billingPeriod.name,
+        },
       ),
     );
   }
@@ -822,9 +872,64 @@ class _GhostButton extends StatelessWidget {
   }
 }
 
-// Plan status card, shown instead of any purchase UI when the storefront's
-// steering mode is SILENT (no purchase mention allowed) or the user already
-// pays. Status only: current plan, trial countdown, renewal state.
+/// "Tell me when I can upgrade" — the CTA for users with no purchase path yet.
+///
+/// Now that web checkout is offered in every country, the only people who see
+/// this are users still inside their 45-day trial (checkout answers 409
+/// trial_active until it ends) and the case where Dodo is unconfigured. It is a
+/// request to be told rather than a purchase, so it mentions no price and links
+/// to no checkout. It just lets someone raise their hand early.
+class _UpgradeInterestButton extends StatelessWidget {
+  final bool registered;
+  final VoidCallback onTap;
+
+  const _UpgradeInterestButton({required this.registered, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: registered ? null : onTap,
+      child: Container(
+        height: 54,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: registered
+                ? AppColors.glassBorderLight
+                : AppColors.accent.withValues(alpha: 0.55),
+          ),
+        ),
+        child: Center(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (registered) ...[
+                const Icon(Icons.check, size: 18, color: AppColors.accent),
+                const SizedBox(width: 8),
+              ],
+              Text(
+                registered
+                    ? "Got it — I'll let you know"
+                    : 'Tell me when I can upgrade',
+                style: TextStyle(
+                  color: registered
+                      ? AppColors.textSecondary
+                      : AppColors.accent,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Plan status card, shown instead of any purchase UI when the user cannot buy
+// right now (still trialing, or checkout unconfigured) or already pays.
+// Status only: current plan, trial countdown, renewal state.
 
 class _PlanStatusCard extends StatelessWidget {
   final SubscriptionViewModel vm;
@@ -850,7 +955,41 @@ class _PlanStatusCard extends StatelessWidget {
       }
       return "You're all set. Manage your plan anytime at auravoiceapp.com.";
     }
-    return "You're on the free plan.";
+    // Trial over and nothing to buy. Say so plainly and immediately follow it
+    // with what they DO still have (the usage rows below). This screen is
+    // reached automatically when someone hits their daily cap, so landing on
+    // vague copy and no numbers is what made it feel like a dead end.
+    return "Your free trial has ended, so you're on the free plan now. "
+        "Here's what you've got today.";
+  }
+
+  /// The metered allowances, when the backend told us. Only rendered for
+  /// free-tier accounts: a paying user has no caps worth showing.
+  List<Widget> _usageRows() {
+    final usage = vm.usage;
+    if (usage == null || vm.isPaid || vm.isTrialActive) return const [];
+
+    final rows = <Widget>[];
+    void add(String label, UsageCounter? counter, {bool isDuration = false}) {
+      if (counter == null) return;
+      rows.add(_UsageRow(label: label, counter: counter, isDuration: isDuration));
+    }
+
+    add('Messages', usage.chat);
+    add('Web searches', usage.webSurf);
+    add('Screen drafts', usage.drafts);
+    add('Voice', usage.voiceSeconds, isDuration: true);
+
+    if (rows.isEmpty) return const [];
+    return [
+      const SizedBox(height: 18),
+      ...rows,
+      const SizedBox(height: 4),
+      const Text(
+        'Resets at midnight UTC.',
+        style: TextStyle(color: AppColors.textTertiary, fontSize: 12),
+      ),
+    ];
   }
 
   @override
@@ -876,6 +1015,83 @@ class _PlanStatusCard extends StatelessWidget {
               color: AppColors.textSecondary,
               fontSize: 14,
               height: 1.4,
+            ),
+          ),
+          ..._usageRows(),
+        ],
+      ),
+    );
+  }
+}
+
+/// One allowance, as "Messages · 18 of 25" with a proportional bar.
+///
+/// The bar matters more than the numbers: it is what lets someone see at a
+/// glance that they are nearly out, which is the information this app has never
+/// given anyone before hitting the wall.
+class _UsageRow extends StatelessWidget {
+  final String label;
+  final UsageCounter counter;
+  final bool isDuration;
+
+  const _UsageRow({
+    required this.label,
+    required this.counter,
+    this.isDuration = false,
+  });
+
+  /// Voice is metered in seconds, which nobody thinks in. Show minutes.
+  String get _valueText {
+    if (!isDuration) return '${counter.used} of ${counter.limit}';
+    final usedMinutes = (counter.used / 60).floor();
+    final limitMinutes = (counter.limit / 60).floor();
+    return '$usedMinutes of $limitMinutes min';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isExhausted = counter.isExhausted;
+    final barColor = isExhausted
+        ? AppColors.error
+        : counter.isRunningLow
+        ? AppColors.warning
+        : AppColors.accent;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                label,
+                style: const TextStyle(
+                  color: AppColors.textSecondary,
+                  fontSize: 13,
+                ),
+              ),
+              Text(
+                _valueText,
+                style: TextStyle(
+                  color: isExhausted
+                      ? AppColors.error
+                      : AppColors.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: counter.fraction,
+              minHeight: 5,
+              backgroundColor: AppColors.textTertiary.withValues(alpha: 0.18),
+              valueColor: AlwaysStoppedAnimation<Color>(barColor),
             ),
           ),
         ],

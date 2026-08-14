@@ -204,6 +204,7 @@ def test_side_effecting_set_matches_the_state_changing_tools():
         "track_topic",
         "cancel_tracker",
         "report_feedback",
+        "start_research",
     })
     # Read-only tools are NOT guarded (re-running them on a regen is harmless).
     assert "web_surf" not in tool_idempotency.SIDE_EFFECTING_TOOLS

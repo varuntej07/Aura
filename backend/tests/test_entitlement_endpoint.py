@@ -1,4 +1,4 @@
-"""GET /entitlement: server-stamped trial, usage summary, steering, fail-closed reads.
+"""GET /entitlement: server-stamped trial, usage summary, purchasability, fail-closed reads.
 
 Covers the contract every client depends on from Phase 2 onward: the first-ever
 call stamps a 45-day trial exactly once (race-safe via Firestore create()),
@@ -179,7 +179,7 @@ def test_legacy_doc_past_trial_derives_expired(_auth, store):
     assert body["effective_tier"] == "free"
 
 
-# --- usage summary + steering ------------------------------------------------------------------
+# --- usage summary + purchasability --------------------------------------------------------------
 
 def test_usage_summary_shape_and_rollover(_auth, store):
     store[_ENT_PATH] = {"tier": "pro", "status": "active"}
@@ -208,15 +208,23 @@ def test_single_usage_read_failure_yields_null(_auth, store):
     assert body["usage"]["voice_seconds"] is None
 
 
-def test_steering_silent_until_dodo_is_fully_configured(_auth, store, monkeypatch):
+_ALL_LINK_OUT = {"android_us": "LINK_OUT", "ios_us": "LINK_OUT", "row": "LINK_OUT"}
+
+
+def test_no_purchase_path_until_dodo_is_configured(_auth, store, monkeypatch):
+    # Purchasability moved off `steering` (deleted: web checkout is sold in every
+    # country) and onto `checkout_available`, which is a credentials interlock.
     monkeypatch.setattr(settings, "DODO_API_KEY", "")
     monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", "")
     store[_ENT_PATH] = {"tier": "free", "status": "trialing"}
     _status, body = _call(store)
-    assert body["steering"] == {"android_us": "SILENT", "ios_us": "SILENT", "row": "SILENT"}
+    assert body["checkout_available"] is False
+    # Frozen for already-installed builds, which read a MISSING block as
+    # "silent everywhere" and would lock themselves out of purchasing.
+    assert body["steering"] == _ALL_LINK_OUT
 
 
-def test_steering_uses_storefront_config_after_dodo_is_ready(_auth, store, monkeypatch):
+def test_purchase_path_opens_once_dodo_is_ready(_auth, store, monkeypatch):
     monkeypatch.setattr(settings, "DODO_API_KEY", "test-key")
     monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", "test-secret")
     monkeypatch.setattr(settings, "DODO_PRODUCT_COMPANION_MONTHLY", "prod_cm")
@@ -225,7 +233,9 @@ def test_steering_uses_storefront_config_after_dodo_is_ready(_auth, store, monke
     monkeypatch.setattr(settings, "DODO_PRODUCT_PRO_YEARLY", "prod_py")
     store[_ENT_PATH] = {"tier": "free", "status": "expired"}
     _status, body = _call(store)
-    assert body["steering"] == {"android_us": "LINK_OUT", "ios_us": "LINK_OUT", "row": "SILENT"}
+    assert body["checkout_available"] is True
+    # No country or storefront may narrow this: everyone can buy.
+    assert body["steering"] == _ALL_LINK_OUT
 
 
 # --- auth + outage -----------------------------------------------------------------------------
@@ -360,7 +370,7 @@ def test_stale_trialing_status_served_as_expired(_auth, store):
     assert store[_ENT_PATH]["status"] == "trialing"  # normalized, never written back
 
 
-# --- steering country ----------------------------------------------------------------------------
+# --- country (observability only; gates nothing) ------------------------------------------------
 
 def test_country_null_without_edge_header(_auth, store):
     store[_ENT_PATH] = {"tier": "free", "status": "trialing"}

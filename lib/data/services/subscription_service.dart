@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../core/config/environment.dart';
 import '../../core/constants/api_endpoints.dart';
 import '../../core/logging/app_logger.dart';
 import '../../core/network/api_client.dart';
@@ -28,6 +26,13 @@ const kEntitlementRefreshPendingKey = 'entitlement_refresh_pending_v1';
 /// is the doc's only writer. In-app purchases are gone entirely; purchases
 /// happen on the web and unlock every device through the shared account.
 ///
+/// Checkout is offered in every country. There is no storefront or country
+/// gating left: the only thing that can suppress the purchase path is the
+/// backend reporting that it cannot create a session at all
+/// ([checkoutAvailable]). Dodo is the merchant of record and is the party that
+/// declines a payment it may not legally accept, so this client never
+/// geo-blocks anyone.
+///
 /// Offline behavior: the last good /entitlement response is cached locally and
 /// honored for up to 7 days when the fetch fails, then access degrades to free.
 /// Never crash, never lock out, never silently grant.
@@ -40,8 +45,6 @@ class SubscriptionService extends ChangeNotifier {
   final ApiClient _apiClient;
 
   UserEntitlement? _entitlement;
-  SteeringConfig _steering = SteeringConfig.allSilent;
-  String? _serverCountry;
   bool _isLoading = false;
   String? _errorMessage;
 
@@ -73,32 +76,14 @@ class SubscriptionService extends ChangeNotifier {
   bool get canPurchaseSubscription =>
       _entitlement?.canPurchaseSubscription ?? false;
 
-  /// What the paywall may do on THIS device: web-checkout link-out or plan
-  /// status only. Picks the storefront key by platform and the country the
-  /// BACKEND resolved for this account's requests (GET /entitlement `country`).
-  /// The device locale is deliberately not consulted: it is user-configurable
-  /// and says nothing about the store storefront. While the backend cannot
-  /// resolve a country (`country` null), every device gets the always-legal
-  /// silent mode.
-  SteeringMode get steeringMode {
-    final country = _serverCountry;
-    if (country == null || country.isEmpty) return SteeringMode.silent;
-    if (country != 'US') return _steering.restOfWorld;
-    if (Platform.isAndroid) return _steering.androidUs;
-    if (Platform.isIOS) return _steering.iosUs;
-    // Desktop/web builds are not store-constrained; link-out is always fine
-    // there, but this service is only wired on mobile, so stay conservative.
-    return _steering.restOfWorld;
-  }
+  /// Whether the backend can actually create a checkout session. Serving this
+  /// from the backend is what lets payments be switched on by configuration
+  /// alone, with no app release: the moment Dodo is configured, every installed
+  /// client starts showing the purchase UI on its next entitlement fetch.
+  bool get checkoutAvailable => _entitlement?.checkoutAvailable ?? false;
 
-  /// Test hook: [steeringMode] reads private state normally set only by
-  /// [refreshEntitlement], whose backend leg is bypassed under flutter test
-  /// (dev mode).
-  @visibleForTesting
-  void debugSetSteeringState(SteeringConfig steering, String? country) {
-    _steering = steering;
-    _serverCountry = country;
-  }
+  /// Today's metered usage, or null when unknown (cache hit, or offline).
+  UsageSummary? get usage => _entitlement?.usage;
 
   // ── Entitlement fetch ──────────────────────────────────────────────────────
 
@@ -108,10 +93,20 @@ class SubscriptionService extends ChangeNotifier {
   /// On failure the last cached copy is served if it is fresher than 7 days,
   /// otherwise access degrades to free until a fetch succeeds.
   Future<void> refreshEntitlement() async {
-    if (Environment.isDev) {
+    // Gated on the BUILD MODE, not on Environment.isDev.
+    //
+    // `ENV` is a --dart-define that no build command in this repo passed, so
+    // every shipped Play build resolved to `dev` and took this branch: the app
+    // fabricated a Pro entitlement, never called GET /entitlement, and showed a
+    // 45-day countdown that reset on every launch — while the backend was
+    // enforcing the real trial and capping free users at 25 messages a day.
+    // Users hit that cap with the app still calling them Pro.
+    //
+    // kDebugMode is compiler truth. A release binary can never take this path.
+    if (kDebugMode) {
       _entitlement = _devProEntitlement();
       AppLogger.info(
-        'Dev mode: subscription bypassed with Pro entitlement',
+        'Debug build: subscription bypassed with Pro entitlement',
         tag: _tag,
       );
       notifyListeners();
@@ -131,10 +126,6 @@ class SubscriptionService extends ChangeNotifier {
     await result.when(
       success: (json) async {
         _entitlement = UserEntitlement.fromBackend(json);
-        _steering = SteeringConfig.fromBackend(
-          json['steering'] as Map<String, dynamic>?,
-        );
-        _serverCountry = json['country'] as String?;
         _errorMessage = null;
         await _writeCache(uid, json);
         AppLogger.info(
@@ -194,9 +185,7 @@ class SubscriptionService extends ChangeNotifier {
     required SubscriptionTier tier,
     required bool annual,
   }) async {
-    if (tier == SubscriptionTier.free ||
-        !canPurchaseSubscription ||
-        steeringMode != SteeringMode.linkOut) {
+    if (tier == SubscriptionTier.free || !canPurchaseSubscription) {
       return false;
     }
     _clearError();
@@ -271,10 +260,6 @@ class SubscriptionService extends ChangeNotifier {
           'uid': uid,
           'fetched_at': DateTime.now().toIso8601String(),
           'entitlement': UserEntitlement.fromBackend(json).toCacheJson(),
-          'steering': SteeringConfig.fromBackend(
-            json['steering'] as Map<String, dynamic>?,
-          ).toCacheJson(),
-          'country': json['country'] as String?,
         }),
       );
     } catch (e) {
@@ -304,10 +289,6 @@ class SubscriptionService extends ChangeNotifier {
           _entitlement = UserEntitlement.fromCacheJson(
             (cached['entitlement'] as Map).cast<String, dynamic>(),
           );
-          _steering = SteeringConfig.fromBackend(
-            (cached['steering'] as Map?)?.cast<String, dynamic>(),
-          );
-          _serverCountry = cached['country'] as String?;
           AppLogger.info(
             'Serving cached entitlement (offline grace)',
             tag: _tag,
@@ -327,8 +308,6 @@ class SubscriptionService extends ChangeNotifier {
     // No usable cache: degrade to free (never crash, never lock out UI, and
     // never silently grant paid access we cannot confirm).
     _entitlement = null;
-    _steering = SteeringConfig.allSilent;
-    _serverCountry = null;
     notifyListeners();
   }
 

@@ -1,5 +1,4 @@
 import 'package:aura/core/network/api_client.dart';
-import 'package:aura/data/models/subscription_plan.dart';
 import 'package:aura/data/services/firebase_auth_service.dart';
 import 'package:aura/data/services/posthog_analytics_service.dart';
 import 'package:aura/data/services/subscription_service.dart';
@@ -12,18 +11,6 @@ class MockApiClient extends Mock implements ApiClient {}
 class MockFirebaseAuthService extends Mock implements FirebaseAuthService {}
 
 class MockPostHogAnalyticsService extends Mock implements PostHogAnalyticsService {}
-
-const _allLinkOut = SteeringConfig(
-  androidUs: SteeringMode.linkOut,
-  iosUs: SteeringMode.linkOut,
-  restOfWorld: SteeringMode.linkOut,
-);
-
-const _rowSilent = SteeringConfig(
-  androidUs: SteeringMode.linkOut,
-  iosUs: SteeringMode.linkOut,
-  restOfWorld: SteeringMode.silent,
-);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -38,32 +25,9 @@ void main() {
     );
   });
 
-  group('steeringMode', () {
-    test('unknown country is always SILENT, even when steering allows link-out', () {
-      // The backend could not resolve a country: the paywall must fall to the
-      // always-legal mode regardless of what the steering config would allow.
-      sut.debugSetSteeringState(_allLinkOut, null);
-      expect(sut.steeringMode, SteeringMode.silent);
-
-      sut.debugSetSteeringState(_allLinkOut, '');
-      expect(sut.steeringMode, SteeringMode.silent);
-    });
-
-    test('non-US country gets the rest-of-world mode', () {
-      sut.debugSetSteeringState(_rowSilent, 'DE');
-      expect(sut.steeringMode, SteeringMode.silent);
-
-      sut.debugSetSteeringState(_allLinkOut, 'IN');
-      expect(sut.steeringMode, SteeringMode.linkOut);
-    });
-
-    test('US on a non-store platform stays conservative (rest-of-world)', () {
-      // Test hosts are desktop, neither Android nor iOS: the US branch must
-      // fall through to the rest-of-world mode, never assume a storefront.
-      sut.debugSetSteeringState(_rowSilent, 'US');
-      expect(sut.steeringMode, SteeringMode.silent);
-    });
-  });
+  // The `steeringMode` group that lived here verified per-country storefront
+  // gating of the paywall. That mechanism is deleted: web checkout is offered in
+  // every country, so there is no country branch left to assert on.
 
   group('consumePendingBackgroundRefresh', () {
     test('consumes the flag and refetches entitlement', () async {

@@ -1,7 +1,7 @@
 """GET /entitlement: the one entitlement read every client calls on launch.
 
-Serves the account's subscription state plus a usage summary and the in-app
-purchase steering config. On the first-ever call for a uid it stamps the
+Serves the account's subscription state, a usage summary, and whether checkout
+can actually be created right now. On the first-ever call for a uid it stamps the
 server-side 45-day trial into users/{uid}/entitlement/current, which makes the
 backend the single trial authority (the old client-side stamping was trivially
 extendable by anyone with the Firestore SDK, and desktop users had no doc at all).
@@ -33,6 +33,14 @@ from ..services.entitlement import (
 )
 from ..services.geo import resolve_request_country
 from ..services.request_auth import resolve_user_id_from_request
+
+# Legacy compatibility only. Aura sells through web checkout in every country,
+# so no storefront decides anything any more and the whole steering mechanism is
+# gone. This block is still served because already-installed builds parse it and
+# treat a MISSING one as "silent everywhere", which would lock those users out of
+# purchasing entirely. Nothing on the backend computes it; current clients ignore
+# it. Safe to delete once no shipped build reads it.
+_LEGACY_STEERING = {"android_us": "LINK_OUT", "ios_us": "LINK_OUT", "row": "LINK_OUT"}
 
 # Usage doc id -> (response key, counter field, daily limit).
 _USAGE_COUNTERS: dict[str, tuple[str, str, int]] = {
@@ -118,6 +126,18 @@ async def handle_get_entitlement(request: Request) -> JSONResponse:
         "expires_at": _iso_or_none(data.get("expires_at")),
         "cancel_at_period_end": bool(data.get("cancel_at_period_end", False)),
         "usage": usage,
-        "steering": settings.steering_config,
+        "steering": _LEGACY_STEERING,
+        # Observability only: no purchase decision reads this any more. Null
+        # whenever no trusted edge header carries a country, which is the normal
+        # case on bare Cloud Run.
         "country": resolve_request_country(request),
+        # Whether a checkout session can ACTUALLY be created right now. The
+        # client used to infer purchasability from steering and trial state
+        # alone, which is not enough: Dodo can be unconfigured (as it was in
+        # production for months), in which case POST /billing/checkout refuses
+        # every request and the app would still render an Upgrade button that
+        # leads nowhere. Only the backend knows, so the backend says so. This
+        # is a credentials interlock, not a feature gate: it can never hide a
+        # working checkout, only suppress a button that would 503.
+        "checkout_available": settings.dodo_configured,
     })
