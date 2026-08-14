@@ -470,10 +470,10 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
                 )
             try:
                 try:
-                    result = await openai_stt.transcribe_segment(audio)
+                    result = await deepgram.transcribe_segment(audio)
                 except deepgram.DeepgramError as exc:
                     logger.warn(
-                        "meetings.synthesis: primary STT failed, using Deepgram fallback",
+                        "meetings.synthesis: primary STT failed, using OpenAI fallback",
                         {
                             "meeting_id": meeting_id,
                             "capture_run_id": lease.capture_run_id,
@@ -481,7 +481,7 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
                             "error_type": type(exc).__name__,
                         },
                     )
-                    result = await deepgram.transcribe_segment(audio)
+                    result = await openai_stt.transcribe_segment(audio)
                 vad_ms = int(segment["audio_metrics"]["mic_vad_speech_ms"]) + int(
                     segment["audio_metrics"]["system_vad_speech_ms"]
                 )
@@ -523,10 +523,15 @@ async def _run_v2_synthesis(uid: str, meeting_id: str, job_id: str) -> str:
                     attempt_id=first_attempt_id,
                 )
                 attempt_pointers.append(first_pointer)
-                language_requires_retry = result.provider == "deepgram" and bool(result.language) and (
-                    not str(result.language).lower().startswith("en")
-                    or (
-                        result.language_confidence is not None and result.language_confidence < 0.70
+                language_requires_retry = (
+                    result.provider == "deepgram"
+                    and bool(result.language)
+                    and (
+                        not str(result.language).lower().startswith("en")
+                        or (
+                            result.language_confidence is not None
+                            and result.language_confidence < 0.70
+                        )
                     )
                 )
                 if language_requires_retry:
