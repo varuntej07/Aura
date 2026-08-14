@@ -13,6 +13,7 @@
 #   gcloud secrets create livekit-api-key --project=<PROJECT_ID>
 #   gcloud secrets create livekit-api-secret --project=<PROJECT_ID>
 #   gcloud secrets create deepgram-api-key --project=<PROJECT_ID>
+#   gcloud secrets create deepgram-dictation-api-key --project=<PROJECT_ID>
 #   gcloud secrets create cartesia-api-key --project=<PROJECT_ID>
 #   gcloud secrets create juno-google-client-id --project=<PROJECT_ID>
 #   gcloud secrets create juno-google-client-secret --project=<PROJECT_ID>
@@ -22,6 +23,7 @@
 #   gcloud secrets create juno-gemini-api-key --project=<PROJECT_ID>         # voice worker + signal engine LLM fallback
 #   gcloud secrets create juno-brave-api-key --project=<PROJECT_ID>          # backend: real-time web_surf (chat + voice)
 #   gcloud secrets create juno-newsdata-api-key --project=<PROJECT_ID>       # backend: signal-engine news pool (newsdata.io)
+#   gcloud secrets create juno-firecrawl-api-key --project=<PROJECT_ID>      # backend: research page reading (services/research)
 #   gcloud secrets create juno-dodo-api-key --project=<PROJECT_ID>           # billing: Dodo Payments API key (checkout + portal)
 #   gcloud secrets create juno-dodo-webhook-secret --project=<PROJECT_ID>    # billing: Dodo webhook signature secret (whsec_...)
 #
@@ -55,18 +57,18 @@ SERVICE_NAME="juno-backend"
 IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 LIVEKIT_URL="wss://aura-i06eolmd.livekit.cloud"
 MEETING_STORAGE_SERVICE_ACCOUNT="firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com"
+DICTATION_AUDIO_BUCKET="juno-2ea45-dictation-audio"
+# Cost kill switch. Keep at zero until the approved 30-query p95, provider alerts,
+# and Phase 4 durability fault injection are all complete.
+PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD="0"
 
-# Dodo Payments (billing). Test-mode base until launch; flip to
-# https://live.dodopayments.com in the Phase 5 launch sequence. The four product
-# IDs come from the Dodo dashboard after merchant onboarding; while they are
-# empty the billing routes answer 503 billing_not_configured, which is safe.
-# The API key and webhook secret ride in via Secret Manager, see the
-# commented --set-secrets lines in the deploy block below.
-DODO_API_BASE="https://test.dodopayments.com"
-DODO_PRODUCT_COMPANION_MONTHLY=""
-DODO_PRODUCT_COMPANION_YEARLY=""
-DODO_PRODUCT_PRO_MONTHLY=""
-DODO_PRODUCT_PRO_YEARLY=""
+# Dodo Payments production catalog. The API key and webhook signing secret are
+# injected from Secret Manager in the Cloud Run deploy block below.
+DODO_API_BASE="https://live.dodopayments.com"
+DODO_PRODUCT_COMPANION_MONTHLY="pdt_ONIKvXgFDbrgO4EC5Ads0"
+DODO_PRODUCT_COMPANION_YEARLY="pdt_ONIKvfUD1Bic9YM9Olz4L"
+DODO_PRODUCT_PRO_MONTHLY="pdt_ONIKvmk9Uzm0A4W7j3DNA"
+DODO_PRODUCT_PRO_YEARLY="pdt_ONIKvfC3x3KbqpGY9Hap"
 
 echo "▶ Deploying ${SERVICE_NAME} to project=${PROJECT_ID} region=${REGION}"
 
@@ -122,6 +124,72 @@ python "${SCRIPT_DIR}/scripts/check_meeting_storage.py" --check \
   --required-member "serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
   --required-role "roles/storage.objectAdmin"
 
+echo "▶ Preflighting dictation-audio bucket (region, prefix lifecycle, IAM)..."
+python "${SCRIPT_DIR}/scripts/check_dictation_storage.py" --check \
+  --project "${PROJECT_ID}" \
+  --bucket "${DICTATION_AUDIO_BUCKET}" \
+  --region "${REGION}" \
+  --required-member "serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
+  --required-role "roles/storage.objectAdmin"
+
+# ── Firestore collection-group index preflight ───────────────────────────────
+# Meeting reconciliation (services/meetings/operations.py, run hourly by
+# /scheduler/tick at minute 27) filters the `meetings` COLLECTION GROUP on
+# protocol_version. Firestore's default single-field config indexes every field
+# at COLLECTION scope only, so that query additionally needs the explicit
+# COLLECTION_GROUP field override in firestore.indexes.json — and needs it
+# READY, not CREATING or absent.
+#
+# 2026-07-30: a revision carrying that query shipped before the override had
+# ever been pushed to the default database. Every hourly tick logged
+# meeting_reconciliation_failed ("400: query requires a collection-group
+# index") for 35 hours across three revisions, and stopped mid-life of an
+# unchanged revision the moment the index was finally created — the code was
+# never the problem, the deploy order was.
+#
+# Pushing indexes stays a separate manual step (`firebase deploy --only
+# firestore:indexes`) because an index build is not transactional with a
+# traffic shift and can take arbitrarily long. So this gate does not create
+# anything; it refuses to ship code whose required index is not already
+# serving. A field override that does not exist at all makes `describe` fail
+# and emit nothing, which lands on the same clear failure as a still-building
+# one rather than a JSON traceback.
+echo "▶ Preflighting Firestore collection-group indexes..."
+read -r -d '' REQUIRE_READY_CG_INDEX_PY <<'PY' || true
+import json
+import sys
+
+field = sys.argv[1]
+raw = sys.stdin.read().strip()
+config = (json.loads(raw) if raw else {}).get("indexConfig", {})
+for index in config.get("indexes", []):
+    paths = [entry.get("fieldPath") for entry in index.get("fields", [])]
+    if (
+        index.get("queryScope") == "COLLECTION_GROUP"
+        and index.get("state") == "READY"
+        and paths == [field]
+    ):
+        print(f"  • {field}: COLLECTION_GROUP index READY")
+        break
+else:
+    states = [
+        f'{i.get("queryScope")}/{i.get("state")}' for i in config.get("indexes", [])
+    ]
+    sys.exit(
+        f"  x {field}: no READY COLLECTION_GROUP index (found: {states or 'none'}).\n"
+        "    Run `firebase deploy --only firestore:indexes`, wait for the build to\n"
+        "    reach READY, then re-run this deploy."
+    )
+PY
+gcloud firestore indexes fields describe protocol_version \
+  --collection-group=meetings --project="${PROJECT_ID}" --format=json 2>/dev/null \
+  | python -c "${REQUIRE_READY_CG_INDEX_PY}" protocol_version \
+  || { echo "  x meetings.protocol_version index preflight failed (see above)"; exit 1; }
+gcloud firestore indexes fields describe audio_expires_at \
+  --collection-group=dictation_traces --project="${PROJECT_ID}" --format=json 2>/dev/null \
+  | python -c "${REQUIRE_READY_CG_INDEX_PY}" audio_expires_at \
+  || { echo "  x dictation_traces.audio_expires_at index preflight failed"; exit 1; }
+
 # Deploy to Cloud Run
 echo "▶ Deploying to Cloud Run..."
 gcloud run deploy "${SERVICE_NAME}" \
@@ -137,7 +205,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --timeout=3600 \
   --concurrency=80 \
   --set-env-vars="ENV=production" \
-  --set-env-vars="REALTIME_BRIDGE_ENABLED=true" \
+  --set-env-vars="PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD=${PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD}" \
+  --set-env-vars="REALTIME_BRIDGE_ENABLED=false" \
   --set-env-vars="ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6" \
   --set-env-vars="ANTHROPIC_VOICE_MODEL=claude-haiku-4-5" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
@@ -149,12 +218,16 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="LIVEKIT_API_KEY=livekit-api-key:latest" \
   --set-secrets="LIVEKIT_API_SECRET=livekit-api-secret:latest" \
   --set-secrets="DEEPGRAM_API_KEY=deepgram-api-key:latest" \
+  --set-secrets="DEEPGRAM_DICTATION_API_KEY=deepgram-dictation-api-key:latest" \
   --set-secrets="CARTESIA_API_KEY=cartesia-api-key:latest" \
   --set-secrets="GOOGLE_CLIENT_ID=juno-google-client-id:latest" \
   --set-secrets="GOOGLE_CLIENT_SECRET=juno-google-client-secret:latest" \
   --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
   --set-secrets="BRAVE_API_KEY=juno-brave-api-key:latest" \
   --set-secrets="NEWSDATA_API_KEY=juno-newsdata-api-key:latest" \
+  --set-secrets="FIRECRAWL_API_KEY=juno-firecrawl-api-key:latest" \
+  --set-secrets="DODO_API_KEY=juno-dodo-api-key:latest" \
+  --set-secrets="DODO_WEBHOOK_SECRET=juno-dodo-webhook-secret:latest" \
   --set-secrets="/run/secrets/service-account.json=juno-firebase-service-account:latest" \
   --set-env-vars="GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/service-account.json" \
   --set-env-vars="LIVEKIT_URL=${LIVEKIT_URL}" \
@@ -167,7 +240,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="DODO_PRODUCT_COMPANION_YEARLY=${DODO_PRODUCT_COMPANION_YEARLY}" \
   --set-env-vars="DODO_PRODUCT_PRO_MONTHLY=${DODO_PRODUCT_PRO_MONTHLY}" \
   --set-env-vars="DODO_PRODUCT_PRO_YEARLY=${DODO_PRODUCT_PRO_YEARLY}" \
-  --set-env-vars="MEETINGS_AUDIO_BUCKET=juno-2ea45-meeting-audio"
+  --set-env-vars="MEETINGS_AUDIO_BUCKET=juno-2ea45-meeting-audio" \
+  --set-env-vars="DICTATION_AUDIO_BUCKET=${DICTATION_AUDIO_BUCKET}"
   # ^ One-time prerequisites for the meetings bucket (NOT created by this
   # script, but now VERIFIED by the storage preflight above before every
   # deploy - a missing bucket or absent lifecycle rule fails the deploy).
@@ -187,25 +261,54 @@ gcloud run deploy "${SERVICE_NAME}" \
   #   gcloud storage buckets add-iam-policy-binding gs://juno-2ea45-meeting-audio \
   #     --member=serviceAccount:firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com \
   #     --role=roles/storage.objectAdmin
+  # Dictation training audio is deliberately isolated from meeting retention.
+  # Provisioned 2026-08-06; run from backend/ so the lifecycle path resolves:
+  #   gcloud storage buckets create gs://juno-2ea45-dictation-audio \
+  #     --location=us-central1 --uniform-bucket-level-access \
+  #     --public-access-prevention --soft-delete-duration=0
+  #   gcloud storage buckets update gs://juno-2ea45-dictation-audio \
+  #     --lifecycle-file=scripts/lifecycle-dictation-180day-delete.json
+  #   gcloud storage buckets add-iam-policy-binding gs://juno-2ea45-dictation-audio \
+  #     --member=serviceAccount:firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com \
+  #     --role=roles/storage.objectAdmin
+  #   gcloud iam roles create dictationBucketPreflight --project=juno-2ea45 \
+  #     --title="Dictation Bucket Preflight" --stage=GA \
+  #     --permissions=storage.buckets.get,storage.buckets.getIamPolicy
+  #   gcloud storage buckets add-iam-policy-binding gs://juno-2ea45-dictation-audio \
+  #     --member=serviceAccount:firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com \
+  #     --role=projects/juno-2ea45/roles/dictationBucketPreflight
+  # That last binding is NOT optional and is easy to miss: objectAdmin carries no
+  # storage.buckets.getIamPolicy, so check_dictation_storage.py --check dies with a
+  # 403 traceback (not a clean [FAIL]) and aborts the whole deploy under `set -e`.
+  # juno-2ea45-meeting-audio only passes its own preflight because it additionally
+  # holds roles/storage.admin, which this recipe never recorded. The custom role is
+  # the least-privilege equivalent: bucket metadata + IAM read, nothing else.
+  # soft-delete is 0 here (meeting-audio keeps the 7-day GCS default) so that
+  # DELETE /dictation/traces/{id} and account deletion drop the bytes immediately
+  # rather than leaving them admin-recoverable for a week.
   # The IAM grant targets the FIREBASE service account, because the backend runs
   # every Google client (incl. Cloud Storage) as GOOGLE_APPLICATION_CREDENTIALS
   # (=/run/secrets/service-account.json, the juno-firebase-service-account secret),
-  # not the Cloud Run runtime SA. The 7-day lifecycle DELETE rule is a real privacy backstop, not an
-  # optimization - the worker's post-synthesis audio delete is best-effort, and
-  # without the rule a failed cleanup keeps raw meeting audio indefinitely. Also
+  # not the Cloud Run runtime SA. The 7-day lifecycle DELETE rule is the configured
+  # retention policy, not worker cleanup: successful V2 transcription/publication
+  # deliberately retains source audio, and explicit user deletion uses exact object
+  # generations. Also
   # enable the Firestore TTL policy (not covered by the preflight):
   # `gcloud firestore fields ttls update expires_at --collection-group=meetings --enable-ttl`
-  # After Dodo onboarding, create the two secrets (header above) and move these
-  # two lines INTO the gcloud command block; referencing a secret that does not
-  # exist yet fails the whole deploy, so they stay commented until then:
-  #   --set-secrets="DODO_API_KEY=juno-dodo-api-key:latest" \
-  #   --set-secrets="DODO_WEBHOOK_SECRET=juno-dodo-webhook-secret:latest" \
-
 # Print service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
   --region="${REGION}" \
   --project="${PROJECT_ID}" \
   --format="value(status.url)")
+
+DEPLOYED_RESEARCH_COST_CAP="$(gcloud run services describe "${SERVICE_NAME}" \
+  --region="${REGION}" --project="${PROJECT_ID}" \
+  --format=json | python -c 'import json, sys; data = json.load(sys.stdin); env = data.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [{}])[0].get("env", []); print(next((str(item.get("value", "")) for item in env if item.get("name") == "PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD"), ""))')"
+if [[ "${DEPLOYED_RESEARCH_COST_CAP}" != "${PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD}" ]]; then
+  echo "Research cost kill switch read-back failed" >&2
+  exit 1
+fi
+echo "Research cost kill switch verified at ${DEPLOYED_RESEARCH_COST_CAP} micro-USD"
 
 echo ""
 echo "✅ ${SERVICE_NAME} deployed: ${SERVICE_URL}"

@@ -86,6 +86,8 @@ Desktop-exclusive today (mobile has no equivalent). Frame goes desktop to LiveKi
 Buddy Drafts rides this same channel: the voice agent's `draft_outbound_message` tool reads the session's screen frame in-process and pushes `draft.generating` / `draft.created` / `draft.updated` / `draft.failed` events back over the data channel to the desktop's draft card. Email replies and DMs use `channel: "email_reply" | "cold_dm"`, require a fresh frame, consume the draft quota, and persist.
 
 General visible output uses `present_visible_artifact` and publishes one backward-compatible `draft.created` event with `channel: "snippet"`, plus optional `artifact_kind: "command" | "code" | "config" | "prompt" | "steps" | "checklist" | "note"`, `content_format: "code" | "markdown"`, `title`, `language`, and `persisted: false`. Commands, code, configuration, prompts for another agent, and multi-step guidance do not require a frame unless the requested answer itself depends on the screen. They do not use the draft quota, do not persist, and are sent reliably with a strict packet-size guard. Old snippet-aware clients render the text as code and ignore the new fields; new clients render exact code or safe GFM Markdown. A desktop client older than snippet support drops this event, so the compatible desktop release must ship BEFORE the backend emits visible artifacts.
+
+Desktop builds that validate the structured artifact checksum and acknowledge only after the exact revision commits into a visible card send `artifact_ack=displayed-v1` on `GET /voice/token`. The API copies that value into LiveKit participant metadata. The worker then requires `artifact.displayed {artifact_id, revision}` on the reliable `client_events` topic from the first ready card before it says the card is on screen, with one idempotent resend and bounded waits. Installed clients that omit the capability keep the prior optimistic behavior, and old workers ignore the additive query parameter. Acknowledging packet receipt, a rejected stale revision, a hidden overlay, or a checksum mismatch is forbidden.
 The latest version of every draft also persists to Firestore at `UserAura/{uid}/drafts/{draft_id}` (`backend/src/services/drafts/`), written by the voice worker after each create/refine event, for the web dashboard's Drafts feed (contract 7).
 Rows auto-expire 7 days after their last edit via a Firestore TTL policy on `expires_at` (one-time setup: `gcloud firestore fields ttls update expires_at --collection-group=drafts --enable-ttl`).
 The draft text and its screen-derived context summary are what persist; the SCREEN FRAME itself stays ephemeral (worker RAM only, never Firestore/GCS/logs), and logs/analytics still never carry draft text.
@@ -114,11 +116,6 @@ installation receives the existing `meeting_already_claimed` conflict. Stale-fen
 mutations return 409 `stale_capture_fence`, and that response body now also carries the
 server's current `capture_fence` so a client can distinguish "behind" (adopt and resume)
 from "forked" (unrecoverable); older clients ignore the additive field.
-
-The desktop separates the fence it ENCRYPTED segments under (part of the local AEAD
-associated data, immutable once any segment exists) from the wire fence it sends. Only
-the wire fence adopts a server advance; changing the encryption fence makes that run's
-own audio undecryptable.
 `PUT /meetings/{id}/capture-runs/{capture_run_id}/segments/{seq}` takes raw
 two-channel 16 kHz FLAC with the V2 integrity headers. It creates only
 `audio/v2/{uid}/{meeting_id}/{capture_run_id}/{seq:06}/{plaintext_sha256}.flac`
@@ -149,7 +146,60 @@ Capture trust model is load-bearing for the brand: user-armed only (global toggl
 Duration is TEMPORARILY clamped to 60 minutes on every tier (product decision 2026-07-11): events scheduled longer than an hour are not armable, the desktop engine hard-stops capture at 60 minutes per meeting, and the backend synthesis caps mirror the clamp (design values of 4h capture / 240min Pro synthesis return when long-meeting support lands).
 Join detection polls only inside the event's exact scheduled window, start to end, because detection is not link-matched in v1 and a wider armed window widens the misattribution surface.
 
-### 5c. Desktop notification outbox and preferences
+### 5b-2. Desktop dictation transcription credential (desktop -> backend -> Deepgram)
+
+Aura Desktop's hold-to-talk dictation chord (Ctrl+Win) no longer transcribes
+on-device. It opens one Deepgram Nova-3 streaming WebSocket per hold, DIRECT
+from the desktop's Rust process, and authenticates it with a short-lived token
+minted by `POST /dictation/stt-token`. Firebase-authenticated; returns
+`{"accessToken": str, "expiresInSeconds": int}` with `Cache-Control: no-store`.
+The permanent `DEEPGRAM_API_KEY` lives only in Cloud Run secrets and is
+exchanged server-side through Deepgram's `/v1/auth/grant`.
+
+Direct rather than proxied because dictation is interactive: every relay hop
+would sit between the user finishing a word and seeing it. `no-store` plus a
+`DEEPGRAM_STT_TOKEN_TTL_S` of 300s is what makes that safe. The desktop holds
+only a minutes-long, transcription-scoped JWT, in memory, cleared on sign-out,
+and refreshes at ~70% of the TTL so a chord press never pays for a mint.
+
+`DICTATION_CLOUD_ENABLED` is the kill switch. When false the endpoint returns
+503 and the desktop shows a HUD error rather than failing at the socket. Deploy
+this additive backend contract, with the key set and the switch on, BEFORE
+releasing the desktop consumer: the previous desktop build carried a bundled
+on-device model and this one has nothing to fall back on. Dictation now
+requires a signed-in user and a network, which the on-device version did not.
+
+### 5c. Opt-in dictation training traces (desktop REST -> backend corpus)
+
+The `modelId` and `sherpaVersion` fields in the trace payload now carry the
+cloud recognizer's identity (`deepgram-nova-3-en` / `deepgram-v1-listen`). The
+`sherpaVersion` field NAME is deliberately unchanged so traces already queued
+on a user's machine from the on-device build still validate against the live
+schema. Per-token timings are no longer sent (`tokens` is always empty): asking
+the provider for word timings would mean transmitting and storing more
+speech-derived data than the transcript itself.
+
+Aura Desktop only queues a trace after the
+15-minute correction window reaches `Finalized` under explicit sharing consent.
+The Firebase-authenticated backend contract is `PUT /dictation/traces/{trace_id}`
+for metadata, `PUT /dictation/traces/{trace_id}/audio` for 16 kHz mono PCM16 FLAC,
+idempotent `DELETE /dictation/traces/{trace_id}`, and `GET /dictation/quota`.
+`trace_id` is 24 lowercase hex characters; the current desktop also includes
+`traceId` in JSON and the backend requires it to match the path.
+
+The first metadata write and `users/{uid}/usage/dictation_{YYYYMM}` counter
+increment are one transaction (500 traces/user/UTC month). Identical retries are
+free; changed reuse or a tombstone returns 409. Metadata lives at
+`users/{uid}/dictation_traces/{trace_id}`. Create-only audio lives in the separate
+`DICTATION_AUDIO_BUCKET` at
+`dictation/v1/{uid}/{trace_id}/{sha256}.flac`, with a prefix-scoped 180-day GCS
+lifecycle rule. The hourly backend reconciliation confirms exact-generation
+absence before clearing `has_audio`. Account deletion purges these blobs before
+Firestore/Auth. Admin export uses `groundTruth` only and keeps recognition edits
+(`verbatim/casing/punctuation`) separate from non-transcript style edits
+(`disfluency/style`). See `backend/docs/dictation-training-data.md`.
+
+### 5d. Desktop notification outbox and preferences
 
 Aura-Desktop registers its notification capability with authenticated `PUT /desktop/notifications/preferences`, polls `GET /desktop/notifications` with an owner-bound opaque cursor, and acknowledges lifecycle through `POST /desktop/notifications/{notification_id}/ack`. The backend stores capability and category preferences at `users/{uid}/notification_preferences/desktop`, and durable outbox rows at `users/{uid}/desktop_notifications/{notification_id}`.
 
@@ -176,7 +226,8 @@ Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebas
 
 | Endpoint | Request | Response contract |
 |---|---|---|
-| `POST /devices/profile` | `{where_heard, where_heard_other, role, role_other}` where every field is `string | null` | `{ok: true}`. Last write wins on `users/{uid}`. |
+| `POST /devices/profile` | `{where_heard, where_heard_other, role, role_other}` where every field is `string | null` | `{ok: true}`. Profile fields use last write wins on `users/{uid}`. There is no per-user desktop chat rollout gate: the desktop shows its text lane to any signed-in user, and what keeps that safe is the server-enforced `surface` tool allowlist on `POST /chat` below, not a flag. |
+| `POST /chat` | Existing chat request plus optional `surface`, default `app` | Desktop and unrecognized surfaces receive read-only tools only. The existing app surface retains its current tool behavior. |
 | `POST /devices/guide-usage` | `{guide_session_id (32-hex), started_at, ended_at (ISO), duration_ms, outcome (completed\|abandoned\|signed_out\|session_ended), frames_sent, steps_received, agent_timeouts}` | `{ok: true}`, always (fail-soft; the desktop treats any non-2xx as a swallowed blip). Merges into a Guide Mode rollup on `users/{uid}` (lifetime counters + one latest-session snapshot; no subcollection). The voice worker's `GuideCoordinator` writes the fields the client cannot see (model, avg TTFT, tools used, last user turn, frames processed) onto the SAME rollup, keyed by `guide_session_id`; a transaction guards the snapshot so a stale writer never clobbers a newer session. |
 | `GET /desktop/home/stats` | none | `{last_used_at, last_session_seconds, sessions_this_week}` for desktop-surface voice sessions. |
 | `GET /desktop/activity?limit=8` | `limit` is capped at 50 | `{items: [{id, kind, title, subtitle?, timestamp}]}` merging desktop voice sessions, drafts, and saved memory. |

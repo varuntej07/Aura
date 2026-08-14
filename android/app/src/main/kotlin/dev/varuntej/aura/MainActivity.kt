@@ -6,6 +6,9 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
+import dev.varuntej.aura.diagnostics.StartupBeacon
+import dev.varuntej.aura.diagnostics.StartupForensics
+import dev.varuntej.aura.diagnostics.StartupTrace
 import dev.varuntej.aura.keyboard.KeyboardCredentialStore
 import dev.varuntej.aura.keyboard.KeyboardVoiceHandoff
 import dev.varuntej.aura.widget.VoiceWidgetProvider
@@ -17,10 +20,57 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterFragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Startup forensics run FIRST, before edge-to-edge and before
+        // super.onCreate, because everything after this line is a candidate for
+        // the failure being measured. This reads how far the PREVIOUS launch got
+        // and what the OS says killed it — see the diagnostics package.
+        captureStartupForensics()
+
         // FlutterFragmentActivity installs its content view during super.onCreate, so
         // enable edge-to-edge first. This also opts in Android 14 and earlier.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+    }
+
+    /**
+     * Reads the previous launch's breadcrumb and the OS exit record, then stamps
+     * this launch as started.
+     *
+     * A previous stage of anything other than "first_frame" means the last
+     * launch died before rendering, which is the symptom under investigation. In
+     * that case the report is beaconed straight out over raw HTTP, because the
+     * app may not survive long enough to report it any other way.
+     *
+     * Wrapped whole in a catch: diagnostics must never be the reason a launch
+     * fails.
+     */
+    private fun captureStartupForensics() {
+        try {
+            val previousStage = StartupTrace.previousStage(applicationContext)
+            val launchCount = StartupTrace.launchCount(applicationContext)
+            val isFirstEverLaunch = previousStage == null && launchCount <= 1
+            val previousLaunchFailed =
+                !isFirstEverLaunch && previousStage != StartupTrace.STAGE_FIRST_FRAME
+
+            StartupTrace.stamp(applicationContext, StartupTrace.STAGE_NATIVE_ON_CREATE)
+
+            if (previousLaunchFailed) {
+                val consecutiveFailures = StartupTrace.recordFailedLaunch(applicationContext)
+                val report = StartupForensics.buildReport(
+                    applicationContext,
+                    previousStage,
+                    consecutiveFailures,
+                    launchCount,
+                )
+                // Held for Dart to collect over the diagnostics channel, so the
+                // same record also lands in Crashlytics as a non-fatal IF the
+                // app survives long enough. The beacon does not depend on that.
+                pendingForensicsReport = report.toString()
+                StartupBeacon.send(report)
+            }
+        } catch (_: Throwable) {
+            // See the diagnostics package docstrings.
+        }
     }
 
     // Lets the Flutter app push the Buddy Keyboard credential (uid + Firebase ID token
@@ -33,6 +83,15 @@ class MainActivity : FlutterFragmentActivity() {
     // Flutter, and lets the app pin the voice widget from its own UI. See
     // VoiceLauncherBridge (Dart) and VoiceWidgetProvider (Kotlin).
     private val widgetChannel = "dev.varuntej.aura/widget"
+
+    // Lets Dart stamp its own startup milestones onto the native breadcrumb and
+    // collect the previous launch's forensics. See StartupDiagnosticsService (Dart)
+    // and the diagnostics package (Kotlin).
+    private val diagnosticsChannel = "dev.varuntej.aura/diagnostics"
+
+    // The previous launch's forensics report, as a JSON string, when that launch
+    // failed to reach a first frame. Null on a healthy launch. Handed to Dart once.
+    private var pendingForensicsReport: String? = null
 
     // The launch action carried by the intent that started this activity (e.g. a
     // voice-widget tap). Captured on cold launch and handed to Flutter once via
@@ -47,6 +106,42 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // Reaching here means the Flutter engine was created successfully, which
+        // rules out the entire native/engine-load class of startup failure.
+        StartupTrace.stamp(applicationContext, StartupTrace.STAGE_ENGINE_CONFIGURED)
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, diagnosticsChannel)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // Dart reports how far ITS half of startup got. Stamped
+                    // synchronously to disk so it survives an immediate death.
+                    "stampStage" -> {
+                        val stage = call.argument<String>("stage")
+                        if (stage.isNullOrBlank()) {
+                            result.error("invalid_args", "stage is required", null)
+                        } else {
+                            StartupTrace.stamp(applicationContext, stage)
+                            result.success(true)
+                        }
+                    }
+                    // The first rendered frame is the only unambiguous proof that
+                    // this launch actually worked, so it is what clears the
+                    // breadcrumb and resets the consecutive-failure counter.
+                    "markLaunchSucceeded" -> {
+                        StartupTrace.markLaunchSucceeded(applicationContext)
+                        result.success(true)
+                    }
+                    // Returns the previous launch's forensics once, or null when
+                    // the previous launch was healthy.
+                    "consumeStartupForensics" -> {
+                        val report = pendingForensicsReport
+                        pendingForensicsReport = null
+                        result.success(report)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, keyboardChannel)
             .setMethodCallHandler { call, result ->

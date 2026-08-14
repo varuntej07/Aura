@@ -42,10 +42,13 @@ RUN groupadd -r juno && useradd -r -g juno -m juno
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Download the turn-detector ONNX model and Silero VAD weights into the image
-# so the worker subprocess doesn't try to fetch them at runtime.
-# Placed BEFORE `COPY src/` so editing source code doesn't invalidate this ~332MB layer 
+# Download local model weights into the image so the worker subprocess doesn't
+# fetch them at runtime.
+# Placed BEFORE `COPY src/` so editing source code doesn't invalidate this layer
 # it depends only on the installed livekit.agents package, not on src.
+
+# HF_HOME is retained: harmless if unused, and still the right cache root if
+# anything in the chain touches huggingface_hub.
 ENV HF_HOME=/app/.cache/huggingface
 RUN mkdir -p $HF_HOME && python -m livekit.agents download-files
 

@@ -126,8 +126,13 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
 - **GDPR gate:** `user_aura_extractor.py` reads `users/{uid}.aura_consent_granted`
   before every extraction. Explicit `false` blocks it; an absent field (legacy
   accounts) does not.
-- **Payments are in beta interest-capture mode.** Real IAP is disabled; tier CTAs
-  record intent. Plan and price constants live in `subscription_plan.dart`.
+- **Payments are web checkout only, in every country.** Dodo Payments is the
+  merchant of record; there is no IAP and no storefront or country gating of the
+  paywall. Never add a country branch, blocklist, or `STEERING_*`-style config
+  that can decide who may buy: sanctions and local tax are the merchant of
+  record's job, and a Dodo decline is the correct outcome. The only thing that
+  suppresses purchase UI is `checkout_available` (Dodo credentials present) and
+  the 45-day trial. Plan and price constants live in `subscription_plan.dart`.
 - **Never state a cost is negligible.** Reason about scaling to hundreds of
   users, not today's dollar amount.
 
@@ -151,8 +156,15 @@ Flutter app (analyze first to catch compile errors before the Gradle build):
 
 ```powershell
 flutter analyze
-flutter build appbundle --release --obfuscate --split-debug-info=build/symbols
+flutter build appbundle --release --obfuscate --split-debug-info=build/symbols `
+  --dart-define=ENV=prod
 ```
+
+`--dart-define=ENV=prod` is belt-and-braces: a release build already defaults to
+`prod` (`environment.dart`), because omitting this flag is exactly what shipped
+months of Play releases that believed they were dev builds, silently disabling
+crash reporting and analytics and faking a Pro entitlement for every user. Pass
+it anyway so the intent is visible in the command.
 
 The `.aab` on disk is NOT the user download. Play strips the R8 mapping and
 native symbols and delivers one ABI per device. Check the real number in Play

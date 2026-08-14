@@ -10,6 +10,7 @@ Aura is a voice-first personal AI companion. The assistant persona is **Buddy**,
 - **Reach out first.** Proactive notifications, curiosity-driven follow-up questions, a daily evening briefing, and life-aware openers, all timed to be useful rather than noisy.
 - **Search the live web.** When something could have changed since training, Buddy looks it up and answers from the result instead of guessing.
 - **Handle your calendar and email.** Buddy works with Google Calendar and Gmail on your behalf.
+- **Turn desktop meetings into durable notes.** The Windows companion records only when armed, uploads immutable evidence, and publishes notes only after transcript-quality checks pass.
 - **Live everywhere.** A custom Android keyboard brings Buddy into any app on your phone, for drafting replies and quick answers without switching apps. On Windows, the Aura-Desktop companion (Tauri, separate repo) pairs to the same account.
 
 ## Architecture
@@ -77,5 +78,5 @@ Committed user action fails ------> surface controlled failure; never claim succ
 - Backend operations: [`backend/README.md`](backend/README.md)
 - Cross-repository contracts: [`ECOSYSTEM.md`](ECOSYSTEM.md)
 - Monitoring: [`MONITORING.md`](MONITORING.md)
-- Scalability: [`scalability_doc.md`](scalability_doc.md)
+- Scalability: [`architectures/scalability_doc.md`](architectures/scalability_doc.md)
 - Repository working rules: [`CLAUDE.md`](CLAUDE.md)

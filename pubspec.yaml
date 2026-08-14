@@ -2,7 +2,7 @@ name: aura
 description: "Aura - Voice-first personal AI companion"
 publish_to: 'none'
 
-version: 2.3.0+13
+version: 2.3.1+14
 
 environment:
   sdk: ^3.10.7
