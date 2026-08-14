@@ -131,7 +131,7 @@ async def handle_send_nudge(body: dict[str, Any]) -> dict[str, Any]:
         })
         return {"status": "no_devices", "tokens_targeted": 0, "success_count": 0}
 
-    if not decision.delivered:
+    if not decision.transport_accepted:
         logger.error("daily_notification: FCM delivery failed, all tokens rejected", {
             "user_id": user_id,
             "nudge_slot": nudge_slot,

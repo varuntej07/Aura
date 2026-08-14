@@ -84,9 +84,52 @@ OUTCOME_OPENED = "opened"
 OUTCOME_DISMISSED = "dismissed"
 OUTCOME_TIMEOUT = "timeout"
 
-# Delivery status values.
+# Delivery status values. STATUS_SENT is legacy-only and remains readable.
 STATUS_SENT = "sent"
+STATUS_ACCEPTED = "accepted"
+STATUS_QUEUED = "queued"
+STATUS_RECEIVED = "received"
+STATUS_SEEN = "seen"
+STATUS_ACTED = "acted"
 STATUS_FAILED = "failed"
+STATUS_NO_ELIGIBLE_ENDPOINT = "no_eligible_endpoint"
+
+TRANSPORT_ACCEPTED_STATUSES = frozenset({
+    STATUS_SENT,
+    STATUS_ACCEPTED,
+    STATUS_QUEUED,
+    STATUS_RECEIVED,
+    STATUS_SEEN,
+    STATUS_ACTED,
+})
+
+_ACK_STATUS_RANK = {
+    STATUS_QUEUED: 0,
+    STATUS_RECEIVED: 1,
+    STATUS_SEEN: 2,
+    STATUS_ACTED: 3,
+}
+
+
+def resolve_delivery_status(
+    channels: dict[str, dict[str, Any]],
+) -> str:
+    """Resolve one truthful top-level status from independent channel states."""
+    statuses = {
+        str(value.get("status") or "")
+        for value in channels.values()
+        if isinstance(value, dict)
+    }
+    for status in (STATUS_ACTED, STATUS_SEEN, STATUS_RECEIVED, STATUS_ACCEPTED):
+        if status in statuses:
+            return status
+    if STATUS_QUEUED in statuses or "deduplicated" in statuses:
+        return STATUS_QUEUED
+    if statuses and statuses <= {STATUS_NO_ELIGIBLE_ENDPOINT}:
+        return STATUS_NO_ELIGIBLE_ENDPOINT
+    if not statuses:
+        return STATUS_NO_ELIGIBLE_ENDPOINT
+    return STATUS_FAILED
 
 
 @dataclass
@@ -156,6 +199,7 @@ async def record_send(
     content_kind: str = "",
     dedup_key: str = "",
     delivered: bool,
+    accepted: bool | None = None,
     tokens_targeted: int,
     success_count: int,
     failure_count: int,
@@ -169,15 +213,25 @@ async def record_send(
     / ``record_dismiss`` (or the signal engine's 6h timeout sweep).
     """
     now = datetime.now(UTC)
+    accepted = delivered if accepted is None else accepted
     channels = channel_results or {
         "mobile": {
-            "status": STATUS_SENT if delivered else STATUS_FAILED,
+            "status": (
+                STATUS_ACCEPTED
+                if accepted
+                else STATUS_NO_ELIGIBLE_ENDPOINT
+                if tokens_targeted == 0
+                else STATUS_FAILED
+            ),
+            "accepted": accepted,
             "delivered": delivered,
             "tokens_targeted": tokens_targeted,
             "success_count": success_count,
             "failure_count": failure_count,
         }
     }
+    status = resolve_delivery_status(channels)
+    received = status in {STATUS_RECEIVED, STATUS_SEEN, STATUS_ACTED}
     doc: dict[str, Any] = {
         FIELD_NOTIFICATION_ID: notification_id,
         FIELD_TYPE: notification_type,
@@ -191,12 +245,14 @@ async def record_send(
         FIELD_CONTENT_KIND: content_kind,
         FIELD_DEDUP_KEY: dedup_key,
         FIELD_SENT_AT: now,
-        FIELD_STATUS: STATUS_SENT if delivered else STATUS_FAILED,
+        FIELD_STATUS: status,
         FIELD_DELIVERY: {
             "tokens_targeted": tokens_targeted,
             "success_count": success_count,
             "failure_count": failure_count,
-            "delivered": delivered,
+            "accepted": accepted,
+            "received": received,
+            "delivered": received,
             FIELD_CHANNELS: channels,
         },
         FIELD_OUTCOME: OUTCOME_PENDING,
@@ -267,9 +323,9 @@ async def recent_dedup_keys(user_id: str, *, since: datetime) -> set[str]:
         keys: set[str] = set()
         for snap in snaps:
             row = snap.to_dict() or {}
-            # Only a DELIVERED send dedups: a failed send must stay retryable, so
+            # Only a transport-accepted send dedups: a failed send stays retryable, so
             # its row never blocks the same content from being attempted again.
-            if row.get(FIELD_STATUS) != STATUS_SENT:
+            if row.get(FIELD_STATUS) not in TRANSPORT_ACCEPTED_STATUSES:
                 continue
             key = row.get(FIELD_DEDUP_KEY)
             if key:
@@ -285,8 +341,10 @@ async def recent_dedup_keys(user_id: str, *, since: datetime) -> set[str]:
         return set()
 
 
-async def has_recent_delivery(user_id: str, notification_type: str, *, since: datetime) -> bool:
-    """True if a notification of ``notification_type`` was DELIVERED to this user since
+async def has_recent_acceptance(
+    user_id: str, notification_type: str, *, since: datetime
+) -> bool:
+    """True if a notification of ``notification_type`` was transport-accepted since
     ``since``. Same cheap single-field ``sent_at`` range as ``recent_dedup_keys``
     (auto-indexed at collection scope, no explicit index needed). Fails OPEN (False) so
     a read error never holds/blocks a send that would otherwise go out."""
@@ -306,26 +364,36 @@ async def has_recent_delivery(user_id: str, notification_type: str, *, since: da
         )
         for snap in snaps:
             row = snap.to_dict() or {}
-            if row.get(FIELD_STATUS) == STATUS_SENT and row.get(FIELD_TYPE) == notification_type:
+            if (
+                row.get(FIELD_STATUS) in TRANSPORT_ACCEPTED_STATUSES
+                and row.get(FIELD_TYPE) == notification_type
+            ):
                 return True
         return False
 
     try:
         return await asyncio.to_thread(_read)
     except Exception as exc:
-        logger.warn("notification_ledger.has_recent_delivery failed", {
+        logger.warn("notification_ledger.has_recent_acceptance failed", {
             "user_id": user_id, "notification_type": notification_type, "error": str(exc),
         })
         return False
 
 
-async def recent_engagement(user_id: str, *, since: datetime) -> tuple[int, int]:
+async def has_recent_delivery(user_id: str, notification_type: str, *, since: datetime) -> bool:
+    """Backward-compatible alias for legacy callers and rows."""
+    return await has_recent_acceptance(user_id, notification_type, since=since)
+
+
+async def recent_notification_activity(
+    user_id: str, *, since: datetime
+) -> tuple[int, int]:
     """``(delivered_count, opened_count)`` over ``[since, now]`` — the substrate for
     the adaptive per-user notification volume (``notification_budget``).
 
     A user who taps gets a higher daily ceiling + tighter spacing; one who ignores
-    gets throttled. Counts only DELIVERED rows (a failed send was never seen, so it
-    can't be 'ignored'). Same cheap single-field ``sent_at`` range as
+    gets throttled. Counts only transport-accepted rows; failed sends do not enter
+    the engagement denominator. Same cheap single-field ``sent_at`` range as
     ``recent_dedup_keys`` (auto-indexed at collection scope). Fails OPEN to ``(0, 0)``
     so a read error falls back to the gentle default tier, never an outage.
     """
@@ -343,24 +411,29 @@ async def recent_engagement(user_id: str, *, since: datetime) -> tuple[int, int]
             .limit(500)
             .stream()
         )
-        delivered = 0
+        accepted = 0
         opened = 0
         for snap in snaps:
             row = snap.to_dict() or {}
-            if row.get(FIELD_STATUS) != STATUS_SENT:
+            if row.get(FIELD_STATUS) not in TRANSPORT_ACCEPTED_STATUSES:
                 continue
-            delivered += 1
+            accepted += 1
             if row.get(FIELD_OUTCOME) == OUTCOME_OPENED:
                 opened += 1
-        return delivered, opened
+        return accepted, opened
 
     try:
         return await asyncio.to_thread(_read)
     except Exception as exc:
-        logger.warn("notification_ledger.recent_engagement failed", {
+        logger.warn("notification_ledger.recent_notification_activity failed", {
             "user_id": user_id, "error": str(exc),
         })
         return 0, 0
+
+
+async def recent_engagement(user_id: str, *, since: datetime) -> tuple[int, int]:
+    """Backward-compatible alias; the first count is transport-accepted rows."""
+    return await recent_notification_activity(user_id, since=since)
 
 
 async def record_tap(
@@ -391,12 +464,23 @@ async def record_tap(
         if isinstance(sent_at, datetime):
             sent_aware = sent_at if sent_at.tzinfo else sent_at.replace(tzinfo=UTC)
             time_to_tap = max(0.0, (when - sent_aware).total_seconds())
+        channels = delivery_channels(current)
+        acted_channel = (
+            "desktop"
+            if channels.get("desktop", {}).get("status") == STATUS_ACTED
+            else "mobile"
+        )
         ref.update({
+            FIELD_STATUS: STATUS_ACTED,
             FIELD_OUTCOME: OUTCOME_OPENED,
             FIELD_OUTCOME_AT: when,
             FIELD_TAPPED_AT: when,
             FIELD_TIME_TO_TAP_SECONDS: time_to_tap,
             FIELD_LED_TO_SESSION: True,
+            f"{FIELD_DELIVERY}.received": True,
+            f"{FIELD_DELIVERY}.delivered": True,
+            f"{FIELD_DELIVERY}.{FIELD_CHANNELS}.{acted_channel}.status": STATUS_ACTED,
+            f"{FIELD_DELIVERY}.{FIELD_CHANNELS}.{acted_channel}.acted_at": when,
         })
 
     try:
@@ -421,16 +505,31 @@ async def record_desktop_ack(
 
     def _update_channel() -> None:
         ref = _notification_ref(user_id, notification_id)
-        if not ref.get().exists:
+        snap = ref.get()
+        if not snap.exists:
             return
+        current = snap.to_dict() or {}
+        channels = delivery_channels(current)
+        desktop = dict(channels.get("desktop") or {})
+        current_status = str(desktop.get("status") or STATUS_QUEUED)
+        if _ACK_STATUS_RANK.get(current_status, -1) >= _ACK_STATUS_RANK.get(status, -1):
+            return
+        desktop["status"] = status
+        channels["desktop"] = desktop
+        top_level = resolve_delivery_status(channels)
         ref.update({
+            FIELD_STATUS: top_level,
             f"{FIELD_DELIVERY}.{FIELD_CHANNELS}.desktop.status": status,
             f"{FIELD_DELIVERY}.{FIELD_CHANNELS}.desktop.{status}_at": when,
+            f"{FIELD_DELIVERY}.received": top_level
+            in {STATUS_RECEIVED, STATUS_SEEN, STATUS_ACTED},
+            f"{FIELD_DELIVERY}.delivered": top_level
+            in {STATUS_RECEIVED, STATUS_SEEN, STATUS_ACTED},
         })
 
     try:
         await asyncio.to_thread(_update_channel)
-        if status in {"seen", "acted"}:
+        if status == STATUS_ACTED:
             await record_tap(user_id, notification_id, tapped_at=when)
     except Exception as exc:
         logger.warn("notification_ledger.record_desktop_ack failed", {

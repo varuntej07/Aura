@@ -12,7 +12,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 from src.handlers import threads as handler
-from src.services.threads.models import ThreadStatus
+from src.services.threads.models import Thread, ThreadSource, ThreadStatus
 
 
 class _FakeRequest:
@@ -110,6 +110,34 @@ async def test_buddy_reply_pushed_to_shade_as_followup(monkeypatch):
     assert kwargs["data"]["kind"] == "reply"
     assert kwargs["data"]["thread_id"] == "rem_88"
     assert kwargs["data"]["buddy_reply"] == "oh nice, what's it for?"
+
+
+async def test_user_reply_on_sensitive_thread_remains_available_with_private_copy(monkeypatch):
+    append, set_status = _patch_common(monkeypatch, reply_text="I hear you")
+    monkeypatch.setattr(
+        handler.thread_store,
+        "get_thread",
+        AsyncMock(return_value=Thread(
+            thread_id="rem_private",
+            trigger_text="private subject",
+            source=ThreadSource.REMINDER,
+            sensitivity={"status": "sensitive", "categories": ["health_medical"]},
+        )),
+    )
+
+    response = await handler.handle_thread_reply(_FakeRequest({
+        "thread_id": "rem_private",
+        "question": "want to continue?",
+        "reply": "yes",
+    }))
+
+    assert response.status_code == 200
+    assert [call.kwargs["role"] for call in append.await_args_list] == ["user", "assistant"]
+    assert set_status.await_args.args[2] == ThreadStatus.ENGAGED
+    kwargs = handler.send_notification.await_args.kwargs
+    assert kwargs["body"] == "Buddy replied to your private conversation"
+    assert kwargs["data"]["sensitive"] == "true"
+    assert kwargs["data"]["buddy_reply"] == "I hear you"
 
 
 async def test_push_failure_does_not_fail_reply(monkeypatch):

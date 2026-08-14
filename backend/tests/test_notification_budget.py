@@ -205,7 +205,7 @@ async def test_heavy_tapper_cap_is_clamped_to_hard_ceiling(monkeypatch):
     # but the resolved claim limit must still clamp to HARD_DAILY_PROACTIVE_CEILING
     # (3) — a highly-engaged user's real ceiling is 3 + PRIORITY_RESERVED_SLOTS, not 5+1.
     monkeypatch.setattr(
-        "src.services.notification_ledger.recent_engagement",
+        "src.services.notification_ledger.recent_notification_activity",
         AsyncMock(return_value=(20, 12)),  # e=0.60 -> top tier, raw cap=5
     )
     monkeypatch.setattr(nb, "resolve_account_age_days", lambda user_id, now: 365)
@@ -217,7 +217,7 @@ async def test_heavy_tapper_cap_is_clamped_to_hard_ceiling(monkeypatch):
 
 async def test_ledger_failure_fallback_is_also_within_hard_ceiling(monkeypatch):
     monkeypatch.setattr(
-        "src.services.notification_ledger.recent_engagement",
+        "src.services.notification_ledger.recent_notification_activity",
         AsyncMock(side_effect=RuntimeError("ledger down")),
     )
     cap, _ = await nb._resolve_effective_claim_limits("u1", "thread", NOW)

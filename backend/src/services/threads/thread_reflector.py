@@ -121,16 +121,16 @@ def select_thread_to_follow_up(threads: list[Thread], now: datetime) -> Thread |
     return eligible[0]
 
 
-async def on_thread_delivered(
+async def on_thread_accepted(
     proposal: NotificationProposal, result: NotificationResult
 ) -> None:
-    """Post-send bookkeeping for a thread follow-up the drain actually DELIVERED.
+    """Post-send bookkeeping for a thread follow-up accepted by a transport.
 
     Runs in the drain (via post_send.dispatch_post_send), not the reflector tick, so
     the per-thread + per-day counters, the funnel event, and the exhausted-thread
     retirement all key off a real send, never a held/dropped proposal. Never raises.
     """
-    if not result.delivered:
+    if not result.accepted:
         return
     user_id = proposal.user_id
     data = proposal.data or {}
@@ -161,6 +161,9 @@ async def on_thread_delivered(
     if followups_before + 1 >= MAX_FOLLOW_UPS_PER_THREAD:
         await thread_store.set_status(user_id, thread_id, ThreadStatus.DORMANT)
 
-    logger.info("threads.thread_reflector: follow-up delivered", {
+    logger.info("threads.thread_reflector: follow-up accepted", {
         "user_id": user_id, "thread_id": thread_id,
     })
+
+
+on_thread_delivered = on_thread_accepted

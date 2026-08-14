@@ -48,7 +48,7 @@ class TestHandleSchedulerTick:
         assert result["statusCode"] == 200
         body = json.loads(result["body"])
         assert body["scanned"] == 0
-        assert body["delivered"] == 0
+        assert body["accepted"] == 0
 
     @pytest.mark.asyncio
     async def test_due_reminder_delivered_marks_fired(self):
@@ -67,7 +67,7 @@ class TestHandleSchedulerTick:
 
         body = json.loads(result["body"])
         assert body["scanned"] == 1
-        assert body["delivered"] == 1
+        assert body["accepted"] == 1
         mock_mark.assert_called_once_with("u1", "r1")
 
     @pytest.mark.asyncio
@@ -85,7 +85,7 @@ class TestHandleSchedulerTick:
                             result = await handle_scheduler_tick()
 
         body = json.loads(result["body"])
-        assert body["delivered"] == 0
+        assert body["accepted"] == 0
         mock_mark.assert_not_called()
 
     @pytest.mark.asyncio
@@ -113,7 +113,7 @@ class TestHandleSchedulerTick:
 
         body = json.loads(result["body"])
         assert body["scanned"] == 2
-        assert body["delivered"] == 1
+        assert body["accepted"] == 1
         mock_mark.assert_called_once_with("u2", "r_ok")
 
     @pytest.mark.asyncio

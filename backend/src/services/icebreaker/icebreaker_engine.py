@@ -26,13 +26,13 @@ from ..notifications.proposal import NotificationProposal
 from . import icebreaker_store as store
 
 
-async def on_icebreaker_delivered(
+async def on_icebreaker_accepted(
     proposal: NotificationProposal, result: NotificationResult
 ) -> None:
-    """Post-send bookkeeping for an icebreaker the drain actually DELIVERED: record the
+    """Post-send bookkeeping for an icebreaker accepted by a transport: record the
     opener topic (anti-repeat memory) and fire the funnel event. Runs in the drain via
     post_send.dispatch_post_send, so both key off a real send. Never raises."""
-    if not result.delivered:
+    if not result.accepted:
         return
     user_id = proposal.user_id
     data = proposal.data or {}
@@ -51,6 +51,9 @@ async def on_icebreaker_delivered(
         },
     )
 
-    logger.info("icebreaker.engine: opener delivered", {
+    logger.info("icebreaker.engine: opener accepted", {
         "user_id": user_id, "topic": topic,
     })
+
+
+on_icebreaker_delivered = on_icebreaker_accepted

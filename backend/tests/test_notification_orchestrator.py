@@ -34,6 +34,8 @@ from src.services.notifications.proposal import (
     ProposalKind,
 )
 from src.services.reactive import idempotency
+from src.services.threads import sensitivity as thread_sensitivity
+from src.services.threads.sensitivity import SensitivityDecision
 
 NOW = datetime(2026, 6, 21, 15, 0, tzinfo=UTC)  # 15:00 UTC, a non-quiet hour in UTC
 
@@ -62,7 +64,8 @@ async def test_delivery_router_mobile_only_is_backward_compatible(monkeypatch):
     )
 
     assert calls == ["mobile", "ledger"]
-    assert result.delivered is True
+    assert result.accepted is True
+    assert result.delivered is False
     assert result.desktop_queued_count == 0
 
 
@@ -87,7 +90,8 @@ async def test_delivery_router_desktop_only(monkeypatch):
 
     result = await delivery_router.deliver(item)
 
-    assert result.delivered is True
+    assert result.accepted is True
+    assert result.delivered is False
     assert result.tokens_targeted == 0
     assert result.desktop_queued_count == 1
     assert recorded[0]["channel_results"]["desktop"]["status"] == "queued"
@@ -118,8 +122,107 @@ async def test_delivery_router_both_channels_share_one_logical_id(monkeypatch):
     result = await delivery_router.deliver(item)
 
     assert len(set(ids)) == 1
-    assert result.delivered is True
+    assert result.accepted is True
+    assert result.delivered is False
     assert result.desktop_queued_count == 1
+
+
+async def test_mobile_failure_with_desktop_queue_is_accepted_not_delivered(monkeypatch):
+    recorded = []
+
+    async def send(*args, **kwargs):
+        return NotificationResult(1, 0, 1, notification_id=kwargs["notification_id"])
+
+    async def enqueue(*args, **kwargs):
+        return desktop_outbox.OutboxWriteResult(True, True)
+
+    async def record(*args, **kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(delivery_router, "send_notification", send)
+    monkeypatch.setattr(delivery_router.desktop_outbox, "enqueue", enqueue)
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+    item = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    item.notification_type = "generic"
+    item.channels = frozenset({DeliveryChannel.MOBILE, DeliveryChannel.DESKTOP})
+
+    result = await delivery_router.deliver(item)
+
+    assert result.accepted is True
+    assert result.delivered is False
+    assert recorded[0]["channel_results"]["mobile"]["status"] == "failed"
+    assert recorded[0]["channel_results"]["desktop"]["status"] == "queued"
+
+
+async def test_zero_mobile_tokens_with_desktop_queue_is_not_delivered(monkeypatch):
+    recorded = []
+
+    async def send(*args, **kwargs):
+        return NotificationResult(0, 0, 0, notification_id=kwargs["notification_id"])
+
+    async def enqueue(*args, **kwargs):
+        return desktop_outbox.OutboxWriteResult(True, False)
+
+    async def record(*args, **kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(delivery_router, "send_notification", send)
+    monkeypatch.setattr(delivery_router.desktop_outbox, "enqueue", enqueue)
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+    item = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    item.notification_type = "generic"
+    item.channels = frozenset({DeliveryChannel.MOBILE, DeliveryChannel.DESKTOP})
+
+    result = await delivery_router.deliver(item)
+
+    assert result.accepted is True
+    assert result.desktop_queued_count == 1
+    assert recorded[0]["channel_results"]["mobile"]["status"] == "no_eligible_endpoint"
+    assert recorded[0]["channel_results"]["desktop"]["created"] is False
+
+
+async def test_all_channels_fail_truthfully(monkeypatch):
+    recorded = []
+
+    async def send(*args, **kwargs):
+        return NotificationResult(1, 0, 1, notification_id=kwargs["notification_id"])
+
+    async def enqueue(*args, **kwargs):
+        raise RuntimeError("outbox unavailable")
+
+    async def record(*args, **kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(delivery_router, "send_notification", send)
+    monkeypatch.setattr(delivery_router.desktop_outbox, "enqueue", enqueue)
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+    item = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    item.notification_type = "generic"
+    item.channels = frozenset({DeliveryChannel.MOBILE, DeliveryChannel.DESKTOP})
+
+    result = await delivery_router.deliver(item)
+
+    assert result.accepted is False
+    assert result.delivered is False
+    assert recorded[0]["accepted"] is False
+    assert {row["status"] for row in recorded[0]["channel_results"].values()} == {"failed"}
+
+
+async def test_no_eligible_channels_is_recorded_without_acceptance(monkeypatch):
+    recorded = []
+
+    async def record(*args, **kwargs):
+        recorded.append(kwargs)
+
+    monkeypatch.setattr(delivery_router.notification_ledger, "record_send", record)
+    item = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED)
+    item.channels = frozenset()
+
+    result = await delivery_router.deliver(item)
+
+    assert result.accepted is False
+    assert result.delivered is False
+    assert recorded[0]["channel_results"] == {}
 
 
 def _proposal(source: str, *, kind: ProposalKind, dedup_key: str = "k",
@@ -340,6 +443,9 @@ def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True, active
     async def _active_tracker(uid, now):
         return active_tracker
 
+    async def _clear_thread(p):
+        return SensitivityDecision("clear", [], "test", "ordinary", NOW.isoformat())
+
     monkeypatch.setattr(queue_store, "list_pending", _list_pending)
     monkeypatch.setattr(queue_store, "mark", _mark)
     monkeypatch.setattr(notification_ledger, "recent_dedup_keys", _no_recent)
@@ -349,6 +455,7 @@ def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True, active
     monkeypatch.setattr(orchestrator, "_user_local", _user_local)
     monkeypatch.setattr(orchestrator, "_deliver", _deliver)
     monkeypatch.setattr(orchestrator, "_has_active_tracker", _active_tracker)
+    monkeypatch.setattr(thread_sensitivity, "revalidate_thread_proposal", _clear_thread)
     # The tap-gate (LLM), post-send dispatch, and smart-timing slot read are I/O seams
     # too — patch them so the drain tests exercise routing without an LLM call, producer
     # bookkeeping, or Firestore. Dedicated tests below cover the real tap-gate drop and
@@ -368,7 +475,7 @@ async def test_drain_arbitrates_highest_priority(monkeypatch):
 
     assert decision.disposition == Disposition.SEND
     assert len(delivered) == 1 and delivered[0].source == SOURCE_THREAD
-    assert ("p_thread", queue_store.STATUS_SENT) in marks
+    assert ("p_thread", queue_store.STATUS_ACCEPTED) in marks
     assert ("p_news", queue_store.STATUS_HELD) in marks
 
 
@@ -518,7 +625,7 @@ async def test_drain_runs_post_send_only_on_delivery(monkeypatch):
     dispatched: list[tuple[str, bool]] = []
 
     async def _capture(p, r):
-        dispatched.append((p.source, r.delivered))
+        dispatched.append((p.source, r.accepted))
 
     monkeypatch.setattr(post_send, "dispatch_post_send", _capture)
 
@@ -526,3 +633,54 @@ async def test_drain_runs_post_send_only_on_delivery(monkeypatch):
 
     assert decision is not None and decision.disposition == Disposition.SEND
     assert dispatched == [(SOURCE_THREAD, True)]
+
+
+async def test_thread_reclassified_sensitive_immediately_before_delivery_is_suppressed(
+    monkeypatch,
+):
+    thread = ("p_thread", _proposal(
+        SOURCE_THREAD, kind=ProposalKind.PROACTIVE, dedup_key="thread:t1"
+    ))
+    thread[1].data = {
+        "thread_id": "t1",
+        "suggested_replies": '["That diagnosis explains it"]',
+    }
+    marks, delivered = _patch_drain_io(monkeypatch, pending=[thread])
+
+    async def _sensitive(item):
+        assert "diagnosis" in item.data["suggested_replies"]
+        return SensitivityDecision(
+            "sensitive", ["health_medical"], "delivery_revalidation", "private", "now"
+        )
+
+    monkeypatch.setattr(thread_sensitivity, "revalidate_thread_proposal", _sensitive)
+
+    decision = await orchestrator.drain_user_queue("u1", now=NOW)
+
+    assert decision is not None
+    assert decision.disposition == Disposition.DROP
+    assert decision.reason == proposal.REASON_SENSITIVE
+    assert delivered == []
+    assert ("p_thread", queue_store.STATUS_DROPPED) in marks
+
+
+async def test_thread_sensitivity_outage_fails_closed_before_delivery(monkeypatch):
+    thread = ("p_thread", _proposal(
+        SOURCE_THREAD, kind=ProposalKind.PROACTIVE, dedup_key="thread:t1"
+    ))
+    thread[1].data = {"thread_id": "t1"}
+    marks, delivered = _patch_drain_io(monkeypatch, pending=[thread])
+
+    async def _unknown(item):
+        return SensitivityDecision(
+            "unknown", ["classifier_unavailable"], "classifier_unavailable", "fail_closed", "now"
+        )
+
+    monkeypatch.setattr(thread_sensitivity, "revalidate_thread_proposal", _unknown)
+
+    decision = await orchestrator.drain_user_queue("u1", now=NOW)
+
+    assert decision is not None
+    assert decision.reason == proposal.REASON_SENSITIVE
+    assert delivered == []
+    assert ("p_thread", queue_store.STATUS_DROPPED) in marks

@@ -44,10 +44,9 @@ FIELD_REGISTERED_AT = "registered_at"
 # permanently invalid and must be deleted. This is the primary, version-stable
 # detection path — checking the exception class avoids depending on the exact
 # string code the SDK happens to expose.
-INVALID_TOKEN_EXCEPTIONS = (
-    messaging.UnregisteredError,      # token expired / app uninstalled (canonical NOT_FOUND)
-    messaging.SenderIdMismatchError,  # token belongs to a different FCM sender
-    exceptions.InvalidArgumentError,  # malformed / unparseable token
+UNAMBIGUOUS_INVALID_TOKEN_EXCEPTIONS = (
+    messaging.UnregisteredError,
+    messaging.SenderIdMismatchError,
 )
 
 # FCM error codes that indicate a token is permanently invalid. Used only as a
@@ -55,34 +54,67 @@ INVALID_TOKEN_EXCEPTIONS = (
 # Codes are normalised to lowercase-hyphenated before comparison, so both the
 # canonical codes ("NOT_FOUND" -> "not-found") and the messaging-style codes
 # ("messaging/registration-token-not-registered") land here.
-INVALID_TOKEN_CODES = frozenset({
+UNAMBIGUOUS_INVALID_TOKEN_CODES = frozenset({
     "registration-token-not-registered",
+    "unregistered",
+    "sender-id-mismatch",
+    "mismatched-credential",
+})
+
+VALIDATED_PAYLOAD_TOKEN_CODES = frozenset({
     "invalid-registration-token",
     "invalid-argument",
-    "not-found",
-    "sender-id-mismatch",
 })
 
 
-def is_permanently_invalid_token_error(exc: BaseException | None) -> bool:
+def normalized_error_code(exc: BaseException | None) -> str:
+    """Return the stable, lower-hyphenated FCM/Admin error code."""
+    if exc is None:
+        return ""
+    code = (
+        getattr(exc, "code", "")
+        or getattr(getattr(exc, "cause", None), "error_code", "")
+        or ""
+    )
+    if not isinstance(code, str):
+        return ""
+    return code.split("/")[-1].lower().replace("_", "-")
+
+
+def invalid_token_reason(
+    exc: BaseException | None, *, payload_validated: bool = False
+) -> str | None:
+    """Return a validated prune reason, or None when token removal is unsafe."""
+    if exc is None:
+        return None
+    if isinstance(exc, messaging.UnregisteredError):
+        return "unregistered"
+    if isinstance(exc, messaging.SenderIdMismatchError):
+        return "sender_id_mismatch"
+    code = normalized_error_code(exc)
+    if code in UNAMBIGUOUS_INVALID_TOKEN_CODES:
+        return code
+    if (
+        payload_validated
+        and isinstance(exc, exceptions.InvalidArgumentError)
+        and code in VALIDATED_PAYLOAD_TOKEN_CODES
+    ):
+        return "malformed_token_validated_payload"
+    if payload_validated and code == "invalid-registration-token":
+        return "malformed_token_validated_payload"
+    return None
+
+
+def is_permanently_invalid_token_error(
+    exc: BaseException | None, *, payload_validated: bool = False
+) -> bool:
     """True if an FCM send exception means the device token should be deleted.
 
     Checks the exception type first (stable across SDK versions), then falls
     back to matching the normalised error code so a future SDK change can't
     silently reopen the stale-token leak.
     """
-    if exc is None:
-        return False
-    if isinstance(exc, INVALID_TOKEN_EXCEPTIONS):
-        return True
-    code = (
-        getattr(exc, "code", "")
-        or getattr(getattr(exc, "cause", None), "error_code", "")
-        or ""
-    )
-    if isinstance(code, str):
-        code = code.split("/")[-1].lower().replace("_", "-")
-    return code in INVALID_TOKEN_CODES
+    return invalid_token_reason(exc, payload_validated=payload_validated) is not None
 
 
 def _tokens_ref(user_id: str):
@@ -202,7 +234,8 @@ def list_active_user_ids(inactivity_days: int = 7, *, force_refresh: bool = Fals
             )
             return cached[0]
         logger.error(
-            "fcm_token_registry.list_active_user_ids: refresh failed, no cached value to fall back on",
+            "fcm_token_registry.list_active_user_ids: refresh failed, "
+            "no cached value to fall back on",
             {"error": str(exc)},
         )
         raise
@@ -219,19 +252,26 @@ def any_token_registered() -> bool:
     return len(docs) > 0
 
 
-def remove_invalid_tokens(user_id: str, tokens: list[str]) -> None:
-    """Delete tokens that FCM reported as permanently invalid.
-
-    Called automatically by ``notification_service.send_notification``
-    whenever FCM returns an error code in ``INVALID_TOKEN_CODES``.
-    """
+def remove_invalid_tokens(user_id: str, tokens: list[str], *, reason: str) -> int:
+    """Delete only tokens with an unambiguous, validated FCM prune reason."""
     if not tokens:
-        return
+        return 0
     ref = _tokens_ref(user_id)
-    for token in tokens:
+    unique_tokens = list(dict.fromkeys(tokens))
+    for token in unique_tokens:
         ref.document(token).delete()
-    logger.info("Invalid FCM tokens removed", {
+    _active_users_cache.clear()
+    remaining_count = len(get_user_tokens(user_id))
+    event = {
         "user_id": user_id,
-        "removed_count": len(tokens),
-        "token_previews": [t[:20] for t in tokens],
-    })
+        "removed_count": len(unique_tokens),
+        "remaining_token_count": remaining_count,
+        "reason": reason,
+    }
+    logger.info("Invalid FCM tokens removed", event)
+    if remaining_count == 0:
+        logger.error(
+            "FCM token pruning emptied user registry",
+            {**event, "alert": True},
+        )
+    return remaining_count

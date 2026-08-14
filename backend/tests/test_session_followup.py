@@ -462,7 +462,7 @@ async def test_finalize_revision_version_and_task_retry_are_idempotent(followup_
     assert len([
         path for path in followup_db.docs if path[-2:-1] == (machine.CANDIDATE_SUBCOLLECTION,)
     ]) == 1
-    # A Cloud Tasks retry of an already-delivered candidate must not push twice.
+    # A Cloud Tasks retry of an already-accepted candidate must not push twice.
     assert orchestrator.submit.await_count == 1
 
     followup_db.docs[_path("u1", F.SESSIONS, "s1")]["input_revision"] = 2
@@ -472,11 +472,11 @@ async def test_finalize_revision_version_and_task_retry_are_idempotent(followup_
     assert followup_db.docs[_path(
         "u1", machine.TOPIC_STATE_SUBCOLLECTION, candidate["topic_id"]
     )]["active_candidate_id"] == candidate_three
-    # Superseding does not rewrite a candidate that already went out; delivered is
+    # Superseding does not rewrite a candidate that was already accepted; accepted is
     # terminal and the ledger has to keep saying so.
     assert followup_db.docs[_path(
         "u1", machine.CANDIDATE_SUBCOLLECTION, candidate_one
-    )]["state"] == machine.STATE_DELIVERED
+    )]["state"] == machine.STATE_ACCEPTED
 
     # A duplicate finalization is owned and suppressed at the lifecycle boundary.
     assert await service.finalize_session("u1", "s1", reason="duplicate", now=NOW) is False
@@ -580,7 +580,7 @@ async def test_quiet_hours_defer_then_refire_while_fresh(followup_db, monkeypatc
         "u1", candidate_id, expected_fire_epoch=deferred_fire_at.timestamp(),
         now=deferred_fire_at,
     )
-    assert result == machine.STATE_DELIVERED
+    assert result == machine.STATE_ACCEPTED
     assert candidate["framed_text"]
     orchestrator.submit.assert_awaited()
 

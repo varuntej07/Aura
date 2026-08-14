@@ -9,7 +9,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from firebase_admin import messaging
+from firebase_admin import exceptions, messaging
 
 
 # ---------------------------------------------------------------------------
@@ -45,15 +45,30 @@ def _token_doc(token: str) -> dict:
     return {"token": token, "platform": "android", "registered_at": "2026-01-01T00:00:00+00:00"}
 
 
+def _batch_with_exceptions(exceptions_: list[BaseException | None]):
+    responses = []
+    for exc in exceptions_:
+        response = MagicMock()
+        response.success = exc is None
+        response.exception = exc
+        responses.append(response)
+    batch = MagicMock(spec=messaging.BatchResponse)
+    batch.responses = responses
+    batch.success_count = sum(exc is None for exc in exceptions_)
+    batch.failure_count = len(exceptions_) - batch.success_count
+    return batch
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 class TestNotificationResult:
-    def test_delivered_true_when_success_count_positive(self):
+    def test_fcm_acceptance_is_not_device_receipt(self):
         from src.services.notification_service import NotificationResult
         r = NotificationResult(tokens_targeted=1, success_count=1, failure_count=0)
-        assert r.delivered is True
+        assert r.accepted is True
+        assert r.delivered is False
 
     def test_delivered_false_when_success_count_zero(self):
         from src.services.notification_service import NotificationResult
@@ -95,7 +110,8 @@ class TestSendNotification:
         assert result.tokens_targeted == 2
         assert result.success_count == 2
         assert result.failure_count == 0
-        assert result.delivered is True
+        assert result.accepted is True
+        assert result.delivered is False
         assert result.invalid_tokens == []
 
     @pytest.mark.asyncio
@@ -113,10 +129,12 @@ class TestSendNotification:
                     result = await send_notification("user1", title="T", body="B")
 
         assert result.invalid_tokens == ["bad_token"]
-        mock_remove.assert_called_once_with("user1", ["bad_token"])
+        mock_remove.assert_called_once_with(
+            "user1", ["bad_token"], reason="registration-token-not-registered"
+        )
 
     @pytest.mark.asyncio
-    async def test_invalid_token_invalid_argument_is_auto_deleted(self):
+    async def test_generic_invalid_argument_does_not_delete_token(self):
         from src.services.notification_service import send_notification
 
         tokens = [_token_doc("bad_token")]
@@ -129,8 +147,119 @@ class TestSendNotification:
                 with patch("src.services.notification_service.remove_invalid_tokens") as mock_remove:
                     result = await send_notification("user1", title="T", body="B")
 
-        assert "bad_token" in result.invalid_tokens
-        mock_remove.assert_called_once()
+        assert result.invalid_tokens == []
+        mock_remove.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_top_level_payload_invalid_argument_never_prunes(self):
+        from src.services.notification_service import send_notification
+
+        mock_msg = MagicMock()
+        mock_msg.send_each_for_multicast.side_effect = exceptions.InvalidArgumentError(
+            "invalid APNs payload"
+        )
+        with patch(
+            "src.services.notification_service.get_user_tokens",
+            return_value=[_token_doc("valid-token")],
+        ), patch(
+            "src.services.notification_service.admin_messaging", return_value=mock_msg
+        ), patch(
+            "src.services.notification_service.remove_invalid_tokens"
+        ) as mock_remove, patch(
+            "src.services.notification_service.notification_ledger.record_send"
+        ) as record_send:
+            result = await send_notification("user1", title="T", body="B")
+
+        assert result.failure_count == 1
+        assert result.invalid_tokens == []
+        mock_remove.assert_not_called()
+        assert record_send.await_args.kwargs["accepted"] is False
+
+    @pytest.mark.asyncio
+    async def test_locally_invalid_payload_is_failed_before_fcm_without_pruning(self):
+        from src.services.notification_service import send_notification
+
+        mock_msg = MagicMock()
+        with patch(
+            "src.services.notification_service.get_user_tokens",
+            return_value=[_token_doc("valid-token")],
+        ), patch(
+            "src.services.notification_service.admin_messaging", return_value=mock_msg
+        ), patch(
+            "src.services.notification_service.remove_invalid_tokens"
+        ) as mock_remove, patch(
+            "src.services.notification_service.notification_ledger.record_send"
+        ) as record_send:
+            result = await send_notification(
+                "user1", title="T", body="B", data={"invalid": 7}  # type: ignore[dict-item]
+            )
+
+        assert result.failure_count == 1
+        mock_msg.send_each_for_multicast.assert_not_called()
+        mock_remove.assert_not_called()
+        assert record_send.await_args.kwargs["accepted"] is False
+
+    @pytest.mark.asyncio
+    async def test_malformed_token_with_validated_payload_is_deleted(self):
+        from src.services.notification_service import send_notification
+
+        tokens = [_token_doc("malformed")]
+        batch = _batch_with_exceptions([
+            exceptions.InvalidArgumentError("invalid registration token")
+        ])
+        mock_msg = MagicMock()
+        mock_msg.send_each_for_multicast.return_value = batch
+
+        with patch("src.services.notification_service.get_user_tokens", return_value=tokens), \
+             patch("src.services.notification_service.admin_messaging", return_value=mock_msg), \
+             patch("src.services.notification_service.remove_invalid_tokens") as mock_remove:
+            result = await send_notification("user1", title="T", body="B")
+
+        assert result.invalid_tokens == ["malformed"]
+        mock_remove.assert_called_once_with(
+            "user1", ["malformed"], reason="malformed_token_validated_payload"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sender_id_mismatch_is_deleted(self):
+        from src.services.notification_service import send_notification
+
+        tokens = [_token_doc("wrong-sender")]
+        batch = _batch_with_exceptions([
+            messaging.SenderIdMismatchError("sender mismatch")
+        ])
+        mock_msg = MagicMock()
+        mock_msg.send_each_for_multicast.return_value = batch
+
+        with patch("src.services.notification_service.get_user_tokens", return_value=tokens), \
+             patch("src.services.notification_service.admin_messaging", return_value=mock_msg), \
+             patch("src.services.notification_service.remove_invalid_tokens") as mock_remove:
+            result = await send_notification("user1", title="T", body="B")
+
+        assert result.invalid_tokens == ["wrong-sender"]
+        mock_remove.assert_called_once_with(
+            "user1", ["wrong-sender"], reason="sender_id_mismatch"
+        )
+
+    @pytest.mark.asyncio
+    async def test_mixed_multicast_prunes_only_unregistered_token(self):
+        from src.services.notification_service import send_notification
+
+        tokens = [_token_doc("valid"), _token_doc("expired")]
+        batch = _batch_with_exceptions([
+            None, messaging.UnregisteredError("unregistered")
+        ])
+        mock_msg = MagicMock()
+        mock_msg.send_each_for_multicast.return_value = batch
+
+        with patch("src.services.notification_service.get_user_tokens", return_value=tokens), \
+             patch("src.services.notification_service.admin_messaging", return_value=mock_msg), \
+             patch("src.services.notification_service.remove_invalid_tokens") as mock_remove:
+            result = await send_notification("user1", title="T", body="B")
+
+        assert result.success_count == 1
+        assert result.invalid_tokens == ["expired"]
+        mock_remove.assert_called_once_with("user1", ["expired"], reason="unregistered")
 
     @pytest.mark.asyncio
     async def test_unknown_error_code_not_deleted(self):
@@ -175,10 +304,59 @@ class TestSendNotification:
                         "user1", title="T", body="B", collapse_key="reminder_abc"
                     )
 
-        # APNS headers are set inside send_notification before MulticastMessage is built
-        # Verify the function ran without error; the apns_headers dict is local so we
-        # confirm indirectly that no exception was raised and a message was sent.
+        assert captured[0].android.collapse_key == "reminder_abc"
+        assert captured[0].apns.headers["apns-collapse-id"] == "reminder_abc"
         mock_msg.send_each_for_multicast.assert_called_once()
+
+    @pytest.mark.parametrize("identity", ["x" * 500, "🧬" * 200])
+    def test_overlong_collapse_identity_is_platform_valid(self, identity):
+        from src.services.notification_service import canonical_collapse_key
+
+        result = canonical_collapse_key(identity)
+
+        assert len(result.encode("utf-8")) <= 64
+        assert result == canonical_collapse_key(identity)
+        assert result.isascii()
+
+    def test_distinct_long_collapse_identities_do_not_collide(self):
+        from src.services.notification_service import canonical_collapse_key
+
+        assert canonical_collapse_key("thread:" + "a" * 500) != canonical_collapse_key(
+            "thread:" + "b" * 500
+        )
+
+    @pytest.mark.asyncio
+    async def test_android_recipient_accepts_valid_apns_configuration(self):
+        from src.services.notification_service import send_notification
+
+        batch = _make_batch_response([True])
+        mock_msg = MagicMock()
+        mock_msg.send_each_for_multicast.return_value = batch
+        captured = []
+        original_multicast = messaging.MulticastMessage
+
+        def capture_message(**kwargs):
+            message = original_multicast(**kwargs)
+            captured.append(message)
+            return message
+
+        with patch(
+            "src.services.notification_service.get_user_tokens",
+            return_value=[_token_doc("android-token")],
+        ), patch(
+            "src.services.notification_service.admin_messaging", return_value=mock_msg
+        ), patch(
+            "src.services.notification_service.messaging.MulticastMessage",
+            side_effect=capture_message,
+        ):
+            result = await send_notification(
+                "user1", title="T", body="B", collapse_key="🧬" * 200
+            )
+
+        assert result.accepted is True
+        collapse_id = captured[0].apns.headers["apns-collapse-id"]
+        assert collapse_id == captured[0].android.collapse_key
+        assert len(collapse_id.encode("utf-8")) <= 64
 
     @pytest.mark.asyncio
     async def test_data_dict_merged_into_payload(self):
@@ -243,7 +421,7 @@ class TestSendNotification:
                     result = await send_notification("user1", title="T", body="B")
 
         assert result.invalid_tokens == ["dead_token"]
-        mock_remove.assert_called_once_with("user1", ["dead_token"])
+        mock_remove.assert_called_once_with("user1", ["dead_token"], reason="unregistered")
 
     @pytest.mark.asyncio
     async def test_error_code_extracted_from_exc_cause(self):

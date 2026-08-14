@@ -51,6 +51,7 @@ from ...notifications.proposal import (
 from ...signal_engine.scoring import is_within_active_hours
 from ...threads import thread_store
 from ...threads.models import Thread
+from ...threads.sensitivity import classify_proactive_subject
 from ...threads.thread_framer import (
     FollowUpFramingContext,
     FramedFollowUp,
@@ -169,6 +170,27 @@ class CuriosityThreadFollowUpAgent:
         if chosen is None:
             return _Inputs(eligible=False, reason="no_thread")
 
+        sensitivity = await classify_proactive_subject(
+            "\n".join((chosen.trigger_text, chosen.known_summary)),
+            category=chosen.category,
+            explicit_sensitive=chosen.sensitivity.get("status") == "sensitive",
+        )
+        await thread_store.update_sensitivity(
+            user_id,
+            chosen.thread_id,
+            sensitivity.to_dict(),
+            suppress=sensitivity.status == "sensitive",
+        )
+        if not sensitivity.allows_proactive:
+            logger.info("curiosity.agent: sensitive thread suppressed", {
+                "user_id": user_id,
+                "thread_id": chosen.thread_id,
+                "sensitivity_status": sensitivity.status,
+                "sensitivity_source": sensitivity.source,
+                "sensitivity_categories": sensitivity.categories,
+            })
+            return _Inputs(eligible=False, reason="sensitive_subject")
+
         framing_ctx = await _build_framing_context(user_id, local_now)
         return _Inputs(
             eligible=True, thread=chosen, framing_ctx=framing_ctx, local_date=local_date,
@@ -264,6 +286,7 @@ class CuriosityThreadFollowUpAgent:
                 "thread_source": str(thread.source),
                 "local_date": raw.local_date,
                 "followups_before": str(thread.follow_ups_sent),
+                "sensitive": "false",
             },
             notification_type=NOTIFICATION_TYPE_THREAD_FOLLOW_UP,
             collapse_key=f"thread_{thread.thread_id}",

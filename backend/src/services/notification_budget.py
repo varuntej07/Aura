@@ -68,10 +68,10 @@ PRIORITY_RESERVED_SLOTS = 1
 # the fail-open default), turning volume into a per-user function of engagement
 # instead of one global wall — the "adaptive per-user" product decision.
 #
-# Engagement e = opened / delivered over a trailing window. Tiers (cap = max
+# Engagement e = opened / transport-accepted over a trailing window. Tiers (cap = max
 # proactive sends/user/local-day; spacing = min gap between two proactive sends):
 ADAPTIVE_ENGAGEMENT_WINDOW = timedelta(days=14)
-# Below this many delivered notifications we don't have enough signal to judge, so
+# Below this many accepted notifications we don't have enough signal to judge, so
 # a new / quiet user starts on the gentle default tier (never the harsh floor).
 ADAPTIVE_MIN_SAMPLE = 5
 # (engagement upper-bound exclusive, daily cap, spacing)
@@ -89,13 +89,19 @@ _ADAPTIVE_DEFAULT_CAP = 3
 _ADAPTIVE_DEFAULT_SPACING = timedelta(minutes=90)
 
 
-def resolve_adaptive_limits(delivered: int, opened: int) -> tuple[int, timedelta]:
+def resolve_adaptive_limits(
+    accepted: int | None = None,
+    opened: int = 0,
+    *,
+    delivered: int | None = None,
+) -> tuple[int, timedelta]:
     """Map a user's recent engagement to ``(daily_cap, min_spacing)``. Pure +
     unit-tested. Under ``ADAPTIVE_MIN_SAMPLE`` deliveries → the gentle default
     (we can't yet tell a non-engager from a brand-new user)."""
-    if delivered < ADAPTIVE_MIN_SAMPLE:
+    accepted = (delivered or 0) if accepted is None else accepted
+    if accepted < ADAPTIVE_MIN_SAMPLE:
         return _ADAPTIVE_DEFAULT_CAP, _ADAPTIVE_DEFAULT_SPACING
-    engagement = opened / delivered if delivered else 0.0
+    engagement = opened / accepted if accepted else 0.0
     for upper, cap, spacing in _ADAPTIVE_TIERS:
         if engagement < upper:
             return cap, spacing
@@ -103,7 +109,7 @@ def resolve_adaptive_limits(delivered: int, opened: int) -> tuple[int, timedelta
 
 
 # ── New-account ramp ─────────────────────────────────────────────────────────
-# The adaptive tiers above key off DELIVERED HISTORY, not account age: a brand
+# The adaptive tiers above key off TRANSPORT-ACCEPTED HISTORY, not account age: a brand
 # new signup and a 2-year-old account that ignores everything look identical
 # (both under ADAPTIVE_MIN_SAMPLE) and land on the same "gentle default" (3/day,
 # 90min). That default is still a beta_producer's worth of unscripted content on
@@ -116,7 +122,11 @@ _NEW_ACCOUNT_SPACING = timedelta(hours=2)
 
 
 def resolve_effective_limits(
-    delivered: int, opened: int, account_age_days: int | None
+    accepted: int | None = None,
+    opened: int = 0,
+    account_age_days: int | None = None,
+    *,
+    delivered: int | None = None,
 ) -> tuple[int, timedelta]:
     """``resolve_adaptive_limits`` plus an account-age override.
 
@@ -126,7 +136,8 @@ def resolve_effective_limits(
     beyond what already shipped."""
     if account_age_days is not None and account_age_days < NEW_ACCOUNT_WINDOW_DAYS:
         return _NEW_ACCOUNT_CAP, _NEW_ACCOUNT_SPACING
-    return resolve_adaptive_limits(delivered, opened)
+    accepted = (delivered or 0) if accepted is None else accepted
+    return resolve_adaptive_limits(accepted, opened)
 
 
 # In-process cache: account creation time never changes, so once resolved for a
@@ -258,11 +269,11 @@ async def _resolve_effective_claim_limits(
     try:
         from . import notification_ledger
 
-        delivered, opened = await notification_ledger.recent_engagement(
+        accepted, opened = await notification_ledger.recent_notification_activity(
             user_id, since=now - ADAPTIVE_ENGAGEMENT_WINDOW
         )
         account_age_days = await asyncio.to_thread(resolve_account_age_days, user_id, now)
-        cap, spacing = resolve_effective_limits(delivered, opened, account_age_days)
+        cap, spacing = resolve_effective_limits(accepted, opened, account_age_days)
     except Exception as exc:
         logger.warn("notification_budget: adaptive resolve failed, using defaults", {
             "user_id": user_id, "source": source, "error": str(exc),

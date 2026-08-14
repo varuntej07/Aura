@@ -59,7 +59,7 @@ class FollowUpFramingContext(BaseModel):
 
 # Few-shot examples steer the tone hard away from "teacher" and toward "friend".
 def _build_prompt(thread: Thread, ctx: FollowUpFramingContext) -> str:
-    return thread_framer_user_prompt(
+    base = thread_framer_user_prompt(
         tone=ctx.dominant_tone or "neutral",
         depth_level=ctx.depth_level,
         top_interests=ctx.top_interests,
@@ -68,6 +68,12 @@ def _build_prompt(thread: Thread, ctx: FollowUpFramingContext) -> str:
         source=str(thread.source),
         known_summary=thread.known_summary,
         unknown=thread.unknown,
+    )
+    return (
+        base
+        + "\nSafety for suggested replies: use neutral conversation openings only. "
+        "Never invent a cause, diagnosis, motive, identity, relationship, or explanation; "
+        "never trivialize the subject; never write a reply that could out private information."
     )
 
 

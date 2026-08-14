@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Any
 
 from google.cloud import firestore as fs
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -110,6 +111,27 @@ async def touch_thread(user_id: str, thread_id: str, when: datetime) -> None:
             "user_id": user_id,
             "thread_id": thread_id,
             "error": str(exc),
+        })
+
+
+async def update_sensitivity(
+    user_id: str,
+    thread_id: str,
+    sensitivity: dict[str, Any],
+    *,
+    suppress: bool = False,
+) -> None:
+    """Persist current provenance and optionally retire unsafe proactive work."""
+    update: dict[str, Any] = {f.FIELD_SENSITIVITY: dict(sensitivity)}
+    if suppress:
+        update[f.FIELD_STATUS] = str(ThreadStatus.DORMANT)
+    try:
+        await asyncio.to_thread(_threads_ref(user_id).document(thread_id).update, update)
+    except Exception as exc:
+        logger.warn("threads.thread_store: sensitivity update failed", {
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "error_type": type(exc).__name__,
         })
 
 
@@ -239,7 +261,7 @@ async def list_messages(user_id: str, thread_id: str) -> list[dict]:
 
 
 async def mark_follow_up_sent(user_id: str, thread_id: str, sent_at: datetime) -> None:
-    """Increment the follow-up counter and stamp the time after a push is delivered."""
+    """Increment the follow-up counter after a transport accepts the push."""
 
     def _update() -> None:
         _threads_ref(user_id).document(thread_id).update({

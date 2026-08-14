@@ -57,6 +57,7 @@ def test_to_dict_keys_are_exactly_the_field_constants():
         f.FIELD_EXPECTED_RESOLUTION_AT,
         f.FIELD_FOLLOW_UPS_SENT,
         f.FIELD_LAST_FOLLOW_UP_AT,
+        f.FIELD_SENSITIVITY,
     }
     assert set(_sample_thread().to_dict().keys()) == expected_keys
 
@@ -79,6 +80,7 @@ async def test_writer_produces_a_readable_document(monkeypatch):
     from unittest.mock import AsyncMock
 
     from src.services.threads import thread_store, thread_writer
+    from src.services.threads.sensitivity import SensitivityDecision
 
     captured: dict[str, Thread] = {}
 
@@ -88,6 +90,13 @@ async def test_writer_produces_a_readable_document(monkeypatch):
     # Approve the worthiness judge and start from no existing threads so the write
     # path runs (the judge now fails CLOSED, so an unmocked judge would skip).
     monkeypatch.setattr(thread_writer, "_judge_worth_a_thread", AsyncMock(return_value=(True, "")))
+    monkeypatch.setattr(
+        thread_writer,
+        "classify_proactive_subject",
+        AsyncMock(return_value=SensitivityDecision(
+            "clear", [], "test", "ordinary", "2026-06-10T00:00:00+00:00"
+        )),
+    )
     monkeypatch.setattr(
         thread_store, "list_threads_for_subject_dedup", AsyncMock(return_value=[])
     )

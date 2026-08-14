@@ -37,11 +37,13 @@ from .proposal import (
     REASON_OK,
     REASON_PRESENCE,
     REASON_QUIET_HOURS,
+    REASON_SENSITIVE,
     REASON_STALE,
     REASON_SUPERSEDED,
     REASON_TAP_GATE,
     SOURCE_ICEBREAKER,
     SOURCE_MEMORY_GRAPH,
+    SOURCE_THREAD,
     Disposition,
     NotificationProposal,
     OrchestratorDecision,
@@ -196,6 +198,29 @@ async def drain_user_queue(
         })
         return OrchestratorDecision(Disposition.HOLD, REASON_OFF_PEAK)
 
+    # Stage 3.4: privacy revalidation happens after queue delay and after framing,
+    # immediately before any channel is selected. The current thread subject and
+    # generated suggested replies are judged together, so stale classifications
+    # and model-generated privacy leaks cannot bypass the gate.
+    if winner.source == SOURCE_THREAD:
+        from ..threads.sensitivity import revalidate_thread_proposal
+
+        sensitivity = await revalidate_thread_proposal(winner)
+        if not sensitivity.allows_proactive:
+            await queue_store.mark(
+                user_id, winner_pid, queue_store.STATUS_DROPPED, now=now
+            )
+            await _hold_all(user_id, losers, now)
+            _log_drop(winner, REASON_SENSITIVE)
+            logger.info("orchestrator: curiosity suppressed at delivery", {
+                "user_id": user_id,
+                "thread_id": winner.data.get("thread_id", ""),
+                "sensitivity_status": sensitivity.status,
+                "sensitivity_source": sensitivity.source,
+                "sensitivity_categories": sensitivity.categories,
+            })
+            return OrchestratorDecision(Disposition.DROP, REASON_SENSITIVE)
+
     # Stage 3.5: tap-worthiness gate on the winner (balanced bar). A low-value push is
     # worse than silence, so a rejected winner is DROPPED and the losers are held for a
     # later — possibly stronger — window. Judged only on the arbitration winner (one LLM
@@ -261,9 +286,14 @@ async def drain_user_queue(
             await _hold_all(user_id, losers, now)
             return OrchestratorDecision(Disposition.HOLD, "delivery_error")
         raise
-    if not result.delivered and winner.dedup_key:
+    if not result.accepted and winner.dedup_key:
         await _release_dedup(winner.dedup_key, user_id)
-    await queue_store.mark(user_id, winner_pid, queue_store.STATUS_SENT, now=now)
+    await queue_store.mark(
+        user_id,
+        winner_pid,
+        queue_store.STATUS_ACCEPTED if result.accepted else queue_store.STATUS_DROPPED,
+        now=now,
+    )
     # Producer-specific bookkeeping (thread follow-up count, icebreaker memory, signal
     # learning outcome + funnel) runs HERE, on the real delivery — not in the producer
     # tick, which only enqueued. Never raises into the drain.
@@ -276,12 +306,14 @@ async def drain_user_queue(
         "user_id": user_id,
         "source": winner.source,
         "priority": winner.effective_priority,
-        "delivered": result.delivered,
+        "accepted": result.accepted,
+        "received": result.delivered,
         "held_losers": len(losers),
     })
     return OrchestratorDecision(
         Disposition.SEND, REASON_OK,
         delivered=result.delivered,
+        accepted=result.accepted,
         tokens_targeted=result.tokens_targeted,
         success_count=result.success_count,
         failure_count=result.failure_count,
@@ -306,22 +338,24 @@ async def _send_committed(
         if proposal.dedup_key:
             await _release_dedup(proposal.dedup_key, proposal.user_id)
         raise
-    if not result.delivered and proposal.dedup_key:
+    if not result.accepted and proposal.dedup_key:
         await _release_dedup(proposal.dedup_key, proposal.user_id)
-    if result.delivered:
-        # Record for spacing (only a real delivery is worth spacing away from) so a
-        # later proactive push keeps its distance from this committed one.
+    if result.accepted:
+        # Transport acceptance is enough to stop retries and reserve attention;
+        # device receipt remains a separate acknowledgement state.
         await notification_budget.record_committed_send(
             proposal.user_id, source=proposal.source, now=now
         )
     logger.info("orchestrator: committed sent", {
         "user_id": proposal.user_id,
         "source": proposal.source,
-        "delivered": result.delivered,
+        "accepted": result.accepted,
+        "received": result.delivered,
     })
     return OrchestratorDecision(
         Disposition.SEND, REASON_OK,
         delivered=result.delivered,
+        accepted=result.accepted,
         tokens_targeted=result.tokens_targeted,
         success_count=result.success_count,
         failure_count=result.failure_count,
@@ -380,7 +414,7 @@ async def _has_active_tracker(user_id: str, now: datetime) -> bool:
     try:
         from ..tracking.fields import NOTIFICATION_TYPE_TRACKER_UPDATE
 
-        return await notification_ledger.has_recent_delivery(
+        return await notification_ledger.has_recent_acceptance(
             user_id, NOTIFICATION_TYPE_TRACKER_UPDATE, since=now - ACTIVE_TRACKER_HOLD_WINDOW,
         )
     except Exception as exc:

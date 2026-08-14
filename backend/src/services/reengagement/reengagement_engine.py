@@ -203,12 +203,15 @@ async def _reengage_one(
     })
 
 
-async def on_reengage_delivered(
+async def on_reengage_accepted(
     proposal: NotificationProposal, result: NotificationResult
 ) -> None:
-    """Post-send hook for a delivered win-back. The once-per-episode claim already
-    happened at enqueue (it's the spam guard), so this only logs the real delivery.
+    """Post-send hook for an accepted win-back. The once-per-episode claim already
+    happened at enqueue (it's the spam guard), so this logs transport acceptance.
     Runs in the drain via post_send.dispatch_post_send; never raises."""
-    if not result.delivered:
+    if not result.accepted:
         return
-    logger.info("reengagement: win-back delivered", {"user_id": proposal.user_id})
+    logger.info("reengagement: win-back accepted", {"user_id": proposal.user_id})
+
+
+on_reengage_delivered = on_reengage_accepted

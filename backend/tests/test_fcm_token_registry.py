@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+
 def _make_db(doc_exists: bool = True, doc_data: dict | None = None):
     """Build a minimal Firestore client mock."""
     doc_ref = MagicMock()
@@ -132,12 +133,16 @@ class TestGetUserTokens:
 
 class TestRemoveInvalidTokens:
     def test_deletes_each_token(self):
-        from src.services.fcm_token_registry import remove_invalid_tokens
+        from src.services import fcm_token_registry
 
         doc_ref_a = MagicMock()
         doc_ref_b = MagicMock()
         col_ref = MagicMock()
         col_ref.document = MagicMock(side_effect=[doc_ref_a, doc_ref_b])
+        remaining = MagicMock()
+        remaining.exists = True
+        remaining.to_dict.return_value = {"token": "tok_c", "platform": "android"}
+        col_ref.stream.return_value = [remaining]
         user_doc = MagicMock()
         user_doc.collection = MagicMock(return_value=col_ref)
         users = MagicMock()
@@ -145,11 +150,41 @@ class TestRemoveInvalidTokens:
         db = MagicMock()
         db.collection = MagicMock(return_value=users)
 
-        with patch("src.services.fcm_token_registry.admin_firestore", return_value=db):
-            remove_invalid_tokens("user1", ["tok_a", "tok_b"])
+        fcm_token_registry._active_users_cache[7] = (["user1"], 1.0)
+        with patch("src.services.fcm_token_registry.admin_firestore", return_value=db), \
+             patch.object(fcm_token_registry.logger, "error") as error:
+            count = fcm_token_registry.remove_invalid_tokens(
+                "user1", ["tok_a", "tok_b"], reason="unregistered"
+            )
 
         doc_ref_a.delete.assert_called_once()
         doc_ref_b.delete.assert_called_once()
+        assert count == 1
+        assert fcm_token_registry._active_users_cache == {}
+        error.assert_not_called()
+
+    def test_empty_registry_emits_operational_signal_without_tokens(self):
+        from src.services import fcm_token_registry
+
+        db, doc_ref, col_ref = _make_db()
+        col_ref.stream.return_value = []
+        with patch("src.services.fcm_token_registry.admin_firestore", return_value=db), \
+             patch.object(fcm_token_registry.logger, "error") as error:
+            count = fcm_token_registry.remove_invalid_tokens(
+                "user1", ["secret-token"], reason="sender_id_mismatch"
+            )
+
+        assert count == 0
+        doc_ref.delete.assert_called_once()
+        event = error.call_args.args[1]
+        assert event == {
+            "user_id": "user1",
+            "removed_count": 1,
+            "remaining_token_count": 0,
+            "reason": "sender_id_mismatch",
+            "alert": True,
+        }
+        assert "secret-token" not in str(error.call_args)
 
     def test_empty_list_is_noop(self):
         from src.services.fcm_token_registry import remove_invalid_tokens
@@ -157,6 +192,6 @@ class TestRemoveInvalidTokens:
         db = MagicMock()
 
         with patch("src.services.fcm_token_registry.admin_firestore", return_value=db):
-            remove_invalid_tokens("user1", [])
+            assert remove_invalid_tokens("user1", [], reason="unregistered") == 0
 
         db.collection.assert_not_called()

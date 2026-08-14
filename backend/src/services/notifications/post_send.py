@@ -1,5 +1,5 @@
 """Post-send dispatch — the producer-specific bookkeeping that must run ONLY on a
-real delivery.
+transport acceptance, not inferred device receipt.
 
 In the funnel model the actual proactive send happens in the drain, not in the
 producer's tick, so the "I sent it, now record it" side effects (a thread's
@@ -29,22 +29,22 @@ from .proposal import (
 async def dispatch_post_send(
     proposal: NotificationProposal, result: NotificationResult
 ) -> None:
-    """Run the source's post-delivery bookkeeping. Best-effort, never raises."""
+    """Run the source's post-acceptance bookkeeping. Best-effort, never raises."""
     try:
         if proposal.source == SOURCE_THREAD:
-            from ..threads.thread_reflector import on_thread_delivered
-            await on_thread_delivered(proposal, result)
+            from ..threads.thread_reflector import on_thread_accepted
+            await on_thread_accepted(proposal, result)
         elif proposal.source == SOURCE_ICEBREAKER:
-            from ..icebreaker.icebreaker_engine import on_icebreaker_delivered
-            await on_icebreaker_delivered(proposal, result)
+            from ..icebreaker.icebreaker_engine import on_icebreaker_accepted
+            await on_icebreaker_accepted(proposal, result)
         elif proposal.source == SOURCE_NEWS:
             # Wired when the signal-engine cutover lands (Increment 2b).
-            from ..signal_engine.scoring_loop import on_news_delivered
-            await on_news_delivered(proposal, result)
+            from ..signal_engine.scoring_loop import on_news_accepted
+            await on_news_accepted(proposal, result)
         elif proposal.source == SOURCE_REENGAGE:
             # Wired when the dormancy re-engagement producer lands (Increment 2c).
-            from ..reengagement.reengagement_engine import on_reengage_delivered
-            await on_reengage_delivered(proposal, result)
+            from ..reengagement.reengagement_engine import on_reengage_accepted
+            await on_reengage_accepted(proposal, result)
         elif proposal.source == SOURCE_MEMORY_GRAPH:
             from .memory_graph_notifications import on_orchestrator_outcome
             from .proposal import REASON_OK, Disposition, OrchestratorDecision
@@ -55,6 +55,7 @@ async def dispatch_post_send(
                     Disposition.SEND,
                     REASON_OK,
                     delivered=result.delivered,
+                    accepted=result.accepted,
                     tokens_targeted=result.tokens_targeted,
                     success_count=result.success_count,
                     failure_count=result.failure_count,

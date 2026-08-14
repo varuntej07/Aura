@@ -10,7 +10,7 @@ future reader can't query.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -74,12 +74,13 @@ async def test_record_send_writes_core_and_decision():
     assert doc[nl.FIELD_URL] == "https://news.google.com/rss/articles/abc"
     assert doc[nl.FIELD_SOURCE] == "google_news"
     assert isinstance(doc[nl.FIELD_SENT_AT], datetime)
-    assert doc[nl.FIELD_STATUS] == nl.STATUS_SENT
+    assert doc[nl.FIELD_STATUS] == nl.STATUS_ACCEPTED
     assert doc[nl.FIELD_OUTCOME] == nl.OUTCOME_PENDING
     assert doc[nl.FIELD_TAPPED_AT] is None
     assert doc[nl.FIELD_TIME_TO_TAP_SECONDS] is None
     assert doc[nl.FIELD_LED_TO_SESSION] is False
-    assert doc[nl.FIELD_DELIVERY]["delivered"] is True
+    assert doc[nl.FIELD_DELIVERY]["accepted"] is True
+    assert doc[nl.FIELD_DELIVERY]["delivered"] is False
     assert doc[nl.FIELD_DELIVERY][nl.FIELD_CHANNELS]["mobile"]["success_count"] == 2
     assert doc[nl.FIELD_EXPIRES_AT] > doc[nl.FIELD_SENT_AT]
     # Decision sub-map (the learning substrate).
@@ -158,6 +159,8 @@ async def test_record_tap_sets_tapped_at_and_latency():
     assert captured[nl.FIELD_TIME_TO_TAP_SECONDS] == 30.0
     assert captured[nl.FIELD_OUTCOME] == nl.OUTCOME_OPENED
     assert captured[nl.FIELD_LED_TO_SESSION] is True
+    assert captured[nl.FIELD_STATUS] == nl.STATUS_ACTED
+    assert captured[f"{nl.FIELD_DELIVERY}.{nl.FIELD_CHANNELS}.mobile.status"] == nl.STATUS_ACTED
 
 
 @pytest.mark.asyncio
@@ -179,6 +182,101 @@ async def test_record_tap_is_idempotent():
     doc_ref.update.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("incoming", "expected"),
+    [
+        (nl.STATUS_RECEIVED, nl.STATUS_RECEIVED),
+        (nl.STATUS_SEEN, nl.STATUS_SEEN),
+        (nl.STATUS_ACTED, nl.STATUS_ACTED),
+    ],
+)
+async def test_desktop_ack_advances_truthful_delivery_state(incoming, expected):
+    snap = MagicMock()
+    snap.exists = True
+    snap.to_dict.return_value = {
+        nl.FIELD_STATUS: nl.STATUS_QUEUED,
+        nl.FIELD_DELIVERY: {
+            nl.FIELD_CHANNELS: {"desktop": {"status": nl.STATUS_QUEUED}}
+        },
+    }
+    doc_ref = MagicMock()
+    doc_ref.get.return_value = snap
+    captured = {}
+    doc_ref.update.side_effect = lambda updates: captured.update(updates)
+    mock_db = _mock_db_with_doc_ref(doc_ref)
+
+    with patch.object(nl, "admin_firestore", return_value=mock_db), patch.object(
+        nl, "record_tap", new=AsyncMock()
+    ) as record_tap:
+        await nl.record_desktop_ack("u1", "n1", status=incoming)
+
+    assert captured[nl.FIELD_STATUS] == expected
+    assert captured[f"{nl.FIELD_DELIVERY}.delivered"] is True
+    if incoming == nl.STATUS_ACTED:
+        record_tap.assert_awaited_once()
+    else:
+        record_tap.assert_not_awaited()
+
+
+async def test_delayed_lower_desktop_ack_does_not_regress_state():
+    snap = MagicMock()
+    snap.exists = True
+    snap.to_dict.return_value = {
+        nl.FIELD_STATUS: nl.STATUS_SEEN,
+        nl.FIELD_DELIVERY: {
+            nl.FIELD_CHANNELS: {"desktop": {"status": nl.STATUS_SEEN}}
+        },
+    }
+    doc_ref = MagicMock()
+    doc_ref.get.return_value = snap
+    mock_db = _mock_db_with_doc_ref(doc_ref)
+
+    with patch.object(nl, "admin_firestore", return_value=mock_db):
+        await nl.record_desktop_ack("u1", "n1", status=nl.STATUS_RECEIVED)
+
+    doc_ref.update.assert_not_called()
+
+
+def test_status_resolution_keeps_queue_acceptance_separate_from_receipt():
+    assert nl.resolve_delivery_status({"desktop": {"status": nl.STATUS_QUEUED}}) == nl.STATUS_QUEUED
+    assert (
+        nl.resolve_delivery_status({"mobile": {"status": nl.STATUS_ACCEPTED}})
+        == nl.STATUS_ACCEPTED
+    )
+    assert nl.resolve_delivery_status({}) == nl.STATUS_NO_ELIGIBLE_ENDPOINT
+
+
+async def test_queued_and_legacy_sent_rows_dedup_without_claiming_receipt():
+    rows = []
+    for status, key in (
+        (nl.STATUS_QUEUED, "desktop-only"),
+        (nl.STATUS_SENT, "legacy"),
+        (nl.STATUS_FAILED, "retryable"),
+    ):
+        row = MagicMock()
+        row.to_dict.return_value = {
+            nl.FIELD_STATUS: status,
+            nl.FIELD_DEDUP_KEY: key,
+        }
+        rows.append(row)
+    mock_db = MagicMock()
+    stream_chain = (
+        mock_db.collection.return_value
+        .document.return_value
+        .collection.return_value
+        .where.return_value
+        .limit.return_value
+    )
+    stream_chain.stream.return_value = rows
+
+    with patch.object(nl, "admin_firestore", return_value=mock_db):
+        keys = await nl.recent_dedup_keys(
+            "u1", since=datetime(2026, 6, 1, tzinfo=UTC)
+        )
+
+    assert keys == {"desktop-only", "legacy"}
+
+
 def _snap(status: str, outcome: str) -> MagicMock:
     s = MagicMock()
     s.to_dict.return_value = {nl.FIELD_STATUS: status, nl.FIELD_OUTCOME: outcome}
@@ -186,13 +284,14 @@ def _snap(status: str, outcome: str) -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_recent_engagement_counts_only_delivered_and_opened():
+async def test_recent_engagement_counts_transport_acceptance_and_opened():
     # delivered+opened, delivered+pending, delivered+dismissed, and a FAILED row.
     rows = [
         _snap(nl.STATUS_SENT, nl.OUTCOME_OPENED),
         _snap(nl.STATUS_SENT, nl.OUTCOME_OPENED),
         _snap(nl.STATUS_SENT, nl.OUTCOME_PENDING),
         _snap(nl.STATUS_SENT, nl.OUTCOME_DISMISSED),
+        _snap(nl.STATUS_QUEUED, nl.OUTCOME_PENDING),
         _snap(nl.STATUS_FAILED, nl.OUTCOME_PENDING),  # never seen → not counted at all
     ]
     mock_db = MagicMock()
@@ -210,7 +309,7 @@ async def test_recent_engagement_counts_only_delivered_and_opened():
             "u1", since=datetime(2026, 6, 1, tzinfo=UTC)
         )
 
-    assert delivered == 4   # the 4 SENT rows; the FAILED one is excluded
+    assert delivered == 5   # accepted rows include queued and legacy SENT
     assert opened == 2      # only the two OUTCOME_OPENED
 
 

@@ -64,7 +64,9 @@ FIELD_EXPIRES_AT = "expires_at"
 # Lifecycle.
 STATUS_PENDING = "pending"
 STATUS_HELD = "held"
+# Legacy terminal value; new rows use accepted because sent is not device receipt.
 STATUS_SENT = "sent"
+STATUS_ACCEPTED = "accepted"
 STATUS_DROPPED = "dropped"
 
 _ACTIVE_STATUSES = [STATUS_PENDING, STATUS_HELD]

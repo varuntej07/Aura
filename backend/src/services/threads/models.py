@@ -66,6 +66,7 @@ class Thread:
     expected_resolution_at: datetime | None = None
     follow_ups_sent: int = 0
     last_follow_up_at: datetime | None = None
+    sensitivity: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise for Firestore. Every key goes through fields.py."""
@@ -83,6 +84,7 @@ class Thread:
             f.FIELD_EXPECTED_RESOLUTION_AT: self.expected_resolution_at,
             f.FIELD_FOLLOW_UPS_SENT: self.follow_ups_sent,
             f.FIELD_LAST_FOLLOW_UP_AT: self.last_follow_up_at,
+            f.FIELD_SENSITIVITY: dict(self.sensitivity),
         }
 
     @classmethod
@@ -102,4 +104,5 @@ class Thread:
             expected_resolution_at=_coerce_datetime(data.get(f.FIELD_EXPECTED_RESOLUTION_AT)),
             follow_ups_sent=int(data.get(f.FIELD_FOLLOW_UPS_SENT, 0) or 0),
             last_follow_up_at=_coerce_datetime(data.get(f.FIELD_LAST_FOLLOW_UP_AT)),
+            sensitivity=dict(data.get(f.FIELD_SENSITIVITY, {}) or {}),
         )

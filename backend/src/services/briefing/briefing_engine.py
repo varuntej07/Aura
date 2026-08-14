@@ -222,7 +222,7 @@ async def _process_one_user(
         )
     )
 
-    if decision.disposition != Disposition.SEND or not decision.delivered:
+    if decision.disposition != Disposition.SEND or not decision.transport_accepted:
         summary.skipped_no_tokens += 1
         logger.info("briefing.engine: push not delivered (briefing still viewable)", {
             "user_id": user_id,

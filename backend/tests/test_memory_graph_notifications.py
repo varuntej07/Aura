@@ -283,7 +283,7 @@ async def test_collision_reservation_has_one_winner_and_defers_loser(candidate_d
 
 
 @pytest.mark.asyncio
-async def test_cooldown_advances_only_on_confirmed_delivery(candidate_db):
+async def test_cooldown_advances_only_on_transport_acceptance(candidate_db):
     delivered = _candidate("u1", "cand-delivered", "topic-delivered", 0.9)
     suppressed = _candidate("u2", "cand-suppressed", "topic-suppressed", 0.9)
     assert await machine.install_candidate("u1", delivered)
@@ -295,7 +295,7 @@ async def test_cooldown_advances_only_on_confirmed_delivery(candidate_db):
         "state"
     ] = machine.STATE_SUBMITTED
 
-    assert await machine.mark_delivered("u1", "cand-delivered", now=NOW)
+    assert await machine.mark_accepted("u1", "cand-delivered", now=NOW)
     await machine.transition_terminal(
         "u2",
         "cand-suppressed",
@@ -411,10 +411,10 @@ async def test_orchestrator_retry_defers_but_permanent_drop_suppresses(monkeypat
     )
     defer = AsyncMock()
     terminal = AsyncMock()
-    delivered = AsyncMock()
+    accepted = AsyncMock()
     monkeypatch.setattr(machine, "defer_candidate", defer)
     monkeypatch.setattr(machine, "transition_terminal", terminal)
-    monkeypatch.setattr(machine, "mark_delivered", delivered)
+    monkeypatch.setattr(machine, "mark_accepted", accepted)
 
     await notifications.on_orchestrator_outcome(
         proposal,
@@ -436,4 +436,4 @@ async def test_orchestrator_retry_defers_but_permanent_drop_suppresses(monkeypat
         REASON_TAP_GATE,
         now=NOW,
     )
-    delivered.assert_not_awaited()
+    accepted.assert_not_awaited()

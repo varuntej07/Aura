@@ -379,10 +379,14 @@ def _effective_score(
 ) -> float:
     score = float(candidate.get("score", 0.0) or 0.0)
     project_id = str(candidate.get("project_id") or "")
-    last_delivered = _aware_datetime(
-        (arbitration.get("project_last_delivered") or {}).get(project_id)
+    last_accepted = _aware_datetime(
+        (
+            arbitration.get("project_last_accepted")
+            or arbitration.get("project_last_delivered")
+            or {}
+        ).get(project_id)
     )
-    if last_delivered is not None and now - last_delivered < machine.TOPIC_COOLDOWN:
+    if last_accepted is not None and now - last_accepted < machine.TOPIC_COOLDOWN:
         score -= PROJECT_RECENCY_PENALTY
     return score
 
@@ -515,8 +519,8 @@ async def on_orchestrator_outcome(
         return
     when = now or datetime.now(UTC)
     if decision.disposition == Disposition.SEND:
-        if decision.delivered:
-            await machine.mark_delivered(proposal.user_id, candidate_id, now=when)
+        if decision.transport_accepted:
+            await machine.mark_accepted(proposal.user_id, candidate_id, now=when)
         else:
             await machine.defer_candidate(
                 proposal.user_id,

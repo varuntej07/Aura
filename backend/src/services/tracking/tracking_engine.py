@@ -855,7 +855,12 @@ async def _fan_out(
                 dedup_key=dedup_key,
                 content_timestamp=content_timestamp,
             )
-            if decision.disposition == Disposition.SEND and decision.delivered:
+            transport_accepted = bool(getattr(
+                decision,
+                "transport_accepted",
+                getattr(decision, "accepted", getattr(decision, "delivered", False)),
+            ))
+            if decision.disposition == Disposition.SEND and transport_accepted:
                 await store.record_tracker_outcome(sub.id, summary=copy.summary, at=now)
                 delivered_count += 1
                 summary.sent += 1

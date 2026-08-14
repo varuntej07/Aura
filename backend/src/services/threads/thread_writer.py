@@ -28,6 +28,7 @@ from ...prompts import (
 from ..model_provider import get_model_provider
 from . import thread_store
 from .models import Thread, ThreadSource, ThreadStatus
+from .sensitivity import classify_proactive_subject, read_graph_sensitivity_nodes
 
 # Generic curiosity angles for a reminder. The reflector's framer picks ONE and
 # turns it into a specific, warm question — these are only the holes to aim at,
@@ -189,6 +190,17 @@ async def record_reminder_thread(
     if not message:
         return
 
+    sensitivity = await classify_proactive_subject(message)
+    if not sensitivity.allows_proactive:
+        logger.info("threads.thread_writer: reminder curiosity suppressed", {
+            "user_id": user_id,
+            "reminder_id": reminder_id,
+            "sensitivity_status": sensitivity.status,
+            "sensitivity_source": sensitivity.source,
+            "sensitivity_categories": sensitivity.categories,
+        })
+        return
+
     worth, reason = await _judge_worth_a_thread(message)
     if not worth:
         logger.info("threads.thread_writer: reminder skipped, not worth a curiosity thread", {
@@ -234,6 +246,7 @@ async def record_reminder_thread(
         created_at=now,
         last_touched_at=now,
         expected_resolution_at=_parse_iso(trigger_at_iso),
+        sensitivity=sensitivity.to_dict(),
     )
     await thread_store.create_thread(user_id, thread)
     logger.info("threads.thread_writer: opened reminder thread", {
@@ -269,6 +282,36 @@ _MAX_TOPICS_JUDGED = 4
 # judge would only reject anyway. Filtered before the call, not after, so the
 # cheap check runs first.
 _MIN_TOPIC_SUMMARY_CHARS = 20
+
+
+async def _assess_conversation_topic(
+    user_id: str, topic: dict[str, Any]
+) -> tuple[tuple[bool, str], Any | None]:
+    summary = str(topic["summary"]).strip()
+    worthiness = _judge_worth_a_thread(
+        summary,
+        system=CONVERSATION_WORTHINESS_SYSTEM_PROMPT,
+        build_user_prompt=conversation_worthiness_user_prompt,
+    )
+    try:
+        graph_nodes = await read_graph_sensitivity_nodes(
+            user_id, [str(key) for key in topic.get("entity_keys") or []]
+        )
+    except Exception as exc:
+        logger.error("threads.thread_writer: graph sensitivity read failed closed", {
+            "user_id": user_id,
+            "topic_id": topic.get("topic_id"),
+            "error_type": type(exc).__name__,
+        })
+        return await worthiness, None
+    sensitivity = classify_proactive_subject(
+        summary,
+        explicit_sensitive=any(
+            turn.get("inferred_sensitive") is True for turn in topic.get("turns") or []
+        ),
+        graph_nodes=graph_nodes,
+    )
+    return await worthiness, await sensitivity
 
 
 def _conversation_thread_id(session_id: str, topic_id: str) -> str:
@@ -312,13 +355,8 @@ async def record_conversation_threads(
         return 0
 
     try:
-        verdicts = await asyncio.gather(*(
-            _judge_worth_a_thread(
-                str(topic["summary"]).strip(),
-                system=CONVERSATION_WORTHINESS_SYSTEM_PROMPT,
-                build_user_prompt=conversation_worthiness_user_prompt,
-            )
-            for topic in candidates
+        assessments = await asyncio.gather(*(
+            _assess_conversation_topic(user_id, topic) for topic in candidates
         ))
     except Exception as exc:
         # _judge_worth_a_thread already fails closed per-topic; this only catches
@@ -336,10 +374,20 @@ async def record_conversation_threads(
     source = ThreadSource.VOICE if surface == "voice" else ThreadSource.CHAT
     created = 0
 
-    for topic, (worth, reason) in zip(candidates, verdicts):
+    for topic, assessment in zip(candidates, assessments):
         if created >= MAX_THREADS_PER_SESSION:
             break
+        (worth, reason), sensitivity = assessment
         summary = str(topic["summary"]).strip()
+        if sensitivity is None or not sensitivity.allows_proactive:
+            logger.info("threads.thread_writer: conversation curiosity suppressed", {
+                "user_id": user_id,
+                "session_id": session_id,
+                "sensitivity_status": sensitivity.status if sensitivity else "unknown",
+                "sensitivity_source": sensitivity.source if sensitivity else "graph_unavailable",
+                "sensitivity_categories": sensitivity.categories if sensitivity else [],
+            })
+            continue
         if not worth:
             logger.info("threads.thread_writer: topic skipped, not worth a thread", {
                 "user_id": user_id, "session_id": session_id, "reason": reason,
@@ -358,6 +406,10 @@ async def record_conversation_threads(
             })
             continue
 
+        sensitivity_doc = sensitivity.to_dict()
+        sensitivity_doc["entity_keys"] = [
+            str(key) for key in topic.get("entity_keys") or []
+        ]
         thread = Thread(
             thread_id=_conversation_thread_id(session_id, str(topic["topic_id"])),
             trigger_text=summary,
@@ -367,6 +419,7 @@ async def record_conversation_threads(
             unknown=list(CONVERSATION_CURIOSITY_ANGLES),
             created_at=now,
             last_touched_at=now,
+            sensitivity=sensitivity_doc,
         )
         if not await thread_store.create_thread(user_id, thread):
             # The store logged the cause. Do not count it: a write that never

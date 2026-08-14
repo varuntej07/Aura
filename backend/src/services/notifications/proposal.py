@@ -178,16 +178,25 @@ class Disposition(StrEnum):
 class OrchestratorDecision:
     disposition: Disposition
     reason: str
-    # On a SEND, whether FCM actually reached a device. Producers that keep a
-    # per-user cursor (the tracker advances ``last_sent_summary`` only on a real
-    # delivery) read this; it is None for HOLD/DROP.
+    # Confirmed device receipt, when a channel can report it. Initial FCM/outbox
+    # sends leave this false; it is None for HOLD/DROP and retained for compatibility.
     delivered: bool | None = None
+    # Durable transport acceptance. This closes idempotency/bookkeeping without
+    # claiming that a person or device received the notification. Legacy test
+    # fakes that only set delivered remain compatible through transport_accepted.
+    accepted: bool | None = None
     # FCM delivery counts, surfaced on a SEND so a committed caller that needs the
     # no-devices vs all-rejected distinction (the calendar handler decides Cloud
     # Tasks retry on it) keeps full fidelity. None on HOLD/DROP.
     tokens_targeted: int | None = None
     success_count: int | None = None
     failure_count: int | None = None
+
+    @property
+    def transport_accepted(self) -> bool:
+        if self.accepted is not None:
+            return self.accepted
+        return self.delivered is True
 
 
 # Reasons (single source of truth so logs + tests agree on the strings).
@@ -201,6 +210,7 @@ REASON_OFF_PEAK = "off_peak"
 REASON_PRESENCE = "user_present"  # surface-aware: in the app now / on a dismiss streak
 REASON_ACTIVE_TRACKER = "active_tracker"  # a tracked event (e.g. a live match) fired recently
 REASON_OK = "ok"
+REASON_SENSITIVE = "sensitive_subject"
 
 
 @dataclass

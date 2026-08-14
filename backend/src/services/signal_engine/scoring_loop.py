@@ -844,10 +844,10 @@ async def _safe_write_state(user_id: str, state: feature_store.SignalStoreState)
         pass
 
 
-async def on_news_delivered(
+async def on_news_accepted(
     proposal: NotificationProposal, result: NotificationResult
 ) -> None:
-    """Post-send bookkeeping for a signal-engine (news) push the drain DELIVERED.
+    """Post-send bookkeeping for a signal-engine push accepted by a transport.
 
     Runs in the drain (via post_send.dispatch_post_send), NOT the scoring tick, so the
     learning outcome, the funnel event, and the daily send counters all key off a REAL
@@ -862,10 +862,10 @@ async def on_news_delivered(
     is_breaking = data.get("lane") == "breaking"
     state = await feature_store.read_state(user_id)
 
-    if not result.delivered:
+    if not result.accepted:
         state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
         await _safe_write_state(user_id, state)
-        logger.info("signal_engine.scoring_loop: news send returned no delivery", {
+        logger.info("signal_engine.scoring_loop: news send was not accepted", {
             "user_id": user_id, "notification_id": data.get("notification_id", ""),
         })
         return
@@ -918,10 +918,13 @@ async def on_news_delivered(
         distinct_id=user_id, event=EVENT_NOTIFICATION_SENT, properties=properties,
     )
 
-    logger.info("signal_engine.scoring_loop: news notification delivered", {
+    logger.info("signal_engine.scoring_loop: news notification accepted", {
         "user_id": user_id, "notification_id": notification_id,
         "content_id": data.get("content_id", ""), "lane": data.get("lane", "personal"),
     })
+
+
+on_news_delivered = on_news_accepted
 
 
 def _has_any_signal(state: feature_store.SignalStoreState) -> bool:

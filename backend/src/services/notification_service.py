@@ -24,6 +24,9 @@ Firebase Admin SDK calls are dispatched to a thread pool via
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -34,13 +37,100 @@ from ..lib.logger import logger
 from . import notification_ledger
 from .fcm_token_registry import (
     get_user_tokens,
-    is_permanently_invalid_token_error,
+    invalid_token_reason,
     remove_invalid_tokens,
 )
 from .firebase import admin_messaging
 
 # Android notification channel created by the Flutter app on first launch.
 _ANDROID_CHANNEL_ID = "aura_default"
+_APNS_COLLAPSE_ID_MAX_BYTES = 64
+_FCM_PAYLOAD_MAX_BYTES = 4096
+_SAFE_COLLAPSE_KEY = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+
+def canonical_collapse_key(identity: str | None) -> str | None:
+    """Map an arbitrary identity to one stable, ASCII, <=64-byte platform key."""
+    if identity is None:
+        return None
+    value = str(identity).strip()
+    if not value:
+        return None
+    encoded = value.encode("utf-8")
+    if len(encoded) <= _APNS_COLLAPSE_ID_MAX_BYTES and _SAFE_COLLAPSE_KEY.fullmatch(value):
+        return value
+    digest = hashlib.sha256(encoded).hexdigest()[:48]
+    ascii_hint = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-")[:11]
+    return f"ck_{ascii_hint + '_' if ascii_hint else ''}{digest}"
+
+
+def _validate_outbound_fields(
+    *,
+    title: str,
+    body: str,
+    payload: dict[str, str],
+    notification_type: str,
+    priority: str,
+    collapse_key: str | None,
+    badge: int | None,
+    sound: str,
+    apns_category: str | None,
+) -> None:
+    """Validate every platform field Aura constructs before any token is sent."""
+    if priority not in {"high", "normal"}:
+        raise ValueError("notification priority must be high or normal")
+    for name, value in (
+        ("title", title),
+        ("body", body),
+        ("sound", sound),
+        ("notification_type", notification_type),
+    ):
+        if not isinstance(value, str):
+            raise ValueError(f"notification {name} must be a string")
+    if not notification_type:
+        raise ValueError("notification_type must not be empty")
+    if badge is not None and (
+        isinstance(badge, bool) or not isinstance(badge, int) or badge < 0
+    ):
+        raise ValueError("notification badge must be a non-negative integer")
+    if collapse_key is not None:
+        if not _SAFE_COLLAPSE_KEY.fullmatch(collapse_key):
+            raise ValueError("collapse key must be ASCII and header-safe")
+        if len(collapse_key.encode("utf-8")) > _APNS_COLLAPSE_ID_MAX_BYTES:
+            raise ValueError("collapse key exceeds APNs 64-byte limit")
+    if apns_category is not None:
+        if not isinstance(apns_category, str) or not apns_category:
+            raise ValueError("APNs category must be a non-empty string")
+        try:
+            apns_category.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("APNs category must be ASCII") from exc
+    if any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in payload.items()
+    ):
+        raise ValueError("FCM data keys and values must be strings")
+    platform_payloads = (
+        {
+            "notification": {"title": title, "body": body},
+            "data": payload,
+        },
+        {
+            "aps": {
+                "alert": {"title": title, "body": body},
+                "sound": sound,
+                "badge": badge,
+                "category": apns_category,
+            },
+            **payload,
+        },
+    )
+    wire_sizes = [
+        len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        for item in platform_payloads
+    ]
+    if max(wire_sizes) > _FCM_PAYLOAD_MAX_BYTES:
+        raise ValueError("notification payload exceeds 4096 UTF-8 bytes")
 
 
 @dataclass
@@ -70,7 +160,15 @@ class NotificationResult:
 
     @property
     def delivered(self) -> bool:
-        """True if at least one selected channel accepted the notification."""
+        """True only when a device receipt has been confirmed."""
+        return any(
+            channel.get("status") in {"received", "seen", "acted"}
+            for channel in self.channel_results.values()
+        )
+
+    @property
+    def accepted(self) -> bool:
+        """True when transport accepted the item and retries must stop."""
         return self.success_count > 0 or self.desktop_queued_count > 0
 
 
@@ -138,6 +236,33 @@ async def send_notification(
     # One logical id can be supplied by the channel router so mobile and desktop
     # share the same audit identity. Direct mobile callers keep UUID behavior.
     notification_id = notification_id or str(uuid.uuid4())
+    data_in = data or {}
+
+    async def _record_to_ledger(
+        *, accepted: bool, tokens_targeted: int, success_count: int, failure_count: int
+    ) -> None:
+        if not record_ledger:
+            return
+        await notification_ledger.record_send(
+            user_id,
+            notification_id=notification_id,
+            notification_type=notification_type,
+            origin=str(data_in.get("notification_origin", notification_type)),
+            title=title,
+            body=body,
+            url=str(data_in.get("url", "")),
+            content_id=str(data_in.get("content_id", "")),
+            source=str(data_in.get("source", "")),
+            category=str(data_in.get("category", "")),
+            content_kind=str(data_in.get("content_kind", "")),
+            dedup_key=dedup_key,
+            delivered=False,
+            accepted=accepted,
+            tokens_targeted=tokens_targeted,
+            success_count=success_count,
+            failure_count=failure_count,
+            decision=decision,
+        )
 
     # 1. Fetch registered tokens
     token_docs: list[dict[str, Any]] = await asyncio.to_thread(
@@ -150,6 +275,12 @@ async def send_notification(
             "title": title,
             "notification_type": notification_type,
         })
+        await _record_to_ledger(
+            accepted=False,
+            tokens_targeted=0,
+            success_count=0,
+            failure_count=0,
+        )
         return NotificationResult(
             tokens_targeted=0,
             success_count=0,
@@ -172,6 +303,42 @@ async def send_notification(
     # one; generate it for the other paths). Also the ledger doc id.
     notification_id = payload.get("notification_id") or notification_id
     payload["notification_id"] = notification_id
+
+    # One identity feeds both Android collapse_key and APNs apns-collapse-id.
+    # Canonicalizing once keeps cross-platform collapse semantics identical while
+    # guaranteeing APNs' strict 64-byte header limit for arbitrary producer IDs.
+    collapse_key = canonical_collapse_key(collapse_key)
+    try:
+        _validate_outbound_fields(
+            title=title,
+            body=body,
+            payload=payload,
+            notification_type=notification_type,
+            priority=priority,
+            collapse_key=collapse_key,
+            badge=badge,
+            sound=sound,
+            apns_category=apns_category,
+        )
+    except ValueError as exc:
+        logger.error("send_notification: outbound payload rejected before FCM", {
+            "user_id": user_id,
+            "notification_type": notification_type,
+            "token_count": len(token_strings),
+            "validation_error": str(exc),
+        })
+        await _record_to_ledger(
+            accepted=False,
+            tokens_targeted=len(token_strings),
+            success_count=0,
+            failure_count=len(token_strings),
+        )
+        return NotificationResult(
+            tokens_targeted=len(token_strings),
+            success_count=0,
+            failure_count=len(token_strings),
+            notification_id=notification_id,
+        )
 
     # 3. Build platform-specific message
     apns_headers: dict[str, str] = {
@@ -223,37 +390,6 @@ async def send_notification(
         "collapse_key": collapse_key,
     })
 
-    # Record one ledger row per attempted send (success or failure). This is the
-    # single choke point through which every notification path flows, so writing
-    # here covers all of them. Fire-and-forget: record_send swallows its own
-    # errors and must never break or delay delivery.
-    data_in = data or {}
-
-    async def _record_to_ledger(
-        *, delivered: bool, tokens_targeted: int, success_count: int, failure_count: int
-    ) -> None:
-        if not record_ledger:
-            return
-        await notification_ledger.record_send(
-            user_id,
-            notification_id=notification_id,
-            notification_type=notification_type,
-            origin=str(data_in.get("notification_origin", notification_type)),
-            title=title,
-            body=body,
-            url=str(data_in.get("url", "")),
-            content_id=str(data_in.get("content_id", "")),
-            source=str(data_in.get("source", "")),
-            category=str(data_in.get("category", "")),
-            content_kind=str(data_in.get("content_kind", "")),
-            dedup_key=dedup_key,
-            delivered=delivered,
-            tokens_targeted=tokens_targeted,
-            success_count=success_count,
-            failure_count=failure_count,
-            decision=decision,
-        )
-
     # 4. Send via FCM
     try:
         batch_response: messaging.BatchResponse = await asyncio.to_thread(
@@ -268,7 +404,7 @@ async def send_notification(
             "error_type": type(exc).__name__,
         })
         await _record_to_ledger(
-            delivered=False,
+            accepted=False,
             tokens_targeted=len(token_strings),
             success_count=0,
             failure_count=len(token_strings),
@@ -282,6 +418,7 @@ async def send_notification(
 
     # 5. Collect invalid tokens from FCM response
     invalid: list[str] = []
+    invalid_reasons: dict[str, str] = {}
     for idx, response in enumerate(batch_response.responses):
         if response.success:
             continue
@@ -298,22 +435,29 @@ async def send_notification(
                 # Normalise: "messaging/registration-token-not-registered"
                 error_code = error_code.split("/")[-1].lower()
 
-        is_invalid = is_permanently_invalid_token_error(exc)
+        removal_reason = invalid_token_reason(exc, payload_validated=True)
 
         logger.warn("send_notification: token delivery failed", {
             "user_id": user_id,
-            "token_preview": token_strings[idx][:20],
             "error_code": error_code,
             "error": str(exc),
-            "token_removed": is_invalid,
+            "token_removed": removal_reason is not None,
         })
 
-        if is_invalid:
-            invalid.append(token_strings[idx])
+        if removal_reason is not None:
+            token = token_strings[idx]
+            invalid.append(token)
+            invalid_reasons[token] = removal_reason
 
     # 6. Auto-delete permanently invalid tokens
     if invalid:
-        await asyncio.to_thread(remove_invalid_tokens, user_id, invalid)
+        reasons = sorted(set(invalid_reasons.values()))
+        await asyncio.to_thread(
+            remove_invalid_tokens,
+            user_id,
+            invalid,
+            reason=",".join(reasons),
+        )
 
     result = NotificationResult(
         tokens_targeted=len(token_strings),
@@ -333,7 +477,7 @@ async def send_notification(
     })
 
     await _record_to_ledger(
-        delivered=result.delivered,
+        accepted=result.accepted,
         tokens_targeted=result.tokens_targeted,
         success_count=result.success_count,
         failure_count=result.failure_count,

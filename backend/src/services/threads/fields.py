@@ -42,6 +42,7 @@ FIELD_LAST_TOUCHED_AT = "last_touched_at"    # last time the user referenced thi
 FIELD_EXPECTED_RESOLUTION_AT = "expected_resolution_at"
 FIELD_FOLLOW_UPS_SENT = "follow_ups_sent"
 FIELD_LAST_FOLLOW_UP_AT = "last_follow_up_at"
+FIELD_SENSITIVITY = "sensitivity"
 
 # ── threads_state document fields (reflector daily budget) ──────────────────
 FIELD_FOLLOW_UPS_TODAY = "follow_ups_today"

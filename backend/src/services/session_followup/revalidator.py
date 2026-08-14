@@ -357,9 +357,9 @@ async def revalidate_and_submit_followup(
         ),
         now=when,
     )
-    if decision.disposition == Disposition.SEND and decision.delivered:
-        await machine.mark_delivered(uid, candidate_id, now=when)
-        return machine.STATE_DELIVERED
+    if decision.disposition == Disposition.SEND and decision.transport_accepted:
+        await machine.mark_accepted(uid, candidate_id, now=when)
+        return machine.STATE_ACCEPTED
     # The orchestrator held or dropped it (presence, budget, arbitration). Retry
     # once the collision window has passed rather than losing the intent.
     return await _defer(
