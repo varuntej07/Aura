@@ -75,11 +75,14 @@ async def deliver(proposal: NotificationProposal) -> NotificationResult:
             mobile_result = outcome
             channel_results[channel.value] = {
                 "status": (
-                    notification_ledger.STATUS_SENT
-                    if outcome.delivered
+                    notification_ledger.STATUS_ACCEPTED
+                    if outcome.success_count > 0
+                    else notification_ledger.STATUS_NO_ELIGIBLE_ENDPOINT
+                    if outcome.tokens_targeted == 0
                     else notification_ledger.STATUS_FAILED
                 ),
-                "delivered": outcome.delivered,
+                "accepted": outcome.success_count > 0,
+                "delivered": False,
                 "tokens_targeted": outcome.tokens_targeted,
                 "success_count": outcome.success_count,
                 "failure_count": outcome.failure_count,
@@ -87,8 +90,9 @@ async def deliver(proposal: NotificationProposal) -> NotificationResult:
         else:
             desktop_result = outcome
             channel_results[channel.value] = {
-                "status": "queued" if outcome.created else "deduplicated",
-                "delivered": outcome.accepted,
+                "status": notification_ledger.STATUS_QUEUED,
+                "accepted": outcome.accepted,
+                "delivered": False,
                 "created": outcome.created,
             }
 
@@ -119,6 +123,7 @@ async def deliver(proposal: NotificationProposal) -> NotificationResult:
         content_kind=str(data.get("content_kind", "")),
         dedup_key=proposal.dedup_key,
         delivered=result.delivered,
+        accepted=result.accepted,
         tokens_targeted=result.tokens_targeted,
         success_count=result.success_count,
         failure_count=result.failure_count,

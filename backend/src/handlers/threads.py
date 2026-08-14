@@ -43,7 +43,9 @@ MAX_REPLY_CHARS = 2_000
 _THREAD_FOLLOWUP_TYPE = "thread_followup"
 
 
-async def _push_buddy_reply(user_id: str, thread_id: str, buddy_reply: str) -> None:
+async def _push_buddy_reply(
+    user_id: str, thread_id: str, buddy_reply: str, *, sensitive: bool = False
+) -> None:
     """Deliver Buddy's reply to a shade answer as its own follow-up push.
 
     Why a push and not just the HTTP response: the chip tap runs in an Android
@@ -60,11 +62,12 @@ async def _push_buddy_reply(user_id: str, thread_id: str, buddy_reply: str) -> N
         await send_notification(
             user_id,
             title="Buddy",
-            body=buddy_reply,
+            body=("Buddy replied to your private conversation" if sensitive else buddy_reply),
             data={
                 "thread_id": thread_id,
                 "kind": "reply",
                 "buddy_reply": buddy_reply,
+                "sensitive": "true" if sensitive else "false",
             },
             notification_type=_THREAD_FOLLOWUP_TYPE,
             data_only=True,
@@ -144,7 +147,12 @@ async def handle_thread_reply(request: Request) -> JSONResponse:
 
     # Land Buddy's reply in the notification shade via its own push, so it shows
     # even if the client's background isolate was already reaped (see helper).
-    await _push_buddy_reply(user_id, thread_id, buddy_reply)
+    await _push_buddy_reply(
+        user_id,
+        thread_id,
+        buddy_reply,
+        sensitive=thread.sensitivity.get("status") in {"sensitive", "unknown"},
+    )
 
     # Funnel action step: a shade reply is a conversion even though the app
     # never opened (so no tap/session event fires for this path). Fire server-
