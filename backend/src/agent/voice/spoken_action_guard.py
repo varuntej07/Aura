@@ -1,9 +1,25 @@
-"""Deterministic backstop for copyable answers that get spoken instead of carded.
+"""Recognizes the turn that OPENS a card. Everything after it is session state.
 
 The system prompt and tool skills route "draft me a prompt / command / code" to
 present_visible_artifact (see voice_prompt.py). This module is the finalized
 request-intent safety net for turns where the model narrates that copyable text
 anyway. Output shape alone never authorizes a card.
+
+Scope note, because this module used to try to do more. It once also had to
+recognize FOLLOW-UP turns: "make it shorter", "rewrite that", "don't read it
+out loud". It could not, and the attempt is what shipped the bug that
+`artifact_session` now fixes. Two things defeat a lexicon there:
+
+* Revision turns do not restate the noun. "Why don't you make it a bit longer"
+  and "Where is the greeting? Where is the hook?" name no artifact at all.
+* Endpointing splits one spoken thought across several finalized messages, so
+  the matched string is often not the string the generation runs against. In
+  the motivating session "Give me a draft" matched correctly and was then
+  discarded, because two more STT fragments arrived behind it.
+
+So follow-up recognition moved to `ArtifactSession`, which needs no wording at
+all. What is left here is the opening turn, where the user does say the noun,
+plus the output-shape helpers used by the last-resort backstop.
 
 Pure functions only; the wiring that calls them lives in buddy_agent.llm_node.
 """
@@ -65,31 +81,26 @@ _WANT_ARTIFACT_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Explicit corrections a frustrated user makes when it keeps speaking copyable
-# content: "I asked you to draft", "put it on screen", "don't read it out loud",
-# "why are you spitting it out", "give me a prompt".
+# The correction a user makes when Buddy recited instead of carding and NO card
+# exists yet: "put it on screen", "don't read it out loud", "I asked you to
+# draft". Kept, unlike the follow-up patterns, because with the session closed
+# this is an OPENING turn - it is the user's first successful request for a card
+# after a failed one, and nothing else will recognize it.
 _CORRECTION_RE = re.compile(
     r"(?:"
     r"don'?t (?:read|say|speak)|stop (?:reading|saying|speaking)|"
     r"put it on (?:the )?screen|on (?:the )?screen|not out loud|"
     r"spitting it out|reading it out|spelling it out|"
     r"i (?:just )?asked (?:you )?(?:to |for )(?:a |the )?(?:draft|prompt|command|code)|"
-    r"give me (?:a|the) (?:prompt|command|code|script)|"
+    r"give me (?:a|the) (?:draft|prompt|command|code|script)|"
     r"draft me\b"
     r")",
     re.IGNORECASE,
 )
 
-_VISIBLE_ARTIFACT_FOLLOWUP_RE = re.compile(
-    r"(?:"
-    r"^\s*(?:please\s+)?(?:make|rewrite|revise|change|shorten|lengthen|expand|"
-    r"simplify|tighten|translate|format|regenerate)\s+(?:it|that|this)\b|"
-    r"\b(?:rewrite|revise|change|shorten|lengthen|expand|simplify|tighten|"
-    r"translate|format|regenerate)\s+(?:the|that|this)\s+(?:card|artifact|"
-    r"draft|prompt|command|code|script|snippet|config|checklist|note)\b"
-    r")",
-    re.IGNORECASE,
-)
+# Ceiling for treating a question-final reply as a question rather than a body.
+# Two sentences of asking comfortably fits; a delivered draft does not.
+_MAX_QUESTION_CHARS = 240
 
 _SHORT_CONFIRMATION_RE = re.compile(
     r"(?:"
@@ -118,14 +129,36 @@ def wants_copyable_artifact(transcript: str) -> bool:
     )
 
 
-def references_visible_artifact(transcript: str) -> bool:
-    """True when a turn clearly edits or refers to the card already on screen."""
-    return bool(transcript and _VISIBLE_ARTIFACT_FOLLOWUP_RE.search(transcript))
+def is_question_to_user(text: str) -> bool:
+    """True when the reply is Buddy asking, not Buddy delivering.
+
+    A clarifying question is speech, never a card. Buddy asking "what tone do
+    you want for this?" and having that question silently rendered to the
+    screen instead of asked out loud is a worse failure than the recitation
+    this module exists to stop: the user is left waiting on a conversation that
+    already happened somewhere they were not looking.
+
+    Deliberately structural rather than a phrase list. A reply that ends on a
+    question mark and carries no body is a question; a draft that happens to
+    contain a question in the middle ("...are you open to it? Best, Varun") is
+    not, because it does not END there. The length ceiling is what separates
+    "what vibe do you want?" from a long answer with a rhetorical closer.
+    """
+    stripped = (text or "").strip()
+    if not stripped.endswith("?"):
+        return False
+    if len(stripped) > _MAX_QUESTION_CHARS:
+        return False
+    # A body that merely finishes on a question still reads as a body if it is
+    # multi-paragraph or fenced. Those are shapes speech destroys.
+    return "\n\n" not in stripped and "```" not in stripped
 
 
 def looks_copyable(text: str) -> bool:
     """True for any non-empty requested body except a bare progress acknowledgement."""
     if not text:
+        return False
+    if is_question_to_user(text):
         return False
     stripped = text.strip()
     return bool(stripped and not _SHORT_CONFIRMATION_RE.fullmatch(stripped))

@@ -63,8 +63,10 @@ DEFAULT_REGION = "us-central1"
 LIFECYCLE_DELETE_AGE_DAYS = 7
 
 # Synthetic objects live under a clearly non-user prefix so they can never
-# collide with real meetings/{uid}/{meeting_id}/ captures.
-PREFLIGHT_PREFIX = "meetings/__preflight__/"
+# collide with real audio/v2/{uid}/{meeting_id}/ captures. Kept under audio/v2/
+# so the smoke test exercises the prefix the pipeline actually writes to, and so
+# the lifecycle rule sweeps up anything a crashed run leaves behind.
+PREFLIGHT_PREFIX = "audio/v2/__preflight__/"
 
 
 @dataclass(frozen=True)

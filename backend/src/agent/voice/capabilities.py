@@ -71,6 +71,10 @@ class Capability(StrEnum):
     OUTBOUND_DRAFT = "outbound_draft"
     VISIBLE_ARTIFACT = "visible_artifact"
     GUIDE_CONTROL = "guide_control"
+    # Not a topic. The channel Buddy speaks on when a turn is constrained to
+    # emit a tool and the right answer is ordinary speech (a clarifying
+    # question, a short reply). See speak_only in the registry below.
+    SPEECH_CHANNEL = "speech_channel"
 
 
 ALL_SURFACES = frozenset(VoiceSurface)
@@ -311,6 +315,24 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             surfaces=DESKTOP_ONLY,
             concurrent=False,
             required=("enable",),
+        ),
+        _tool(
+            # The speech channel, exposed ONLY on turns that are constrained to
+            # emit a tool (see BuddyAgent.llm_node). On those turns plain prose
+            # is not a representable answer, which is the point: it is how a
+            # recited draft becomes impossible rather than merely discouraged.
+            # Without this tool that constraint would also make an ordinary
+            # clarifying question impossible, and Buddy would be forced to
+            # render its own question to a card.
+            #
+            # concurrent=False because speaking ends the turn; pairing it with
+            # another call would strand that call's result.
+            "speak_only",
+            Capability.SPEECH_CHANNEL,
+            ToolEffect.READ,
+            namespace="voice.speech",
+            concurrent=False,
+            required=("text",),
         ),
     )
 }

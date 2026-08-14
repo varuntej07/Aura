@@ -176,6 +176,14 @@ gcloud run deploy "${SERVICE_NAME}" \
   #     --location=us-central1 --uniform-bucket-level-access
   #   gcloud storage buckets update gs://juno-2ea45-meeting-audio \
   #     --lifecycle-file=scripts/lifecycle-7day-delete.json
+  # RE-APPLY that rule if the bucket still carries the original hand-applied one.
+  # This file did not exist in the repo until now, so the live rule was created by
+  # hand and was bucket-WIDE by age. That also deleted transcripts/v2/**, which is
+  # where canonical/webvtt/quality-report/note-input live - and a Pro meeting has
+  # no Firestore TTL, so its "ready" note kept pointing at artifacts that had been
+  # deleted on day 7. The committed rule is scoped to the source-audio prefixes
+  # only. check_meeting_storage.py matches on delete AGE, not prefix, so the
+  # scoped rule still satisfies the deploy gate.
   #   gcloud storage buckets add-iam-policy-binding gs://juno-2ea45-meeting-audio \
   #     --member=serviceAccount:firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com \
   #     --role=roles/storage.objectAdmin

@@ -574,8 +574,11 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         if now_minute % 5 == 2:
             asyncio.create_task(_run_meeting_job_sweep())
 
+        # Await this too: it now REPAIRS (redelivers stranded jobs, stamps
+        # stalled meetings) rather than only counting, and a detached task can be
+        # cut off the moment this response ends, leaving the repair half-done.
         if now_minute == 27:
-            asyncio.create_task(_run_meeting_reconciliation())
+            await _run_meeting_reconciliation()
 
         # GCS lifecycle deletion is asynchronous. Hourly reconciliation confirms
         # absence by exact object generation before clearing has_audio, so corpus

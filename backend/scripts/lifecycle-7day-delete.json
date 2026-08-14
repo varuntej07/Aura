@@ -1,0 +1,11 @@
+{
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "age": 7,
+        "matchesPrefix": ["audio/v2/", "meetings/"]
+      }
+    }
+  ]
+}
