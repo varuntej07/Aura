@@ -34,9 +34,16 @@ class SettingsViewModel extends SafeChangeNotifier {
     safeNotifyListeners();
   }
 
+  /// Seeds the user this VM writes through.
+  ///
+  /// Deliberately silent. The screen calls this synchronously from initState and
+  /// then reads [settings] on its very first build, so a notify here would only
+  /// schedule a redundant rebuild one frame later — which is exactly the flicker
+  /// of the page painting defaults and then correcting itself. Callers that need
+  /// the UI to react to a *changed* user go through [_updateSettings].
   void loadUser(UserModel user) {
     _user = user;
-    _setState(ViewState.loaded);
+    _state = ViewState.loaded;
   }
 
   Future<void> toggleWakeWord(bool enabled) async {
@@ -49,12 +56,28 @@ class SettingsViewModel extends SafeChangeNotifier {
     await _updateSettings(_user!.settings.copyWith(ttsEnabled: enabled));
   }
 
+  /// Persists the voice Buddy speaks in. Takes effect at the next session start,
+  /// not mid-call: the TTS pipeline is constructed once when the worker joins the
+  /// room. The picker says so rather than leaving the user to notice.
+  ///
+  /// Entitlement is deliberately not checked here. The lock in the picker is
+  /// cosmetic; `voice_catalog.resolve_voice` is the real boundary and re-checks
+  /// tier every session, so a lapse reverts the voice without needing the client
+  /// to have written anything different.
+  Future<void> selectVoice(String voiceSlug) async {
+    if (_user == null) return;
+    if (_user!.settings.ttsVoiceId == voiceSlug) return;
+    await _updateSettings(_user!.settings.copyWith(ttsVoiceId: voiceSlug));
+  }
+
   Future<void> _updateSettings(UserSettings newSettings) async {
     if (_user == null) return;
-    _setState(ViewState.loading);
 
-    final optimisticUser = _user!.copyWith(settings: newSettings);
-    _user = optimisticUser;
+    // No loading state. The write is optimistic, so the switch is already in its
+    // new position; a `loading` state here used to blank the entire Settings page
+    // behind a full-screen spinner until Firestore acked, then rebuild the list
+    // from scratch and lose the scroll position. One notify, not two.
+    _user = _user!.copyWith(settings: newSettings);
     safeNotifyListeners();
 
     try {

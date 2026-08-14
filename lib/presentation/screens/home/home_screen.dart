@@ -27,7 +27,6 @@ import '../../viewmodels/home_viewmodel.dart';
 import '../../viewmodels/notification_chat_seed.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
-import '../settings/aura_profile_screen.dart';
 import '../settings/settings_screen.dart';
 import '../../widgets/show_sign_in_pill.dart';
 import '../../widgets/voice_sphere.dart';
@@ -1124,10 +1123,7 @@ class _ChatDrawer extends StatelessWidget {
 
   void _openSettings(BuildContext context) {
     Navigator.of(context).pop();
-    Navigator.push(
-      context,
-      MaterialPageRoute<void>(builder: (_) => const SettingsScreen()),
-    );
+    context.push('/settings');
   }
 
   @override
@@ -1170,7 +1166,7 @@ class _ChatDrawer extends StatelessWidget {
                     label: 'Your Aura Profile',
                     onTap: () {
                       Navigator.of(context).pop();
-                      Navigator.push(context, AuraProfileScreen.route());
+                      context.push('/settings/aura-profile');
                     },
                   ),
                   _DrawerNavRow(

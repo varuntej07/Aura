@@ -12,7 +12,6 @@ import '../../viewmodels/text_chat_viewmodel.dart';
 import '../../widgets/chat_message_list.dart';
 import '../../widgets/message_input.dart';
 import '../../widgets/sign_in_gate_dialog.dart';
-import '../reminders/reminders_screen.dart';
 
 /// A muted "Yesterday" / "From M/D" label when the served briefing is a prior day's
 /// (the fallback). Null for today's briefing and the world snapshot (empty date).
@@ -168,7 +167,7 @@ class _BriefingScreenState extends State<BriefingScreen> {
       onRetry: chatVm.retryLastMessage,
       onEdit: chatVm.editAndResend,
       onFeedback: chatVm.setFeedback,
-      onViewReminders: () => Navigator.push(context, RemindersScreen.route()),
+      onViewReminders: () => context.push('/reminders'),
       onClarificationSubmit: chatVm.submitClarification,
     );
   }

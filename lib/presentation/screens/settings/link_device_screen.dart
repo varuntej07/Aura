@@ -17,18 +17,15 @@ import '../../viewmodels/link_device_viewmodel.dart';
 class LinkDeviceScreen extends StatefulWidget {
   const LinkDeviceScreen({super.key});
 
-  static MaterialPageRoute<void> route() {
-    return MaterialPageRoute<void>(
-      builder: (_) => const _LinkDeviceScreenProvider(),
-    );
-  }
-
   @override
   State<LinkDeviceScreen> createState() => _LinkDeviceScreenState();
 }
 
-class _LinkDeviceScreenProvider extends StatelessWidget {
-  const _LinkDeviceScreenProvider();
+/// The routable entry point: the screen only works with its view model above it.
+/// Public so the `/settings/link-device` route can build it, keeping the VM
+/// wiring next to the screen it belongs to rather than in the router.
+class LinkDeviceScreenProvider extends StatelessWidget {
+  const LinkDeviceScreenProvider({super.key});
 
   @override
   Widget build(BuildContext context) {

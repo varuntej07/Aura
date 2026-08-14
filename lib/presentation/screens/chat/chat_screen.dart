@@ -14,7 +14,6 @@ import '../../widgets/chat_suggestion_pills.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/message_input.dart';
 import '../../widgets/sign_in_gate_dialog.dart';
-import '../reminders/reminders_screen.dart';
 
 /// Full-screen Buddy text chat. Opened from the home drawer.
 /// Scoped [TextChatViewModel] is provided by the router.
@@ -206,10 +205,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           onRetry: vm.retryLastMessage,
                           onEdit: vm.editAndResend,
                           onFeedback: vm.setFeedback,
-                          onViewReminders: () => Navigator.push(
-                            context,
-                            RemindersScreen.route(),
-                          ),
+                          onViewReminders: () => context.push('/reminders'),
                           onClarificationSubmit: vm.submitClarification,
                         ),
                 ),

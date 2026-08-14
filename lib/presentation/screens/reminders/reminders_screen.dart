@@ -20,12 +20,6 @@ import '../../widgets/sign_in_required_view.dart';
 class RemindersScreen extends StatelessWidget {
   const RemindersScreen({super.key});
 
-  static Route<void> route() {
-    return MaterialPageRoute(
-      builder: (_) => const RemindersScreen(),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return const _RemindersView();

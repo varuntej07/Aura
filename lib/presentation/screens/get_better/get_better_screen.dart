@@ -15,7 +15,6 @@ import '../../viewmodels/text_chat_viewmodel.dart';
 import '../../widgets/chat_message_list.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/message_input.dart';
-import '../reminders/reminders_screen.dart';
 
 class GetBetterScreen extends StatefulWidget {
   const GetBetterScreen({super.key});
@@ -214,10 +213,7 @@ class _GetBetterScreenState extends State<GetBetterScreen> {
                               onRetry: chatViewModel.retryLastMessage,
                               onEdit: chatViewModel.editAndResend,
                               onFeedback: chatViewModel.setFeedback,
-                              onViewReminders: () => Navigator.push(
-                                context,
-                                RemindersScreen.route(),
-                              ),
+                              onViewReminders: () => context.push('/reminders'),
                               onClarificationSubmit:
                                   chatViewModel.submitClarification,
                             )

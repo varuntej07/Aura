@@ -25,9 +25,14 @@ import '../../presentation/screens/briefing/briefing_screen.dart';
 import '../../presentation/screens/chat/chat_screen.dart';
 import '../../presentation/screens/get_better/get_better_screen.dart';
 import '../../presentation/screens/home/home_screen.dart';
+import '../../presentation/screens/connectors/connectors_screen.dart';
+import '../../presentation/screens/onboarding/aura_consent_screen.dart';
 import '../../presentation/screens/onboarding/onboarding_screen.dart';
 import '../../presentation/screens/reminders/reminders_screen.dart';
+import '../../presentation/screens/settings/aura_profile_screen.dart';
+import '../../presentation/screens/settings/link_device_screen.dart';
 import '../../presentation/screens/settings/settings_screen.dart';
+import '../../presentation/screens/settings/voice_picker_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
 import '../../presentation/viewmodels/auth_viewmodel.dart';
 import '../../presentation/viewmodels/briefing_viewmodel.dart';
@@ -163,11 +168,49 @@ GoRouter buildRouter(
         },
       ),
 
+      // Settings and everything reachable from it. These are flat paths rather
+      // than nested children so an imperative push lands exactly one page on the
+      // stack, and every settings destination gets the same slide transition.
+      // Before this, Settings was a raw MaterialPageRoute pushed from the home
+      // drawer, which left GoRouter's location (and so the analytics route
+      // observer) pointing at /home for the whole time the user was in Settings.
       GoRoute(
         path: '/settings',
         name: 'Settings',
         pageBuilder: (context, state) =>
             _slidePage(state, const SettingsScreen()),
+      ),
+      GoRoute(
+        path: '/settings/voice',
+        name: 'Voice Picker',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const VoicePickerScreen()),
+      ),
+      GoRoute(
+        path: '/settings/link-device',
+        name: 'Link Device',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const LinkDeviceScreenProvider()),
+      ),
+      GoRoute(
+        path: '/settings/connectors',
+        name: 'Connectors',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const ConnectorsScreen()),
+      ),
+      GoRoute(
+        path: '/settings/aura-profile',
+        name: 'Aura Profile',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const AuraProfileScreen()),
+      ),
+      // Onboarding pushes its own AuraConsentScreen with the onboarding
+      // transition; this route is the settings-side entry only.
+      GoRoute(
+        path: '/settings/aura-consent',
+        name: 'Aura Consent',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const AuraConsentScreen()),
       ),
       GoRoute(
         path: '/paywall',

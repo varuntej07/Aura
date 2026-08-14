@@ -7,14 +7,9 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../widgets/sign_in_required_view.dart';
-import '../onboarding/aura_consent_screen.dart';
 
 class AuraProfileScreen extends StatelessWidget {
   const AuraProfileScreen({super.key});
-
-  static Route<void> route() => MaterialPageRoute(
-        builder: (_) => const AuraProfileScreen(),
-      );
 
   @override
   Widget build(BuildContext context) {
@@ -635,9 +630,7 @@ class _AuraMemoryOffPrompt extends StatelessWidget {
   ];
 
   void _turnOn(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const AuraConsentScreen()),
-    );
+    context.push('/settings/aura-consent');
   }
 
   @override

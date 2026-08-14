@@ -17,7 +17,6 @@ import '../../widgets/chat_suggestion_pills.dart';
 import '../../widgets/error_display.dart';
 import '../../widgets/message_input.dart';
 import '../../widgets/sign_in_gate_dialog.dart';
-import '../reminders/reminders_screen.dart';
 
 class EmbeddedChatPanel extends StatefulWidget {
   const EmbeddedChatPanel({super.key});
@@ -206,10 +205,7 @@ class _EmbeddedChatPanelState extends State<EmbeddedChatPanel>
                       onRetry: vm.retryLastMessage,
                       onEdit: vm.editAndResend,
                       onFeedback: vm.setFeedback,
-                      onViewReminders: () => Navigator.push(
-                        context,
-                        RemindersScreen.route(),
-                      ),
+                      onViewReminders: () => context.push('/reminders'),
                       onClarificationSubmit: vm.submitClarification,
                     ),
             ),

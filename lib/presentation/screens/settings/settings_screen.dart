@@ -5,18 +5,16 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/constants/buddy_voices.dart';
+import '../../../core/errors/app_exception.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
+import '../../../data/models/user_model.dart';
 import '../../../data/services/voice_launcher_bridge.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/settings_viewmodel.dart';
 import '../../widgets/error_display.dart';
-import '../../widgets/loading_indicator.dart';
-import '../connectors/connectors_screen.dart';
-import '../onboarding/aura_consent_screen.dart';
-import '../reminders/reminders_screen.dart';
-import 'aura_profile_screen.dart';
-import 'link_device_screen.dart';
+import '../../widgets/pressable_tile.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -29,12 +27,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final user = context.read<AuthViewModel>().user;
-      if (user != null) {
-        context.read<SettingsViewModel>().loadUser(user);
-      }
-    });
+    // Seeded synchronously, not in a post-frame callback: the VM's loadUser is
+    // silent, so the first build already reads the real settings. Deferring it
+    // by a frame is what made the page paint defaults and then visibly correct
+    // itself while the route was still sliding in.
+    final user = context.read<AuthViewModel>().user;
+    if (user != null) {
+      context.read<SettingsViewModel>().loadUser(user);
+    }
   }
 
   Future<void> _signOut(BuildContext context) async {
@@ -130,9 +130,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final authVm = context.read<AuthViewModel>();
 
     if (enable) {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => const AuraConsentScreen()),
-      );
+      await context.push('/settings/aura-consent');
       return;
     }
 
@@ -229,201 +227,230 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
 
               // Body
+              //
+              // No page-wide Consumer. This list used to sit inside a
+              // Consumer2<SettingsViewModel, AuthViewModel>, so a notify from
+              // either — and AuthViewModel notifies off a Firestore user stream
+              // and an entitlement stream — rebuilt all ~25 gradient tiles. The
+              // handful of rows that actually depend on state subscribe for
+              // themselves below; everything else is const and never rebuilds.
               Expanded(
-                child: Consumer2<SettingsViewModel, AuthViewModel>(
-                  builder: (context, settingsVm, authVm, _) {
-                    if (settingsVm.state == ViewState.loading) {
-                      return const FullScreenLoader();
-                    }
-
-                    final settings = settingsVm.settings;
-                    final user = authVm.user;
-
-                    return ListView(
-                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
-                      children: [
-                        if (settingsVm.error != null)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: ErrorDisplay(
-                              error: settingsVm.error!,
-                              onDismiss: settingsVm.clearError,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
+                  children: [
+                    Selector<SettingsViewModel, AppException?>(
+                      selector: (_, vm) => vm.error,
+                      builder: (context, error, _) => error == null
+                          ? const SizedBox.shrink()
+                          : Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: ErrorDisplay(
+                                error: error,
+                                onDismiss: context
+                                    .read<SettingsViewModel>()
+                                    .clearError,
+                              ),
                             ),
-                          ),
+                    ),
 
-                        // ── Voice ───────────────────────────────────────────
-                        _SectionLabel('Voice'),
-                        _GlassToggleTile(
-                          icon: Icons.record_voice_over_rounded,
-                          title: 'Wake Word',
-                          subtitle: 'Activate with "Hey Buddy"',
-                          value: settings?.wakeWordEnabled ?? false,
-                          onChanged: settingsVm.toggleWakeWord,
-                        ),
-                        const SizedBox(height: 8),
-                        _GlassToggleTile(
-                          icon: Icons.volume_up_rounded,
-                          title: 'Voice Responses',
-                          subtitle: 'Read responses aloud (TTS)',
-                          value: settings?.ttsEnabled ?? true,
-                          onChanged: settingsVm.toggleTts,
-                        ),
-                        // Home-screen widget: one tap opens the app with mic on.
-                        // Android-only (iOS WidgetKit ships separately).
-                        if (Platform.isAndroid) ...[
-                          const SizedBox(height: 8),
-                          _GlassNavTile(
-                            icon: Icons.add_to_home_screen_rounded,
-                            title: 'Add to home screen',
-                            subtitle:
-                                'One-tap widget that opens Buddy with the mic on',
-                            onTap: () => _addVoiceWidget(context),
-                          ),
-                        ],
+                    // ── Voice ───────────────────────────────────────────
+                    const _SectionLabel('Voice'),
+                    Selector<SettingsViewModel, String>(
+                      selector: (_, vm) => buddyVoiceFor(
+                        vm.settings?.ttsVoiceId.isEmpty ?? true
+                            ? kDefaultBuddyVoiceSlug
+                            : vm.settings!.ttsVoiceId,
+                      ).label,
+                      builder: (context, voiceLabel, _) => _GlassNavTile(
+                        icon: Icons.graphic_eq_rounded,
+                        title: "Buddy's voice",
+                        subtitle: voiceLabel,
+                        onTap: () => context.push('/settings/voice'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Selector<SettingsViewModel, bool>(
+                      selector: (_, vm) => vm.settings?.wakeWordEnabled ?? false,
+                      builder: (context, enabled, _) => _GlassToggleTile(
+                        icon: Icons.record_voice_over_rounded,
+                        title: 'Wake Word',
+                        subtitle: 'Activate with "Hey Buddy"',
+                        value: enabled,
+                        onChanged: context
+                            .read<SettingsViewModel>()
+                            .toggleWakeWord,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Selector<SettingsViewModel, bool>(
+                      selector: (_, vm) => vm.settings?.ttsEnabled ?? true,
+                      builder: (context, enabled, _) => _GlassToggleTile(
+                        icon: Icons.volume_up_rounded,
+                        title: 'Voice Responses',
+                        subtitle: 'Read responses aloud (TTS)',
+                        value: enabled,
+                        onChanged: context.read<SettingsViewModel>().toggleTts,
+                      ),
+                    ),
+                    // Home-screen widget: one tap opens the app with mic on.
+                    // Android-only (iOS WidgetKit ships separately).
+                    if (Platform.isAndroid) ...[
+                      const SizedBox(height: 8),
+                      _GlassNavTile(
+                        icon: Icons.add_to_home_screen_rounded,
+                        title: 'Add to home screen',
+                        subtitle:
+                            'One-tap widget that opens Buddy with the mic on',
+                        onTap: () => _addVoiceWidget(context),
+                      ),
+                    ],
 
-                        // ── Buddy on your PC ─────────────────────────────────
-                        _SectionLabel('Buddy on your PC'),
-                        _GlassNavTile(
-                          icon: Icons.desktop_windows_rounded,
-                          title: 'Link this PC',
-                          subtitle:
-                              'Get a code to sign in Buddy on your desktop',
-                          onTap: () =>
-                              Navigator.push(context, LinkDeviceScreen.route()),
-                        ),
+                    // ── Buddy on your PC ─────────────────────────────────
+                    const _SectionLabel('Buddy on your PC'),
+                    _GlassNavTile(
+                      icon: Icons.desktop_windows_rounded,
+                      title: 'Link this PC',
+                      subtitle: 'Get a code to sign in Buddy on your desktop',
+                      onTap: () => context.push('/settings/link-device'),
+                    ),
 
-                        // ── Reminders ────────────────────────────────────────
-                        _SectionLabel('Reminders'),
-                        _GlassNavTile(
-                          icon: Icons.notifications_active_rounded,
-                          title: 'View Reminders',
-                          subtitle: 'See all scheduled reminders',
-                          onTap: () =>
-                              Navigator.push(context, RemindersScreen.route()),
-                        ),
+                    // ── Reminders ────────────────────────────────────────
+                    const _SectionLabel('Reminders'),
+                    _GlassNavTile(
+                      icon: Icons.notifications_active_rounded,
+                      title: 'View Reminders',
+                      subtitle: 'See all scheduled reminders',
+                      onTap: () => context.push('/reminders'),
+                    ),
 
-                        _SectionLabel('Connectors'),
-                        _GlassNavTile(
-                          icon: Icons.link_rounded,
-                          title: 'Connectors',
-                          subtitle: 'Calendar, Gmail & more',
-                          onTap: () => Navigator.push(
-                            context,
-                            MaterialPageRoute<void>(
-                              builder: (_) => const ConnectorsScreen(),
+                    const _SectionLabel('Connectors'),
+                    _GlassNavTile(
+                      icon: Icons.link_rounded,
+                      title: 'Connectors',
+                      subtitle: 'Calendar, Gmail & more',
+                      onTap: () => context.push('/settings/connectors'),
+                    ),
+
+                    // Aura memory — consent toggle + profile
+                    const _SectionLabel('Aura Memory'),
+                    Selector<AuthViewModel, bool>(
+                      selector: (_, vm) => vm.auraMemoryEnabled,
+                      builder: (context, memoryOn, _) => _GlassToggleTile(
+                        icon: Icons.memory_rounded,
+                        title: 'Aura memory',
+                        subtitle: memoryOn
+                            ? 'Buddy learns from your chats to personalize everything'
+                            : 'Turn on to let Buddy remember what matters to you',
+                        value: memoryOn,
+                        onChanged: (enabled) =>
+                            _onToggleAuraMemory(context, enabled),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _GlassNavTile(
+                      icon: Icons.psychology_alt_rounded,
+                      title: 'Your Aura Profile',
+                      subtitle: 'See what Buddy has learned about you',
+                      onTap: () => context.push('/settings/aura-profile'),
+                    ),
+
+                    // Subscription
+                    const _SectionLabel('Subscription'),
+                    _GlassNavTile(
+                      icon: Icons.workspace_premium_rounded,
+                      title: 'Upgrade Plan',
+                      subtitle: 'View plans and manage subscription',
+                      onTap: () => context.push('/paywall'),
+                    ),
+
+                    // Account
+                    const _SectionLabel('Account'),
+                    Selector<AuthViewModel, UserModel?>(
+                      selector: (_, vm) => vm.user,
+                      builder: (context, user, _) => user == null
+                          ? const SizedBox.shrink()
+                          : Column(
+                              children: [
+                                _GlassInfoTile(
+                                  icon: Icons.person_rounded,
+                                  label: 'Name',
+                                  value: user.displayName,
+                                ),
+                                const SizedBox(height: 8),
+                                _GlassInfoTile(
+                                  icon: Icons.alternate_email_rounded,
+                                  label: 'Email',
+                                  value: user.email,
+                                ),
+                              ],
                             ),
-                          ),
-                        ),
+                    ),
 
-                        // Aura memory — consent toggle + profile
-                        _SectionLabel('Aura Memory'),
-                        _GlassToggleTile(
-                          icon: Icons.memory_rounded,
-                          title: 'Aura memory',
-                          subtitle: authVm.auraMemoryEnabled
-                              ? 'Buddy learns from your chats to personalize everything'
-                              : 'Turn on to let Buddy remember what matters to you',
-                          value: authVm.auraMemoryEnabled,
-                          onChanged: (enabled) =>
-                              _onToggleAuraMemory(context, enabled),
-                        ),
-                        const SizedBox(height: 8),
-                        _GlassNavTile(
-                          icon: Icons.psychology_alt_rounded,
-                          title: 'Your Aura Profile',
-                          subtitle: 'See what Buddy has learned about you',
-                          onTap: () => Navigator.push(
-                            context,
-                            AuraProfileScreen.route(),
-                          ),
-                        ),
+                    // ── Feedback ─────────────────────────────────────────
+                    const _SectionLabel('Feedback'),
+                    _GlassNavTile(
+                      icon: Icons.rate_review_rounded,
+                      title: 'Send Feedback',
+                      subtitle: 'Tell us what to change or fix',
+                      onTap: () => showFeedbackSheet(context),
+                    ),
 
-                        // Subscription
-                        _SectionLabel('Subscription'),
-                        _GlassNavTile(
-                          icon: Icons.workspace_premium_rounded,
-                          title: 'Upgrade Plan',
-                          subtitle: 'View plans and manage subscription',
-                          onTap: () => context.push('/paywall'),
-                        ),
+                    // ── Legal ────────────────────────────────────────────
+                    const _SectionLabel('Legal'),
+                    _GlassNavTile(
+                      icon: Icons.admin_panel_settings_rounded,
+                      title: 'Privacy Policy',
+                      subtitle: 'How we handle your data',
+                      onTap: () => launchUrl(
+                        Uri.parse('https://auravoiceapp.com/privacy-policy'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    _GlassNavTile(
+                      icon: Icons.article_rounded,
+                      title: 'Terms of Service',
+                      subtitle: 'Terms and conditions',
+                      onTap: () => launchUrl(
+                        Uri.parse('https://auravoiceapp.com/terms-of-service'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                    ),
 
-                        // Account
-                        _SectionLabel('Account'),
-                        if (user != null) ...[
-                          _GlassInfoTile(
-                            icon: Icons.person_rounded,
-                            label: 'Name',
-                            value: user.displayName,
-                          ),
-                          const SizedBox(height: 8),
-                          _GlassInfoTile(
-                            icon: Icons.alternate_email_rounded,
-                            label: 'Email',
-                            value: user.email,
-                          ),
-                        ],
-
-                        // ── Feedback ─────────────────────────────────────────
-                        _SectionLabel('Feedback'),
-                        _GlassNavTile(
-                          icon: Icons.rate_review_rounded,
-                          title: 'Send Feedback',
-                          subtitle: 'Tell us what to change or fix',
-                          onTap: () => showFeedbackSheet(context),
-                        ),
-
-                        // ── Legal ────────────────────────────────────────────
-                        _SectionLabel('Legal'),
-                        _GlassNavTile(
-                          icon: Icons.admin_panel_settings_rounded,
-                          title: 'Privacy Policy',
-                          subtitle: 'How we handle your data',
-                          onTap: () => launchUrl(
-                            Uri.parse(
-                              'https://auravoiceapp.com/privacy-policy',
+                    const SizedBox(height: 28),
+                    // Sign Out / Delete only make sense for a real session. A
+                    // logged-out guest who lands here gets a Sign In button
+                    // instead, never a dead "Sign Out".
+                    Selector<AuthViewModel, bool>(
+                      selector: (_, vm) => vm.user != null,
+                      builder: (context, signedIn, _) => signedIn
+                          ? Column(
+                              children: [
+                                _GlassSignOutButton(
+                                  onTap: () => _signOut(context),
+                                ),
+                                const SizedBox(height: 12),
+                                _GlassDeleteAccountButton(
+                                  onTap: () => _confirmDeleteAccount(context),
+                                ),
+                              ],
+                            )
+                          : _GlassSignInButton(
+                              onTap: () => context.go('/login'),
                             ),
-                            mode: LaunchMode.externalApplication,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        _GlassNavTile(
-                          icon: Icons.article_rounded,
-                          title: 'Terms of Service',
-                          subtitle: 'Terms and conditions',
-                          onTap: () => launchUrl(
-                            Uri.parse(
-                              'https://auravoiceapp.com/terms-of-service',
-                            ),
-                            mode: LaunchMode.externalApplication,
-                          ),
-                        ),
+                    ),
 
-                        const SizedBox(height: 28),
-                        // Sign Out / Delete only make sense for a real session.
-                        // A logged-out guest who lands here gets a Sign In button
-                        // instead, never a dead "Sign Out".
-                        if (user != null) ...[
-                          _GlassSignOutButton(onTap: () => _signOut(context)),
-                          const SizedBox(height: 12),
-                          _GlassDeleteAccountButton(
-                            onTap: () => _confirmDeleteAccount(context),
-                          ),
-                        ] else
-                          _GlassSignInButton(onTap: () => context.go('/login')),
-
-                        const SizedBox(height: 28),
-                        Center(
-                          child: Text(
-                            'Aura v2.2.0',
-                            style: const TextStyle(
-                              color: AppColors.textTertiary,
-                              fontSize: 12,
-                            ),
-                          ),
+                    const SizedBox(height: 28),
+                    const Center(
+                      child: Text(
+                        'Aura v2.2.0',
+                        style: TextStyle(
+                          color: AppColors.textTertiary,
+                          fontSize: 12,
                         ),
-                      ],
-                    );
-                  },
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -583,7 +610,7 @@ class _GlassNavTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return PressableTile(
       onTap: onTap,
       child: FauxGlassCard.navTile(
         child: Row(
