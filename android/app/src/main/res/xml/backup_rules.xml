@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- AndroidKeyStore keys are device-bound. Restoring these encrypted files without their
+         wrapping key makes their Tink keysets undecryptable. -->
+    <exclude domain="sharedpref" path="buddy_keyboard_credential.xml" />
+    <exclude domain="sharedpref" path="buddy_keyboard_voice_handoff.xml" />
+</full-backup-content>

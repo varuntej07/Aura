@@ -155,15 +155,40 @@ class MainActivity : FlutterFragmentActivity() {
                         } else {
                             // Encrypted write is off the main thread; reply once it lands.
                             keyboardBridgeExecutor.execute {
-                                KeyboardCredentialStore.save(applicationContext, uid, idToken, apiBaseUrl)
-                                runOnUiThread { result.success(true) }
+                                try {
+                                    KeyboardCredentialStore.save(
+                                        applicationContext,
+                                        uid,
+                                        idToken,
+                                        apiBaseUrl,
+                                    )
+                                    runOnUiThread { result.success(true) }
+                                } catch (_: Exception) {
+                                    runOnUiThread {
+                                        result.error(
+                                            "credential_store_error",
+                                            "Unable to save the keyboard credential",
+                                            null,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
                     "clearKeyboardCredential" -> {
                         keyboardBridgeExecutor.execute {
-                            KeyboardCredentialStore.clear(applicationContext)
-                            runOnUiThread { result.success(true) }
+                            try {
+                                KeyboardCredentialStore.clear(applicationContext)
+                                runOnUiThread { result.success(true) }
+                            } catch (_: Exception) {
+                                runOnUiThread {
+                                    result.error(
+                                        "credential_store_error",
+                                        "Unable to clear the keyboard credential",
+                                        null,
+                                    )
+                                }
+                            }
                         }
                     }
                     else -> result.notImplemented()

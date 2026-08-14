@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.security.GeneralSecurityException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -51,7 +52,22 @@ object KeyboardCredentialStore {
 
     // A fresh prefs instance per call on purpose: the writer lives in a different process
     // (the app), so we never cache a handle that could go stale against its writes.
-    private fun prefs(context: Context): SharedPreferences {
+    @Synchronized
+    private fun prefs(context: Context): SharedPreferences = try {
+        createPrefs(context)
+    } catch (error: Exception) {
+        if (!error.hasCryptoCause()) throw error
+
+        // EncryptedSharedPreferences stores its Tink keysets inside this XML file. If Android
+        // restores the file without the AndroidKeyStore key that wrapped those keysets, even
+        // opening the preferences throws AEADBadTagException. The contents are already
+        // unrecoverable, so delete only this credential file and recreate it under the current
+        // device key. The auth listener will repopulate it for signed-in users.
+        context.deleteSharedPreferences(FILE_NAME)
+        createPrefs(context)
+    }
+
+    private fun createPrefs(context: Context): SharedPreferences {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
@@ -62,6 +78,16 @@ object KeyboardCredentialStore {
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
+    }
+
+    private fun Throwable.hasCryptoCause(): Boolean {
+        var current: Throwable? = this
+        while (current != null) {
+            if (current is GeneralSecurityException) return true
+            val cause = current.cause
+            current = if (cause === current) null else cause
+        }
+        return false
     }
 
     /** Called from the app process (via MethodChannel) on sign-in and token refresh. */
