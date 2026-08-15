@@ -295,6 +295,57 @@ gcloud run deploy "${SERVICE_NAME}" \
   # generations. Also
   # enable the Firestore TTL policy (not covered by the preflight):
   # `gcloud firestore fields ttls update expires_at --collection-group=meetings --enable-ttl`
+# Cloud Run preserves an explicit revision/tag traffic assignment across future
+# deploys. A tagged hotfix once left the stable production URL pinned to the old
+# revision while every later `gcloud run deploy` created a healthy revision at
+# 0% traffic. Restore the LATEST allocation explicitly on every production deploy
+# so this deploy and future deploys actually reach users.
+DEPLOYED_REVISION="$(gcloud run services describe "${SERVICE_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --format="value(status.latestCreatedRevisionName)")"
+if [[ -z "${DEPLOYED_REVISION}" ]]; then
+  echo "Cloud Run deploy verification failed: no latest created revision" >&2
+  exit 1
+fi
+echo "▶ Promoting the latest Cloud Run revision to 100% traffic..."
+gcloud run services update-traffic "${SERVICE_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --to-latest
+
+# Do not print "deployed" unless the control plane confirms that the stable URL
+# follows LATEST at 100%. This checks the allocation type, not just whichever
+# revision happens to be serving today, so a later deploy cannot silently fall
+# back to a stale explicit revision.
+DEPLOYED_SERVICE_STATE="$(gcloud run services describe "${SERVICE_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --format=json)"
+SERVING_REVISION="$(python -c '
+import json
+import sys
+
+service = json.load(sys.stdin)
+expected = sys.argv[1]
+traffic = service.get("status", {}).get("traffic", [])
+latest = next(
+    (
+        target
+        for target in traffic
+        if target.get("latestRevision") is True and target.get("percent") == 100
+    ),
+    None,
+)
+if latest is None or latest.get("revisionName") != expected:
+    actual = latest.get("revisionName") if latest else "none"
+    sys.exit(
+        f"Cloud Run traffic verification failed: deployed={expected}, serving={actual}"
+    )
+print(latest["revisionName"])
+' "${DEPLOYED_REVISION}" <<<"${DEPLOYED_SERVICE_STATE}")"
+echo "Cloud Run traffic verified: LATEST=100% (${SERVING_REVISION})"
+
 # Print service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
   --region="${REGION}" \
@@ -366,20 +417,35 @@ remove_scheduler_job_if_exists "juno-signal-engine-tick"
 
 # ── Prune old revisions + images (keep the 2 newest) ─────────────────────────
 # Cloud Run keeps every past revision forever (they cost nothing to keep idle,
-# but they pile up — this deploy inherited ~100). We keep exactly the 2 newest:
-# the live one plus one instant-rollback target. The newest revision always
-# carries 100% traffic (see --to-latest below), so it is never in the delete
-# set. `|| true` on each delete keeps one still-referenced/undeletable revision
-# from aborting the whole script (set -euo pipefail).
+# but they pile up — this deploy inherited ~100). Keep the 2 newest plus every
+# revision still referenced by a traffic target or tag. A tagged revision can be
+# referenced at 0%, and Cloud Run still refuses to delete it. `|| true` keeps an
+# unexpected control-plane race from aborting an otherwise successful deploy.
 KEEP_REVISIONS=2
 echo ""
 echo "▶ Pruning Cloud Run revisions (keeping newest ${KEEP_REVISIONS})..."
+ACTIVE_REVISIONS="$(python -c '
+import json
+import sys
+
+service = json.load(sys.stdin)
+names = sorted({
+    target.get("revisionName", "")
+    for target in service.get("status", {}).get("traffic", [])
+    if target.get("revisionName")
+})
+print("\n".join(names))
+' <<<"${DEPLOYED_SERVICE_STATE}")"
 gcloud run revisions list --service="${SERVICE_NAME}" --region="${REGION}" --project="${PROJECT_ID}" \
   --sort-by="~metadata.creationTimestamp" --format="value(metadata.name)" \
   | tr -d '\r' \
   | tail -n "+$((KEEP_REVISIONS + 1))" \
   | while read -r rev; do
       [[ -z "${rev}" ]] && continue
+      if grep -qxF "${rev}" <<<"${ACTIVE_REVISIONS}"; then
+        echo "  • keeping referenced revision ${rev}"
+        continue
+      fi
       echo "  • deleting old revision ${rev}"
       gcloud run revisions delete "${rev}" --region="${REGION}" --project="${PROJECT_ID}" --quiet || true
     done

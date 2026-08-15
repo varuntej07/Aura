@@ -41,7 +41,7 @@ All notification intent is normalized into `NotificationProposal`. Committed pro
                               v                                          v
                      +------------------+                      +------------------+
                      | Mobile FCM       |                      | Desktop outbox   |
-                     | token delivery   |                      | owner-scoped poll|
+                     | acceptance      |                      | durable queue    |
                      +--------+---------+                      +--------+---------+
                               |                                         |
                               +-------------------+---------------------+
@@ -54,9 +54,13 @@ All notification intent is normalized into `NotificationProposal`. Committed pro
 
 The orchestrator owns delivery policy, so producers do not independently implement quiet hours, caps, channel selection, or cross-feature priority. Automatic channel selection is resolved at delivery time from the authenticated user's current desktop capability and category preferences. Explicit meeting desktop delivery and mobile-only device-link security alerts retain their source contracts.
 
+Transport acceptance, device receipt, and human engagement are distinct. FCM success means `accepted`; an outbox write means `queued`; desktop acknowledgements advance the same logical row through `received`, `seen`, and `acted`. Initial sends never infer device receipt from FCM acceptance or a durable desktop row. Deduplication, cooldowns, and budgets close on transport acceptance so a queued desktop item is not resent, while delivery analytics use only confirmed receipt and engagement transitions. Legacy `sent`/`delivered` rows remain readable.
+
 Desktop capability is stored at `users/{uid}/notification_preferences/desktop`. Aura-Desktop refreshes it after owner binding and every five minutes while signed in. A missing or failed preference read fails closed to mobile-only. The desktop outbox remains owner-scoped under the same Firebase UID, and account IDs are never guessed or merged.
 
 Unsupported mobile routing types are mapped to the versioned desktop `generic` contract with the allowlisted `open_notifications` action. Sensitive personal sources are marked sensitive so operating-system toast rendering can use privacy-safe copy while the authenticated inbox retains the full message.
+
+Curiosity threads have a fail-closed semantic sensitivity gate at creation and immediately before delivery. Structured category and memory-graph signals are persisted as sensitivity provenance. The delivery recheck includes current thread context, generated question copy, and suggested replies, so a subject that changes after creation cannot bypass the shared mobile/desktop decision. User-initiated chat and replies remain available.
 
 ## Failure, retry, and recovery
 
@@ -68,8 +72,10 @@ Proactive item is too early ----> held for a later minute drain
 Item exceeds freshness TTL -----> dropped as stale
 Desktop not registered ---------> mobile-only delivery
 Desktop preference read fails --> mobile-only delivery, warning emitted
-Outbox row already exists ------> accepted as an idempotent desktop delivery
+Outbox row already exists ------> queued as idempotent transport acceptance
 Desktop received/seen/acted ----> same ledger row advances per-channel state
+Invalid outbound payload ------> rejected before FCM; no token is pruned
+FCM unregistered/mismatch -----> only the affected token is pruned; caches invalidated
 Drain crashes ------------------> queued proposals remain durable for next drain
 Committed delivery fails -------> caller receives and records the inline failure
 ```
@@ -96,5 +102,8 @@ Committed delivery fails -------> caller receives and records the inline failure
 - `backend/src/services/notifications/desktop_preferences.py`
 - `backend/src/services/notifications/delivery_router.py`
 - `backend/src/services/notifications/desktop_outbox.py`
+- `backend/src/services/notification_ledger.py`
+- `backend/src/services/fcm_token_registry.py`
+- `backend/src/services/threads/sensitivity.py`
 - `backend/src/services/timezone_utils.py`
 - `backend/src/handlers/scheduler.py`

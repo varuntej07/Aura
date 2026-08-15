@@ -207,6 +207,67 @@ Channel selection is backend-owned and evaluated at delivery time. Enabled deskt
 
 The Firebase UID is the ownership boundary on both sides. The system does not infer that two different UIDs belong to one person and does not merge their outboxes or preferences.
 
+### 5e. Alarm schedule sync
+
+A reminder now carries a `tier` of `reminder` or `alarm` at
+`users/{uid}/reminders/{id}`, alongside `local_time` (naive wall clock) and
+`timezone` (IANA). An absent `tier` means `reminder`, so already-released clients
+and every pre-existing document are unaffected.
+
+An alarm is **not** delivered as a notification. FCM cannot wake a doze'd device,
+so the schedule is distributed ahead of time and each client rings from its own
+local timer:
+
+- Authenticated `GET /reminders/alarms` returns the COMPLETE set of pending
+  alarm-tier reminders within 7 days, plus `server_time` for clock-drift
+  detection. Clients replace their local schedule with this answer; an alarm
+  absent from it must be disarmed. The endpoint returns 503 rather than an empty
+  200 on failure, because an empty list means "disarm everything". Each row also
+  carries a concrete `tone` slug and a stable `clip_tag` when that tone is
+  `buddy`; native schedules must accept both as optional for upgrade safety.
+- Authenticated `GET /reminders/{id}/wake-clip` returns `audio/mpeg` only when the
+  owned reminder is an alarm whose resolved tone is `buddy`. Clients fetch it at
+  arm time, cache it under `alarm_voice_{id}_{clip_tag}.mp3` in durable app
+  support storage, and pass the absolute `voice_clip_path` to native code. The
+  path is device-local and never crosses the API boundary.
+- Authenticated `POST /reminders/{id}/ack` takes `{action: dismiss|snooze|im_up}`
+  and, for a snooze, an optional `next_trigger_at` ISO instant naming the moment
+  the client already armed. A `next_trigger_at` in the past, or more than 24h
+  out, settles the row as dismissed instead of re-arming it.
+- Silent data-only FCM messages with `notification_type: "alarm_sync"` carry
+  `op: schedule|cancel|stop`; schedule messages also carry `tone` and `clip_tag`
+  for immediate arming without waiting for a poll.
+  These produce no user-visible artifact and deliberately bypass the
+  notification funnel; they are the fast path only, and the GET above is
+  authoritative.
+- At the fire time the backend still submits a `SOURCE_REMINDER` proposal, but
+  for alarms it is sent **data-only** with `alarm_fallback: "1"` so the client
+  decides whether to render it. A client whose local alarm already rang must
+  suppress it.
+
+Snooze keeps `status = "pending"` and moves `trigger_at` forward. No consumer may
+introduce a `snoozed` status: the due-scan selects on `pending` alone, so a
+snoozed row would never fire again.
+
+Alarm tone slugs are a shared contract mirrored by Flutter, Android, and the
+backend: `ripple`, `dawn`, `tide`, `pulse`, `chime`, `ascent`, `buddy`, `device`,
+and `""` for the phone default. The backend resolves per-alarm override ->
+`users/{uid}.settings.alarm_tone` -> `""` before a schedule reaches a device.
+
+`POST /devices/register` accepts an optional boolean `alarm_capable`, stored per
+token at `users/{uid}/fcm_tokens/{token}.alarm_capable`. It reports whether that
+device will actually ring, i.e. whether the OS granted exact-alarm access. Three
+states, and the difference is load-bearing: `true` and `false` are reports from a
+client that knows, **absent means unknown and must never be read as "cannot
+ring"** (it is the state of every client predating the alarm tier). The backend
+uses it to decide whether Buddy may promise a wake-up at all. A non-boolean is
+rejected with 400 rather than coerced.
+
+Aura-Desktop does not ring yet: `desktop_notifications` has no `alarm_due` type,
+so an alarm currently degrades to a generic desktop notification. Adding it means
+a new outbox type plus a local timer driven by `GET /reminders/alarms`, since the
+outbox poll cadence cannot ring at an exact minute.
+
 ### 6. Windows desktop distribution and auto-update
 
 Two independent consumers of the same Aura-Desktop GitHub release, not one shared mechanism:

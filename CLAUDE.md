@@ -42,6 +42,7 @@ Read the doc before changing a subsystem. Paths are references, not imports.
 |---|---|
 | Index of all of the below | `architectures/README.md` |
 | Chat and tools | `architectures/chat-and-tools.md` |
+| Alarms (the loud reminder tier) | `architectures/alarm-tier.md` |
 | Turn completion after disconnect | `architectures/background-chat-completion.md` |
 | Notification funnel | `architectures/notification-delivery.md` |
 | News signal ranking | `architectures/signal-engine.md` |
@@ -222,7 +223,8 @@ run days behind the repo before.
 When a request matches an installed skill, invoke it as the first action rather
 than asking whether to. Routing: product ideas -> office-hours · strategy ->
 plan-ceo-review · bugs -> investigate · ship/PR -> ship · QA -> qa · code review
--> review · docs -> document-release · architecture -> plan-eng-review.
+-> review · docs -> document-release · new feature planning -> plan-feature ·
+architecture -> plan-eng-review.
 
 **Boundaries always win over skill routing.** Anything that commits, pushes,
 deploys, sends, publishes, or schedules needs explicit confirmation in the

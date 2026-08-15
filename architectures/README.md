@@ -32,6 +32,7 @@ These documents describe the current code, not a target design. Every architectu
 | Area | Canonical overview |
 |---|---|
 | Text conversation and tools | [chat-and-tools.md](chat-and-tools.md) |
+| Alarms (the loud reminder tier) | [alarm-tier.md](alarm-tier.md) |
 | Turn completion after a disconnect | [background-chat-completion.md](background-chat-completion.md) |
 | Daily briefing | [daily-briefing.md](daily-briefing.md) |
 | Feedback relay | [feedback-relay.md](feedback-relay.md) |

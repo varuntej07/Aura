@@ -1,5 +1,20 @@
 # Repository Guidelines
 
+## Subjective Product Feedback
+
+When the user gives direct feedback about sound, visuals, wording, animation, or
+other subjective product qualities, treat the user's judgment as authoritative.
+
+Make the smallest requested change and stop. Do not perform research studies,
+benchmark alternatives, analyze waveforms/spectrums, compare multiple candidates,
+or attempt to predict whether the user will like the result unless explicitly
+asked.
+
+If the user asks to find an asset online, do one targeted search, choose one
+clearly usable result matching their description, integrate it, and leave
+subjective acceptance testing to the user. Do not inspect or evaluate the asset's
+subjective quality. Preserve everything the user said was already correct.
+
 ## Required Project Instructions
 
 Before changing this repository, read `CLAUDE.md` completely and follow its project-specific architecture, product, safety, testing, and working-style instructions. Re-read relevant sections when a task touches their subsystem. Higher-priority instructions and the user's current explicit request take precedence.
@@ -11,6 +26,18 @@ Aura combines a Flutter client with a Python backend. Flutter code lives in `lib
 The FastAPI service is in `backend/src/`; endpoints are in `handlers/`, integrations in `services/`, and the LiveKit worker in `agent/`. Python tests live in `backend/tests/`.
 
 ## Build, Test, and Development Commands
+
+### Proportional Verification
+
+For straightforward, low-risk edits, make the requested change directly without
+running analyzers, tests, builds, formatters, `git diff --check`, diff statistics,
+repository-wide completeness searches, process inspection, or process termination.
+This applies even when a small, mechanical change touches multiple files. The
+number of files alone is never a reason to run checks. Use verification only when
+the change is materially large, complex, behaviorally risky, or the user explicitly
+requests it. Almost never run Git statistics; they do not validate correctness. If
+an optional check stalls, stop and report it without investigating or killing
+processes unless the stalled process is demonstrably causing a real problem.
 
 - `flutter pub get` installs Dart dependencies.
 - `flutter run` starts the client on a selected device.

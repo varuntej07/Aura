@@ -27,13 +27,17 @@ fi
 # Optional config from ops/.env (passcode / posthog / offset). Safe if the file is absent.
 if [ -f "$OPS_DIR/.env" ]; then set -a; source "$OPS_DIR/.env"; set +a; fi
 
-# Passcode: prompt if not already set in .env. Min 8 chars, letters+numbers (no commas, the
-# env-var list below is comma-separated).
+# Passcode: prompt if not already set in .env. Keep it alphanumeric because the
+# gcloud environment-variable argument below uses @ as its custom delimiter.
 if [ -z "${OPS_PASSCODE:-}" ]; then
   read -r -s -p "Set a dashboard passcode (8+ letters/numbers): " OPS_PASSCODE; echo
 fi
 if [ "${#OPS_PASSCODE}" -lt 8 ]; then
   echo "ERROR: passcode must be at least 8 characters." >&2; exit 1
+fi
+if [[ ! "$OPS_PASSCODE" =~ ^[[:alnum:]]+$ ]]; then
+  echo "ERROR: passcode must contain letters and numbers only (no spaces or symbols)." >&2
+  exit 1
 fi
 
 # Optional least-privilege service account (see prerequisites below). Default SA used if unset.

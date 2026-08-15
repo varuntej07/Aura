@@ -42,6 +42,13 @@ The scheduler tick still submits a `SOURCE_REMINDER` proposal at the fire time.
 For an alarm that is a **backstop**, not the delivery mechanism: cover for a
 device that never held a local schedule.
 
+The regular wake-up alarm in Settings is a separate, device-local authority. Its
+weekly definition is stored once in native `SharedPreferences`; Android arms
+only the next selected wall-clock occurrence and derives the following one as
+soon as it fires. It never creates Firestore reminder rows and never waits for
+the backend scheduler. A pending snooze uses a separate local id so tomorrow's
+regular occurrence is already safe while the snooze is ringing.
+
 ## Division of labour
 
 **Kotlin owns the schedule. Dart owns the network.**
@@ -112,8 +119,10 @@ full-screen Activity is paused.
 - **`GET /reminders/alarms` returns 503, never an empty 200, on failure.** The
   answer is complete, so an empty list is an instruction to disarm everything.
   Returning one on a Firestore blip would cancel every alarm the user has.
-- **The reconcile replaces, it does not merge.** An alarm absent from the server's
-  answer was cancelled elsewhere and must stop ringing here.
+- **The reconcile replaces the server-owned partition, not device-local
+  alarms.** A server alarm absent from the answer was cancelled elsewhere and
+  must stop ringing here. The Settings-owned regular alarm and its snooze have
+  local source markers and survive that replacement.
 
 ## The permission
 
@@ -175,8 +184,8 @@ somewhere.
 ## Code anchors
 
 - `backend/src/services/alarm_sync.py` (silent control pushes; why they bypass the funnel)
-- `backend/src/handlers/reminders.py` (`GET /reminders/alarms`, `POST /reminders/{id}/ack`)
+- `backend/src/handlers/reminders.py` (`GET /reminders/alarms`, alarm acks, coming-soon interest)
 - `backend/src/services/tool_executor.py` (`_set_reminder` tier + `requeue_stuck_reminders`)
 - `backend/src/handlers/scheduler.py` (backstop proposal, stuck-reminder sweep)
 - `android/app/src/main/kotlin/dev/varuntej/aura/alarm/` (the whole ringing path)
-- `lib/data/services/alarm_service.dart` (reconcile, ack flush, fallback rendering)
+- `lib/data/services/alarm_service.dart` (regular alarm bridge, reconcile, ack and interest queues)
