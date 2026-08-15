@@ -27,7 +27,13 @@ class AlarmReceiver : BroadcastReceiver() {
         // seconds of each other for the same alarm. Whichever arrives first
         // claims the ring; the second is dropped. Waking someone twice at 3 AM
         // for one alarm is its own bug.
-        if (!AlarmStore.claimFired(context, schedule.reminderId, System.currentTimeMillis())) {
+        if (!AlarmStore.claimFired(
+                context,
+                schedule.reminderId,
+                schedule.triggerAtIso,
+                System.currentTimeMillis(),
+            )
+        ) {
             Log.i(TAG, "already ringing/rang, dropping duplicate: ${schedule.reminderId}")
             return
         }

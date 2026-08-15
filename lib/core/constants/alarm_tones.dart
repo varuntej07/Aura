@@ -9,10 +9,9 @@
 /// the backend before shipping an app build that offers a new one, or the
 /// server drops the unknown slug and the alarm quietly falls back.
 ///
-/// [beatPeriodMs] is not decoration. Every bundled clip is a seamless loop of an
-/// exact integer number of these, and the alarm screen emits one ripple per
-/// beat from a single anchor timestamp. A wrong value here does not break audio,
-/// it desynchronises the water from the sound.
+/// [beatPeriodMs] is optional timing metadata for the alarm ripples. Zero means
+/// no beat has been declared for the clip, so the native alarm screen uses its
+/// ambient ripple timing instead of inventing one.
 library;
 
 import 'package:flutter/material.dart';
@@ -44,9 +43,9 @@ class AlarmTone {
   /// Also the path Kotlin opens, prefixed with `flutter_assets/`. One file, so
   /// the preview and the 3 AM alarm can never be different sounds.
   String get previewAsset =>
-      'assets/alarm_tones/${slug == kAlarmToneBuddy ? kAlarmToneBed : slug}.ogg';
+      'assets/alarm_tones/${slug == kAlarmToneBuddy ? kAlarmToneBed : slug}.wav';
 
-  bool get isBundled => beatPeriodMs > 0 && slug != kAlarmToneBuddy;
+  bool get isBundled => slug != kAlarmToneBuddy;
 }
 
 /// Buddy speaks the reminder aloud in the user's chosen voice, over [_buddyBed].
@@ -65,58 +64,79 @@ const String kAlarmToneDevice = 'device';
 const String kAlarmToneSystemDefault = '';
 
 /// The tone Buddy's voice rings over, and what an unresolvable slug becomes.
-const String kAlarmToneBed = 'ripple';
+const String kAlarmToneBed = 'morning-clock-alarm';
 
-/// Order is the order the picker renders: gentlest first, hardest to sleep
-/// through last, because that is how someone shops for an alarm.
+/// Order is the order the picker renders: familiar alarms first, followed by
+/// the more distinctive character sounds.
 const List<AlarmTone> kAlarmTones = [
   AlarmTone(
-    slug: 'ripple',
-    label: 'Ripple',
-    blurb: 'Soft wooden droplets. Wakes you without startling you.',
-    beatPeriodMs: 750,
-    tint: Color(0xFF6EE1EB), // cyan
-  ),
-  AlarmTone(
-    slug: 'dawn',
-    label: 'Dawn',
-    blurb: 'A warm bell that swells and climbs. Slow on purpose.',
-    beatPeriodMs: 1500,
+    slug: 'morning-clock-alarm',
+    label: 'Morning Clock',
+    blurb: 'A familiar bedside alarm for everyday wake-ups.',
+    beatPeriodMs: 0,
     tint: Color(0xFFE89B5A), // warm
   ),
   AlarmTone(
-    slug: 'tide',
-    label: 'Tide',
-    blurb: 'A low wash with a shimmer over it. The calmest one here.',
-    beatPeriodMs: 2000,
-    tint: Color(0xFF5A96FF), // blue
+    slug: 'alert-alarm',
+    label: 'Alert',
+    blurb: 'A straightforward alert-style alarm.',
+    beatPeriodMs: 0,
+    tint: Color(0xFF6EE1EB), // cyan
   ),
   AlarmTone(
-    slug: 'chime',
-    label: 'Chime',
-    blurb: 'Bright glass bells, clear enough to cut through a dream.',
-    beatPeriodMs: 900,
-    tint: Color(0xFF34E3CB), // teal bright
-  ),
-  AlarmTone(
-    slug: 'pulse',
-    label: 'Pulse',
-    blurb: 'Two firm notes, over and over. Hard to ignore.',
-    beatPeriodMs: 600,
+    slug: 'buzzer-alarm',
+    label: 'Alarm Buzzer',
+    blurb: 'A classic buzzer-style alarm.',
+    beatPeriodMs: 0,
     tint: Color(0xFF966EF5), // violet
   ),
   AlarmTone(
-    slug: 'ascent',
-    label: 'Ascent',
-    blurb: 'Climbs and gets louder every pass. For heavy sleepers.',
-    beatPeriodMs: 500,
+    slug: 'warning-buzzer',
+    label: 'Warning Buzzer',
+    blurb: 'A warning-style buzzer for urgent alarms.',
+    beatPeriodMs: 0,
     tint: Color(0xFFF0B67A), // warm soft
+  ),
+  AlarmTone(
+    slug: 'street-public-alarm',
+    label: 'Public Alarm',
+    blurb: 'A public alarm sound with a larger presence.',
+    beatPeriodMs: 0,
+    tint: Color(0xFF5A96FF), // blue
+  ),
+  AlarmTone(
+    slug: 'battleship-alarm',
+    label: 'Battleship',
+    blurb: 'A naval-style alarm with a dramatic character.',
+    beatPeriodMs: 0,
+    tint: Color(0xFF34E3CB), // teal bright
+  ),
+  AlarmTone(
+    slug: 'retro-game-emergency',
+    label: 'Retro Emergency',
+    blurb: 'An arcade-style emergency alarm.',
+    beatPeriodMs: 0,
+    tint: Color(0xFF966EF5), // violet
+  ),
+  AlarmTone(
+    slug: 'rooster-crowing',
+    label: 'Morning Rooster',
+    blurb: 'A classic rooster call for the morning.',
+    beatPeriodMs: 0,
+    tint: Color(0xFFE89B5A), // warm
+  ),
+  AlarmTone(
+    slug: 'short-rooster-crowing',
+    label: 'Quick Rooster',
+    blurb: 'A shorter rooster call that gets to the point.',
+    beatPeriodMs: 0,
+    tint: Color(0xFF6EE1EB), // cyan
   ),
   AlarmTone(
     slug: kAlarmToneBuddy,
     label: "Buddy's voice",
-    blurb: 'Ripple, then Buddy reads your reminder out loud.',
-    beatPeriodMs: 750,
+    blurb: 'Morning Clock, then Buddy reads your reminder out loud.',
+    beatPeriodMs: 0,
     tint: Color(0xFF1EC8B0), // house teal
   ),
 ];

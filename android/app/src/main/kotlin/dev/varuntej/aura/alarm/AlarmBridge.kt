@@ -106,9 +106,15 @@ object AlarmBridge {
                 // user a second time for the thing that worked.
                 "firedRecently" -> {
                     val id = call.argument<String>("reminder_id")
+                    val triggerAt = call.argument<String>("trigger_at").orEmpty()
                     result.success(
                         !id.isNullOrBlank() &&
-                            AlarmStore.firedRecently(app, id, System.currentTimeMillis()),
+                            AlarmStore.firedRecently(
+                                app,
+                                id,
+                                triggerAt,
+                                System.currentTimeMillis(),
+                            ),
                     )
                 }
 

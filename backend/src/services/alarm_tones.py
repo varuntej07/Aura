@@ -17,14 +17,17 @@ the sync row, so the device never has to know the precedence rule.
 
 from __future__ import annotations
 
-# Bundled clips. Order is the picker's order, gentlest first.
+# Bundled clips. Order mirrors the picker.
 BUNDLED_TONES: tuple[str, ...] = (
-    "ripple",
-    "dawn",
-    "tide",
-    "chime",
-    "pulse",
-    "ascent",
+    "morning-clock-alarm",
+    "alert-alarm",
+    "buzzer-alarm",
+    "warning-buzzer",
+    "street-public-alarm",
+    "battleship-alarm",
+    "retro-game-emergency",
+    "rooster-crowing",
+    "short-rooster-crowing",
 )
 
 # Buddy reads the reminder aloud in the user's chosen voice, over the bed clip.

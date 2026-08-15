@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/network/api_client.dart';
 import '../../core/logging/app_logger.dart';
@@ -61,6 +62,8 @@ class AlarmService {
   static const String controlMessageType = 'alarm_sync';
 
   static const String _tag = 'AlarmService';
+  static const String _firedOccurrencesPrefsKey = 'alarm_fired_occurrences';
+  static const Duration _firedOccurrenceTtl = Duration(hours: 1);
 
   /// Must match CHANNEL_ID in AlarmService.kt. A channel's importance and sound
   /// are immutable after creation, so the two sides cannot be allowed to drift.
@@ -350,10 +353,37 @@ class AlarmService {
     if ((data['alarm_fallback'] ?? '').toString() != '1') return false;
     final reminderId = (data['reminder_id'] ?? '').toString();
     if (reminderId.isEmpty) return false;
+    final triggerAt = (data['alarm_trigger_at'] ?? '').toString();
+
+    // Firebase handles a background data message in a Flutter engine that does
+    // not run MainActivity.configureFlutterEngine, so Aura's custom MethodChannel
+    // is not registered there. AlarmStore mirrors its fired ledger into Flutter's
+    // own SharedPreferences file, which is available in both engines and needs no
+    // Firebase or network round trip.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final raw = prefs.getString(_firedOccurrencesPrefsKey);
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          final occurrence = _occurrenceKey(reminderId, triggerAt);
+          final firedAt = decoded[occurrence];
+          if (firedAt is num &&
+              DateTime.now().millisecondsSinceEpoch - firedAt.toInt() <
+                  _firedOccurrenceTtl.inMilliseconds) {
+            return true;
+          }
+        }
+      }
+    } catch (e) {
+      AppLogger.warning('could not read local fired ledger: $e', tag: _tag);
+    }
+
     try {
       return await _channel.invokeMethod<bool>(
             'firedRecently',
-            {'reminder_id': reminderId},
+            {'reminder_id': reminderId, 'trigger_at': triggerAt},
           ) ??
           false;
     } catch (e) {
@@ -490,6 +520,13 @@ class AlarmService {
       AppLogger.warning('default tone mirror failed: $e', tag: _tag);
       return false;
     }
+  }
+
+  String _occurrenceKey(String reminderId, String triggerAt) {
+    if (triggerAt.isEmpty) return reminderId;
+    final parsed = DateTime.tryParse(triggerAt);
+    if (parsed == null) return '$reminderId@$triggerAt';
+    return '$reminderId@${parsed.toUtc().millisecondsSinceEpoch}';
   }
 
   Future<bool> _invokeBool(String method) async {

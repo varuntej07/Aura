@@ -103,15 +103,11 @@ flutter:
     # Voice-picker previews, one MP3 per voice_catalog.CATALOG entry.
     # Regenerate with: cd backend && python -m src.agent.generate_voice_previews
     - assets/voices/
-    # Alarm tones, one OGG per kAlarmTones entry. Bundled as Flutter assets
+    # Alarm tones, one WAV per bundled kAlarmTones entry. Bundled as Flutter assets
     # rather than res/raw so the settings preview and the 3 AM alarm play the
     # exact same bytes: AlarmTones.kt reads them out of the APK at
-    # flutter_assets/assets/alarm_tones/<slug>.ogg.
-    #
-    # Each file is a seamless loop of an EXACT integer number of its declared
-    # beat period. AlarmRippleView derives ring emission from elapsed/beat
-    # against one anchor timestamp, so a loop length that is not a multiple of
-    # the beat would slide the visuals off the audio a little more on every wrap.
+    # flutter_assets/assets/alarm_tones/<slug>.wav. Tones without declared beat
+    # metadata use AlarmRippleView's ambient ripple timing.
     - assets/alarm_tones/
 
   fonts:

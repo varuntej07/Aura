@@ -715,6 +715,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                             # half-asleep user is not woken a second time by the
                             # safety net for the thing that worked.
                             "alarm_fallback": "1" if is_alarm else "0",
+                            # The client dedupes one alarm OCCURRENCE, not the
+                            # reminder id. A snooze keeps the same id but must be
+                            # allowed to ring again at its new trigger time.
+                            **(
+                                {"alarm_trigger_at": str(data.get("trigger_at", ""))}
+                                if is_alarm
+                                else {}
+                            ),
                             # data_only strips the display block, so the text has
                             # to travel in the payload for the client to render
                             # it. Only populated for alarms; a plain reminder is

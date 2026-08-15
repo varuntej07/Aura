@@ -15,13 +15,12 @@ import android.util.Log
  * which is why the table is duplicated here rather than read from Dart.
  *
  * Clips are bundled as FLUTTER assets, not `res/raw`. That is deliberate: the
- * settings picker previews `assets/alarm_tones/<slug>.ogg` through just_audio
+ * settings picker previews `assets/alarm_tones/<slug>.wav` through just_audio
  * and this reads the same bytes out of the same APK entry, so the sound someone
  * chose and the sound that wakes them cannot drift apart.
  *
- * [beatPeriodMs] is what [AlarmRippleView] emits ripples on. Every clip is a
- * seamless loop of an exact integer number of beats, so one anchor timestamp
- * keeps the water in time with the audio for as long as the alarm rings.
+ * These clips do not declare beat metadata, so [AlarmRippleView] uses its
+ * ambient timing while the audio loops.
  */
 object AlarmTones {
 
@@ -34,22 +33,25 @@ object AlarmTones {
     const val DEVICE = "device"
 
     /** What Buddy's voice rings over, and what an unknown slug degrades to. */
-    const val BED_SLUG = "ripple"
+    const val BED_SLUG = "morning-clock-alarm"
 
     /** No beat this build knows about: the screen falls back to ambient ripples. */
     const val AMBIENT_BEAT_MS = 3200L
 
-    data class Tone(val slug: String, val beatPeriodMs: Long) {
-        val assetPath: String get() = "flutter_assets/assets/alarm_tones/$slug.ogg"
+    data class Tone(val slug: String, val beatPeriodMs: Long = AMBIENT_BEAT_MS) {
+        val assetPath: String get() = "flutter_assets/assets/alarm_tones/$slug.wav"
     }
 
     private val BUNDLED = listOf(
-        Tone("ripple", 750L),
-        Tone("dawn", 1500L),
-        Tone("tide", 2000L),
-        Tone("chime", 900L),
-        Tone("pulse", 600L),
-        Tone("ascent", 500L),
+        Tone("morning-clock-alarm"),
+        Tone("alert-alarm"),
+        Tone("buzzer-alarm"),
+        Tone("warning-buzzer"),
+        Tone("street-public-alarm"),
+        Tone("battleship-alarm"),
+        Tone("retro-game-emergency"),
+        Tone("rooster-crowing"),
+        Tone("short-rooster-crowing"),
     ).associateBy { it.slug }
 
     /**

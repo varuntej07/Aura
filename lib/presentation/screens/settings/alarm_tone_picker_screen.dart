@@ -12,7 +12,7 @@ import '../../viewmodels/settings_viewmodel.dart';
 
 /// Lets the user choose what wakes them.
 ///
-/// Previews are the SAME files the alarm plays: `assets/alarm_tones/<slug>.ogg`
+/// Previews are the SAME files the alarm plays: `assets/alarm_tones/<slug>.wav`
 /// is bundled once and read by Kotlin out of the APK at ring time, so what is
 /// auditioned here cannot drift from what actually goes off at 6 AM.
 ///

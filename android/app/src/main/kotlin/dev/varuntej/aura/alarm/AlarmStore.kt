@@ -29,6 +29,8 @@ object AlarmStore {
 
     /** reminder_id -> epoch millis it rang. Suppresses duplicate rings. */
     private const val KEY_FIRED = "fired"
+    private const val FLUTTER_PREFS = "FlutterSharedPreferences"
+    private const val FLUTTER_KEY_FIRED = "flutter.alarm_fired_occurrences"
 
     /** Acks taken while offline or with no app running, flushed by Dart later. */
     private const val KEY_PENDING_ACKS = "pending_acks"
@@ -116,23 +118,51 @@ object AlarmStore {
      * once from the local schedule and once from the server's backstop push,
      * and waking someone twice at 3 AM for the same thing is its own bug.
      */
-    fun claimFired(context: Context, reminderId: String, nowMs: Long): Boolean {
+    fun claimFired(
+        context: Context,
+        reminderId: String,
+        triggerAtIso: String,
+        nowMs: Long,
+    ): Boolean {
         val ledger = firedLedger(context)
-        val previous = ledger[reminderId]
+        val occurrence = occurrenceKey(reminderId, triggerAtIso)
+        val previous = ledger[occurrence]
         if (previous != null && nowMs - previous < FIRED_LEDGER_TTL_MS) return false
         val next = ledger.filterValues { nowMs - it < FIRED_LEDGER_TTL_MS }.toMutableMap()
+        next[occurrence] = nowMs
+        // A reminder-only alias keeps backstops from older backend revisions
+        // suppressible. Local alarm claims never consult this alias, so a snooze
+        // with the same reminder id remains a distinct occurrence and can ring.
         next[reminderId] = nowMs
         writeFired(context, next)
         return true
     }
 
-    fun firedRecently(context: Context, reminderId: String, nowMs: Long): Boolean {
-        val at = firedLedger(context)[reminderId] ?: return false
+    fun firedRecently(
+        context: Context,
+        reminderId: String,
+        triggerAtIso: String,
+        nowMs: Long,
+    ): Boolean {
+        val at = firedLedger(context)[occurrenceKey(reminderId, triggerAtIso)] ?: return false
         return nowMs - at < FIRED_LEDGER_TTL_MS
     }
 
+    private fun occurrenceKey(reminderId: String, triggerAtIso: String): String {
+        if (triggerAtIso.isBlank()) return reminderId
+        val epochMs = runCatching { java.time.Instant.parse(triggerAtIso).toEpochMilli() }.getOrNull()
+            ?: return "$reminderId@$triggerAtIso"
+        return "$reminderId@$epochMs"
+    }
+
     private fun firedLedger(context: Context): Map<String, Long> {
-        val raw = prefs(context).getString(KEY_FIRED, null) ?: return emptyMap()
+        val flutterPrefs = context.applicationContext.getSharedPreferences(
+            FLUTTER_PREFS,
+            Context.MODE_PRIVATE,
+        )
+        val raw = flutterPrefs.getString(FLUTTER_KEY_FIRED, null)
+            ?: prefs(context).getString(KEY_FIRED, null)
+            ?: return emptyMap()
         return try {
             val root = JSONObject(raw)
             root.keys().asSequence().associateWith { root.optLong(it, 0L) }
@@ -144,7 +174,17 @@ object AlarmStore {
     private fun writeFired(context: Context, map: Map<String, Long>) {
         val root = JSONObject()
         map.forEach { (id, at) -> root.put(id, at) }
-        prefs(context).edit().putString(KEY_FIRED, root.toString()).commit()
+        // This is deliberately the preference file used by Flutter's
+        // shared_preferences plugin. Firebase's background Flutter engine does
+        // not run MainActivity.configureFlutterEngine, so the custom alarm
+        // MethodChannel is unavailable there. Sharing this one durable ledger
+        // lets the background handler suppress a backstop without Firebase,
+        // network access, or an Activity-bound channel.
+        context.applicationContext
+            .getSharedPreferences(FLUTTER_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(FLUTTER_KEY_FIRED, root.toString())
+            .commit()
     }
 
     // Pending acks ---------------------------------------------------------
