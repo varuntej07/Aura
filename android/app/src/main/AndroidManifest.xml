@@ -125,6 +125,60 @@
             </intent-filter>
         </service>
 
+        <!-- Alarm tier. FCM cannot wake a doze'd phone, so an alarm is registered
+             locally with AlarmManager.setAlarmClock and fires through these three
+             components with no network and no Flutter engine involved.
+
+             AlarmActivity is the full-screen UI shown over the lock screen. Its own
+             task (excludeFromRecents + no history) so dismissing an alarm at 3 AM
+             never leaves a stray card in the recents list, and so it can never be
+             resumed later out of context. NOT exported: only this app's own
+             PendingIntents and the system's full-screen intent may start it. -->
+        <activity
+            android:name=".alarm.AlarmActivity"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:showWhenLocked="true"
+            android:taskAffinity=".alarm"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode" />
+
+        <!-- Receives the AlarmManager fire broadcast. Not exported: the only thing
+             that may trigger it is the PendingIntent this app registered. -->
+        <receiver
+            android:name=".alarm.AlarmReceiver"
+            android:exported="false" />
+
+        <!-- Re-arms after the OS discards the alarm table (reboot, package
+             replace) and re-anchors wall-clock alarms after a timezone change.
+             MUST be exported so the system can deliver these broadcasts. -->
+        <receiver
+            android:name=".alarm.AlarmBootReceiver"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <!-- Sent instead of BOOT_COMPLETED by several OEM fast-boot ROMs. -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Holds the wake lock and plays the alarm. mediaPlayback rather than
+             specialUse: it is literally playing audio, and specialUse requires a
+             Play Console justification this does not need. -->
+        <service
+            android:name=".alarm.AlarmService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <!-- flutter_local_notifications: receives notification ACTION taps (the
              thread follow-up reply chips, showsUserInterface: false). The plugin
              does NOT merge this itself; without it Android silently drops the
@@ -197,6 +251,33 @@
     <!-- Photo library: API 32 and below -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"/>
+
+    <!-- Alarm tier. Everything below exists because a push notification cannot
+         wake a sleeping phone: an alarm has to be a schedule the OS itself holds.
+
+         SCHEDULE_EXACT_ALARM, deliberately NOT USE_EXACT_ALARM. USE_EXACT_ALARM is
+         granted automatically, which is tempting, but Play policy restricts it to
+         apps whose CORE function is an alarm clock or calendar. Aura is a
+         companion app, so declaring it invites a policy takedown of the whole
+         listing. This one is user-grantable instead, denied by default from
+         Android 14, and requested in-conversation the first time Buddy is asked
+         to wake someone. See AlarmPermissions. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+    <!-- Lets the alarm take over a locked screen. Restricted on Android 14+; when
+         it is denied the alarm degrades to a heads-up notification that still
+         rings at alarm volume, so this is an upgrade rather than the mechanism. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
+    <!-- Escalating vibration, the independent second channel when audio fails. -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- Holds the device awake while the alarm rings. Released on a timeout that
+         matches the give-up window so it can never leak into an all-day drain. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- A reboot wipes the OS alarm table. Without this an alarm set before an
+         overnight system update simply never rings, with nothing to reveal it. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- The ringing service. mediaPlayback because it is playing audio. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
 
     <queries>
         <intent>

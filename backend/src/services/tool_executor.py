@@ -27,6 +27,7 @@ from ..shared.tools import (
     claude_tool_definitions,
     validate_and_coerce_tool_input,
 )
+from . import alarm_sync, alarm_tones
 from .analytics.llm_telemetry import start_tool_span
 from .calendar_time import parse_calendar_when
 from .chat_completion import tool_idempotency as _tool_idempotency
@@ -400,12 +401,31 @@ class ToolExecutor:
         try:
             validate_and_coerce_tool_input(tool_name, input_data)
         except ValueError as exc:
+            # This branch sits above the "Tool: executing" log, so until this
+            # warning existed a rejected call left NO trace at all: the model got a
+            # failure, the user got an apology, and the logs looked like the tool
+            # was never asked for. A schema rejection and a healthy turn must never
+            # read the same way.
+            logger.warn("Tool: schema validation rejected the call", {
+                "tool": tool_name,
+                "user_id": self._user_id,
+                "input_keys": sorted(input_data.keys()),
+                "error": str(exc),
+            })
             return {
                 "ok": False,
                 "error": True,
                 "code": "validation_error",
                 "retryable": False,
-                "user_message": str(exc),
+                # Buddy speaks user_message close to verbatim, and schema language
+                # ("Missing required field: tier") means nothing to a person. Left
+                # raw, the model paraphrases it into "the tool isn't responding"
+                # and starts recommending other apps. The detail stays in `debug`,
+                # which is for logs and evals, not for the reply.
+                "user_message": (
+                    "I couldn't set that one up. Say it once more and I'll get it."
+                ),
+                "debug": str(exc),
             }
         dispatch: dict[str, Any] = {
             "set_reminder": self._set_reminder,
@@ -538,6 +558,14 @@ class ToolExecutor:
     async def _set_reminder(self, inp: dict[str, Any]) -> ToolResult:
         message = str(inp.get("message", "")).strip()
         when = str(inp.get("when", "")).strip()
+        # Anything unrecognised collapses to the quiet tier. An older client or a
+        # model that omits the field must never accidentally arm a 3 AM siren.
+        tier = alarm_sync.normalize_tier(inp.get("tier"))
+        # Per-alarm sound override. Empty is the normal answer and means "use
+        # whatever the user picked in settings", resolved at sync time. An
+        # unrecognised slug becomes empty rather than failing the call: a
+        # rejected set_reminder over a cosmetic argument is a missed alarm.
+        tone = alarm_tones.normalize_tone(inp.get("tone"))
 
         if not message:
             raise ValueError("message is required")
@@ -558,16 +586,58 @@ class ToolExecutor:
         # reminder, while a batch of DISTINCT tasks at one time is preserved.
         duplicate = await self._find_duplicate_reminder(message, trigger_at_dt)
         if duplicate is not None:
-            logger.info("ToolExecutor: duplicate reminder suppressed", {
-                "user_id": self._user_id,
-                "reminder_id": duplicate["reminder_id"],
-                "trigger_at": trigger_at,
-            })
+            existing_tier = alarm_sync.normalize_tier(duplicate.get("tier"))
+            duplicate_id = duplicate["reminder_id"]
+            duplicate_update: dict[str, Any] = {}
+            # Dedup must never silence an escalation. "Remind me at 3am" followed
+            # by "actually make that an alarm" is the SAME occasion by every
+            # similarity measure, so without this the second request collapses
+            # into the first and the user is left with the quiet tier they
+            # explicitly asked to leave. Upgrades only: an alarm is never
+            # downgraded to a banner by a re-phrasing.
+            if tier == alarm_sync.TIER_ALARM and existing_tier != alarm_sync.TIER_ALARM:
+                duplicate_update.update({
+                    "tier": alarm_sync.TIER_ALARM,
+                    "local_time": parsed_time.local.replace(tzinfo=None).isoformat(),
+                    "timezone": parsed_time.timezone,
+                })
+
+            # A repeated request may be the user's correction of the sound rather
+            # than a second alarm. Preserve an existing override when the new call
+            # says "use my default", but apply an explicit new tone even when the
+            # reminder itself dedupes.
+            if tier == alarm_sync.TIER_ALARM and tone:
+                if alarm_tones.normalize_tone(duplicate.get("tone")) != tone:
+                    duplicate_update["tone"] = tone
+
+            if duplicate_update:
+                await _run(
+                    lambda: self._reminders_ref()
+                    .document(duplicate_id)
+                    .update(duplicate_update)
+                )
+                duplicate = {**duplicate, **duplicate_update}
+                existing_tier = alarm_sync.normalize_tier(duplicate.get("tier"))
+                asyncio.create_task(alarm_sync.push_schedule(self._user_id, {
+                    **duplicate, "id": duplicate_id,
+                }))
+                logger.info("ToolExecutor: duplicate reminder updated", {
+                    "user_id": self._user_id,
+                    "reminder_id": duplicate_id,
+                    "fields": sorted(duplicate_update),
+                })
+            else:
+                logger.info("ToolExecutor: duplicate reminder suppressed", {
+                    "user_id": self._user_id,
+                    "reminder_id": duplicate_id,
+                    "trigger_at": trigger_at,
+                })
             return {
-                "reminder_id": duplicate["reminder_id"],
+                "reminder_id": duplicate_id,
                 "message": duplicate.get("message", message),
                 "trigger_at": duplicate.get("trigger_at", trigger_at),
                 "status": "pending",
+                "tier": existing_tier,
                 "timezone": parsed_time.timezone,
             }
 
@@ -579,15 +649,39 @@ class ToolExecutor:
             "message": message,
             "trigger_at": trigger_at,
             "status": "pending",
+            "tier": tier,
+            # The wall clock the user actually asked for, plus the zone it was
+            # asked in. `trigger_at` alone is an absolute instant, which is the
+            # right anchor for a reminder ("the meeting starts at 14:00 UTC") and
+            # the WRONG one for an alarm: "wake me at 6" means 6 AM where the
+            # sleeper is, so a device that has moved timezones re-resolves these
+            # rather than firing at the originally-computed instant.
+            "local_time": parsed_time.local.replace(tzinfo=None).isoformat(),
+            "timezone": parsed_time.timezone,
             "created_via": self._created_via,
             "snooze_count": 0,
             "created_at": now_iso,
         }
+        # Written only when the user actually asked for a sound, and only on the
+        # tier that makes one. An absent field is the normal case and means the
+        # alarm rings with whatever they chose in settings, resolved at sync time
+        # rather than frozen here: changing the setting should move every alarm
+        # that never asked for something specific.
+        if tone and tier == alarm_sync.TIER_ALARM:
+            data["tone"] = tone
         if self._session_id:
             # Stamps the reminder with its originating session so the evaluator can
             # drop that topic: an explicit reminder is already a promise to ping.
             data["session_id"] = self._session_id
         await _run(lambda: self._reminders_ref().document(reminder_id).set(data))
+
+        # Arm the alarm on the user's devices. FCM cannot wake a doze'd phone at
+        # the fire time, so the schedule has to reach the device NOW and be
+        # registered with the OS locally. Detached and best-effort: a dropped
+        # push is repaired by the client's reconcile against GET /reminders/alarms,
+        # and a slow FCM call must never delay the tool response.
+        if tier == alarm_sync.TIER_ALARM:
+            asyncio.create_task(alarm_sync.push_schedule(self._user_id, data))
 
         # Open a curiosity thread for this reminder so Buddy can later ask what
         # it is about (not whether it was done). Fire-and-forget and a no-op
@@ -609,16 +703,75 @@ class ToolExecutor:
         asyncio.create_task(capture_event(
             distinct_id=self._user_id,
             event="reminder_created",
-            properties={},
+            properties={"tier": tier},
         ))
 
-        return {
+        result: ToolResult = {
             "reminder_id": reminder_id,
             "message": message,
             "trigger_at": trigger_at,
             "status": "pending",
+            "tier": tier,
             "timezone": parsed_time.timezone,
         }
+        if tier == alarm_sync.TIER_ALARM:
+            capable = await self._any_alarm_capable_device()
+            result["alarm_capable"] = capable
+            result["instruction"] = self._alarm_confirmation_instruction(capable)
+        return result
+
+    async def _any_alarm_capable_device(self) -> bool | None:
+        """Whether any of this user's devices will actually ring an alarm.
+
+        None means no device has reported either way, which is every user on an
+        app build that predates the alarm tier.
+        """
+        from .fcm_token_registry import any_alarm_capable_device
+
+        try:
+            return await asyncio.to_thread(any_alarm_capable_device, self._user_id)
+        except Exception as exc:
+            # Fail toward the promise. A Firestore blip must not turn a working
+            # alarm into a hedged one; the device is what actually rings, and it
+            # is already armed by this point.
+            logger.warn("ToolExecutor: alarm capability lookup failed", {
+                "user_id": self._user_id,
+                "error": str(exc),
+            })
+            return None
+
+    def _alarm_confirmation_instruction(self, capable: bool | None) -> str:
+        """What Buddy must say about an alarm it just set.
+
+        Buddy has to state the tier out loud, because the tier is inferred from
+        language and the user has no other way to catch a misread before 3 AM.
+        "I'll remind you" and "I'll wake you" are different promises and only one
+        of them makes noise.
+
+        The promise is conditional on the device, though. Android denies
+        exact-alarm access by default from Android 14, and denies it silently, so
+        an alarm can be created and stored and simply never ring. Promising a
+        wake-up in that state is the exact bug the alarm tier was built to fix,
+        reproduced with more code behind it.
+        """
+        if capable is False:
+            return (
+                "IMPORTANT: their device has NOT granted the alarm permission, so "
+                "this will NOT ring and will NOT wake them. Do not promise to wake "
+                "them up. Tell them warmly that you need one thing first: Android "
+                "has to let you set alarms, and there is a notification waiting "
+                "that takes them straight to the switch. Until then say you will "
+                "nudge them, not wake them."
+            )
+        # True, or None for a client that has never reported either way (every
+        # user on an older app build). Unknown must never read as "cannot ring":
+        # telling someone their alarm will not work when it will is its own
+        # failure, and the honest hedge belongs only where it is known to be true.
+        return (
+            "This is an ALARM: it will ring at alarm volume, turn the screen "
+            "on, and cut through Do Not Disturb. Confirm it as waking them up, "
+            "not as a reminder, so they can correct you now if you misread it."
+        )
 
     async def _find_duplicate_reminder(
         self, message: str, trigger_at_dt: datetime
@@ -713,6 +866,13 @@ class ToolExecutor:
             "status": "dismissed",
             "dismissed_at": now_iso,
         }))
+
+        # Cancelling the document is not enough for an alarm: the schedule lives
+        # in the OS on every one of the user's devices, and it will happily ring
+        # at 3 AM for a reminder Firestore now says is dismissed. Unconditional
+        # rather than tier-gated — reading the doc back first would cost a round
+        # trip to save a push that is a no-op on a device with nothing armed.
+        asyncio.create_task(alarm_sync.push_cancel(self._user_id, reminder_id))
         return {"reminder_id": reminder_id, "status": "dismissed"}
 
     # Topic tracking (live-update subscriptions)
@@ -1571,3 +1731,57 @@ def mark_reminder_fired(user_id: str, reminder_id: str) -> None:
         "status": "fired",
         "fired_at": now_iso,
     })
+
+
+# How long a claimed reminder may sit in "processing" before it is considered
+# abandoned. The claim -> deliver -> mark_fired path takes seconds; anything past
+# ten minutes means the worker died mid-flight or delivery failed outright.
+STUCK_PROCESSING_AFTER = timedelta(minutes=10)
+
+
+def requeue_stuck_reminders(limit: int = 200) -> int:
+    """Return abandoned "processing" reminders to "pending" so they can fire.
+
+    claim_reminder_for_processing flips pending -> processing before any slow
+    work, and only a SUCCESSFUL delivery flips it on to "fired". Every other
+    outcome — no registered device, an FCM outage, an instance killed mid-tick —
+    left the row in "processing" forever, invisible to both fetch_due_reminders
+    (which selects "pending") and list_reminders (whose filter allowlist has no
+    "processing"). The reminder was simply gone, with nothing anywhere saying so.
+
+    That is survivable for a banner and not survivable for an alarm, which is why
+    this exists now. Intentionally synchronous — called via asyncio.to_thread.
+    """
+    db = admin_firestore()
+    cutoff = (datetime.now(UTC) - STUCK_PROCESSING_AFTER).isoformat()
+
+    docs = list(
+        db.collection_group("reminders")
+        .where(filter=FieldFilter("status", "==", "processing"))
+        .where(filter=FieldFilter("processing_at", "<=", cutoff))
+        .limit(limit)
+        .stream()
+    )
+    if not docs:
+        return 0
+
+    requeued = 0
+    for doc in docs:
+        try:
+            doc.reference.update({"status": "pending", "processing_at": None})
+            requeued += 1
+        except Exception as exc:
+            logger.warn("requeue_stuck_reminders: update failed", {
+                "doc_id": doc.id,
+                "error": str(exc),
+            })
+
+    # WARN, not INFO. A non-zero count here means reminders were silently lost
+    # between the last sweep and this one; it should be rare enough to be worth
+    # looking at every time it appears.
+    logger.warn("requeue_stuck_reminders: recovered abandoned reminders", {
+        "requeued": requeued,
+        "found": len(docs),
+        "cutoff": cutoff,
+    })
+    return requeued

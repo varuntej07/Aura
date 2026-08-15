@@ -633,6 +633,33 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     );
   }
 
+  /// Opens the chat the moment an alarm woke someone up.
+  ///
+  /// This is the reason the alarm tier is a retention lever rather than a
+  /// utility: the user has just pressed "I'm up" on something they committed to
+  /// hours earlier, and Buddy already knows what it was. Seeding that as the
+  /// first bubble turns a dismissed alarm into a live conversation.
+  ///
+  /// [openingMessage] is what the user asked to be woken FOR, so Buddy opens on
+  /// their own commitment rather than a generic greeting.
+  Future<void> loadAlarmWakeContext({required String openingMessage}) async {
+    _messages.clear();
+    _error = null;
+
+    if (openingMessage.isNotEmpty) {
+      await _persistMessage(ChatMessageModel(
+        id: _uuid.v4(),
+        text: openingMessage,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+      ));
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+  }
+
   /// Starts a NEW dedicated conversation about the daily briefing, embedded in the
   /// briefing screen. The briefing is seeded as the VISIBLE first assistant bubble
   /// [newsMessage] of a fresh session, so the user sees the news as message #1 and the

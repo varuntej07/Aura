@@ -9,6 +9,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../../core/analytics/funnel_events.dart';
 import '../../core/logging/app_logger.dart';
+import 'alarm_service.dart';
 import '../../core/network/api_client.dart';
 import 'backend_api_service.dart';
 import '../../core/analytics/analytics_client.dart';
@@ -175,9 +176,13 @@ class NotificationService {
     required ApiClient apiClient,
     BackendApiService? signalEventSink,
     required AnalyticsClient postHogAnalyticsService,
+    required AlarmService alarmService,
   })  : _apiClient = apiClient,
         _signalEventSink = signalEventSink,
-        _postHogAnalyticsService = postHogAnalyticsService;
+        _postHogAnalyticsService = postHogAnalyticsService,
+        _alarmService = alarmService;
+
+  final AlarmService _alarmService;
 
   bool _initialized = false;
   String? _userId;
@@ -325,6 +330,13 @@ class NotificationService {
     // 3. Register the current token before initialization completes. Recheck it
     // whenever the app resumes so a token invalidated by FCM, or a registration
     // missed while offline, heals without requiring a cold restart.
+    //
+    // Capability is read BEFORE registering, not as part of the alarm sync in
+    // step 8, because the registration is what carries it to the backend. Read
+    // after, the first registration of every install would report the default
+    // and Buddy would promise wake-ups on a device that cannot ring until the
+    // next resume corrected it.
+    await _alarmService.refreshCapabilities();
     _installLifecycleListener();
     await _syncCurrentToken(reason: 'initialization', force: true);
 
@@ -353,6 +365,53 @@ class NotificationService {
     final initialMessage = await FirebaseMessaging.instance.getInitialMessage();
     if (initialMessage != null) {
       _handleNotificationTap(initialMessage);
+    }
+
+    // 8. Alarms. Detached: this is repair work, not startup work. Whatever is
+    // already armed on the device rings with or without it.
+    unawaited(_syncAlarms());
+  }
+
+  /// Bring the device's local alarm schedule back in line with the server, and
+  /// hand over any acks taken while the app was not running.
+  ///
+  /// Both halves matter and neither can happen anywhere else. The schedule is
+  /// held by the OS and is wiped by a reboot; the acks are taken by a native
+  /// full-screen activity that has no live auth token and possibly no network
+  /// at 3 AM. This is the only place both sides are available at once.
+  Future<void> _syncAlarms() async {
+    if (!AlarmService.isSupported) return;
+    try {
+      await _alarmService.refreshCapabilities();
+
+      // The exact-alarm permission is granted in a system Settings screen, so
+      // the app is never told; it finds out by noticing here. A flip in either
+      // direction has to be acted on immediately.
+      //
+      // Granted: alarms refused earlier are sitting armed INEXACTLY and would
+      // fire minutes late. Re-arming upgrades them to real alarms, which is what
+      // makes walking back from Settings actually work.
+      //
+      // Revoked: the backend must stop letting Buddy promise wake-ups.
+      if (_alarmService.canRingChangedSinceReport) {
+        final canRing = _alarmService.capabilities.canRing;
+        AppLogger.info(
+          'Alarm capability changed, re-arming and re-registering',
+          tag: _tag,
+          metadata: {'canRing': canRing},
+        );
+        if (canRing) await _alarmService.rearmAll();
+        await _syncCurrentToken(reason: 'alarm_capability_changed', force: true);
+      }
+
+      await _alarmService.flushPendingAcks();
+      await _alarmService.reconcile();
+    } catch (error) {
+      AppLogger.warning(
+        'Alarm sync failed, existing alarms are unaffected',
+        tag: _tag,
+        metadata: {'error': error.toString()},
+      );
     }
   }
 
@@ -429,6 +488,10 @@ class NotificationService {
   Future<void> _onAppResumed() async {
     if (_initialized) {
       await _syncCurrentToken(reason: 'app_resume');
+      // Resume is where a reboot, a package replace, a revoked exact-alarm
+      // permission, and an ack taken on the lock screen all become visible for
+      // the first time. Every one of them is silent until something asks.
+      unawaited(_syncAlarms());
       return;
     }
 
@@ -581,9 +644,24 @@ class NotificationService {
             ? 'android'
             : 'web';
 
+    // Whether this device will actually ring an alarm. The backend uses it to
+    // decide what Buddy is allowed to promise: without it Buddy says "I'll wake
+    // you up" on a device where the OS has refused exact alarms, which is the
+    // precise failure the alarm tier exists to fix. Only sent where the question
+    // is meaningful; on iOS and web the field is absent, which the backend reads
+    // as unknown rather than as "cannot ring".
+    final alarmCapable =
+        AlarmService.isSupported ? _alarmService.markCanRingReported() : null;
+
     final result = await _apiClient.post(
       '/devices/register',
-      {'token': token, 'platform': platform},
+      {
+        'token': token,
+        'platform': platform,
+        // Omitted entirely when null, which the backend reads as "unknown"
+        // rather than "cannot ring".
+        'alarm_capable': ?alarmCapable,
+      },
       (json) => json,
     );
 
@@ -627,6 +705,16 @@ class NotificationService {
 
   /// Show a system notification while the app is in the foreground.
   Future<void> _handleForegroundMessage(RemoteMessage message) async {
+    // Alarm schedule sync. Silent control traffic with no user-visible form:
+    // it arms, disarms, or silences a local alarm and returns nothing to render.
+    if (await _alarmService.handleControlMessage(message.data)) return;
+
+    // The server pushes a backstop at an alarm's moment as cover for a device
+    // that never held a local schedule. Sent data-only so this side can decide
+    // whether to render it: if the local alarm already rang, showing it would
+    // wake a half-asleep user a second time for the thing that worked.
+    if (await _alarmService.handleFallback(message.data)) return;
+
     // Curiosity follow-ups are data-only (no notification block) so we render
     // the interactive chip notification ourselves, same as in the background.
     if (isThreadFollowUp(message)) {

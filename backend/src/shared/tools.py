@@ -96,7 +96,8 @@ SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
         "is genuinely unknowable, and then exactly one short question, never a stack. "
         "Never invent a date or time. Pass the time as natural language; the server "
         "resolves it against the user's current local date, time, and timezone, and "
-        "rejects or clarifies what it cannot resolve safely."
+        "rejects or clarifies what it cannot resolve safely. Always choose a tier, and "
+        "always tell the user which one you chose in your reply."
     ),
     "strict": True,
     "inputSchema": {
@@ -110,8 +111,54 @@ SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
                     "'tomorrow at 9 AM' or 'in 45 minutes'. Include an exact time."
                 ),
             },
+            "tier": {
+                "type": "string",
+                "enum": ["reminder", "alarm"],
+                # Required AND defaulted, which is not a contradiction here. Required
+                # so the model has to state the loudness on every call instead of
+                # letting silence decide. Defaulted so that a model which omits it
+                # anyway, or sends "Alarm", degrades to the quiet tier rather than
+                # failing the whole call: a rejected set_reminder is a user being
+                # told to go use their clock app, which is worse than a banner.
+                "default": "reminder",
+                "description": (
+                    "How loud this needs to be. 'alarm' rings at alarm volume, turns "
+                    "the screen on, and pierces Do Not Disturb: use it ONLY when the "
+                    "user is asking to be woken or physically pulled out of what they "
+                    "are doing ('set an alarm', 'wake me at 6', 'make sure I'm up', "
+                    "'get me up', 'don't let me sleep through it'). 'reminder' is a "
+                    "silent notification banner and is the default for everything "
+                    "else, including timed tasks like 'remind me to take my meds at "
+                    "8am'. Time of day alone NEVER makes something an alarm. When you "
+                    "are unsure, choose 'reminder': a wrong 3 AM ring costs far more "
+                    "than a missed banner, and the user can always ask again."
+                ),
+            },
+            "tone": {
+                "type": "string",
+                # Optional and defaulted: "" is a real answer meaning "whatever
+                # they already chose". Omitting sound detail must never reject an
+                # otherwise valid alarm tool call.
+                # Overriding someone's own alarm sound because a model felt
+                # creative is a worse failure than never overriding it at all.
+                "enum": ["", "ripple", "dawn", "tide", "chime", "pulse", "ascent", "buddy"],
+                "default": "",
+                "description": (
+                    "Which sound this ONE alarm rings with, overriding the user's "
+                    "own setting. Ignored when tier is 'reminder'. Use \"\" unless "
+                    "the user asked for a specific character of sound in this "
+                    "message. 'ripple' soft wooden droplets, 'dawn' a slow warm "
+                    "bell, 'tide' the calmest, 'chime' bright glass bells, 'pulse' "
+                    "two firm insistent notes, 'ascent' climbs and gets louder for "
+                    "a heavy sleeper, 'buddy' means you read the reminder out loud "
+                    "in your own voice. Map what they asked for: 'something gentle' "
+                    "-> 'dawn', 'wake me properly' or 'I sleep through everything' "
+                    "-> 'ascent', 'wake me up yourself' -> 'buddy'. When they said "
+                    "nothing about the sound, \"\" is correct."
+                ),
+            },
         },
-        "required": ["message", "when"],
+        "required": ["message", "when", "tier"],
         "additionalProperties": False,
     },
 }
@@ -748,6 +795,39 @@ def validate_and_coerce_tool_input(tool_name: str, value: dict[str, Any]) -> Non
             raise ValueError(f"{path} has an unsupported value")
         if isinstance(candidate, dict):
             properties = rule.get("properties", {})
+            # Coercion runs BEFORE the required check on purpose. A property that
+            # declares a default has a safe value for every failure mode, including
+            # the model omitting it entirely, so raising instead would throw away a
+            # whole tool call over a field the schema already said how to fill.
+            # set_reminder.tier omitted used to hard-fail here and surface as Buddy
+            # telling the user to go set the alarm in their clock app.
+            for field, child_rule in properties.items():
+                if not isinstance(child_rule, dict) or "default" not in child_rule:
+                    continue
+                if field not in candidate:
+                    candidate[field] = child_rule["default"]
+                    continue
+                enum_values = child_rule.get("enum")
+                if not enum_values or candidate[field] in enum_values:
+                    continue
+                # Canonicalise casing before giving up. "Alarm" means alarm; letting
+                # it fall through to the default would silently downgrade a wake-up
+                # the user explicitly asked for into a banner they will sleep through.
+                supplied = candidate[field]
+                folded = (
+                    next(
+                        (
+                            option
+                            for option in enum_values
+                            if isinstance(option, str)
+                            and option.casefold() == supplied.casefold()
+                        ),
+                        None,
+                    )
+                    if isinstance(supplied, str)
+                    else None
+                )
+                candidate[field] = folded if folded is not None else child_rule["default"]
             missing = [
                 field
                 for field in rule.get("required", [])
@@ -759,15 +839,6 @@ def validate_and_coerce_tool_input(tool_name: str, value: dict[str, Any]) -> Non
                 unknown = sorted(set(candidate) - set(properties))
                 if unknown:
                     raise ValueError(f"Unknown field: {unknown[0]}")
-            for field, child_rule in properties.items():
-                if (
-                    field in candidate
-                    and isinstance(child_rule, dict)
-                    and "default" in child_rule
-                    and "enum" in child_rule
-                    and candidate[field] not in child_rule["enum"]
-                ):
-                    candidate[field] = child_rule["default"]
             for field, child in candidate.items():
                 child_rule = properties.get(field)
                 if isinstance(child_rule, dict):

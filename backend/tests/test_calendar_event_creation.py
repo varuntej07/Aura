@@ -341,7 +341,10 @@ async def test_tool_executor_rejects_every_unknown_field_without_google_writes(
     )
     assert result["ok"] is False
     assert result["code"] == "validation_error"
-    assert result["user_message"] == f"Unknown field: {field}"
+    # Schema wording is diagnostic, not speech: it stays in `debug`, never in the
+    # sentence Buddy reads out.
+    assert result["debug"] == f"Unknown field: {field}"
+    assert field not in result["user_message"]
     assert inserts == []
 
 

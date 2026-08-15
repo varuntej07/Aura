@@ -18,6 +18,7 @@ import 'data/services/posthog_analytics_service.dart';
 import 'data/services/startup_diagnostics_service.dart';
 import 'data/services/subscription_service.dart' show kEntitlementRefreshPendingKey;
 import 'presentation/screens/startup_failure_app.dart';
+import 'data/services/alarm_service.dart';
 import 'data/services/thread_notification_handler.dart';
 import 'data/services/voice_launcher_bridge.dart';
 import 'data/services/deep_link_service.dart';
@@ -37,6 +38,24 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       'notificationType': message.data['notification_type'],
     },
   );
+
+  // Alarm schedule sync. This is the important half of the alarm path: the
+  // control push arrives while the app is backgrounded (which is almost always,
+  // since alarms are set hours before they fire) and arms the local
+  // AlarmManager schedule that actually rings. Handled here rather than left to
+  // the next app open, because a user who sets an alarm and puts the phone down
+  // may not open Aura again before it is due.
+  //
+  // Constructed inline: this isolate has no access to the DI graph, and the
+  // methods used here are pure MethodChannel calls that need no ApiClient.
+  final alarmService = AlarmService.forBackgroundIsolate();
+  if (await alarmService.handleControlMessage(message.data)) return;
+
+  // The alarm backstop is data-only so this side can decide whether to draw it.
+  // Backgrounded is the normal case at 3 AM, so this isolate is where the choice
+  // between "the local alarm handled it" and "nothing else is going to fire"
+  // actually gets made.
+  if (await alarmService.handleFallback(message.data)) return;
 
   // Curiosity follow-ups arrive data-only so we can render interactive
   // suggestion chips ourselves (FCM cannot draw action buttons).

@@ -2,9 +2,11 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/constants/alarm_tones.dart';
 import '../../../core/constants/buddy_voices.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../core/theme/app_colors.dart';
@@ -24,6 +26,8 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  Future<PackageInfo>? _packageInfo;
+
   @override
   void initState() {
     super.initState();
@@ -44,6 +48,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Settings was pushed via Navigator (not GoRouter), so the redirect won't
     // clear this screen on its own — navigating to the sign-in screen explicitly.
     context.go('/login');
+  }
+
+  Future<void> _showAccountActions(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => _AccountActionsSheet(
+        onSignOut: () {
+          Navigator.pop(sheetContext);
+          _signOut(context);
+        },
+        onDeleteAccount: () {
+          Navigator.pop(sheetContext);
+          _confirmDeleteAccount(context);
+        },
+      ),
+    );
   }
 
   Future<void> _confirmDeleteAccount(BuildContext context) async {
@@ -120,75 +141,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         behavior: SnackBarBehavior.floating,
       ),
     );
-  }
-
-  /// Toggles Aura memory consent. Turning ON opens the age-gated consent screen
-  /// (informed consent + the under-18 rule live there, never a bare write).
-  /// Turning OFF is the GDPR withdrawal: confirm, then write consent = false,
-  /// which stops Buddy learning and stops the stored profile being used.
-  Future<void> _onToggleAuraMemory(BuildContext context, bool enable) async {
-    final authVm = context.read<AuthViewModel>();
-
-    if (enable) {
-      await context.push('/settings/aura-consent');
-      return;
-    }
-
-    final messenger = ScaffoldMessenger.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.deepBackground,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text(
-          'Turn off Aura memory?',
-          style: TextStyle(
-            color: AppColors.textPrimary,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        content: const Text(
-          'Buddy will stop learning from your conversations, and what it has '
-          'already learned will no longer be used to personalize your chats or '
-          'notifications. You can turn it back on anytime. To erase what Buddy '
-          'has learned, delete your account.',
-          style: TextStyle(color: AppColors.textSecondary, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: AppColors.textTertiary),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text(
-              'Turn off',
-              style: TextStyle(
-                color: AppColors.error,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) return;
-    if (!context.mounted) return;
-
-    final ok = await authVm.revokeAuraMemory();
-    if (!context.mounted) return;
-    if (!ok) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Something went wrong. Try again in a moment.'),
-          backgroundColor: AppColors.error,
-        ),
-      );
-    }
   }
 
   @override
@@ -271,20 +223,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 8),
                     Selector<SettingsViewModel, bool>(
-                      selector: (_, vm) => vm.settings?.wakeWordEnabled ?? false,
-                      builder: (context, enabled, _) => _GlassToggleTile(
-                        icon: _SettingsIconKind.voiceWake,
-                        iconColor: _SettingsIconColors.amber,
-                        title: 'Wake Word',
-                        subtitle: 'Activate with "Hey Buddy"',
-                        value: enabled,
-                        onChanged: context
-                            .read<SettingsViewModel>()
-                            .toggleWakeWord,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Selector<SettingsViewModel, bool>(
                       selector: (_, vm) => vm.settings?.ttsEnabled ?? true,
                       builder: (context, enabled, _) => _GlassToggleTile(
                         icon: _SettingsIconKind.volume,
@@ -303,8 +241,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         icon: _SettingsIconKind.phone,
                         iconColor: _SettingsIconColors.blue,
                         title: 'Add to home screen',
-                        subtitle:
-                            'One-tap widget that opens Buddy with the mic on',
+                        subtitle: 'One tap widget that opens Buddy',
                         onTap: () => _addVoiceWidget(context),
                       ),
                     ],
@@ -328,6 +265,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       subtitle: 'See all scheduled reminders',
                       onTap: () => context.push('/reminders'),
                     ),
+                    const SizedBox(height: 8),
+                    Selector<SettingsViewModel, String>(
+                      selector: (_, vm) => vm.settings?.alarmTone ?? '',
+                      builder: (context, storedTone, _) {
+                        final slug = displayAlarmToneSlug(storedTone);
+                        final label = switch (slug) {
+                          kAlarmToneDevice => 'From your device',
+                          kAlarmToneSystemDefault => 'Phone default',
+                          _ => alarmToneFor(slug)?.label ?? 'Phone default',
+                        };
+                        return _GlassNavTile(
+                          icon: _SettingsIconKind.volume,
+                          iconColor: _SettingsIconColors.green,
+                          title: 'Alarm sound',
+                          subtitle: label,
+                          onTap: () => context.push('/settings/alarm-sound'),
+                        );
+                      },
+                    ),
 
                     const _SectionLabel('Connectors'),
                     _GlassNavTile(
@@ -339,27 +295,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
 
                     // Aura memory — consent toggle + profile
-                    const _SectionLabel('Aura Memory'),
-                    Selector<AuthViewModel, bool>(
-                      selector: (_, vm) => vm.auraMemoryEnabled,
-                      builder: (context, memoryOn, _) => _GlassToggleTile(
-                        icon: _SettingsIconKind.brain,
-                        iconColor: _SettingsIconColors.purple,
-                        title: 'Aura memory',
-                        subtitle: memoryOn
-                            ? 'Buddy learns from your chats to personalize everything'
-                            : 'Turn on to let Buddy remember what matters to you',
-                        value: memoryOn,
-                        onChanged: (enabled) =>
-                            _onToggleAuraMemory(context, enabled),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
+                    const _SectionLabel('Aura'),
                     _GlassNavTile(
-                      icon: _SettingsIconKind.profile,
+                      icon: _SettingsIconKind.brain,
                       iconColor: _SettingsIconColors.purple,
-                      title: 'Your Aura Profile',
-                      subtitle: 'See what Buddy has learned about you',
+                      title: 'Your Aura',
+                      subtitle: 'What Buddy remembers about you',
                       onTap: () => context.push('/settings/aura-profile'),
                     ),
 
@@ -378,7 +319,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Selector<AuthViewModel, UserModel?>(
                       selector: (_, vm) => vm.user,
                       builder: (context, user, _) => user == null
-                          ? const SizedBox.shrink()
+                          ? _GlassSignInButton(
+                              onTap: () => context.go('/login'),
+                            )
                           : Column(
                               children: [
                                 _GlassInfoTile(
@@ -393,6 +336,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   iconColor: _SettingsIconColors.purple,
                                   label: 'Email',
                                   value: user.email,
+                                ),
+                                const SizedBox(height: 8),
+                                _GlassNavTile(
+                                  icon: _SettingsIconKind.person,
+                                  iconColor: _SettingsIconColors.blue,
+                                  title: 'Manage account',
+                                  subtitle: 'Sign out or delete your account',
+                                  onTap: () => _showAccountActions(context),
                                 ),
                               ],
                             ),
@@ -433,35 +384,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
 
                     const SizedBox(height: 28),
-                    // Sign Out / Delete only make sense for a real session. A
-                    // logged-out guest who lands here gets a Sign In button
-                    // instead, never a dead "Sign Out".
-                    Selector<AuthViewModel, bool>(
-                      selector: (_, vm) => vm.user != null,
-                      builder: (context, signedIn, _) => signedIn
-                          ? Column(
-                              children: [
-                                _GlassSignOutButton(
-                                  onTap: () => _signOut(context),
-                                ),
-                                const SizedBox(height: 12),
-                                _GlassDeleteAccountButton(
-                                  onTap: () => _confirmDeleteAccount(context),
-                                ),
-                              ],
-                            )
-                          : _GlassSignInButton(
-                              onTap: () => context.go('/login'),
-                            ),
-                    ),
-
-                    const SizedBox(height: 28),
-                    const Center(
-                      child: Text(
-                        'Aura v2.2.0',
-                        style: TextStyle(
-                          color: AppColors.textTertiary,
-                          fontSize: 12,
+                    Center(
+                      child: FutureBuilder<PackageInfo>(
+                        future: _packageInfo ??= PackageInfo.fromPlatform(),
+                        builder: (context, snapshot) => Text(
+                          snapshot.hasData
+                              ? 'Aura v${snapshot.data!.version}'
+                              : 'Aura',
+                          style: const TextStyle(
+                            color: AppColors.textTertiary,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
                     ),
@@ -509,43 +442,6 @@ Future<void> showFeedbackSheet(BuildContext context) async {
   }
 }
 
-// Delete account button
-
-class _GlassDeleteAccountButton extends StatelessWidget {
-  final VoidCallback onTap;
-  const _GlassDeleteAccountButton({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: FauxGlassCard(
-        borderRadius: 30,
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        borderColor: AppColors.error.withValues(alpha: 0.15),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            AppColors.error.withValues(alpha: 0.05),
-            AppColors.error.withValues(alpha: 0.02),
-          ],
-        ),
-        child: const Center(
-          child: Text(
-            'Delete Account',
-            style: TextStyle(
-              color: AppColors.error,
-              fontSize: 15,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 // Section label
 
 class _SectionLabel extends StatelessWidget {
@@ -571,6 +467,8 @@ class _SectionLabel extends StatelessWidget {
 
 // Toggle tile
 
+const double _settingsTileHeight = 68;
+
 class _GlassToggleTile extends StatelessWidget {
   final _SettingsIconKind icon;
   final Color iconColor;
@@ -590,21 +488,35 @@ class _GlassToggleTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FauxGlassCard.toggleTile(
-      child: SwitchListTile(
-        secondary: _SettingsIcon(icon, color: iconColor),
-        title: Text(
-          title,
-          style: const TextStyle(color: AppColors.textPrimary, fontSize: 15),
+    return SizedBox(
+      height: _settingsTileHeight,
+      child: FauxGlassCard.toggleTile(
+        child: SwitchListTile(
+          dense: true,
+          secondary: _SettingsIcon(icon, color: iconColor),
+          title: Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 15,
+              height: 1.2,
+            ),
+          ),
+          subtitle: Text(
+            subtitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: AppColors.textTertiary,
+              fontSize: 13,
+              height: 1.2,
+            ),
+          ),
+          value: value,
+          onChanged: onChanged,
+          activeThumbColor: AppColors.accent,
+          activeTrackColor: AppColors.accent.withValues(alpha: 0.3),
         ),
-        subtitle: Text(
-          subtitle,
-          style: const TextStyle(color: AppColors.textTertiary, fontSize: 13),
-        ),
-        value: value,
-        onChanged: onChanged,
-        activeThumbColor: AppColors.accent,
-        activeTrackColor: AppColors.accent.withValues(alpha: 0.3),
       ),
     );
   }
@@ -629,41 +541,51 @@ class _GlassNavTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return PressableTile(
-      onTap: onTap,
-      child: FauxGlassCard.navTile(
-        child: Row(
-          children: [
-            _SettingsIcon(icon, color: iconColor),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 15,
+    return SizedBox(
+      height: _settingsTileHeight,
+      child: PressableTile(
+        onTap: onTap,
+        child: FauxGlassCard.navTile(
+          child: Row(
+            children: [
+              _SettingsIcon(icon, color: iconColor),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 15,
+                        height: 1.2,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(
-                      color: AppColors.textTertiary,
-                      fontSize: 13,
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.textTertiary,
+                        fontSize: 13,
+                        height: 1.2,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            const Icon(
-              Icons.chevron_right,
-              size: 18,
-              color: AppColors.textTertiary,
-            ),
-          ],
+              const Icon(
+                Icons.chevron_right,
+                size: 18,
+                color: AppColors.textTertiary,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -672,20 +594,20 @@ class _GlassNavTile extends StatelessWidget {
 
 enum _SettingsIconKind {
   waveform,
-  voiceWake,
   volume,
   phone,
   desktop,
   bell,
   link,
   brain,
-  profile,
   premium,
   person,
   email,
   feedback,
   privacy,
   document,
+  signOut,
+  delete,
 }
 
 class _SettingsIcon extends StatelessWidget {
@@ -739,13 +661,6 @@ class _SettingsIconPainter extends CustomPainter {
         ]) {
           line(bar.$1, bar.$2, bar.$1, bar.$3);
         }
-        break;
-      case _SettingsIconKind.voiceWake:
-        line(4, 10, 4, 14);
-        line(8, 7, 8, 17);
-        line(12, 4, 12, 20);
-        line(16, 8, 16, 16);
-        line(20, 10, 20, 14);
         break;
       case _SettingsIconKind.volume:
         canvas.drawPath(
@@ -838,25 +753,44 @@ class _SettingsIconPainter extends CustomPainter {
         line(8.5, 15.5, 15.5, 8.5);
         break;
       case _SettingsIconKind.brain:
-      case _SettingsIconKind.profile:
+        line(12, 5, 12, 18);
         canvas.drawPath(
           Path()
-            ..moveTo(11, 5)
-            ..cubicTo(8, 2, 4, 5, 6, 8)
-            ..cubicTo(2, 9, 3, 14, 6, 14)
-            ..cubicTo(4, 18, 8, 21, 11, 18)
-            ..lineTo(11, 5)
-            ..moveTo(13, 5)
-            ..cubicTo(16, 2, 20, 5, 18, 8)
-            ..cubicTo(22, 9, 21, 14, 18, 14)
-            ..cubicTo(20, 18, 16, 21, 13, 18)
-            ..lineTo(13, 5),
+            ..moveTo(12, 5)
+            ..cubicTo(10.8, 2.5, 7.2, 2.4, 6, 5.1)
+            ..cubicTo(3.2, 5.6, 2.2, 8.5, 3.5, 10.9)
+            ..cubicTo(1.7, 13.1, 2.2, 16.2, 4, 17.5)
+            ..cubicTo(3.8, 20.1, 7.1, 22.2, 9.4, 20.7)
+            ..cubicTo(10.5, 20, 11.2, 18.8, 12, 18)
+            ..moveTo(12, 5)
+            ..cubicTo(13.2, 2.5, 16.8, 2.4, 18, 5.1)
+            ..cubicTo(20.8, 5.6, 21.8, 8.5, 20.5, 10.9)
+            ..cubicTo(22.3, 13.1, 21.8, 16.2, 20, 17.5)
+            ..cubicTo(20.2, 20.1, 16.9, 22.2, 14.6, 20.7)
+            ..cubicTo(13.5, 20, 12.8, 18.8, 12, 18),
           paint,
         );
-        line(8, 8, 11, 10);
-        line(16, 8, 13, 10);
-        line(8, 15, 11, 13);
-        line(16, 15, 13, 13);
+        canvas.drawPath(
+          Path()
+            ..moveTo(9, 13)
+            ..cubicTo(10.8, 12.4, 12, 10.8, 12, 9)
+            ..cubicTo(12, 10.8, 13.2, 12.4, 15, 13),
+          paint,
+        );
+        canvas.drawArc(
+          const Rect.fromLTRB(4.5, 4.2, 8.5, 8.5),
+          -0.2,
+          1.35,
+          false,
+          paint,
+        );
+        canvas.drawArc(
+          const Rect.fromLTRB(15.5, 4.2, 19.5, 8.5),
+          2,
+          1.35,
+          false,
+          paint,
+        );
         break;
       case _SettingsIconKind.premium:
         canvas.drawPath(
@@ -943,6 +877,32 @@ class _SettingsIconPainter extends CustomPainter {
         line(9, 12, 16, 12);
         line(9, 16, 16, 16);
         break;
+      case _SettingsIconKind.signOut:
+        canvas.drawPath(
+          Path()
+            ..moveTo(10, 4)
+            ..lineTo(5, 4)
+            ..lineTo(5, 20)
+            ..lineTo(10, 20),
+          paint,
+        );
+        line(10, 12, 21, 12);
+        line(17, 8, 21, 12);
+        line(17, 16, 21, 12);
+        break;
+      case _SettingsIconKind.delete:
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTRB(6, 7, 18, 21),
+            const Radius.circular(2),
+          ),
+          paint,
+        );
+        line(4, 7, 20, 7);
+        line(9, 3, 15, 3);
+        line(10, 11, 10, 17);
+        line(14, 11, 14, 17);
+        break;
     }
     canvas.restore();
   }
@@ -978,29 +938,35 @@ class _GlassInfoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FauxGlassCard.navTile(
-      child: Row(
-        children: [
-          _SettingsIcon(icon, color: iconColor),
-          const SizedBox(width: 12),
-          Text(
-            label,
-            style: const TextStyle(color: AppColors.textTertiary, fontSize: 14),
-          ),
-          const Spacer(),
-          Flexible(
-            child: Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.end,
+    return SizedBox(
+      height: _settingsTileHeight,
+      child: FauxGlassCard.navTile(
+        child: Row(
+          children: [
+            _SettingsIcon(icon, color: iconColor),
+            const SizedBox(width: 12),
+            Text(
+              label,
               style: const TextStyle(
-                color: AppColors.textPrimary,
+                color: AppColors.textTertiary,
                 fontSize: 14,
               ),
             ),
-          ),
-        ],
+            const Spacer(),
+            Flexible(
+              child: Text(
+                value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1017,29 +983,109 @@ class _GlassSignInButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: FauxGlassCard(
-        borderRadius: 16,
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        borderColor: AppColors.accent.withValues(alpha: 0.4),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            AppColors.accent.withValues(alpha: 0.16),
-            AppColors.accent.withValues(alpha: 0.07),
-          ],
+      child: SizedBox(
+        height: _settingsTileHeight,
+        child: FauxGlassCard(
+          borderRadius: 16,
+          padding: EdgeInsets.zero,
+          borderColor: AppColors.accent.withValues(alpha: 0.4),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              AppColors.accent.withValues(alpha: 0.16),
+              AppColors.accent.withValues(alpha: 0.07),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.login_rounded, color: AppColors.accentDark, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                'Sign In',
+                style: TextStyle(
+                  color: AppColors.accentDark,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+      ),
+    );
+  }
+}
+
+class _AccountActionsSheet extends StatelessWidget {
+  final VoidCallback onSignOut;
+  final VoidCallback onDeleteAccount;
+
+  const _AccountActionsSheet({
+    required this.onSignOut,
+    required this.onDeleteAccount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.deepBackground,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        border: Border(top: BorderSide(color: AppColors.glassBorderLight)),
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.login_rounded, color: AppColors.accentDark, size: 18),
-            const SizedBox(width: 8),
-            Text(
-              'Sign In',
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: AppColors.glassBorderLight,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              'Manage account',
               style: TextStyle(
-                color: AppColors.accentDark,
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
+                color: AppColors.textPrimary,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.3,
+              ),
+            ),
+            const SizedBox(height: 14),
+            FauxGlassCard.section(
+              child: Column(
+                children: [
+                  _AccountActionRow(
+                    icon: _SettingsIconKind.signOut,
+                    iconColor: _SettingsIconColors.blue,
+                    title: 'Sign out',
+                    subtitle: 'Sign out on this device',
+                    onTap: onSignOut,
+                  ),
+                  const Divider(
+                    height: 24,
+                    color: AppColors.glassBorderDim,
+                  ),
+                  _AccountActionRow(
+                    icon: _SettingsIconKind.delete,
+                    iconColor: AppColors.error,
+                    title: 'Delete account',
+                    subtitle: 'Permanently delete your Aura data',
+                    onTap: onDeleteAccount,
+                    destructive: true,
+                  ),
+                ],
               ),
             ),
           ],
@@ -1049,26 +1095,67 @@ class _GlassSignInButton extends StatelessWidget {
   }
 }
 
-// Sign-out button
-
-class _GlassSignOutButton extends StatelessWidget {
+class _AccountActionRow extends StatelessWidget {
+  final _SettingsIconKind icon;
+  final Color iconColor;
+  final String title;
+  final String subtitle;
   final VoidCallback onTap;
-  const _GlassSignOutButton({required this.onTap});
+  final bool destructive;
+
+  const _AccountActionRow({
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.destructive = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: FauxGlassCard.destructiveButton(
-        child: const Center(
-          child: Text(
-            'Sign Out',
-            style: TextStyle(
-              color: AppColors.error,
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
+      child: SizedBox(
+        height: _settingsTileHeight,
+        child: Row(
+          children: [
+            _SettingsIcon(icon, color: iconColor),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: destructive
+                          ? AppColors.error
+                          : AppColors.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      height: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      color: AppColors.textTertiary,
+                      fontSize: 13,
+                      height: 1.2,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: destructive ? AppColors.error : AppColors.textTertiary,
+              size: 19,
+            ),
+          ],
         ),
       ),
     );

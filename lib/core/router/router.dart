@@ -29,6 +29,7 @@ import '../../presentation/screens/connectors/connectors_screen.dart';
 import '../../presentation/screens/onboarding/aura_consent_screen.dart';
 import '../../presentation/screens/onboarding/onboarding_screen.dart';
 import '../../presentation/screens/reminders/reminders_screen.dart';
+import '../../presentation/screens/settings/alarm_tone_picker_screen.dart';
 import '../../presentation/screens/settings/aura_profile_screen.dart';
 import '../../presentation/screens/settings/link_device_screen.dart';
 import '../../presentation/screens/settings/settings_screen.dart';
@@ -185,6 +186,12 @@ GoRouter buildRouter(
         name: 'Voice Picker',
         pageBuilder: (context, state) =>
             _slidePage(state, const VoicePickerScreen()),
+      ),
+      GoRoute(
+        path: '/settings/alarm-sound',
+        name: 'Alarm Sound',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const AlarmTonePickerScreen()),
       ),
       GoRoute(
         path: '/settings/link-device',

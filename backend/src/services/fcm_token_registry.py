@@ -39,6 +39,10 @@ _active_users_cache: dict[int, tuple[list[str], float]] = {}
 FIELD_TOKEN = "token"
 FIELD_PLATFORM = "platform"
 FIELD_REGISTERED_AT = "registered_at"
+# Whether the OS has granted this device exact-alarm access, i.e. whether an
+# alarm set here would actually ring. Absent on every document written before the
+# alarm tier existed, and that absence means UNKNOWN, never "no".
+FIELD_ALARM_CAPABLE = "alarm_capable"
 
 # Exception types raised by ``send_each_for_multicast`` that mean a token is
 # permanently invalid and must be deleted. This is the primary, version-stable
@@ -126,34 +130,70 @@ def _tokens_ref(user_id: str):
     )
 
 
-def register_token(user_id: str, token: str, platform: str) -> None:
+def register_token(
+    user_id: str,
+    token: str,
+    platform: str,
+    *,
+    alarm_capable: bool | None = None,
+) -> None:
     """Upsert an FCM token for a user device.
 
     Uses the token string as the document ID so registering the same
     token twice is a no-op (just updates registered_at).
+
+    ``alarm_capable`` is whether this device will actually ring an alarm, i.e.
+    whether the OS has granted it exact-alarm access. It lives here rather than
+    on the user document because it is a property of one DEVICE: a user can hold
+    the permission on their phone and not on their tablet. ``None`` means the
+    client did not report it (an older app build), which is deliberately
+    distinct from ``False`` and must not be read as "cannot ring".
     """
     now = datetime.now(UTC).isoformat()
     ref = _tokens_ref(user_id).document(token)
     doc = ref.get()
 
+    payload: dict[str, Any] = {FIELD_PLATFORM: platform, FIELD_REGISTERED_AT: now}
+    if alarm_capable is not None:
+        payload[FIELD_ALARM_CAPABLE] = bool(alarm_capable)
+
     if doc.exists:
-        ref.update({FIELD_PLATFORM: platform, FIELD_REGISTERED_AT: now})
+        ref.update(payload)
         logger.debug("FCM token updated", {
             "user_id": user_id,
             "platform": platform,
+            "alarm_capable": alarm_capable,
             "token_preview": token[:20],
         })
     else:
-        ref.set({
-            FIELD_TOKEN: token,
-            FIELD_PLATFORM: platform,
-            FIELD_REGISTERED_AT: now,
-        })
+        ref.set({FIELD_TOKEN: token, **payload})
         logger.info("FCM token registered", {
             "user_id": user_id,
             "platform": platform,
+            "alarm_capable": alarm_capable,
             "token_preview": token[:20],
         })
+
+
+def any_alarm_capable_device(user_id: str) -> bool | None:
+    """Whether ANY of the user's devices can actually ring an alarm.
+
+    Returns None when no device has reported either way, which is the case for
+    every user on an app build that predates the alarm tier. The caller must
+    treat None as "unknown", never as "no": telling someone their alarm will not
+    work when it will is its own failure.
+
+    ORs across devices because the question being answered is "can Buddy promise
+    to wake this person", and one phone with the permission is enough.
+    """
+    reported = [
+        doc.get(FIELD_ALARM_CAPABLE)
+        for doc in get_user_tokens(user_id)
+        if isinstance(doc.get(FIELD_ALARM_CAPABLE), bool)
+    ]
+    if not reported:
+        return None
+    return any(reported)
 
 
 def get_user_tokens(user_id: str) -> list[dict[str, Any]]:

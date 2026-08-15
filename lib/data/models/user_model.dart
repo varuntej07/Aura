@@ -7,10 +7,17 @@ class UserSettings {
   /// picked, which resolves to the default rather than to silence.
   final String ttsVoiceId;
 
+  /// The default sound alarms ring with. A slug from `alarm_tones.dart`, read
+  /// server-side by `services/alarm_tones.user_default_tone` and collapsed with
+  /// any per-alarm override into the one slug the device receives. Empty means
+  /// never picked, which resolves to the phone's own default alarm sound.
+  final String alarmTone;
+
   const UserSettings({
     required this.wakeWordEnabled,
     required this.ttsEnabled,
     this.ttsVoiceId = '',
+    this.alarmTone = '',
   });
 
   factory UserSettings.defaults() {
@@ -25,6 +32,7 @@ class UserSettings {
       wakeWordEnabled: json['wake_word_enabled'] as bool? ?? false,
       ttsEnabled: json['tts_enabled'] as bool? ?? true,
       ttsVoiceId: json['tts_voice_id'] as String? ?? '',
+      alarmTone: json['alarm_tone'] as String? ?? '',
     );
   }
 
@@ -32,17 +40,20 @@ class UserSettings {
         'wake_word_enabled': wakeWordEnabled,
         'tts_enabled': ttsEnabled,
         'tts_voice_id': ttsVoiceId,
+        'alarm_tone': alarmTone,
       };
 
   UserSettings copyWith({
     bool? wakeWordEnabled,
     bool? ttsEnabled,
     String? ttsVoiceId,
+    String? alarmTone,
   }) {
     return UserSettings(
       wakeWordEnabled: wakeWordEnabled ?? this.wakeWordEnabled,
       ttsEnabled: ttsEnabled ?? this.ttsEnabled,
       ttsVoiceId: ttsVoiceId ?? this.ttsVoiceId,
+      alarmTone: alarmTone ?? this.alarmTone,
     );
   }
 }

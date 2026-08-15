@@ -70,6 +70,18 @@ class SettingsViewModel extends SafeChangeNotifier {
     await _updateSettings(_user!.settings.copyWith(ttsVoiceId: voiceSlug));
   }
 
+  /// Persists the default sound alarms ring with.
+  ///
+  /// Takes effect on the next sync rather than instantly: the device holds a
+  /// schedule the OS already registered, and the tone travels with it. Alarms
+  /// that carry their own tone (Buddy set one because the user asked for it) are
+  /// unaffected, because the override wins server-side.
+  Future<void> selectAlarmTone(String slug) async {
+    if (_user == null) return;
+    if (_user!.settings.alarmTone == slug) return;
+    await _updateSettings(_user!.settings.copyWith(alarmTone: slug));
+  }
+
   Future<void> _updateSettings(UserSettings newSettings) async {
     if (_user == null) return;
 

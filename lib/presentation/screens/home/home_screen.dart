@@ -11,6 +11,7 @@ import '../../../data/local/app_database.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../../data/repositories/chat_repository.dart';
+import '../../../data/services/alarm_service.dart';
 import '../../../data/services/buddy_pills_refresher.dart';
 import '../../../data/services/session_consolidator.dart';
 import '../../../data/services/chat_service_provider.dart';
@@ -275,12 +276,41 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       unawaited(_startVoiceFromWidget());
       return;
     }
+    if (action == VoiceLauncherBridge.launchActionAlarmImUp) {
+      unawaited(_openChatFromAlarmWake());
+      return;
+    }
     if (action == DeepLinkService.launchActionEntitlementRefresh) {
       // aura://checkout: the browser checkout just finished; pull the new plan
       // now instead of waiting for the push or the next paywall visit. No
       // navigation, the current screen simply reflects the unlock.
       unawaited(context.read<SubscriptionService>().refreshEntitlement());
     }
+  }
+
+  /// Opens a chat turn straight off an alarm the user answered with "I'm up".
+  ///
+  /// The alarm is settled first, and independently of the navigation: if the
+  /// chat fails to open, the server must still learn the alarm was answered, or
+  /// the backstop keeps treating it as unfired.
+  Future<void> _openChatFromAlarmWake() async {
+    final wake = await VoiceLauncherBridge.instance.consumePendingAlarmWake();
+    if (wake == null || !mounted) return;
+
+    unawaited(
+      context.read<AlarmService>().acknowledge(wake.reminderId, action: 'im_up'),
+    );
+
+    final opener = wake.message.isEmpty
+        ? "You're up. What's first?"
+        : "You're up. You said: ${wake.message}";
+    context.push(
+      '/chat/new',
+      extra: NotificationChatSeed(
+        origin: NotificationChatOrigin.alarm,
+        openingMessage: opener,
+      ),
+    );
   }
 
   /// Opens the app into a live voice session, as if the user tapped the mic. The

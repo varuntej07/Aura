@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../data/models/reminder_model.dart';
+import '../../../data/services/alarm_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/reminders_viewmodel.dart';
 import '../../widgets/sign_in_required_view.dart';
@@ -38,6 +41,11 @@ class _RemindersView extends StatefulWidget {
 class _RemindersViewState extends State<_RemindersView> {
   final _scrollController = ScrollController();
 
+  /// Whether the OS will let an alarm actually ring on this device. Re-read on
+  /// every open, because the permission is granted in a system Settings screen
+  /// and nothing notifies the app when it changes.
+  bool _canRingAlarms = true;
+
   @override
   void initState() {
     super.initState();
@@ -49,7 +57,15 @@ class _RemindersViewState extends State<_RemindersView> {
         // (e.g. via Aura's save_reminder tool) show without an app restart.
         context.read<RemindersViewModel>().refreshReminders(uid);
       }
+      unawaited(_refreshAlarmCapability());
     });
+  }
+
+  Future<void> _refreshAlarmCapability() async {
+    if (!AlarmService.isSupported) return;
+    final caps = await context.read<AlarmService>().refreshCapabilities();
+    if (!mounted) return;
+    setState(() => _canRingAlarms = caps.canRing);
   }
 
   @override
@@ -146,6 +162,19 @@ class _RemindersViewState extends State<_RemindersView> {
                 _ErrorBanner(
                   message: vm.errorMessage!,
                   onDismiss: vm.clearError,
+                ),
+
+              // Only when there is actually an alarm to be let down by. Nagging
+              // about a permission on a screen full of silent reminders would be
+              // noise; here it explains why a specific alarm below will not ring.
+              if (!_canRingAlarms && active.any((r) => r.isAlarm))
+                _AlarmPermissionBanner(
+                  onGrant: () async {
+                    await context.read<AlarmService>().requestExactAlarmAccess();
+                    // The user returns from a system screen, so re-read rather
+                    // than assume they granted it.
+                    await _refreshAlarmCapability();
+                  },
                 ),
 
               // Active reminders 
@@ -486,7 +515,83 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-// Error banner 
+// Alarm permission banner
+
+/// Shown when an alarm exists but the OS has not granted exact-alarm access.
+///
+/// The alarm below it is not silent, but it is armed inexactly and can fire
+/// several minutes late, so this says what is actually true rather than hiding a
+/// degraded promise behind an alarm icon.
+class _AlarmPermissionBanner extends StatelessWidget {
+  final Future<void> Function() onGrant;
+
+  const _AlarmPermissionBanner({required this.onGrant});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.errorSurface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.warning.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.alarm_off_outlined,
+                size: 16,
+                color: AppColors.warning,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Your alarms may fire a few minutes late',
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Android needs permission before Buddy can ring exactly on time.',
+            style: TextStyle(color: AppColors.textSecondary, fontSize: 12.5),
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: () => unawaited(onGrant()),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text(
+                'Turn on alarms',
+                style: TextStyle(
+                  color: AppColors.accent,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// Error banner
 
 class _ErrorBanner extends StatelessWidget {
   final String message;

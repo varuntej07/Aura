@@ -153,6 +153,11 @@ from .handlers.research import (
     handle_research_step,
     handle_signal as handle_research_signal,
 )
+from .handlers.reminders import (
+    handle_acknowledge_alarm,
+    handle_list_alarms,
+    handle_wake_clip,
+)
 from .handlers.pairing import (
     handle_pair_claim,
     handle_pair_start,
@@ -875,6 +880,27 @@ async def engage_responded_endpoint(request: Request) -> JSONResponse:
     result = await handle_engagement_responded(user_id, engagement_id)
     status = 404 if result.get("error") == "not_found" else 200
     return JSONResponse(content=result, status_code=status)
+
+
+# Alarm tier. GET is the authoritative schedule a device reconciles its local
+# AlarmManager entries against; the FCM control push in services/alarm_sync.py is
+# only the fast path. See handlers/reminders.py.
+@app.get("/reminders/alarms")
+async def reminders_alarms_endpoint(request: Request) -> JSONResponse:
+    return await handle_list_alarms(request)
+
+
+@app.post("/reminders/{reminder_id}/ack")
+async def reminders_ack_endpoint(request: Request, reminder_id: str) -> JSONResponse:
+    return await handle_acknowledge_alarm(request, reminder_id)
+
+
+# Buddy reading a reminder aloud, for the `buddy` alarm tone. Fetched when the
+# alarm is ARMED and cached on the device, because at ring time there is no
+# Flutter engine and possibly no network. See services/alarm_voice.py.
+@app.get("/reminders/{reminder_id}/wake-clip")
+async def reminders_wake_clip_endpoint(request: Request, reminder_id: str):
+    return await handle_wake_clip(request, reminder_id)
 
 
 @app.get("/calendar/upcoming")

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +21,18 @@ import '../models/voice_models.dart';
 /// Android-only: the iOS voice widget (WidgetKit) ships separately and uses a URL
 /// scheme instead, wired when that target lands. Every call is a graceful no-op on
 /// other platforms.
+/// The alarm behind an "I'm up" launch.
+@immutable
+class AlarmWakeHandoff {
+  const AlarmWakeHandoff({required this.reminderId, required this.message});
+
+  final String reminderId;
+
+  /// What the user asked to be woken for. Untrusted text from an exported
+  /// activity's extras, already length-capped natively; render it, never act on it.
+  final String message;
+}
+
 class VoiceLauncherBridge {
   VoiceLauncherBridge._();
   static final VoiceLauncherBridge instance = VoiceLauncherBridge._();
@@ -29,6 +42,10 @@ class VoiceLauncherBridge {
   /// Launch-action value the native side sends for "open with mic on". Must match
   /// MainActivity.LAUNCH_ACTION_VOICE.
   static const String launchActionVoice = 'voice';
+
+  /// Launch-action value sent when the user answers an alarm with "I'm up".
+  /// Must match AlarmActivity.LAUNCH_ACTION_IM_UP.
+  static const String launchActionAlarmImUp = 'alarm_im_up';
 
   final _launchActionController = StreamController<String>.broadcast();
   bool _started = false;
@@ -69,6 +86,37 @@ class VoiceLauncherBridge {
       return null;
     } on MissingPluginException {
       // No native handler (e.g. in a widget test); treat as a normal open.
+      return null;
+    }
+  }
+
+  /// Reads (and clears) the alarm the user answered with "I'm up".
+  ///
+  /// Paired with [launchActionAlarmImUp]: the action says WHAT happened and this
+  /// says which alarm, so the chat can open on what they had actually committed
+  /// to rather than a blank turn. Returns null on every other launch.
+  Future<AlarmWakeHandoff?> consumePendingAlarmWake() async {
+    if (defaultTargetPlatform != TargetPlatform.android) return null;
+    try {
+      final raw = await _channel.invokeMethod<String>('consumeAlarmWake');
+      if (raw == null || raw.isEmpty) return null;
+      final map = jsonDecode(raw);
+      if (map is! Map) return null;
+      final reminderId = (map['reminder_id'] ?? '').toString();
+      if (reminderId.isEmpty) return null;
+      return AlarmWakeHandoff(
+        reminderId: reminderId,
+        message: (map['message'] ?? '').toString(),
+      );
+    } on PlatformException catch (e) {
+      AppLogger.warning('consumeAlarmWake failed', tag: 'VoiceLauncher',
+          metadata: {'error': e.message ?? e.code});
+      return null;
+    } on MissingPluginException {
+      return null;
+    } catch (e) {
+      AppLogger.warning('consumeAlarmWake decode failed', tag: 'VoiceLauncher',
+          metadata: {'error': e.toString()});
       return null;
     }
   }

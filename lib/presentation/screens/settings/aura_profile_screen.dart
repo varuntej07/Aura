@@ -11,6 +11,66 @@ import '../../widgets/sign_in_required_view.dart';
 class AuraProfileScreen extends StatelessWidget {
   const AuraProfileScreen({super.key});
 
+  Future<void> _onMemoryChanged(BuildContext context, bool enabled) async {
+    if (enabled) {
+      await context.push('/settings/aura-consent');
+      return;
+    }
+
+    final authVm = context.read<AuthViewModel>();
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: AppColors.deepBackground,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'Turn off Aura memory?',
+          style: TextStyle(
+            color: AppColors.textPrimary,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        content: const Text(
+          'Buddy will stop learning from your conversations, and what it has '
+          'already learned will no longer personalize your chats or '
+          'notifications. You can turn it back on anytime. To erase what Buddy '
+          'has learned, delete your account.',
+          style: TextStyle(color: AppColors.textSecondary, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: AppColors.textTertiary),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text(
+              'Turn off',
+              style: TextStyle(
+                color: AppColors.error,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+    final ok = await authVm.revokeAuraMemory();
+    if (!context.mounted || ok) return;
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Something went wrong. Try again in a moment.'),
+        backgroundColor: AppColors.error,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final authVm = context.watch<AuthViewModel>();
@@ -83,6 +143,14 @@ class AuraProfileScreen extends StatelessWidget {
                   ],
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: _AuraMemoryControl(
+                  enabled: memoryEnabled,
+                  onChanged: (enabled) =>
+                      _onMemoryChanged(context, enabled),
+                ),
+              ),
               Expanded(
                 child: memoryEnabled
                     ? StreamBuilder<DocumentSnapshot>(
@@ -131,6 +199,47 @@ class AuraProfileScreen extends StatelessWidget {
 }
 
 // Profile body — renders each non-empty section
+
+class _AuraMemoryControl extends StatelessWidget {
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  const _AuraMemoryControl({
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FauxGlassCard.toggleTile(
+      child: SwitchListTile(
+        secondary: const Icon(
+          Icons.psychology_alt_rounded,
+          color: AppColors.accent,
+          size: 26,
+        ),
+        title: const Text(
+          'Aura Memory',
+          style: TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        subtitle: Text(
+          enabled
+              ? 'Buddy remembers what matters to you'
+              : 'Buddy starts fresh each time',
+          style: const TextStyle(color: AppColors.textTertiary, fontSize: 13),
+        ),
+        value: enabled,
+        onChanged: onChanged,
+        activeThumbColor: AppColors.accent,
+        activeTrackColor: AppColors.accentGlow,
+      ),
+    );
+  }
+}
 
 class _AuraProfileBody extends StatelessWidget {
   final Map<String, dynamic> profile;
@@ -727,7 +836,7 @@ class _AuraMemoryOffPrompt extends StatelessWidget {
         ),
         const SizedBox(height: 14),
         const Text(
-          'You stay in control. Turn it off anytime in Settings. Your data is '
+          'You stay in control. Turn it off anytime here. Your data is '
           'never sold. GDPR compliant.',
           textAlign: TextAlign.center,
           style: TextStyle(

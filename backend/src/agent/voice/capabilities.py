@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from ...shared.tools import (
     CREATE_CALENDAR_EVENT_TOOL_DEFINITION,
+    SET_REMINDER_TOOL_DEFINITION,
     UPDATE_CALENDAR_EVENT_TOOL_DEFINITION,
 )
 
@@ -111,6 +113,26 @@ class VoiceToolCapability:
         )
 
 
+def _execution_required_fields(definition: dict[str, Any]) -> tuple[str, ...]:
+    """The canonical required fields, minus the ones that carry a default.
+
+    `required_fields` is an execution gate: a name listed here and absent from the
+    model's arguments blocks the call outright (action_policy.py). A property that
+    declares a default is never blocking, because the executor fills it in during
+    validation. Listing one here would refuse a perfectly answerable call over a
+    field the schema already knows how to supply, which on set_reminder means a
+    voice request to be woken up is silently dropped instead of degrading to a
+    quiet reminder. Derived rather than retyped so the two paths cannot drift.
+    """
+    schema = definition["inputSchema"]
+    properties = schema.get("properties", {})
+    return tuple(
+        field
+        for field in schema.get("required", ())
+        if "default" not in properties.get(field, {})
+    )
+
+
 def _tool(
     name: str,
     capability: Capability,
@@ -173,7 +195,10 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             namespace="productivity.reminders",
             concurrent=False,
             complex_eligible=True,
-            required=("message", "when"),
+            # Derived, not retyped. This drifted once already: the canonical schema
+            # grew `tier` and this copy did not, so the voice path and the chat path
+            # disagreed about what a valid set_reminder call looks like.
+            required=_execution_required_fields(SET_REMINDER_TOOL_DEFINITION),
         ),
         _tool(
             "cancel_reminder",

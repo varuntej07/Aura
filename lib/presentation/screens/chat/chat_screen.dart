@@ -89,6 +89,13 @@ class _ChatScreenState extends State<ChatScreen> {
             await chatVm.loadTrackerContext(
               openingMessage: extra.openingMessage,
             );
+          case NotificationChatOrigin.alarm:
+            // "I'm up" on a ringing alarm. Buddy opens on what they asked to be
+            // woken for, so the wake-up becomes a conversation rather than a
+            // dismissed banner.
+            await chatVm.loadAlarmWakeContext(
+              openingMessage: extra.openingMessage,
+            );
         }
         _jumpToBottom();
       }

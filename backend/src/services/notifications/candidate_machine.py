@@ -28,6 +28,8 @@ STATE_PENDING = "pending"
 STATE_SCHEDULED = "scheduled"
 STATE_REVALIDATING = "revalidating"
 STATE_SUBMITTED = "submitted"
+STATE_ACCEPTED = "accepted"
+# Legacy terminal rows remain readable; new transport acknowledgements use accepted.
 STATE_DELIVERED = "delivered"
 STATE_DEFERRED = "deferred"
 STATE_SUPPRESSED = "suppressed"
@@ -44,6 +46,7 @@ ACTIVE_STATES = frozenset({
     STATE_SHADOW,
 })
 TERMINAL_STATES = frozenset({
+    STATE_ACCEPTED,
     STATE_DELIVERED,
     STATE_SUPPRESSED,
     STATE_CANCELED,
@@ -461,8 +464,8 @@ async def defer_candidate(
         })
 
 
-async def mark_delivered(uid: str, candidate_id: str, *, now: datetime | None = None) -> bool:
-    """Confirm delivery and only then advance cooldown, caps, and fatigue."""
+async def mark_accepted(uid: str, candidate_id: str, *, now: datetime | None = None) -> bool:
+    """Confirm transport acceptance, then advance anti-spam cooldown and fatigue."""
     when = now or datetime.now(UTC)
 
     def _deliver() -> bool:
@@ -475,7 +478,7 @@ async def mark_delivered(uid: str, candidate_id: str, *, now: datetime | None = 
             if not candidate_snap.exists:
                 return False
             candidate = candidate_snap.to_dict() or {}
-            if candidate.get("state") == STATE_DELIVERED:
+            if candidate.get("state") in {STATE_ACCEPTED, STATE_DELIVERED}:
                 return True
             if candidate.get("state") != STATE_SUBMITTED:
                 return False
@@ -493,9 +496,9 @@ async def mark_delivered(uid: str, candidate_id: str, *, now: datetime | None = 
             if event_id:
                 event_counts[event_id] = int(event_counts.get(event_id, 0) or 0) + 1
             txn.update(candidate_ref, {
-                "state": STATE_DELIVERED,
+                "state": STATE_ACCEPTED,
                 "last_transition": when,
-                "delivered_at": when,
+                "accepted_at": when,
             })
             txn.set(topic_ref, {
                 "last_notified_at": when,
@@ -512,14 +515,18 @@ async def mark_delivered(uid: str, candidate_id: str, *, now: datetime | None = 
             ):
                 window_started = when
                 sent_count = 0
-            project_deliveries = dict(arbitration.get("project_last_delivered") or {})
+            project_acceptances = dict(
+                arbitration.get("project_last_accepted")
+                or arbitration.get("project_last_delivered")
+                or {}
+            )
             project_id = str(candidate.get("project_id") or "")
             if project_id:
-                project_deliveries[project_id] = when
+                project_acceptances[project_id] = when
             txn.set(arbitration_ref, {
                 "fatigue_window_started_at": window_started,
                 "proactive_sent_24h": sent_count + 1,
-                "project_last_delivered": project_deliveries,
+                "project_last_accepted": project_acceptances,
                 "updated_at": when,
             }, merge=True)
             return True
@@ -529,9 +536,16 @@ async def mark_delivered(uid: str, candidate_id: str, *, now: datetime | None = 
     try:
         return await asyncio.to_thread(_deliver)
     except Exception as exc:
-        logger.warn("candidate_machine: delivery confirmation failed", {
+        logger.warn("candidate_machine: transport acceptance failed", {
             "user_id": uid,
             "candidate_id": candidate_id,
             "error": str(exc),
         })
         return False
+
+
+async def mark_delivered(
+    uid: str, candidate_id: str, *, now: datetime | None = None
+) -> bool:
+    """Backward-compatible API alias; new rows are recorded as accepted."""
+    return await mark_accepted(uid, candidate_id, now=now)

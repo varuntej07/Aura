@@ -222,13 +222,21 @@ def _enforce_all_canonical_tool_contracts() -> None:
 
 
 @mcp_server.tool()
-async def set_reminder(message: str, when: str) -> dict[str, Any]:
-    """Set one reminder from a natural-language time such as 'tomorrow at 9 AM'."""
-    result = await _run_tool("set_reminder", {"message": message, "when": when})
-    return _with_action_truth(
-        result,
-        success_say=f"Done, I'll remind you: {message.strip()}.",
+async def set_reminder(message: str, when: str, tier: str, tone: str = "") -> dict[str, Any]:
+    """Set one reminder or alarm from a natural-language time such as 'tomorrow at 9 AM'."""
+    result = await _run_tool(
+        "set_reminder", {"message": message, "when": when, "tier": tier, "tone": tone}
     )
+    # The spoken confirmation has to carry the tier. Voice is the surface where
+    # "set an alarm at 3am" was answered with a silent reminder, and a user who
+    # only hears "done, I'll remind you" has no way to tell that nothing will
+    # actually wake them. Read back from the RESULT, not the argument: the server
+    # is what decides the stored tier.
+    if str(result.get("tier", "")) == "alarm":
+        success_say = f"Done, I'll wake you up: {message.strip()}."
+    else:
+        success_say = f"Done, I'll remind you: {message.strip()}."
+    return _with_action_truth(result, success_say=success_say)
 
 
 # Contracts are applied in one total pass after every tool is declared; see

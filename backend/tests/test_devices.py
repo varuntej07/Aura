@@ -20,7 +20,11 @@ class _Req:
 
 async def test_register_calls_welcome_after_token_registered(monkeypatch):
     monkeypatch.setattr(devices, "resolve_user_id_from_request", lambda r: "u1")
-    monkeypatch.setattr(devices, "register_token", lambda uid, token, platform: None)
+    monkeypatch.setattr(
+        devices,
+        "register_token",
+        lambda uid, token, platform, *, alarm_capable=None: None,
+    )
     calls = []
 
     async def _fake_welcome(user_id):
@@ -38,7 +42,11 @@ async def test_welcome_failure_does_not_break_the_200(monkeypatch):
     # A notification-side failure (Firestore blip, FCM outage) must never turn a
     # successful token registration into a 500.
     monkeypatch.setattr(devices, "resolve_user_id_from_request", lambda r: "u1")
-    monkeypatch.setattr(devices, "register_token", lambda uid, token, platform: None)
+    monkeypatch.setattr(
+        devices,
+        "register_token",
+        lambda uid, token, platform, *, alarm_capable=None: None,
+    )
 
     async def _boom(user_id):
         raise RuntimeError("fcm down")

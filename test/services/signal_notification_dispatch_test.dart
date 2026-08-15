@@ -3,6 +3,7 @@ import 'package:mockito/annotations.dart';
 
 import 'package:aura/core/analytics/funnel_events.dart';
 import 'package:aura/core/network/api_client.dart';
+import 'package:aura/data/services/alarm_service.dart';
 import 'package:aura/data/services/notification_service.dart';
 import 'package:aura/data/services/posthog_analytics_service.dart';
 
@@ -21,9 +22,13 @@ void main() {
   late NotificationService sut;
 
   setUp(() {
+    final apiClient = MockApiClient();
     sut = NotificationService(
-      apiClient: MockApiClient(),
+      apiClient: apiClient,
       postHogAnalyticsService: MockPostHogAnalyticsService(),
+      // Real instance rather than a mock: every method is a no-op off Android,
+      // which is where these tests run.
+      alarmService: AlarmService(apiClient: apiClient),
     );
   });
 

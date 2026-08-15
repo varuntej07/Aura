@@ -70,7 +70,7 @@ async def notify_settled(uid: str, meeting_id: str) -> bool:
     )
     if decision.disposition == Disposition.DROP and decision.reason == "duplicate":
         return True
-    if decision.disposition != Disposition.SEND or decision.delivered is not True:
+    if decision.disposition != Disposition.SEND or not decision.transport_accepted:
         raise MeetingNotificationDeliveryError(
             f"Desktop notification was not durably queued for meeting {meeting_id}."
         )

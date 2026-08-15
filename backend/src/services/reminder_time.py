@@ -104,9 +104,19 @@ _AMBIGUOUS_TIME_THEN_DATE = re.compile(
     rf"^at\s+{_AMBIGUOUS_CLOCK}\s+{_DATE}$",
     re.IGNORECASE,
 )
+# Abbreviations are not sloppiness to be corrected, they are how people write.
+# "wake me up in 5 mins" used to fail the whole call because only the spelled-out
+# unit matched, and the model passes the user's own phrasing straight through.
 _RELATIVE_DURATION = re.compile(
-    r"^(?:in|after)\s+(?P<number>[a-z\d -]+)\s+(?P<unit>minutes?|hours?)$",
+    r"^(?:in|after)\s+(?P<number>[a-z\d -]+)\s+"
+    r"(?P<unit>mins?|minutes?|hrs?|hours?|secs?|seconds?)$",
     re.IGNORECASE,
+)
+_RELATIVE_UNIT_PREFIXES = (
+    ("hour", "hours"),
+    ("hr", "hours"),
+    ("sec", "seconds"),
+    ("min", "minutes"),
 )
 _MONTH_DATE = re.compile(
     rf"^(?:(?P<weekday>{_WEEKDAY}),?\s+)?"
@@ -255,10 +265,14 @@ def parse_reminder_when(when: str, timezone_name: str) -> ParsedReminderTime:
             raise ValueError(
                 "I couldn't understand that duration. Try something like 'in 45 minutes'."
             )
-        unit = (
-            "hours"
-            if relative_match.group("unit").lower().startswith("hour")
-            else "minutes"
+        unit_text = relative_match.group("unit").lower()
+        unit = next(
+            (
+                keyword
+                for prefix, keyword in _RELATIVE_UNIT_PREFIXES
+                if unit_text.startswith(prefix)
+            ),
+            "minutes",
         )
         delta = timedelta(**{unit: amount})
         trigger_at = now_utc + delta

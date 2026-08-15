@@ -50,11 +50,26 @@ async def register_device(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    await asyncio.to_thread(register_token, user_id, token, platform)
+    # Whether this device can actually ring an alarm (exact-alarm access granted).
+    # Three states, and the distinction matters: True and False are reports from a
+    # client that knows, absent is a client that has never heard of alarms. Only an
+    # explicit bool is accepted — coercing here would let a truthy string claim a
+    # capability the device does not have, and the cost of that lie is Buddy
+    # promising a 3 AM wake-up that never comes.
+    alarm_capable = body.get("alarm_capable")
+    if alarm_capable is not None and not isinstance(alarm_capable, bool):
+        return JSONResponse(
+            {"error": "alarm_capable must be a boolean."}, status_code=400
+        )
+
+    await asyncio.to_thread(
+        register_token, user_id, token, platform, alarm_capable=alarm_capable
+    )
 
     logger.info("register_device: token registered", {
         "user_id": user_id,
         "platform": platform,
+        "alarm_capable": alarm_capable,
         "token_preview": token[:20],
     })
 

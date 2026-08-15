@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import '../constants/app_constants.dart';
@@ -95,6 +96,37 @@ class ApiClient {
     Duration? timeout,
   }) =>
       _execute('DELETE', path, null, fromJson, timeout: timeout);
+
+  /// GET a non-JSON body, for endpoints that return a file rather than a shape.
+  ///
+  /// Separate from [get] rather than a flag on it because it deliberately shares
+  /// none of that path's behaviour: no retry (the one caller is caching an
+  /// optional asset, and a retry storm over a nicety is worse than not having
+  /// it), no `Result` (there is nothing to decode), and null for every failure
+  /// including offline. Reuses [_headers] so the auth, platform, and version
+  /// headers cannot drift from every other request.
+  Future<Uint8List?> getBytes(String path, {Duration? timeout}) async {
+    if (!await _connectivity.isConnected) return null;
+    final url = Uri.parse('${Environment.current.apiBaseUrl}$path');
+    final headers = await _headers();
+    headers['Accept'] = '*/*';
+    try {
+      final response = await http
+          .get(url, headers: headers)
+          .timeout(timeout ?? AppConstants.apiReadTimeout);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        AppLogger.warning(
+          'getBytes $path failed with ${response.statusCode}',
+          tag: 'ApiClient',
+        );
+        return null;
+      }
+      return response.bodyBytes.isEmpty ? null : response.bodyBytes;
+    } catch (e) {
+      AppLogger.warning('getBytes $path failed: $e', tag: 'ApiClient');
+      return null;
+    }
+  }
 
   Future<Result<T>> _execute<T>(
     String method,

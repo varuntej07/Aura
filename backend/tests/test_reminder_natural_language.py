@@ -102,28 +102,28 @@ def test_set_reminder_schema_is_exact_and_strict_for_openai():
         tool for tool in claude_tool_definitions() if tool["name"] == "set_reminder"
     )
     schema = anthropic_tool["input_schema"]
-    assert schema == {
-        "type": "object",
-        "properties": {
-            "message": {
-                "type": "string",
-                "description": "What to remind the user about.",
-            },
-            "when": {
-                "type": "string",
-                "description": (
-                    "When the user wants the reminder, in natural language, for example "
-                    "'tomorrow at 9 AM' or 'in 45 minutes'. Include an exact time."
-                ),
-            },
-        },
-        "required": ["message", "when"],
-        "additionalProperties": False,
+    # Exactly four fields; the core three are required. `tier` is required rather than optional
+    # on purpose: it makes the model state whether this rings or stays silent on
+    # every single call, while `tone` safely defaults to the user's own choice.
+    assert set(schema["properties"]) == {"message", "when", "tier", "tone"}
+    assert schema["required"] == ["message", "when", "tier"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["message"] == {
+        "type": "string",
+        "description": "What to remind the user about.",
     }
+    assert schema["properties"]["when"]["type"] == "string"
+    assert schema["properties"]["tier"]["enum"] == ["reminder", "alarm"]
+
     openai_tool = _anthropic_tools_to_openai([anthropic_tool])[0]
     assert openai_tool["function"]["strict"] is True
     assert openai_tool["function"]["parameters"] == schema
-    assert tuple(inspect.signature(mcp.set_reminder).parameters) == ("message", "when")
+    assert tuple(inspect.signature(mcp.set_reminder).parameters) == (
+        "message",
+        "when",
+        "tier",
+        "tone",
+    )
 
 
 async def test_voice_mcp_schema_exposes_only_both_required_fields():
@@ -167,6 +167,7 @@ async def test_real_fastmcp_validation_rejects_unknown_fields_before_creation(mo
             {
                 "message": "Call Mom",
                 "when": "tomorrow at 9 AM",
+                "tier": "reminder",
                 "scheduled_at": "2026-07-29T16:00:00Z",
                 "priority": "high",
             },
@@ -179,10 +180,19 @@ async def test_real_fastmcp_validation_rejects_unknown_fields_before_creation(mo
 async def test_legacy_set_reminder_fields_are_rejected(legacy_field: str):
     result = await ToolExecutor("u1").execute(
         "set_reminder",
-        {"message": "Call Mom", "when": "tomorrow at 9 AM", legacy_field: "old"},
+        {
+            "message": "Call Mom",
+            "when": "tomorrow at 9 AM",
+            "tier": "reminder",
+            legacy_field: "old",
+        },
     )
     assert result["code"] == "validation_error"
-    assert result["user_message"] == f"Unknown field: {legacy_field}"
+    # The schema string is diagnostic, not speech. Buddy says user_message close to
+    # verbatim, so the offending field name stays in `debug` where the model and the
+    # logs can use it and the user never hears it.
+    assert result["debug"] == f"Unknown field: {legacy_field}"
+    assert legacy_field not in result["user_message"]
 
 
 @pytest.mark.parametrize(("when", "expected_local", "expected_utc"), _ACCEPTED_CASES)
@@ -247,11 +257,11 @@ def test_dst_and_past_times_return_actionable_clarification(
         parse_reminder_when(when, "America/Los_Angeles")
 
 
-@pytest.mark.parametrize(("when", "_expected_local", "expected_utc"), _ACCEPTED_CASES)
+@pytest.mark.parametrize(("when", "expected_local", "expected_utc"), _ACCEPTED_CASES)
 async def test_each_accepted_form_creates_exactly_one_canonical_reminder(
     monkeypatch,
     when: str,
-    _expected_local: str,
+    expected_local: str,
     expected_utc: datetime,
 ):
     store: dict[str, dict] = {}
@@ -268,16 +278,22 @@ async def test_each_accepted_form_creates_exactly_one_canonical_reminder(
 
     result = await executor.execute(
         "set_reminder",
-        {"message": "Call Mom", "when": when},
+        {"message": "Call Mom", "when": when, "tier": "reminder"},
     )
 
     assert result["ok"] is True
     assert result["trigger_at"] == expected_utc.isoformat()
     assert result["timezone"] == "America/Los_Angeles"
+    assert result["tier"] == "reminder"
     assert len(store) == 1
     stored = next(iter(store.values()))
     assert stored["trigger_at"] == expected_utc.isoformat()
     assert stored["message"] == "Call Mom"
+    assert stored["tier"] == "reminder"
+    # The wall clock the user asked for, alongside the absolute instant. An alarm
+    # re-anchors to these when the device changes timezone; a reminder does not.
+    assert stored["timezone"] == "America/Los_Angeles"
+    assert stored["local_time"] == expected_local.split("-07:00")[0]
     assert "priority" not in stored
 
 
@@ -315,7 +331,7 @@ async def test_every_rejected_form_returns_clarification_without_writing(
 
     result = await executor.execute(
         "set_reminder",
-        {"message": "Call Mom", "when": when},
+        {"message": "Call Mom", "when": when, "tier": "reminder"},
     )
 
     assert result["ok"] is False

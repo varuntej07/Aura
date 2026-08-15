@@ -25,10 +25,12 @@ from ..services.notifications.proposal import (
     NotificationProposal,
     ProposalKind,
 )
+from ..services import alarm_sync
 from ..services.tool_executor import (
     claim_reminder_for_processing,
     fetch_due_reminders,
     mark_reminder_fired,
+    requeue_stuck_reminders,
 )
 
 
@@ -177,6 +179,19 @@ async def _sweep_expired_candidates() -> None:
         await delete_expired_candidates()
     except Exception as exc:
         logger.error("scheduler: expired-candidate sweep failed", {"error": str(exc)})
+
+
+async def _requeue_stuck_reminders() -> None:
+    """Return abandoned "processing" reminders to "pending".
+
+    Isolated and fire-and-forget for the same reason as every other sweep here:
+    a failure in recovery must never take down the delivery path it exists to
+    protect. See requeue_stuck_reminders for why the stuck state happens at all.
+    """
+    try:
+        await asyncio.to_thread(requeue_stuck_reminders)
+    except Exception as exc:
+        logger.error("scheduler: stuck-reminder requeue failed", {"error": str(exc)})
 
 
 async def _run_tracking_checkpoints() -> None:
@@ -552,6 +567,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         if now_minute % 15 == 10:
             asyncio.create_task(_sweep_expired_candidates())
 
+        # Abandoned-reminder recovery, every 5 minutes at minute 3 — offset from
+        # briefing(5)/sweep(10)/reconcile(12)/icebreaker(15). A reminder claimed
+        # by a tick that then died, or whose delivery failed, sits in "processing"
+        # where NOTHING can see it again; this is the only path that returns one.
+        # Cheap indexed query, empty on almost every run. Fire-and-forget.
+        if now_minute % 5 == 3:
+            asyncio.create_task(_requeue_stuck_reminders())
+
         # Topic-tracking checkpoint due-scan, EVERY minute (like the reminder scan) so
         # a pre/live/post update fires near its exact moment. The due-query is cheap and
         # empty most minutes; only due checkpoints do fetch/LLM work, and atomic claims
@@ -639,7 +662,7 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         asyncio.create_task(_run_session_followup_lifecycle_sweep(now=now_utc))
         asyncio.create_task(_run_session_followup_drain(now=now_utc))
 
-        delivered = 0
+        accepted = 0
 
         for item in due:
             user_id: str = item["userId"]
@@ -663,6 +686,7 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
 
                 raw_message = str(data.get("message", "Reminder due now"))
                 body = await rewrite_reminder_notification(raw_message)
+                is_alarm = alarm_sync.is_alarm(data)
 
                 # Committed lane: the user asked for this, so the orchestrator sends
                 # it inline (freshness n/a, dedup handled by the atomic claim above).
@@ -677,29 +701,52 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                         # two same-minute same-message docs collide on this key and the
                         # orchestrator drops the second within its 24h ledger window.
                         dedup_key=_reminder_dedup_key(raw_message, data.get("trigger_at")),
-                        title="Buddy Reminder",
+                        title="Buddy Alarm" if is_alarm else "Buddy Reminder",
                         body=body,
                         data={
                             "reminder_id": reminder_id,
                             "created_via": str(data.get("created_via", "voice")),
+                            "tier": alarm_sync.normalize_tier(data.get("tier")),
+                            # For an alarm this push is a BACKSTOP, not the
+                            # delivery mechanism: the device should already have
+                            # rung off its own local schedule seconds ago. The
+                            # flag lets the client suppress this banner when its
+                            # native ledger says the alarm already fired, so a
+                            # half-asleep user is not woken a second time by the
+                            # safety net for the thing that worked.
+                            "alarm_fallback": "1" if is_alarm else "0",
+                            # data_only strips the display block, so the text has
+                            # to travel in the payload for the client to render
+                            # it. Only populated for alarms; a plain reminder is
+                            # still drawn by the OS from title/body above.
+                            **({"alarm_body": body} if is_alarm else {}),
                         },
                         notification_type="reminder",
                         # Collapse prevents duplicate banners if overlapping scheduler
                         # ticks fire before the user dismisses the first notification.
                         collapse_key=f"reminder_{reminder_id}",
                         apns_category="BUDDY_REMINDER",
+                        # An alarm's backstop is sent data-only so the CLIENT
+                        # decides whether to render it. Android draws a
+                        # notification block itself, with no chance to ask
+                        # whether the local alarm already rang, so a banner would
+                        # arrive seconds after the device stopped ringing and
+                        # wake a half-asleep user for the thing that worked.
+                        # Plain reminders keep the OS-rendered banner: there is
+                        # nothing local to duplicate.
+                        data_only=is_alarm,
                     )
                 )
 
-                if decision.disposition == Disposition.SEND and decision.delivered:
+                if decision.disposition == Disposition.SEND and decision.transport_accepted:
                     await asyncio.to_thread(mark_reminder_fired, user_id, reminder_id)
-                    delivered += 1
-                    logger.info("Reminder delivered", {
+                    accepted += 1
+                    logger.info("Reminder transport accepted", {
                         "user_id": user_id,
                         "reminder_id": reminder_id,
                     })
                 else:
-                    logger.warn("Reminder not delivered", {
+                    logger.warn("Reminder transport not accepted", {
                         "user_id": user_id,
                         "reminder_id": reminder_id,
                         "disposition": decision.disposition.value,
@@ -721,14 +768,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
 
         logger.info("Scheduler tick complete", {
             "scanned": len(due),
-            "delivered": delivered,
+            "accepted": accepted,
             "calendar_syncs": synced_calendars,
             "renewed_calendar_channels": renewed_channels,
             "periodic_sync_users": periodic_synced,
         })
         return _json(200, {
             "scanned": len(due),
-            "delivered": delivered,
+            "accepted": accepted,
             "calendar_syncs": synced_calendars,
             "renewed_calendar_channels": renewed_channels,
             "periodic_sync_users": periodic_synced,
