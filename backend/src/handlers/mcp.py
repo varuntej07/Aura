@@ -43,7 +43,7 @@ from ..agent.voice.tool_result import (
 from ..lib.logger import logger
 from ..services.request_auth import decode_firebase_claims
 from ..services.tool_executor import ToolExecutor
-from ..shared.tools import tool_definition
+from ..shared.tools import resolve_set_reminder_tier, tool_definition
 
 # Each MCP request runs the AuthMiddleware first, which sets this ContextVar
 # to the verified Firebase uid for the duration of the request. The MCP tool
@@ -222,8 +222,11 @@ def _enforce_all_canonical_tool_contracts() -> None:
 
 
 @mcp_server.tool()
-async def set_reminder(message: str, when: str, tier: str, tone: str = "") -> dict[str, Any]:
+async def set_reminder(
+    message: str, when: str, tier: str = "", tone: str = ""
+) -> dict[str, Any]:
     """Set one reminder or alarm from a natural-language time such as 'tomorrow at 9 AM'."""
+    tier = resolve_set_reminder_tier(message, tier)
     result = await _run_tool(
         "set_reminder", {"message": message, "when": when, "tier": tier, "tone": tone}
     )

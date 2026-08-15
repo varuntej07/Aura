@@ -35,8 +35,44 @@ argument is natural language resolved server-side rather than an ISO string the
 model would have to compute without a clock.
 """
 
+import re
 from copy import deepcopy
 from typing import Any
+
+
+_EXPLICIT_ALARM_INTENT = re.compile(
+    r"\b(?:set|schedule|create|start|arm)\s+(?:me\s+)?(?:an?\s+|the\s+)?alarm\b"
+    r"|\bwake me\b|\bmake sure i(?:'m| am) up\b|\bget me up\b"
+    r"|\bdon't let me sleep through\b|\bdo not let me sleep through\b",
+    re.IGNORECASE,
+)
+_NEGATED_ALARM_INTENT = re.compile(
+    r"\b(?:don't|do not)\s+(?:set|schedule|create|start|arm)\s+"
+    r"(?:me\s+)?(?:an?\s+|the\s+)?alarm\b",
+    re.IGNORECASE,
+)
+_REMINDER_ABOUT_AN_ALARM = re.compile(
+    r"\bremind me to\b[^.?!]{0,100}\balarm\b",
+    re.IGNORECASE,
+)
+
+
+def resolve_set_reminder_tier(
+    message: str, supplied_tier: Any, *, user_instruction: str = ""
+) -> str:
+    """Resolve a missing voice tier without downgrading an explicit alarm request."""
+    supplied = str(supplied_tier or "").strip().lower()
+    if supplied in {"reminder", "alarm"}:
+        return supplied
+
+    for text in (user_instruction, message):
+        if not text:
+            continue
+        if _NEGATED_ALARM_INTENT.search(text) or _REMINDER_ABOUT_AN_ALARM.search(text):
+            return "reminder"
+        if _EXPLICIT_ALARM_INTENT.search(text) or text.strip().lower().startswith("alarm"):
+            return "alarm"
+    return "reminder"
 
 # The one list of memory categories. tool_executor._store_memory reads it from here
 # rather than restating it: the two copies had already drifted from the Flutter

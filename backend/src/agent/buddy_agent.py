@@ -59,6 +59,7 @@ from ..lib.logger import logger
 from ..prompts import GUIDE_SYSTEM_PROMPT, voice_system_prompt
 from ..services.analytics.llm_telemetry import start_tool_span
 from ..shared.capability_claims import log_false_capability_claims
+from ..shared.tools import resolve_set_reminder_tier
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import (
     VOICE_FEEDBACK_TOOL_DEFINITION,
@@ -2738,6 +2739,23 @@ class BuddyAgent(agents.Agent):
                 continue
             buffered_tool_chunks.append(item)
             for call in calls:
+                if getattr(call, "name", "") == "set_reminder":
+                    try:
+                        reminder_arguments = json.loads(
+                            getattr(call, "arguments", "{}") or "{}"
+                        )
+                    except (TypeError, json.JSONDecodeError):
+                        reminder_arguments = None
+                    if (
+                        isinstance(reminder_arguments, dict)
+                        and not reminder_arguments.get("tier")
+                    ):
+                        reminder_arguments["tier"] = resolve_set_reminder_tier(
+                            str(reminder_arguments.get("message", "")),
+                            None,
+                            user_instruction=self._turn_instruction(chat_ctx),
+                        )
+                        call.arguments = json.dumps(reminder_arguments)
                 registration = VOICE_TOOL_REGISTRY.get(getattr(call, "name", ""))
                 decision = evaluate_execution(
                     getattr(call, "name", ""),
