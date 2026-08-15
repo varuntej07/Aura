@@ -40,7 +40,18 @@ data class AlarmSchedule(
      * means the tone keeps looping without ever being interrupted to speak.
      */
     val voiceClipPath: String = "",
+
+    /** Server-distributed reminder or the Settings-owned local wake-up alarm. */
+    val source: String = SOURCE_SERVER,
+
+    /** Per-occurrence vibration choice. Old/server schedules default to on. */
+    val vibrate: Boolean = true,
+
+    /** True only for the separate nine-minute local snooze occurrence. */
+    val isSnooze: Boolean = false,
 ) {
+
+    val isLocalRegular: Boolean get() = source == SOURCE_LOCAL_REGULAR
 
     /**
      * When this alarm should ring on THIS device, right now.
@@ -93,10 +104,15 @@ data class AlarmSchedule(
         .put("snooze_count", snoozeCount)
         .put("tone", tone)
         .put("voice_clip_path", voiceClipPath)
+        .put("source", source)
+        .put("vibrate", vibrate)
+        .put("is_snooze", isSnooze)
 
     companion object {
         /** Three hours: wider than any DST step, narrower than a real flight. */
         const val MAX_SILENT_SHIFT_MS = 3L * 60L * 60L * 1000L
+        const val SOURCE_SERVER = "server"
+        const val SOURCE_LOCAL_REGULAR = "local_regular"
 
         fun fromJson(json: JSONObject): AlarmSchedule? {
             val id = json.optString("reminder_id").orEmpty()
@@ -114,6 +130,9 @@ data class AlarmSchedule(
                 // them unparseable would disarm every alarm on the device.
                 tone = json.optString("tone").orEmpty(),
                 voiceClipPath = json.optString("voice_clip_path").orEmpty(),
+                source = json.optString("source", SOURCE_SERVER),
+                vibrate = json.optBoolean("vibrate", true),
+                isSnooze = json.optBoolean("is_snooze", false),
             )
         }
 

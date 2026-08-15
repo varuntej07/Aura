@@ -43,6 +43,17 @@ class AlarmReceiver : BroadcastReceiver() {
         // a stale entry would be re-armed by the next reconcile.
         AlarmStore.removeArmed(context, schedule.reminderId)
 
+        // A regular alarm schedules tomorrow/its next selected weekday from the
+        // native definition immediately. This happens before any UI or Flutter
+        // engine is involved, so ignoring/dismissing the ring cannot lose the
+        // next occurrence. Snooze has a separate id and cannot overwrite it.
+        if (schedule.isLocalRegular) {
+            RegularAlarmCoordinator.scheduleNext(
+                context,
+                afterMillis = System.currentTimeMillis() + 1_000L,
+            )
+        }
+
         val serviceIntent = AlarmService.startIntent(context, schedule)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

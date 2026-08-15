@@ -11,17 +11,25 @@ class AppColors {
   // Accent is const so `const Icon(color: AppColors.accent)` still compiles.
   // Only accentLight/accentDark/accentGlow are getters, not const.
   static const accent = accentBase;
+  static const onAccent = Color(0xFFFFFFFF);
+  // Slightly calmer teal for the larger, more persistent alarm surfaces.
+  static const alarmAccent = Color(0xFF20B7A3);
   static Color get accentLight => Color.lerp(accentBase, Colors.white, 0.20)!;
   static Color get accentDark => Color.lerp(accentBase, Colors.black, 0.34)!;
   static Color get accentGlow => accentBase.withValues(alpha: 0.18);
+  static Color get alarmAccentDark =>
+      Color.lerp(alarmAccent, Colors.black, 0.30)!;
+  static Color get alarmAccentGlow => alarmAccent.withValues(alpha: 0.16);
   static Color get glassOrb1 => accentBase.withValues(alpha: 0.10);
   static Color get glassOrb2 => accentBase.withValues(alpha: 0.06);
   static Color get micGlow => accentBase.withValues(alpha: 0.24);
 
   // Backgrounds: warm cream theme.
   static const background = Color(0xFFF4EEE2);
-  static const surface = Color(0xFFFBF7EF);         // raised, near-white warm
-  static const surfaceVariant = Color(0xFFEAE2D2);  // selected/active tint, darker than bg
+  static const surface = Color(0xFFFBF7EF); // raised, near-white warm
+  static const surfaceVariant = Color(
+    0xFFEAE2D2,
+  ); // selected/active tint, darker than bg
   static const cardBackground = Color(0xFFFBF7EF);
 
   // Text: warm charcoal on cream

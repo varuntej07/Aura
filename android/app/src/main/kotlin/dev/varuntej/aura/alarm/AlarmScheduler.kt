@@ -136,14 +136,17 @@ object AlarmScheduler {
      */
     fun reconcile(context: Context, schedules: List<AlarmSchedule>): Int {
         val incoming = schedules.associateBy { it.reminderId }
-        AlarmStore.armed(context).keys
+        AlarmStore.armed(context)
+            .filterValues { !it.isLocalRegular }
+            .keys
             .filter { it !in incoming }
             .forEach { disarm(context, it) }
 
         var armedCount = 0
-        // Rewrite the record first so a crash mid-loop cannot leave the store
-        // claiming alarms that were never registered.
-        AlarmStore.replaceArmed(context, schedules)
+        // Rewrite the SERVER record first so a crash mid-loop cannot leave the
+        // store claiming alarms that were never registered. Device-local alarms
+        // are a separate authority and must survive an empty server response.
+        AlarmStore.replaceServerArmed(context, schedules)
         schedules.forEach { if (arm(context, it)) armedCount++ }
         Log.i(TAG, "reconciled: ${schedules.size} known, $armedCount armed")
         return armedCount
@@ -159,6 +162,11 @@ object AlarmScheduler {
      * upgrades them to real alarms with no round trip to the server.
      */
     fun rearmAll(context: Context): Int {
+        // Recompute the regular wake-up from its wall-clock definition. This is
+        // what makes timezone changes and overnight reboots keep "7:30" rather
+        // than a stale absolute instant. A pending snooze uses a separate id and
+        // remains in the armed store.
+        RegularAlarmCoordinator.refreshPrimary(context)
         val known = AlarmStore.armed(context).values.toList()
         var count = 0
         known.forEach { if (arm(context, it)) count++ }

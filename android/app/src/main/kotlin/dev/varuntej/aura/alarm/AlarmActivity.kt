@@ -230,16 +230,25 @@ class AlarmActivity : Activity() {
                 // network at all. The queued ack carries this exact time so a
                 // flush hours later records the real snooze rather than one
                 // counted from whenever the app happened to open.
-                AlarmScheduler.arm(
-                    this,
-                    current.copy(
-                        triggerAtIso = nextTriggerIso,
-                        localTimeIso = "",
-                        snoozeCount = current.snoozeCount + 1,
-                    ),
-                )
+                if (current.isLocalRegular) {
+                    RegularAlarmCoordinator.snooze(this, current, next)
+                } else {
+                    AlarmScheduler.arm(
+                        this,
+                        current.copy(
+                            triggerAtIso = nextTriggerIso,
+                            localTimeIso = "",
+                            snoozeCount = current.snoozeCount + 1,
+                        ),
+                    )
+                }
             }
-            AlarmStore.queueAck(this, current.reminderId, action, nextTriggerIso)
+            // Device-local alarms have no server row to acknowledge. Their next
+            // occurrence was already scheduled by AlarmReceiver before this UI
+            // appeared; only Buddy-created alarms need the durable network ack.
+            if (!current.isLocalRegular) {
+                AlarmStore.queueAck(this, current.reminderId, action, nextTriggerIso)
+            }
         }
 
         if (openChat && current != null) {

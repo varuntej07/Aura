@@ -56,6 +56,24 @@ object AlarmBridge {
                 // screen. Upgrades any alarm armed inexactly into a real one.
                 "rearmAll" -> result.success(AlarmScheduler.rearmAll(app))
 
+                // The regular wake-up alarm is device-local. Flutter edits the
+                // definition; Kotlin persists it and owns every occurrence.
+                "regularAlarm" -> result.success(RegularAlarmCoordinator.snapshot(app))
+
+                "saveRegularAlarm" -> {
+                    val raw = call.argument<String>("alarm")
+                    val alarm = try {
+                        raw?.let { RegularAlarm.fromJson(JSONObject(it)) }
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    if (alarm == null) {
+                        result.error("invalid_args", "alarm must be a JSON object", null)
+                    } else {
+                        result.success(RegularAlarmCoordinator.save(app, alarm))
+                    }
+                }
+
                 "requestExactAlarmAccess" ->
                     result.success(AlarmPermissions.requestExactAlarmAccess(app))
 

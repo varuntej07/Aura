@@ -36,8 +36,8 @@ import 'alarm_voice_cache.dart';
 /// reconcile repairs the rest.
 class AlarmService {
   AlarmService({required ApiClient apiClient})
-      : _apiClient = apiClient,
-        _voiceCache = AlarmVoiceCache(apiClient: apiClient);
+    : _apiClient = apiClient,
+      _voiceCache = AlarmVoiceCache(apiClient: apiClient);
 
   /// For the FCM background isolate, which has no DI graph and no ApiClient.
   ///
@@ -45,9 +45,7 @@ class AlarmService {
   /// matters in the background: arming the local schedule the instant a control
   /// push lands. Every network method degrades to a no-op rather than throwing,
   /// because the app will reconcile properly the next time it runs.
-  AlarmService.forBackgroundIsolate()
-      : _apiClient = null,
-        _voiceCache = null;
+  AlarmService.forBackgroundIsolate() : _apiClient = null, _voiceCache = null;
 
   final ApiClient? _apiClient;
 
@@ -56,21 +54,27 @@ class AlarmService {
   /// fills it in; the alarm itself is armed either way.
   final AlarmVoiceCache? _voiceCache;
 
-  static const MethodChannel _channel = MethodChannel('dev.varuntej.aura/alarm');
+  static const MethodChannel _channel = MethodChannel(
+    'dev.varuntej.aura/alarm',
+  );
 
   /// notification_type on the silent control pushes from `services/alarm_sync.py`.
   static const String controlMessageType = 'alarm_sync';
 
   static const String _tag = 'AlarmService';
   static const String _firedOccurrencesPrefsKey = 'alarm_fired_occurrences';
+  static const String _pendingAlarmInterestPrefsKey =
+      'pending_alarm_feature_interest';
   static const Duration _firedOccurrenceTtl = Duration(hours: 1);
+  bool _flushingAlarmInterest = false;
 
   /// Must match CHANNEL_ID in AlarmService.kt. A channel's importance and sound
   /// are immutable after creation, so the two sides cannot be allowed to drift.
   static const String alarmChannelId = 'aura_alarm';
   static const String alarmChannelName = 'Alarms';
 
-  final FlutterLocalNotificationsPlugin _localPlugin = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _localPlugin =
+      FlutterLocalNotificationsPlugin();
   bool _localPluginReady = false;
 
   /// Android is the only platform that can hold a real alarm schedule today.
@@ -89,9 +93,13 @@ class AlarmService {
   /// tells the user their 3 AM alarm is never going to fire. Confirming a
   /// wake-up that cannot happen is the original bug wearing a new coat.
   Future<AlarmCapabilities> refreshCapabilities() async {
-    if (!isSupported) return _capabilities = const AlarmCapabilities.unsupported();
+    if (!isSupported) {
+      return _capabilities = const AlarmCapabilities.unsupported();
+    }
     try {
-      final raw = await _channel.invokeMapMethod<String, dynamic>('capabilities');
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+        'capabilities',
+      );
       _capabilities = AlarmCapabilities.fromMap(raw ?? const {});
     } catch (e) {
       AppLogger.warning('capability check failed: $e', tag: _tag);
@@ -105,7 +113,8 @@ class AlarmService {
   ///
   /// The grant happens in a system Settings screen, so the app finds out by
   /// noticing on resume. Nothing tells it directly.
-  bool get canRingChangedSinceReport => _lastReportedCanRing != _capabilities.canRing;
+  bool get canRingChangedSinceReport =>
+      _lastReportedCanRing != _capabilities.canRing;
 
   bool? _lastReportedCanRing;
 
@@ -129,10 +138,91 @@ class AlarmService {
 
   /// Send the user to the system page where exact alarms are granted. There is
   /// no runtime dialog for this permission, only a Settings screen.
-  Future<bool> requestExactAlarmAccess() => _invokeBool('requestExactAlarmAccess');
+  Future<bool> requestExactAlarmAccess() =>
+      _invokeBool('requestExactAlarmAccess');
 
   Future<bool> requestFullScreenIntentAccess() =>
       _invokeBool('requestFullScreenIntentAccess');
+
+  /// The Settings-owned regular wake-up alarm.
+  ///
+  /// The definition and every occurrence live in native SharedPreferences and
+  /// AlarmManager. Firestore and the backend scheduler are not on this path.
+  Future<RegularAlarmSettings> regularAlarm() async {
+    if (!isSupported) return const RegularAlarmSettings.defaults();
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+        'regularAlarm',
+      );
+      return RegularAlarmSettings.fromMap(raw ?? const {});
+    } catch (e) {
+      AppLogger.warning('regular alarm read failed: $e', tag: _tag);
+      return const RegularAlarmSettings.defaults();
+    }
+  }
+
+  Future<RegularAlarmSaveResult?> saveRegularAlarm(
+    RegularAlarmSettings alarm,
+  ) async {
+    if (!isSupported) return null;
+    try {
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+        'saveRegularAlarm',
+        {'alarm': jsonEncode(alarm.toJson())},
+      );
+      return raw == null ? null : RegularAlarmSaveResult.fromMap(raw);
+    } catch (e) {
+      AppLogger.warning('regular alarm save failed: $e', tag: _tag);
+      return null;
+    }
+  }
+
+  /// Queue an explicit tap on a coming-soon alarm feature and flush it through
+  /// the authenticated backend into `observed_feedback`.
+  ///
+  /// The local queue makes the acknowledgement truthful even when the phone is
+  /// offline: the next visit to Alarm settings retries it. Duplicate feature
+  /// slugs collapse while pending so fast repeated taps cannot create a storm.
+  Future<void> recordComingSoonInterest(String feature) async {
+    final prefs = await SharedPreferences.getInstance();
+    final pending =
+        prefs.getStringList(_pendingAlarmInterestPrefsKey)?.toSet() ??
+        <String>{};
+    pending.add(feature);
+    await prefs.setStringList(
+      _pendingAlarmInterestPrefsKey,
+      pending.toList()..sort(),
+    );
+    await flushComingSoonInterest();
+  }
+
+  Future<void> flushComingSoonInterest() async {
+    final api = _apiClient;
+    if (api == null || _flushingAlarmInterest) return;
+    _flushingAlarmInterest = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final pending =
+          prefs.getStringList(_pendingAlarmInterestPrefsKey)?.toSet() ??
+          <String>{};
+      for (final feature in pending.toList()) {
+        final result = await api.post<Map<String, dynamic>>(
+          '/feedback/alarm-interest',
+          {'feature': feature},
+          (json) => json,
+        );
+        if (result.isSuccess) pending.remove(feature);
+      }
+      await prefs.setStringList(
+        _pendingAlarmInterestPrefsKey,
+        pending.toList()..sort(),
+      );
+    } catch (e) {
+      AppLogger.warning('alarm interest flush failed: $e', tag: _tag);
+    } finally {
+      _flushingAlarmInterest = false;
+    }
+  }
 
   /// Pull the complete armed set from the server and make the device match it.
   ///
@@ -153,12 +243,18 @@ class AlarmService {
     );
     final body = result.dataOrNull;
     if (body == null) {
-      AppLogger.warning('alarm sync fetch failed; keeping the current schedule', tag: _tag);
+      AppLogger.warning(
+        'alarm sync fetch failed; keeping the current schedule',
+        tag: _tag,
+      );
       return 0;
     }
     final alarms = body['alarms'];
     if (alarms is! List) {
-      AppLogger.warning('alarm sync returned no list; keeping the current schedule', tag: _tag);
+      AppLogger.warning(
+        'alarm sync returned no list; keeping the current schedule',
+        tag: _tag,
+      );
       return 0;
     }
     final rows = await _withVoiceClips(alarms);
@@ -167,7 +263,10 @@ class AlarmService {
       final armed = await _channel.invokeMethod<int>('reconcile', {
         'alarms': jsonEncode(rows),
       });
-      AppLogger.info('reconciled ${rows.length} alarms, $armed armed', tag: _tag);
+      AppLogger.info(
+        'reconciled ${rows.length} alarms, $armed armed',
+        tag: _tag,
+      );
       return armed ?? 0;
     } catch (e) {
       AppLogger.warning('reconcile failed: $e', tag: _tag);
@@ -184,7 +283,9 @@ class AlarmService {
   ///
   /// Also the one place that sees the COMPLETE armed set, so it is where stale
   /// clips are evicted.
-  Future<List<Map<String, dynamic>>> _withVoiceClips(List<dynamic> alarms) async {
+  Future<List<Map<String, dynamic>>> _withVoiceClips(
+    List<dynamic> alarms,
+  ) async {
     final rows = <Map<String, dynamic>>[];
     final tags = <String, String>{};
 
@@ -198,7 +299,10 @@ class AlarmService {
       final cache = _voiceCache;
       if (cache != null && clipTag.isNotEmpty) {
         tags[reminderId] = clipTag;
-        final path = await cache.ensureClip(reminderId: reminderId, clipTag: clipTag);
+        final path = await cache.ensureClip(
+          reminderId: reminderId,
+          clipTag: clipTag,
+        );
         if (path != null) row['voice_clip_path'] = path;
       }
       rows.add(row);
@@ -253,10 +357,14 @@ class AlarmService {
           // new time", the snooze case, where another device acked first.
           await _channel.invokeMethod<bool>('stopRinging');
         case 'cancel':
-          await _channel.invokeMethod<bool>('disarm', {'reminder_id': reminderId});
+          await _channel.invokeMethod<bool>('disarm', {
+            'reminder_id': reminderId,
+          });
         case 'stop':
           // The user already dealt with this alarm on another device.
-          await _channel.invokeMethod<bool>('disarm', {'reminder_id': reminderId});
+          await _channel.invokeMethod<bool>('disarm', {
+            'reminder_id': reminderId,
+          });
           await _channel.invokeMethod<bool>('stopRinging');
         default:
           AppLogger.warning('unknown alarm control op: $op', tag: _tag);
@@ -282,7 +390,10 @@ class AlarmService {
   Future<bool> handleFallback(Map<String, dynamic> data) async {
     if ((data['alarm_fallback'] ?? '').toString() != '1') return false;
     if (await shouldSuppressFallback(data)) {
-      AppLogger.info('alarm backstop suppressed, the local alarm already rang', tag: _tag);
+      AppLogger.info(
+        'alarm backstop suppressed, the local alarm already rang',
+        tag: _tag,
+      );
       return true;
     }
     if (!isSupported) return false;
@@ -328,7 +439,9 @@ class AlarmService {
     // runs first on a fresh install must not post to a channel that does not
     // exist yet, or the notification is dropped without a trace.
     await _localPlugin
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
         ?.createNotificationChannel(
           const AndroidNotificationChannel(
             alarmChannelId,
@@ -381,10 +494,10 @@ class AlarmService {
     }
 
     try {
-      return await _channel.invokeMethod<bool>(
-            'firedRecently',
-            {'reminder_id': reminderId, 'trigger_at': triggerAt},
-          ) ??
+      return await _channel.invokeMethod<bool>('firedRecently', {
+            'reminder_id': reminderId,
+            'trigger_at': triggerAt,
+          }) ??
           false;
     } catch (e) {
       AppLogger.warning('fallback suppression check failed: $e', tag: _tag);
@@ -445,8 +558,7 @@ class AlarmService {
     String reminderId, {
     required String action,
     String? nextTriggerAt,
-  }) =>
-      _postAck(reminderId, action, nextTriggerAt);
+  }) => _postAck(reminderId, action, nextTriggerAt);
 
   Future<bool> _postAck(
     String reminderId,
@@ -455,15 +567,12 @@ class AlarmService {
   ) async {
     final api = _apiClient;
     if (api == null) return false;
-    final result = await api.post<Map<String, dynamic>>(
-      '/reminders/$reminderId/ack',
-      {
-        'action': action,
-        if (nextTriggerAt != null && nextTriggerAt.isNotEmpty)
-          'next_trigger_at': nextTriggerAt,
-      },
-      (json) => json,
-    );
+    final result = await api
+        .post<Map<String, dynamic>>('/reminders/$reminderId/ack', {
+          'action': action,
+          if (nextTriggerAt != null && nextTriggerAt.isNotEmpty)
+            'next_trigger_at': nextTriggerAt,
+        }, (json) => json);
     if (!result.isSuccess) {
       AppLogger.warning('ack failed for $reminderId ($action)', tag: _tag);
     }
@@ -494,7 +603,9 @@ class AlarmService {
   Future<DeviceTone?> pickDeviceTone() async {
     if (!isSupported) return null;
     try {
-      final raw = await _channel.invokeMapMethod<String, dynamic>('pickDeviceTone');
+      final raw = await _channel.invokeMapMethod<String, dynamic>(
+        'pickDeviceTone',
+      );
       final tone = DeviceTone.fromMap(raw ?? const {});
       return tone.uri.isEmpty ? null : tone;
     } catch (e) {
@@ -511,10 +622,9 @@ class AlarmService {
   Future<bool> mirrorDefaultTone(String tone) async {
     if (!isSupported) return false;
     try {
-      return await _channel.invokeMethod<bool>(
-            'setDefaultTone',
-            {'tone': tone},
-          ) ??
+      return await _channel.invokeMethod<bool>('setDefaultTone', {
+            'tone': tone,
+          }) ??
           false;
     } catch (e) {
       AppLogger.warning('default tone mirror failed: $e', tag: _tag);
@@ -554,8 +664,97 @@ class DeviceTone {
   bool get isEmpty => uri.isEmpty;
 
   factory DeviceTone.fromMap(Map<String, dynamic> map) => DeviceTone(
-        uri: (map['uri'] ?? '').toString(),
-        title: (map['title'] ?? '').toString(),
+    uri: (map['uri'] ?? '').toString(),
+    title: (map['title'] ?? '').toString(),
+  );
+}
+
+@immutable
+class RegularAlarmSettings {
+  const RegularAlarmSettings({
+    required this.enabled,
+    required this.hour,
+    required this.minute,
+    required this.weekdays,
+    required this.tone,
+    required this.vibrate,
+  });
+
+  const RegularAlarmSettings.defaults()
+    : enabled = true,
+      hour = 7,
+      minute = 30,
+      weekdays = const {1, 2, 3, 4, 5, 6, 7},
+      tone = '',
+      vibrate = true;
+
+  final bool enabled;
+  final int hour;
+  final int minute;
+
+  /// ISO weekday numbers: Monday=1 ... Sunday=7.
+  final Set<int> weekdays;
+  final String tone;
+  final bool vibrate;
+
+  RegularAlarmSettings copyWith({
+    bool? enabled,
+    int? hour,
+    int? minute,
+    Set<int>? weekdays,
+    String? tone,
+    bool? vibrate,
+  }) => RegularAlarmSettings(
+    enabled: enabled ?? this.enabled,
+    hour: hour ?? this.hour,
+    minute: minute ?? this.minute,
+    weekdays: weekdays ?? this.weekdays,
+    tone: tone ?? this.tone,
+    vibrate: vibrate ?? this.vibrate,
+  );
+
+  factory RegularAlarmSettings.fromMap(Map<String, dynamic> map) {
+    final days = (map['weekdays'] as List<dynamic>? ?? const <dynamic>[])
+        .whereType<num>()
+        .map((day) => day.toInt())
+        .where((day) => day >= 1 && day <= 7)
+        .toSet();
+    return RegularAlarmSettings(
+      enabled: map['enabled'] as bool? ?? false,
+      hour: (map['hour'] as num?)?.toInt().clamp(0, 23).toInt() ?? 7,
+      minute: (map['minute'] as num?)?.toInt().clamp(0, 59).toInt() ?? 30,
+      weekdays: days.isEmpty ? const {1, 2, 3, 4, 5, 6, 7} : days,
+      tone: (map['tone'] ?? '').toString(),
+      vibrate: map['vibrate'] as bool? ?? true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'enabled': enabled,
+    'hour': hour,
+    'minute': minute,
+    'weekdays': weekdays.toList()..sort(),
+    'tone': tone,
+    'vibrate': vibrate,
+  };
+}
+
+@immutable
+class RegularAlarmSaveResult {
+  const RegularAlarmSaveResult({
+    required this.settings,
+    required this.nextTriggerAt,
+  });
+
+  final RegularAlarmSettings settings;
+  final DateTime? nextTriggerAt;
+
+  factory RegularAlarmSaveResult.fromMap(Map<String, dynamic> map) =>
+      RegularAlarmSaveResult(
+        settings: RegularAlarmSettings.fromMap(map),
+        nextTriggerAt: DateTime.tryParse(
+          (map['next_trigger_at'] ?? '').toString(),
+        ),
       );
 }
 
@@ -569,9 +768,9 @@ class AlarmCapabilities {
   });
 
   const AlarmCapabilities.unsupported()
-      : canScheduleExact = false,
-        canUseFullScreenIntent = false,
-        degradedAlarmCount = 0;
+    : canScheduleExact = false,
+      canUseFullScreenIntent = false,
+      degradedAlarmCount = 0;
 
   final bool canScheduleExact;
   final bool canUseFullScreenIntent;
@@ -586,7 +785,8 @@ class AlarmCapabilities {
   /// vibrates, it just does not take over the lock screen.
   bool get canRing => canScheduleExact;
 
-  factory AlarmCapabilities.fromMap(Map<String, dynamic> map) => AlarmCapabilities(
+  factory AlarmCapabilities.fromMap(Map<String, dynamic> map) =>
+      AlarmCapabilities(
         canScheduleExact: map['can_schedule_exact'] == true,
         canUseFullScreenIntent: map['can_use_full_screen_intent'] == true,
         degradedAlarmCount: (map['degraded_alarm_count'] as int?) ?? 0,

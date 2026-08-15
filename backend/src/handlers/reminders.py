@@ -37,6 +37,8 @@ from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
 from ..services import alarm_sync, alarm_tones, alarm_voice
+from ..services.feedback.feedback_capture import capture_feedback
+from ..services.feedback.feedback_schema import FeedbackReport
 from ..services.firebase import admin_firestore
 from ..services.request_auth import resolve_user_id_from_request
 
@@ -55,6 +57,50 @@ ACTION_DISMISS = "dismiss"
 ACTION_SNOOZE = "snooze"
 ACTION_IM_UP = "im_up"
 VALID_ACTIONS = frozenset({ACTION_DISMISS, ACTION_SNOOZE, ACTION_IM_UP})
+
+_ALARM_INTEREST_LABELS = {
+    "sunrise_alarm": "Sunrise Alarm",
+    "weather_forecast": "Weather forecast after alarm",
+    "routines": "Alarm routines",
+    "routine_weather": "routine weather briefing",
+    "routine_calendar": "routine calendar briefing",
+    "routine_tasks": "routine task briefing",
+    "routine_joke": "routine joke",
+    "routine_commute": "routine commute briefing",
+    "routine_news": "routine news playback",
+    "routine_add_action": "routine custom action",
+    "routine_save": "routine save",
+}
+
+
+async def handle_alarm_feature_interest(request: Request) -> JSONResponse:
+    """Record an explicit tap on a coming-soon Alarm settings row."""
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    feature = str(body.get("feature", "") if isinstance(body, dict) else "").strip()
+    label = _ALARM_INTEREST_LABELS.get(feature)
+    if label is None:
+        return JSONResponse({"error": "Unknown alarm feature."}, status_code=400)
+
+    captured = await capture_feedback(
+        user_id,
+        FeedbackReport(
+            category="feature_request",
+            about="reminders",
+            summary=f"User tapped the coming-soon {label} control in Alarm settings.",
+            severity="low",
+        ),
+        source="mobile_alarm_settings",
+    )
+    if not captured:
+        return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
+    return JSONResponse({"ok": True})
 
 
 def _reminders_ref(user_id: str):

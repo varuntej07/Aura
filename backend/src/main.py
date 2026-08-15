@@ -155,6 +155,7 @@ from .handlers.research import (
 )
 from .handlers.reminders import (
     handle_acknowledge_alarm,
+    handle_alarm_feature_interest,
     handle_list_alarms,
     handle_wake_clip,
 )
@@ -893,6 +894,11 @@ async def reminders_alarms_endpoint(request: Request) -> JSONResponse:
 @app.post("/reminders/{reminder_id}/ack")
 async def reminders_ack_endpoint(request: Request, reminder_id: str) -> JSONResponse:
     return await handle_acknowledge_alarm(request, reminder_id)
+
+
+@app.post("/feedback/alarm-interest")
+async def alarm_feature_interest_endpoint(request: Request) -> JSONResponse:
+    return await handle_alarm_feature_interest(request)
 
 
 # Buddy reading a reminder aloud, for the `buddy` alarm tone. Fetched when the

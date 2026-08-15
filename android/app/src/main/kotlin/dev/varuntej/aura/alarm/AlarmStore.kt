@@ -24,8 +24,11 @@ object AlarmStore {
 
     private const val PREFS = "aura_alarms"
 
-    /** reminder_id -> the armed schedule, as JSON. Mirrors the server. */
+    /** reminder_id -> the armed schedule, as JSON. Holds server and local entries. */
     private const val KEY_ARMED = "armed"
+
+    /** The Settings-owned device-local regular wake-up definition. */
+    private const val KEY_REGULAR_ALARM = "regular_alarm"
 
     /** reminder_id -> epoch millis it rang. Suppresses duplicate rings. */
     private const val KEY_FIRED = "fired"
@@ -96,8 +99,10 @@ object AlarmStore {
         if (current.remove(reminderId) != null) writeArmed(context, current)
     }
 
-    fun replaceArmed(context: Context, schedules: List<AlarmSchedule>) {
-        writeArmed(context, schedules.associateBy { it.reminderId })
+    /** Replace only the server-owned portion, preserving device-local alarms. */
+    fun replaceServerArmed(context: Context, schedules: List<AlarmSchedule>) {
+        val local = armed(context).filterValues { it.isLocalRegular }
+        writeArmed(context, local + schedules.associateBy { it.reminderId })
     }
 
     private fun writeArmed(context: Context, map: Map<String, AlarmSchedule>) {
@@ -136,6 +141,19 @@ object AlarmStore {
         next[reminderId] = nowMs
         writeFired(context, next)
         return true
+    }
+
+    // Device-local regular alarm ------------------------------------------
+
+    fun regularAlarm(context: Context): RegularAlarm? {
+        val raw = prefs(context).getString(KEY_REGULAR_ALARM, null) ?: return null
+        return runCatching { RegularAlarm.fromJson(JSONObject(raw)) }.getOrNull()
+    }
+
+    fun putRegularAlarm(context: Context, alarm: RegularAlarm) {
+        prefs(context).edit()
+            .putString(KEY_REGULAR_ALARM, alarm.normalized().toJson().toString())
+            .commit()
     }
 
     fun firedRecently(

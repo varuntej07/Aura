@@ -48,6 +48,7 @@ class AlarmService : Service() {
     private var escalation: Runnable? = null
     private var spokenLine: Runnable? = null
     private var reminderId: String? = null
+    private var currentSchedule: AlarmSchedule? = null
 
     /**
      * What is ACTUALLY sounding, which is not always what was asked for.
@@ -72,6 +73,7 @@ class AlarmService : Service() {
             return START_NOT_STICKY
         }
         reminderId = schedule.reminderId
+        currentSchedule = schedule
 
         // startForeground FIRST and unconditionally. Android kills a service that
         // takes more than a few seconds to post its notification, and everything
@@ -138,7 +140,7 @@ class AlarmService : Service() {
             Log.e(TAG, "alarm audio failed entirely; vibration only")
         }
 
-        startVibration()
+        if (schedule.vibrate) startVibration()
     }
 
     /** Play a bundled tone by slug. False when it is not bundled or will not open. */
@@ -343,7 +345,7 @@ class AlarmService : Service() {
     private fun scheduleGiveUp() {
         val task = Runnable {
             Log.i(TAG, "alarm gave up unanswered: $reminderId")
-            reminderId?.let {
+            reminderId?.takeIf { currentSchedule?.isLocalRegular != true }?.let {
                 AlarmStore.queueAck(applicationContext, it, ACK_UNANSWERED, null)
             }
             stopSelf()
@@ -363,11 +365,18 @@ class AlarmService : Service() {
         //
         // A channel's importance and sound are IMMUTABLE after creation, so this
         // must be right the first time; a later change needs a new channel id.
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Alarms",
-            NotificationManager.IMPORTANCE_HIGH,
-        ).apply {
+        manager.createNotificationChannel(alarmChannel(CHANNEL_ID, "Alarms", vibrate = true))
+        manager.createNotificationChannel(
+            alarmChannel(
+                CHANNEL_ID_NO_VIBRATION,
+                "Alarms (sound only)",
+                vibrate = false,
+            ),
+        )
+    }
+
+    private fun alarmChannel(id: String, name: String, vibrate: Boolean): NotificationChannel =
+        NotificationChannel(id, name, NotificationManager.IMPORTANCE_HIGH).apply {
             description = "Alarms Buddy sets when you ask to be woken up."
             setSound(
                 RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
@@ -376,14 +385,12 @@ class AlarmService : Service() {
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build(),
             )
-            enableVibration(true)
-            vibrationPattern = ESCALATING_PATTERN
+            enableVibration(vibrate)
+            if (vibrate) vibrationPattern = ESCALATING_PATTERN
             setBypassDnd(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             setShowBadge(false)
         }
-        manager.createNotificationChannel(channel)
-    }
 
     private fun buildNotification(schedule: AlarmSchedule): Notification {
         val full = PendingIntent.getActivity(
@@ -392,7 +399,8 @@ class AlarmService : Service() {
             AlarmActivity.launchIntent(this, schedule),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val builder = Notification.Builder(this, CHANNEL_ID)
+        val channelId = if (schedule.vibrate) CHANNEL_ID else CHANNEL_ID_NO_VIBRATION
+        val builder = Notification.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Buddy")
             .setContentText(schedule.message.ifBlank { "Time to get up." })
@@ -408,6 +416,10 @@ class AlarmService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             @Suppress("DEPRECATION")
             builder.setPriority(Notification.PRIORITY_MAX)
+            if (!schedule.vibrate) {
+                @Suppress("DEPRECATION")
+                builder.setVibrate(longArrayOf(0L))
+            }
         }
         return builder.build()
     }
@@ -418,6 +430,7 @@ class AlarmService : Service() {
         private const val WAKE_LOCK_TAG = "aura:alarm"
 
         const val CHANNEL_ID = "aura_alarm"
+        private const val CHANNEL_ID_NO_VIBRATION = "aura_alarm_sound_only"
         const val NOTIFICATION_ID = 90210
         const val ACK_UNANSWERED = "unanswered"
 

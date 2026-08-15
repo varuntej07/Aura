@@ -20,8 +20,25 @@ import '../../viewmodels/settings_viewmodel.dart';
 /// to the OS picker, and the URI it returns stays on the phone: it points into
 /// the user's own storage, would mean nothing on another device, and only the
 /// `device` slug itself is ever synced.
+class AlarmTonePickerArgs {
+  const AlarmTonePickerArgs({
+    this.initialSlug = '',
+    this.selectionOnly = false,
+    this.allowBuddyVoice = true,
+  });
+
+  final String initialSlug;
+  final bool selectionOnly;
+  final bool allowBuddyVoice;
+}
+
 class AlarmTonePickerScreen extends StatefulWidget {
-  const AlarmTonePickerScreen({super.key});
+  const AlarmTonePickerScreen({
+    super.key,
+    this.args = const AlarmTonePickerArgs(),
+  });
+
+  final AlarmTonePickerArgs args;
 
   @override
   State<AlarmTonePickerScreen> createState() => _AlarmTonePickerScreenState();
@@ -85,11 +102,15 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
   Future<void> _choose(AlarmTone tone) async {
     await _stopPreview();
     if (!mounted) return;
+    if (widget.args.selectionOnly) {
+      Navigator.pop(context, tone.slug);
+      return;
+    }
     await _persistSelection(tone.slug);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(_confirmationFor(tone))),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(_confirmationFor(tone))));
   }
 
   String _confirmationFor(AlarmTone tone) => tone.slug == kAlarmToneBuddy
@@ -107,16 +128,24 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
       return;
     }
     setState(() => _deviceTone = picked);
+    if (widget.args.selectionOnly) {
+      Navigator.pop(context, kAlarmToneDevice);
+      return;
+    }
     await _persistSelection(kAlarmToneDevice);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Done. ${picked.title} it is.')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Done. ${picked.title} it is.')));
   }
 
   Future<void> _chooseSystemDefault() async {
     await _stopPreview();
     if (!mounted) return;
+    if (widget.args.selectionOnly) {
+      Navigator.pop(context, kAlarmToneSystemDefault);
+      return;
+    }
     await _persistSelection(kAlarmToneSystemDefault);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -140,7 +169,12 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
   Widget build(BuildContext context) {
     final settingsVm = context.watch<SettingsViewModel>();
     final signedIn = context.watch<AuthViewModel>().user != null;
-    final selected = displayAlarmToneSlug(settingsVm.settings?.alarmTone);
+    final canChoose = widget.args.selectionOnly || signedIn;
+    final selected = displayAlarmToneSlug(
+      widget.args.selectionOnly
+          ? widget.args.initialSlug
+          : settingsVm.settings?.alarmTone,
+    );
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -149,7 +183,10 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
           child: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 12,
+                ),
                 child: Row(
                   children: [
                     GlassIconButton(
@@ -177,9 +214,8 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
                     const Padding(
                       padding: EdgeInsets.fromLTRB(4, 0, 4, 16),
                       child: Text(
-                        'Tap play to hear one, tap the card to keep it. This is '
-                        'the default for every alarm, unless you ask me for '
-                        'something else when you set one.',
+                        'Tap play to hear one, then tap the card to keep it. '
+                        'The sound you preview is the one the alarm plays.',
                         style: TextStyle(
                           color: AppColors.textTertiary,
                           fontSize: 13,
@@ -187,15 +223,19 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
                         ),
                       ),
                     ),
-                    for (final tone in kAlarmTones)
+                    for (final tone in kAlarmTones.where(
+                      (tone) =>
+                          widget.args.allowBuddyVoice ||
+                          tone.slug != kAlarmToneBuddy,
+                    ))
                       Padding(
                         padding: const EdgeInsets.only(bottom: 10),
                         child: _ToneCard(
                           tone: tone,
-                          selected: signedIn && tone.slug == selected,
+                          selected: canChoose && tone.slug == selected,
                           playing: _playingSlug == tone.slug,
                           onPreview: () => _preview(tone),
-                          onChoose: signedIn ? () => _choose(tone) : null,
+                          onChoose: canChoose ? () => _choose(tone) : null,
                         ),
                       ),
                     const SizedBox(height: 6),
@@ -207,18 +247,19 @@ class _AlarmTonePickerScreenState extends State<AlarmTonePickerScreen> {
                       subtitle: _deviceTone?.title.isNotEmpty == true
                           ? 'From your own sounds. Tap to change.'
                           : 'Pick any alarm sound already on your phone.',
-                      selected: signedIn && selected == kAlarmToneDevice,
-                      onTap: signedIn ? _chooseDevice : null,
+                      selected: canChoose && selected == kAlarmToneDevice,
+                      onTap: canChoose ? _chooseDevice : null,
                     ),
                     const SizedBox(height: 10),
                     _PlainRow(
                       icon: Icons.phone_android_outlined,
                       title: 'Phone default',
                       subtitle: "Whatever your phone's own alarm sound is.",
-                      selected: signedIn && selected == kAlarmToneSystemDefault,
-                      onTap: signedIn ? _chooseSystemDefault : null,
+                      selected:
+                          canChoose && selected == kAlarmToneSystemDefault,
+                      onTap: canChoose ? _chooseSystemDefault : null,
                     ),
-                    if (!signedIn)
+                    if (!canChoose)
                       const Padding(
                         padding: EdgeInsets.fromLTRB(4, 20, 4, 0),
                         child: Text(
@@ -271,10 +312,7 @@ class _ToneCard extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [
-            tint.withValues(alpha: 0.16),
-            tint.withValues(alpha: 0.05),
-          ],
+          colors: [tint.withValues(alpha: 0.16), tint.withValues(alpha: 0.05)],
         ),
         child: Row(
           children: [

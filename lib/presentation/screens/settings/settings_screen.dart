@@ -6,7 +6,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../../core/constants/alarm_tones.dart';
 import '../../../core/constants/buddy_voices.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../core/theme/app_colors.dart';
@@ -257,32 +256,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
 
                     // ── Reminders ────────────────────────────────────────
-                    const _SectionLabel('Reminders'),
+                    const _SectionLabel('Alarms & reminders'),
+                    if (Platform.isAndroid) ...[
+                      _GlassNavTile(
+                        icon: _SettingsIconKind.bell,
+                        iconColor: _SettingsIconColors.coral,
+                        title: 'Alarm',
+                        subtitle: 'Set a regular wake-up alarm',
+                        onTap: () => context.push('/settings/alarm'),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     _GlassNavTile(
                       icon: _SettingsIconKind.bell,
-                      iconColor: _SettingsIconColors.coral,
+                      iconColor: _SettingsIconColors.blue,
                       title: 'View Reminders',
                       subtitle: 'See all scheduled reminders',
                       onTap: () => context.push('/reminders'),
-                    ),
-                    const SizedBox(height: 8),
-                    Selector<SettingsViewModel, String>(
-                      selector: (_, vm) => vm.settings?.alarmTone ?? '',
-                      builder: (context, storedTone, _) {
-                        final slug = displayAlarmToneSlug(storedTone);
-                        final label = switch (slug) {
-                          kAlarmToneDevice => 'From your device',
-                          kAlarmToneSystemDefault => 'Phone default',
-                          _ => alarmToneFor(slug)?.label ?? 'Phone default',
-                        };
-                        return _GlassNavTile(
-                          icon: _SettingsIconKind.volume,
-                          iconColor: _SettingsIconColors.green,
-                          title: 'Alarm sound',
-                          subtitle: label,
-                          onTap: () => context.push('/settings/alarm-sound'),
-                        );
-                      },
                     ),
 
                     const _SectionLabel('Connectors'),
@@ -1073,10 +1063,7 @@ class _AccountActionsSheet extends StatelessWidget {
                     subtitle: 'Sign out on this device',
                     onTap: onSignOut,
                   ),
-                  const Divider(
-                    height: 24,
-                    color: AppColors.glassBorderDim,
-                  ),
+                  const Divider(height: 24, color: AppColors.glassBorderDim),
                   _AccountActionRow(
                     icon: _SettingsIconKind.delete,
                     iconColor: AppColors.error,

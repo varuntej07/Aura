@@ -32,6 +32,8 @@ import '../../presentation/screens/reminders/reminders_screen.dart';
 import '../../presentation/screens/settings/alarm_tone_picker_screen.dart';
 import '../../presentation/screens/settings/aura_profile_screen.dart';
 import '../../presentation/screens/settings/link_device_screen.dart';
+import '../../presentation/screens/settings/regular_alarm_screen.dart';
+import '../../presentation/screens/settings/routine_coming_soon_screen.dart';
 import '../../presentation/screens/settings/settings_screen.dart';
 import '../../presentation/screens/settings/voice_picker_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
@@ -188,10 +190,28 @@ GoRouter buildRouter(
             _slidePage(state, const VoicePickerScreen()),
       ),
       GoRoute(
+        path: '/settings/alarm',
+        name: 'Alarm',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const RegularAlarmScreen()),
+      ),
+      GoRoute(
+        path: '/settings/alarm/routines',
+        name: 'Alarm Routines',
+        pageBuilder: (context, state) =>
+            _slidePage(state, const RoutineComingSoonScreen()),
+      ),
+      GoRoute(
         path: '/settings/alarm-sound',
         name: 'Alarm Sound',
-        pageBuilder: (context, state) =>
-            _slidePage(state, const AlarmTonePickerScreen()),
+        pageBuilder: (context, state) => _slidePage(
+          state,
+          AlarmTonePickerScreen(
+            args: state.extra is AlarmTonePickerArgs
+                ? state.extra! as AlarmTonePickerArgs
+                : const AlarmTonePickerArgs(),
+          ),
+        ),
       ),
       GoRoute(
         path: '/settings/link-device',
