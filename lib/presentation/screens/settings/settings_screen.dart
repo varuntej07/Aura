@@ -262,7 +262,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             : vm.settings!.ttsVoiceId,
                       ).label,
                       builder: (context, voiceLabel, _) => _GlassNavTile(
-                        icon: Icons.graphic_eq_rounded,
+                        icon: _SettingsIconKind.waveform,
+                        iconColor: _SettingsIconColors.purple,
                         title: "Buddy's voice",
                         subtitle: voiceLabel,
                         onTap: () => context.push('/settings/voice'),
@@ -272,7 +273,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Selector<SettingsViewModel, bool>(
                       selector: (_, vm) => vm.settings?.wakeWordEnabled ?? false,
                       builder: (context, enabled, _) => _GlassToggleTile(
-                        icon: Icons.record_voice_over_rounded,
+                        icon: _SettingsIconKind.voiceWake,
+                        iconColor: _SettingsIconColors.amber,
                         title: 'Wake Word',
                         subtitle: 'Activate with "Hey Buddy"',
                         value: enabled,
@@ -285,7 +287,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Selector<SettingsViewModel, bool>(
                       selector: (_, vm) => vm.settings?.ttsEnabled ?? true,
                       builder: (context, enabled, _) => _GlassToggleTile(
-                        icon: Icons.volume_up_rounded,
+                        icon: _SettingsIconKind.volume,
+                        iconColor: _SettingsIconColors.green,
                         title: 'Voice Responses',
                         subtitle: 'Read responses aloud (TTS)',
                         value: enabled,
@@ -297,7 +300,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     if (Platform.isAndroid) ...[
                       const SizedBox(height: 8),
                       _GlassNavTile(
-                        icon: Icons.add_to_home_screen_rounded,
+                        icon: _SettingsIconKind.phone,
+                        iconColor: _SettingsIconColors.blue,
                         title: 'Add to home screen',
                         subtitle:
                             'One-tap widget that opens Buddy with the mic on',
@@ -308,7 +312,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     // ── Buddy on your PC ─────────────────────────────────
                     const _SectionLabel('Buddy on your PC'),
                     _GlassNavTile(
-                      icon: Icons.desktop_windows_rounded,
+                      icon: _SettingsIconKind.desktop,
+                      iconColor: _SettingsIconColors.blue,
                       title: 'Link this PC',
                       subtitle: 'Get a code to sign in Buddy on your desktop',
                       onTap: () => context.push('/settings/link-device'),
@@ -317,7 +322,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     // ── Reminders ────────────────────────────────────────
                     const _SectionLabel('Reminders'),
                     _GlassNavTile(
-                      icon: Icons.notifications_active_rounded,
+                      icon: _SettingsIconKind.bell,
+                      iconColor: _SettingsIconColors.coral,
                       title: 'View Reminders',
                       subtitle: 'See all scheduled reminders',
                       onTap: () => context.push('/reminders'),
@@ -325,7 +331,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                     const _SectionLabel('Connectors'),
                     _GlassNavTile(
-                      icon: Icons.link_rounded,
+                      icon: _SettingsIconKind.link,
+                      iconColor: _SettingsIconColors.green,
                       title: 'Connectors',
                       subtitle: 'Calendar, Gmail & more',
                       onTap: () => context.push('/settings/connectors'),
@@ -336,7 +343,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     Selector<AuthViewModel, bool>(
                       selector: (_, vm) => vm.auraMemoryEnabled,
                       builder: (context, memoryOn, _) => _GlassToggleTile(
-                        icon: Icons.memory_rounded,
+                        icon: _SettingsIconKind.brain,
+                        iconColor: _SettingsIconColors.purple,
                         title: 'Aura memory',
                         subtitle: memoryOn
                             ? 'Buddy learns from your chats to personalize everything'
@@ -348,7 +356,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 8),
                     _GlassNavTile(
-                      icon: Icons.psychology_alt_rounded,
+                      icon: _SettingsIconKind.profile,
+                      iconColor: _SettingsIconColors.purple,
                       title: 'Your Aura Profile',
                       subtitle: 'See what Buddy has learned about you',
                       onTap: () => context.push('/settings/aura-profile'),
@@ -357,7 +366,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     // Subscription
                     const _SectionLabel('Subscription'),
                     _GlassNavTile(
-                      icon: Icons.workspace_premium_rounded,
+                      icon: _SettingsIconKind.premium,
+                      iconColor: _SettingsIconColors.amber,
                       title: 'Upgrade Plan',
                       subtitle: 'View plans and manage subscription',
                       onTap: () => context.push('/paywall'),
@@ -372,13 +382,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           : Column(
                               children: [
                                 _GlassInfoTile(
-                                  icon: Icons.person_rounded,
+                                  icon: _SettingsIconKind.person,
+                                  iconColor: _SettingsIconColors.blue,
                                   label: 'Name',
                                   value: user.displayName,
                                 ),
                                 const SizedBox(height: 8),
                                 _GlassInfoTile(
-                                  icon: Icons.alternate_email_rounded,
+                                  icon: _SettingsIconKind.email,
+                                  iconColor: _SettingsIconColors.purple,
                                   label: 'Email',
                                   value: user.email,
                                 ),
@@ -389,7 +401,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     // ── Feedback ─────────────────────────────────────────
                     const _SectionLabel('Feedback'),
                     _GlassNavTile(
-                      icon: Icons.rate_review_rounded,
+                      icon: _SettingsIconKind.feedback,
+                      iconColor: _SettingsIconColors.coral,
                       title: 'Send Feedback',
                       subtitle: 'Tell us what to change or fix',
                       onTap: () => showFeedbackSheet(context),
@@ -398,7 +411,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     // ── Legal ────────────────────────────────────────────
                     const _SectionLabel('Legal'),
                     _GlassNavTile(
-                      icon: Icons.admin_panel_settings_rounded,
+                      icon: _SettingsIconKind.privacy,
+                      iconColor: _SettingsIconColors.blue,
                       title: 'Privacy Policy',
                       subtitle: 'How we handle your data',
                       onTap: () => launchUrl(
@@ -408,7 +422,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     const SizedBox(height: 8),
                     _GlassNavTile(
-                      icon: Icons.article_rounded,
+                      icon: _SettingsIconKind.document,
+                      iconColor: _SettingsIconColors.purple,
                       title: 'Terms of Service',
                       subtitle: 'Terms and conditions',
                       onTap: () => launchUrl(
@@ -557,7 +572,8 @@ class _SectionLabel extends StatelessWidget {
 // Toggle tile
 
 class _GlassToggleTile extends StatelessWidget {
-  final IconData icon;
+  final _SettingsIconKind icon;
+  final Color iconColor;
   final String title;
   final String subtitle;
   final bool value;
@@ -565,6 +581,7 @@ class _GlassToggleTile extends StatelessWidget {
 
   const _GlassToggleTile({
     required this.icon,
+    required this.iconColor,
     required this.title,
     required this.subtitle,
     required this.value,
@@ -575,7 +592,7 @@ class _GlassToggleTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return FauxGlassCard.toggleTile(
       child: SwitchListTile(
-        secondary: _SettingsIcon(icon),
+        secondary: _SettingsIcon(icon, color: iconColor),
         title: Text(
           title,
           style: const TextStyle(color: AppColors.textPrimary, fontSize: 15),
@@ -596,13 +613,15 @@ class _GlassToggleTile extends StatelessWidget {
 // Nav tile
 
 class _GlassNavTile extends StatelessWidget {
-  final IconData icon;
+  final _SettingsIconKind icon;
+  final Color iconColor;
   final String title;
   final String subtitle;
   final VoidCallback onTap;
 
   const _GlassNavTile({
     required this.icon,
+    required this.iconColor,
     required this.title,
     required this.subtitle,
     required this.onTap,
@@ -615,7 +634,7 @@ class _GlassNavTile extends StatelessWidget {
       child: FauxGlassCard.navTile(
         child: Row(
           children: [
-            _SettingsIcon(icon),
+            _SettingsIcon(icon, color: iconColor),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -651,35 +670,308 @@ class _GlassNavTile extends StatelessWidget {
   }
 }
 
-class _SettingsIcon extends StatelessWidget {
-  final IconData icon;
+enum _SettingsIconKind {
+  waveform,
+  voiceWake,
+  volume,
+  phone,
+  desktop,
+  bell,
+  link,
+  brain,
+  profile,
+  premium,
+  person,
+  email,
+  feedback,
+  privacy,
+  document,
+}
 
-  const _SettingsIcon(this.icon);
+class _SettingsIcon extends StatelessWidget {
+  final _SettingsIconKind icon;
+  final Color color;
+
+  const _SettingsIcon(this.icon, {required this.color});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        color: AppColors.accent.withValues(alpha: 0.16),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.accent.withValues(alpha: 0.18)),
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: CustomPaint(
+        painter: _SettingsIconPainter(icon: icon, color: color),
       ),
-      child: Icon(icon, size: 20, color: AppColors.accentDark),
     );
   }
+}
+
+class _SettingsIconPainter extends CustomPainter {
+  final _SettingsIconKind icon;
+  final Color color;
+
+  const _SettingsIconPainter({required this.icon, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.save();
+    canvas.scale(size.width / 24, size.height / 24);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    void line(double x1, double y1, double x2, double y2) {
+      canvas.drawLine(Offset(x1, y1), Offset(x2, y2), paint);
+    }
+
+    switch (icon) {
+      case _SettingsIconKind.waveform:
+        for (final bar in const [
+          (3.0, 10.0, 14.0),
+          (6.5, 7.5, 16.5),
+          (10.0, 4.5, 19.5),
+          (14.0, 6.0, 18.0),
+          (17.5, 8.5, 15.5),
+          (21.0, 10.5, 13.5),
+        ]) {
+          line(bar.$1, bar.$2, bar.$1, bar.$3);
+        }
+        break;
+      case _SettingsIconKind.voiceWake:
+        line(4, 10, 4, 14);
+        line(8, 7, 8, 17);
+        line(12, 4, 12, 20);
+        line(16, 8, 16, 16);
+        line(20, 10, 20, 14);
+        break;
+      case _SettingsIconKind.volume:
+        canvas.drawPath(
+          Path()
+            ..moveTo(4, 10)
+            ..lineTo(8, 10)
+            ..lineTo(13, 6)
+            ..lineTo(13, 18)
+            ..lineTo(8, 14)
+            ..lineTo(4, 14)
+            ..close(),
+          paint,
+        );
+        canvas.drawArc(
+          const Rect.fromLTRB(12, 8, 20, 16),
+          -1.05,
+          2.1,
+          false,
+          paint,
+        );
+        canvas.drawArc(
+          const Rect.fromLTRB(11, 5, 23, 19),
+          -0.85,
+          1.7,
+          false,
+          paint,
+        );
+        break;
+      case _SettingsIconKind.phone:
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTRB(6, 3, 18, 21),
+            const Radius.circular(2.5),
+          ),
+          paint,
+        );
+        line(10, 6, 14, 6);
+        canvas.drawCircle(const Offset(12, 17.5), 0.8, paint);
+        break;
+      case _SettingsIconKind.desktop:
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTRB(3, 4, 21, 16),
+            const Radius.circular(2),
+          ),
+          paint,
+        );
+        line(9, 20, 15, 20);
+        line(12, 16, 12, 20);
+        break;
+      case _SettingsIconKind.bell:
+        canvas.drawPath(
+          Path()
+            ..moveTo(5, 16)
+            ..quadraticBezierTo(7, 14, 7, 10)
+            ..quadraticBezierTo(7, 5, 12, 5)
+            ..quadraticBezierTo(17, 5, 17, 10)
+            ..quadraticBezierTo(17, 14, 19, 16)
+            ..lineTo(5, 16),
+          paint,
+        );
+        line(4, 18, 20, 18);
+        canvas.drawArc(
+          const Rect.fromLTRB(9, 17, 15, 22),
+          0,
+          3.14,
+          false,
+          paint,
+        );
+        break;
+      case _SettingsIconKind.link:
+        canvas.drawPath(
+          Path()
+            ..moveTo(10, 8)
+            ..lineTo(8.5, 6.5)
+            ..cubicTo(5.5, 3.5, 1, 8, 4, 11)
+            ..lineTo(6, 13)
+            ..cubicTo(7.8, 14.8, 10.2, 14.8, 12, 13),
+          paint,
+        );
+        canvas.drawPath(
+          Path()
+            ..moveTo(14, 16)
+            ..lineTo(15.5, 17.5)
+            ..cubicTo(18.5, 20.5, 23, 16, 20, 13)
+            ..lineTo(18, 11)
+            ..cubicTo(16.2, 9.2, 13.8, 9.2, 12, 11),
+          paint,
+        );
+        line(8.5, 15.5, 15.5, 8.5);
+        break;
+      case _SettingsIconKind.brain:
+      case _SettingsIconKind.profile:
+        canvas.drawPath(
+          Path()
+            ..moveTo(11, 5)
+            ..cubicTo(8, 2, 4, 5, 6, 8)
+            ..cubicTo(2, 9, 3, 14, 6, 14)
+            ..cubicTo(4, 18, 8, 21, 11, 18)
+            ..lineTo(11, 5)
+            ..moveTo(13, 5)
+            ..cubicTo(16, 2, 20, 5, 18, 8)
+            ..cubicTo(22, 9, 21, 14, 18, 14)
+            ..cubicTo(20, 18, 16, 21, 13, 18)
+            ..lineTo(13, 5),
+          paint,
+        );
+        line(8, 8, 11, 10);
+        line(16, 8, 13, 10);
+        line(8, 15, 11, 13);
+        line(16, 15, 13, 13);
+        break;
+      case _SettingsIconKind.premium:
+        canvas.drawPath(
+          Path()
+            ..moveTo(4, 8)
+            ..lineTo(8, 12)
+            ..lineTo(12, 6)
+            ..lineTo(16, 12)
+            ..lineTo(20, 8)
+            ..lineTo(18, 18)
+            ..lineTo(6, 18)
+            ..close(),
+          paint,
+        );
+        line(7, 21, 17, 21);
+        break;
+      case _SettingsIconKind.person:
+        canvas.drawCircle(const Offset(12, 8), 4, paint);
+        canvas.drawPath(
+          Path()
+            ..moveTo(4, 21)
+            ..cubicTo(5, 15, 19, 15, 20, 21),
+          paint,
+        );
+        break;
+      case _SettingsIconKind.email:
+        canvas.drawCircle(const Offset(12, 12), 8, paint);
+        canvas.drawCircle(const Offset(12, 12), 3, paint);
+        canvas.drawPath(
+          Path()
+            ..moveTo(15, 9)
+            ..lineTo(15, 14)
+            ..cubicTo(15, 17, 20, 16, 20, 12),
+          paint,
+        );
+        break;
+      case _SettingsIconKind.feedback:
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTRB(3, 4, 21, 17),
+            const Radius.circular(3),
+          ),
+          paint,
+        );
+        canvas.drawPath(
+          Path()
+            ..moveTo(8, 17)
+            ..lineTo(8, 21)
+            ..lineTo(13, 17),
+          paint,
+        );
+        line(7, 9, 17, 9);
+        line(7, 13, 14, 13);
+        break;
+      case _SettingsIconKind.privacy:
+        canvas.drawPath(
+          Path()
+            ..moveTo(12, 3)
+            ..lineTo(20, 6)
+            ..lineTo(19, 13)
+            ..cubicTo(18, 18, 14, 20, 12, 21)
+            ..cubicTo(10, 20, 6, 18, 5, 13)
+            ..lineTo(4, 6)
+            ..close(),
+          paint,
+        );
+        line(8.5, 12, 11, 14.5);
+        line(11, 14.5, 16, 9.5);
+        break;
+      case _SettingsIconKind.document:
+        canvas.drawPath(
+          Path()
+            ..moveTo(6, 3)
+            ..lineTo(15, 3)
+            ..lineTo(19, 7)
+            ..lineTo(19, 21)
+            ..lineTo(6, 21)
+            ..close()
+            ..moveTo(15, 3)
+            ..lineTo(15, 7)
+            ..lineTo(19, 7),
+          paint,
+        );
+        line(9, 12, 16, 12);
+        line(9, 16, 16, 16);
+        break;
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _SettingsIconPainter oldDelegate) {
+    return oldDelegate.icon != icon || oldDelegate.color != color;
+  }
+}
+
+class _SettingsIconColors {
+  static const purple = Color(0xFF7659D8);
+  static const amber = Color(0xFFD98A22);
+  static const green = Color(0xFF50A950);
+  static const blue = Color(0xFF5A7DE0);
+  static const coral = Color(0xFFE47160);
 }
 
 // Info tile
 
 class _GlassInfoTile extends StatelessWidget {
-  final IconData icon;
+  final _SettingsIconKind icon;
+  final Color iconColor;
   final String label;
   final String value;
 
   const _GlassInfoTile({
     required this.icon,
+    required this.iconColor,
     required this.label,
     required this.value,
   });
@@ -689,7 +981,7 @@ class _GlassInfoTile extends StatelessWidget {
     return FauxGlassCard.navTile(
       child: Row(
         children: [
-          _SettingsIcon(icon),
+          _SettingsIcon(icon, color: iconColor),
           const SizedBox(width: 12),
           Text(
             label,
