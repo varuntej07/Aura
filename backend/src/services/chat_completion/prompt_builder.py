@@ -25,10 +25,9 @@ from ...prompts import DEPTH_INSTRUCTIONS, MOBILE_TEXT_SYSTEM_PROMPT, TONE_DESCR
 from ..memory.retrieval import (
     render_relevant_memory_block,
     retrieve_relevant_memory,
-    retrieve_relevant_subgraph,
 )
 from ..user_aura_schema import active_category_slugs, interest_prompt_lines
-from .text_compaction import render_summary_block
+from .text_compaction import render_summary_block, render_unresolved_task_block
 
 # Process-global aura cache (per-uid profile + accepted hints). Shared across the
 # live handler and the completion path; either may populate it.
@@ -369,9 +368,9 @@ async def build_turn_system_blocks(
     no doc yet (the durable background-completion path, a separate invocation)
     leaves it None and gets a single fresh fetch.
 
-    The memory block runs ONLY when the user has a non-empty (consented) profile --
-    an empty profile means revoked consent or a brand-new user with no atoms yet, so
-    we skip the query embed entirely (GDPR-safe, no wasted call).
+    The memory block runs only with explicit Aura consent. It reads durable atoms
+    independently of the capped profile digest, so an empty digest cannot hide a
+    still-relevant atom.
     ``retrieve_relevant_memory`` self-bounds and fail-opens, so it can never block or
     break the turn. The block is appended AFTER the cached prefix (same slot as
     notification_reason) so per-turn memory never invalidates the system-prompt cache,
@@ -402,32 +401,30 @@ async def build_turn_system_blocks(
     # immediately relevant than cross-conversation recall, and reads better next
     # to the raw tail it continues.
     if conversation_summary:
+        task_block = render_unresolved_task_block(conversation_summary)
+        if task_block:
+            blocks.append({"type": "text", "text": task_block})
         summary_block = render_summary_block(conversation_summary)
         if summary_block:
             blocks.append({"type": "text", "text": summary_block})
 
-    if aura_profile:
-        # Graph-first (always on; the GRAPH_READ_CHAT flag was removed 2026-07-20),
-        # falling back to flat atom retrieval when the graph has nothing for this
-        # query: the graph fills organically from new turns, so an empty subgraph
-        # must not erase recall of pre-graph memories.
-        relevant_atoms = await retrieve_relevant_subgraph(
+    if user_doc.get("aura_consent_granted") is True:
+        # Text chat injects only durable atom records. Graph neighbors are useful
+        # discovery candidates, but they do not all carry the atom provenance,
+        # confidence, freshness, and explicit-delete contract required here.
+        relevant_atoms = await retrieve_relevant_memory(
             uid,
             message,
             active_slugs=active_category_slugs(aura_profile),
         )
-        if not relevant_atoms:
-            relevant_atoms = await retrieve_relevant_memory(
-                uid,
-                message,
-                active_slugs=active_category_slugs(aura_profile),
-            )
         if relevant_atoms:
             shown_subjects: set[str] = set()
             for line in interest_prompt_lines(aura_profile):
                 _, _, subjects = line.partition(": ")
                 shown_subjects.update(s.strip() for s in subjects.split(",") if s.strip())
-            memory_block = render_relevant_memory_block(relevant_atoms, already_shown=shown_subjects)
+            memory_block = render_relevant_memory_block(
+                relevant_atoms, already_shown=shown_subjects
+            )
             if memory_block:
                 blocks.append({"type": "text", "text": memory_block})
 

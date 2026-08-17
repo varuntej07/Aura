@@ -21,6 +21,7 @@ extractor it hooks into.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -49,6 +50,11 @@ class AtomInput:
     decay_kind: str = DEFAULT_INTEREST_KIND
     importance: float = 0.5
     categories: list[str] = field(default_factory=list)
+    confidence: float = 0.5
+    confirmation_status: str = F.CONFIRMATION_UNKNOWN
+    source_conversation_id: str = ""
+    source_message_id: str = ""
+    evidence_text: str = ""
 
 
 def _atoms_collection(uid: str):
@@ -69,6 +75,56 @@ def _clamp_importance(value: Any) -> float:
 
 def _safe_kind(kind: Any) -> str:
     return kind if isinstance(kind, str) and kind in INTEREST_KINDS else DEFAULT_INTEREST_KIND
+
+
+def _stronger_confirmation(prior: Any, incoming: str) -> str:
+    rank = {
+        F.CONFIRMATION_UNKNOWN: 0,
+        F.CONFIRMATION_REFLECTED: 1,
+        F.CONFIRMATION_EXPLICIT_USER: 2,
+        F.CONFIRMATION_TOOL_VERIFIED: 3,
+    }
+    prior_value = str(prior or F.CONFIRMATION_UNKNOWN)
+    return incoming if rank.get(incoming, 0) >= rank.get(prior_value, 0) else prior_value
+
+
+def _provenance_records(
+    prior: dict[str, Any], atom: AtomInput, source: str, now: datetime
+) -> list[dict[str, Any]]:
+    existing = prior.get(F.PROVENANCE)
+    records = (
+        [dict(item) for item in existing if isinstance(item, dict)]
+        if isinstance(existing, list)
+        else []
+    )
+    evidence = (atom.evidence_text or atom.text or "").strip()
+    record = {
+        F.PROVENANCE_SOURCE_TYPE: source,
+        F.PROVENANCE_CONVERSATION_ID: atom.source_conversation_id[:128],
+        F.PROVENANCE_MESSAGE_ID: atom.source_message_id[:128],
+        F.PROVENANCE_EVIDENCE_HASH: hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
+        F.PROVENANCE_OBSERVED_AT: now.isoformat(),
+        F.PROVENANCE_CONFIDENCE: _clamp_importance(atom.confidence),
+        F.PROVENANCE_CONFIRMATION_STATUS: atom.confirmation_status,
+    }
+    identity = (
+        record[F.PROVENANCE_SOURCE_TYPE],
+        record[F.PROVENANCE_CONVERSATION_ID],
+        record[F.PROVENANCE_MESSAGE_ID],
+        record[F.PROVENANCE_EVIDENCE_HASH],
+    )
+    records = [
+        item
+        for item in records
+        if (
+            item.get(F.PROVENANCE_SOURCE_TYPE),
+            item.get(F.PROVENANCE_CONVERSATION_ID),
+            item.get(F.PROVENANCE_MESSAGE_ID),
+            item.get(F.PROVENANCE_EVIDENCE_HASH),
+        )
+        != identity
+    ]
+    return [*records, record][-F.MAX_PROVENANCE_RECORDS :]
 
 
 async def upsert_atoms(
@@ -125,6 +181,11 @@ async def upsert_atoms(
                 ref = collection.document(aid)
                 prior = existing.get(aid, {})
                 kind = _safe_kind(atom.decay_kind)
+                confidence = _clamp_importance(atom.confidence)
+                provenance = _provenance_records(prior, atom, source, now)
+                confirmation_status = _stronger_confirmation(
+                    prior.get(F.CONFIRMATION_STATUS), atom.confirmation_status
+                )
                 new_weight = decayed_weight_by_kind(
                     prior.get(F.WEIGHT, 0.0), prior.get(F.LAST_SEEN), kind, now
                 ) + 1.0
@@ -142,6 +203,9 @@ async def upsert_atoms(
                         F.FIRST_SEEN: prior.get(F.FIRST_SEEN, now.isoformat()),
                         F.LAST_SEEN: now.isoformat(),
                         F.SOURCE: source,
+                        F.CONFIDENCE: confidence,
+                        F.CONFIRMATION_STATUS: confirmation_status,
+                        F.PROVENANCE: provenance,
                     })
                 else:
                     # Unchanged text -> cheap touch: bump weight/last_seen, keep the strongest
@@ -153,6 +217,12 @@ async def upsert_atoms(
                             _clamp_importance(prior.get(F.IMPORTANCE, 0.0)),
                             _clamp_importance(atom.importance),
                         ),
+                        F.CONFIDENCE: max(
+                            _clamp_importance(prior.get(F.CONFIDENCE, 0.0)),
+                            confidence,
+                        ),
+                        F.CONFIRMATION_STATUS: confirmation_status,
+                        F.PROVENANCE: provenance,
                     })
             batch.commit()
 

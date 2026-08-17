@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...lib.logger import logger
+from ...shared.tools import REMINDER_RECEIPT_EXISTING, reminder_ui_payload
 from .. import desktop_chat_store
 from ..action_intent_policy import blocked_write_reasons_for_text_turn
 from ..claude_client import ClaudeClient
@@ -29,7 +30,7 @@ from ..tool_executor import (
     excluded_tools_for_chat_surface,
     resolve_chat_surface_allowed_tools,
 )
-from . import tool_idempotency, turn_store
+from . import context_assembler, tool_idempotency, turn_store
 from .prompt_builder import build_turn_system_blocks, build_user_content
 
 # Tools whose effect cannot be safely reproduced by a fresh, non-deterministic LLM run.
@@ -150,26 +151,39 @@ async def complete_turn(
     if completed_tools:
         receipts = await tool_idempotency.get_turn_receipts(user_id, cmid)
         confirmed_tools = [tool for tool in completed_tools if tool in receipts]
+        effective_tools = [
+            tool
+            for tool in confirmed_tools
+            if not (
+                tool == "set_reminder"
+                and isinstance(receipts.get(tool), dict)
+                and receipts[tool].get("receipt_status") == REMINDER_RECEIPT_EXISTING
+            )
+        ]
+    else:
+        effective_tools = []
+
+    if effective_tools:
         answer = (
-            _synthesize_confirmation(confirmed_tools)
-            if confirmed_tools
+            _synthesize_confirmation(effective_tools)
+            if effective_tools
             else "I couldn't verify that action, so I won't pretend it went through."
         )
         # Hydrate the reminder card from the actual receipt so a backgrounded reminder
         # arrives as a card, not text-only, matching the live stream's `reminder` payload.
-        reminder: dict[str, Any] | None = receipts.get("set_reminder")
+        reminder = reminder_ui_payload(receipts.get("set_reminder"), effective_tools)
         if not await _store_desktop_answer(
             user_id, desktop_conversation_id, cmid,
             text=answer, status=desktop_chat_store.STATUS_COMPLETE, reminder=reminder,
         ):
             return _leave_repairable(user_id, cmid, "synthesized")
         await turn_store.mark_complete(
-            user_id, cmid, answer_text=answer, completed_tools=confirmed_tools,
+            user_id, cmid, answer_text=answer, completed_tools=effective_tools,
             reminder=reminder, pushed=True,
         )
         await _push_reply(user_id, cmid, session_id, answer)
         logger.info("chat_completion: synthesized from completed tools", {
-            "user_id": user_id, "cmid": cmid, "tools": confirmed_tools,
+            "user_id": user_id, "cmid": cmid, "tools": effective_tools,
             "reminder_card": reminder is not None,
         })
         return "synthesized"
@@ -236,11 +250,14 @@ async def _regenerate(
     session_id = str(turn.get(turn_store.FIELD_SESSION_ID) or "")
     conversation_summary = ""
     if surface == "desktop" and session_id:
-        state = await desktop_chat_store.get_context_state(user_id, session_id)
-        if state:
-            conversation_summary = str(
-                state.get(desktop_chat_store.FIELD_CONTEXT_SUMMARY) or ""
-            )
+        assembled_context = await context_assembler.assemble_desktop_context(
+            user_id,
+            session_id,
+            current_message_id=cmid,
+            fallback_history=history,
+        )
+        history = assembled_context.history
+        conversation_summary = assembled_context.conversation_summary
 
     system_blocks = await build_turn_system_blocks(
         user_id, message, notification_reason,
@@ -289,7 +306,7 @@ async def _regenerate(
             "user_id": user_id, "cmid": cmid, "error": str(exc),
         })
 
-    return "".join(parts), reminder, tools
+    return "".join(parts), reminder_ui_payload(reminder, tools), tools
 
 
 def _synthesize_confirmation(tools: list[str]) -> str:

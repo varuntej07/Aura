@@ -9,7 +9,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -88,17 +88,17 @@ class IntentAuthorizationState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class IntentPendingRequirement(StrEnum):
+    TOOL_RESULT = "tool_result"
+    CLARIFICATION = "clarification"
+    APPROVAL = "approval"
+
+
 @dataclass(frozen=True, slots=True)
 class IntentArgument:
     value: Any
     provenance: str
     updated_at: float
-
-
-@dataclass(frozen=True, slots=True)
-class SuccessfulReceipt:
-    tool_name: str
-    received_at: float
 
 
 @dataclass(slots=True)
@@ -111,15 +111,20 @@ class ActiveIntentState:
     missing_arguments: frozenset[str] = frozenset()
     last_clarification: str = ""
     authorization_state: IntentAuthorizationState = IntentAuthorizationState.NONE
-    successful_receipt: SuccessfulReceipt | None = None
-    cancellation_requested: bool = False
-    cancelled_at: float | None = None
+    pending_requirement: IntentPendingRequirement | None = None
     expires_at: float | None = None
     expires_after_turn: int | None = None
 
     def is_active(self, turn_index: int, now: float | None = None) -> bool:
         self.expire_if_needed(turn_index, now)
-        return self.active_capability is not None and self.cancelled_at is None
+        return (
+            self.active_capability is not None
+            and self.pending_requirement
+            in {
+                IntentPendingRequirement.CLARIFICATION,
+                IntentPendingRequirement.APPROVAL,
+            }
+        )
 
     def expire_if_needed(self, turn_index: int, now: float | None = None) -> bool:
         now_value = now if now is not None else time.monotonic()
@@ -143,58 +148,9 @@ class ActiveIntentState:
         self.missing_arguments = frozenset()
         self.last_clarification = ""
         self.authorization_state = IntentAuthorizationState.NONE
-        self.successful_receipt = None
-        self.cancellation_requested = False
-        self.cancelled_at = None
+        self.pending_requirement = None
         self.expires_at = None
         self.expires_after_turn = None
-
-    def begin(
-        self,
-        *,
-        capability: Capability,
-        tool_name_value: str,
-        required_arguments: frozenset[str],
-        active_objective: str,
-        referenced_object: str,
-        turn_index: int,
-        effect: ToolEffect,
-    ) -> None:
-        if capability != self.active_capability:
-            self.collected_arguments.clear()
-            self.successful_receipt = None
-            self.last_clarification = ""
-        self.active_capability = capability
-        self.active_tool = tool_name_value
-        if active_objective:
-            self.active_objective = active_objective[:1000]
-        if referenced_object:
-            self.referenced_object = referenced_object[:500]
-        self.missing_arguments = frozenset(
-            name
-            for name in required_arguments
-            if name not in self.collected_arguments
-            or self.collected_arguments[name].value in (None, "")
-        )
-        self.authorization_state = (
-            IntentAuthorizationState.GRANTED
-            if effect is ToolEffect.READ
-            else IntentAuthorizationState.PENDING
-        )
-        self.cancellation_requested = False
-        self.cancelled_at = None
-        self._extend(turn_index)
-
-    # CANCELLED is currently unreachable: its only trigger was a hand-written list of
-    # cancel words, and nothing in the voice path infers cancellation any more. The
-    # mechanism is kept whole so a semantic canceller can re-attach to it without
-    # rebuilding the state transitions or the eligibility check that reads them.
-    def request_cancellation(self, turn_index: int) -> None:
-        if self.active_capability is None:
-            return
-        self.cancellation_requested = True
-        self.authorization_state = IntentAuthorizationState.CANCELLED
-        self._extend(turn_index)
 
     def record_tool_call(
         self,
@@ -202,11 +158,16 @@ class ActiveIntentState:
         arguments: Mapping[str, Any],
         *,
         provenance: str,
+        active_objective: str,
         turn_index: int,
     ) -> None:
         now = time.monotonic()
+        if metadata.capability != self.active_capability:
+            self.collected_arguments.clear()
+            self.last_clarification = ""
         self.active_capability = metadata.capability
         self.active_tool = metadata.name
+        self.active_objective = active_objective.strip()[:1000]
         for name, value in arguments.items():
             if value is not None:
                 self.collected_arguments[str(name)] = IntentArgument(
@@ -222,42 +183,51 @@ class ActiveIntentState:
         )
         self.referenced_object = self._referenced_object_from(arguments)
         self.authorization_state = IntentAuthorizationState.GRANTED
-        self.cancellation_requested = False
-        self.cancelled_at = None
+        self.pending_requirement = IntentPendingRequirement.TOOL_RESULT
         self._extend(turn_index)
+
+    def resolve_tool_result(
+        self,
+        tool_name_value: str,
+        *,
+        pending_requirement: IntentPendingRequirement | None,
+        turn_index: int,
+    ) -> None:
+        if self.active_tool != tool_name_value:
+            return
+        if pending_requirement is None:
+            self.clear()
+            return
+        self.pending_requirement = pending_requirement
+        self.authorization_state = (
+            IntentAuthorizationState.PENDING
+            if pending_requirement is IntentPendingRequirement.APPROVAL
+            else IntentAuthorizationState.GRANTED
+        )
+        self._extend(turn_index)
+
+    def clear_unresolved_execution(self) -> None:
+        if self.pending_requirement is IntentPendingRequirement.TOOL_RESULT:
+            self.clear()
 
     def record_clarification(self, text: str, turn_index: int) -> None:
-        if self.active_capability is None or not self.missing_arguments:
+        if (
+            self.active_capability is None
+            or self.pending_requirement is not IntentPendingRequirement.CLARIFICATION
+        ):
             return
         self.last_clarification = text.strip()[:500]
-        self._extend(turn_index)
-
-    def record_receipt(self, tool_name_value: str, turn_index: int) -> None:
-        self.successful_receipt = SuccessfulReceipt(
-            tool_name=tool_name_value,
-            received_at=time.monotonic(),
-        )
-        self.missing_arguments = frozenset()
-        self.authorization_state = IntentAuthorizationState.GRANTED
-        self._extend(turn_index)
-
-    def mark_cancelled(self, turn_index: int) -> None:
-        if self.active_capability is None:
-            return
-        self.cancellation_requested = False
-        self.cancelled_at = time.monotonic()
-        self.authorization_state = IntentAuthorizationState.CANCELLED
-        self.expires_after_turn = turn_index + 1
 
     def render_for_model(self, exposed_names: Sequence[str]) -> str:
         if self.active_capability is None:
             return ""
         exposed = set(exposed_names)
-        if (
-            self.active_tool
-            and self.active_tool not in exposed
-            and not self.cancellation_requested
-        ):
+        if self.pending_requirement not in {
+            IntentPendingRequirement.CLARIFICATION,
+            IntentPendingRequirement.APPROVAL,
+        }:
+            return ""
+        if self.active_tool and self.active_tool not in exposed:
             return ""
         collected = {
             name: {
@@ -274,10 +244,7 @@ class ActiveIntentState:
             "missing_arguments": sorted(self.missing_arguments),
             "last_clarification": self.last_clarification or None,
             "authorization_state": self.authorization_state.value,
-            "successful_receipt": (
-                self.successful_receipt.tool_name if self.successful_receipt else None
-            ),
-            "cancellation_requested": self.cancellation_requested,
+            "pending_requirement": self.pending_requirement.value,
         }
         return (
             "<active_intent_state>"
@@ -658,40 +625,6 @@ class ToolCatalog:
                 f"semantic_bundle:{primary.metadata.namespace}",
             ),
             scores=tuple((entry.name, round(score, 4)) for entry, score in ranked),
-        )
-
-    def commit_selection(
-        self,
-        selection: ToolSelection,
-        context: SelectionContext,
-        active_intent: ActiveIntentState,
-    ) -> None:
-        if selection.primary_tool is None:
-            return
-        entry = self.entries.get(selection.primary_tool)
-        if entry is None:
-            return
-        referenced_object = (
-            context.screen_referent
-            if entry.metadata.requires_fresh_desktop_frame
-            or entry.metadata.namespace.startswith("desktop.")
-            else active_intent.referenced_object
-        )
-        # The objective is always the turn that produced this selection. Appending to a
-        # prior objective was only ever reached by matching correction words, and a
-        # stale objective outliving its turn is what let one misread request keep
-        # steering selection for the whole intent window.
-        active_objective = context.finalized_request
-        active_intent.begin(
-            capability=entry.metadata.capability,
-            tool_name_value=entry.name,
-            required_arguments=(
-                entry.metadata.required_fields - entry.metadata.empty_allowed_fields
-            ),
-            active_objective=active_objective,
-            referenced_object=referenced_object,
-            turn_index=context.turn_index,
-            effect=entry.metadata.effect,
         )
 
     def selection_fingerprint(self, names: Sequence[str]) -> str:

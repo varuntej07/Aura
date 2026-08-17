@@ -34,6 +34,7 @@ from .capabilities import VOICE_TOOL_REGISTRY, ToolEffect
 from .errors import classify_pipeline_error, publish_client_error
 from .telemetry import log_turn_metrics, log_voice_failure
 from .text_sanitizer import strip_nonverbal_cues
+from .tool_discovery import IntentPendingRequirement
 from .turn_metrics import VoiceTurnMetrics
 
 # Slow-tool filler phrases moved to voice/tool_filler.py, triggered from
@@ -71,6 +72,27 @@ def _safe_tool_result(tool_name: str, output: object) -> dict[str, Any]:
         return {}
     allowed = _SAFE_RESULT_FIELDS.get(tool_name, frozenset())
     return {key: parsed[key] for key in allowed if key in parsed}
+
+
+def _pending_requirement(output: object) -> IntentPendingRequirement | None:
+    raw = getattr(output, "output", "")
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        try:
+            parsed = literal_eval(raw)
+        except (ValueError, SyntaxError):
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("approval_required") is True:
+        return IntentPendingRequirement.APPROVAL
+    if (
+        parsed.get("needs_clarification") is True
+        or parsed.get("__clarification__") is True
+    ):
+        return IntentPendingRequirement.CLARIFICATION
+    return None
 
 
 class VoiceSessionRecorder:
@@ -429,7 +451,13 @@ class VoiceSessionRecorder:
                 record = getattr(observer, "record_voice_tool_execution", None)
                 latency_ms = None
                 if callable(record):
-                    latency_ms = record(name, success=success)
+                    latency_ms = record(
+                        name,
+                        success=success,
+                        pending_requirement=(
+                            _pending_requirement(output) if output is not None else None
+                        ),
+                    )
                 if self._turn_metrics is not None:
                     is_error = output is None or bool(getattr(output, "is_error", False))
                     self._turn_metrics.note_tool_call(

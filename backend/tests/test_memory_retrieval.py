@@ -122,17 +122,17 @@ def _install(monkeypatch, near, probe=None, *, embed=None):
     monkeypatch.setattr(retrieval, "embed_text", embed or _default_embed)
 
 
-# --- intent gate ----------------------------------------------------------
+# --- query gate -----------------------------------------------------------
 def test_intent_gate_skips_acks_and_empties():
     assert should_retrieve_for_message("") is False
-    assert should_retrieve_for_message("ok") is False
-    assert should_retrieve_for_message("thanks!") is False
-    assert should_retrieve_for_message("lol") is False
+    assert should_retrieve_for_message("ok") is True
+    assert should_retrieve_for_message("thanks!") is True
+    assert should_retrieve_for_message("lol") is True
     assert should_retrieve_for_message("what was my doctor's name again?") is True
 
 
 def test_gate_short_circuits_without_touching_firestore(monkeypatch):
-    # An ack must not even reach embed/find_nearest.
+    # Only empty input can skip semantic retrieval without interpreting wording.
     called = {"embed": False}
 
     async def _embed(_q):
@@ -140,7 +140,7 @@ def test_gate_short_circuits_without_touching_firestore(monkeypatch):
         return [1.0, 0.0, 0.0]
 
     monkeypatch.setattr(retrieval, "embed_text", _embed)
-    out = asyncio.run(retrieve_relevant_memory("u1", "ok", now=NOW))
+    out = asyncio.run(retrieve_relevant_memory("u1", "", now=NOW))
     assert out == []
     assert called["embed"] is False
 
@@ -225,15 +225,12 @@ def test_memory_block_is_not_in_cached_suffix():
     assert "relevant_memory" not in suffix
 
 
-def test_chat_graph_first_falls_back_to_legacy_when_graph_empty(monkeypatch):
-    """Graph read is always on (flags removed 2026-07-20). The graph fills
-    organically from new turns, so an empty subgraph must fall back to flat
-    atom retrieval instead of erasing recall of pre-graph memories."""
+def test_chat_injects_query_relevant_durable_atoms(monkeypatch):
     from src.services.chat_completion import prompt_builder
 
     profile = {"explicit_facts": ["lives in Hyderabad"], "dominant_tone": "casual"}
     atom = RetrievedAtom("doctor is Dr. Reddy", F.ATOM_TYPE_FACT, 0.9, 0.9)
-    calls = {"legacy": 0, "graph": 0}
+    calls = {"atoms": 0}
 
     async def _datetime(*_args):
         return "Saturday, July 18, 2026 at 1:00 PM PDT"
@@ -242,20 +239,16 @@ def test_chat_graph_first_falls_back_to_legacy_when_graph_empty(monkeypatch):
         return profile, []
 
     async def _legacy(*_args, **_kwargs):
-        calls["legacy"] += 1
+        calls["atoms"] += 1
         return [atom]
-
-    async def _graph(*_args, **_kwargs):
-        calls["graph"] += 1
-        return []
 
     monkeypatch.setattr(prompt_builder, "get_user_local_datetime", _datetime)
     monkeypatch.setattr(prompt_builder, "fetch_cached_aura_data", _aura)
     monkeypatch.setattr(prompt_builder, "retrieve_relevant_memory", _legacy)
-    monkeypatch.setattr(prompt_builder, "retrieve_relevant_subgraph", _graph)
 
     actual = asyncio.run(prompt_builder.build_turn_system_blocks(
-        "u1", "who was my doctor?", "because you asked", user_doc={},
+        "u1", "who was my doctor?", "because you asked",
+        user_doc={"aura_consent_granted": True},
     ))
     aura_suffix = prompt_builder.build_injected_system_prompt_suffix(profile, [], "u1")
     expected = prompt_builder.build_system_blocks(
@@ -269,16 +262,14 @@ def test_chat_graph_first_falls_back_to_legacy_when_graph_empty(monkeypatch):
         "text": render_relevant_memory_block([atom]),
     })
     assert json.dumps(actual, ensure_ascii=False) == json.dumps(expected, ensure_ascii=False)
-    assert calls == {"legacy": 1, "graph": 1}
+    assert calls == {"atoms": 1}
 
 
-def test_chat_graph_hit_skips_legacy_retrieval(monkeypatch):
-    """When the subgraph returns atoms, legacy retrieval is never consulted."""
+def test_chat_without_explicit_consent_skips_atom_retrieval(monkeypatch):
     from src.services.chat_completion import prompt_builder
 
     profile = {"explicit_facts": ["lives in Hyderabad"], "dominant_tone": "casual"}
-    graph_atom = RetrievedAtom("doctor is Dr. Reddy", F.ATOM_TYPE_FACT, 0.9, 0.9)
-    calls = {"legacy": 0, "graph": 0}
+    calls = {"atoms": 0}
 
     async def _datetime(*_args):
         return "Saturday, July 18, 2026 at 1:00 PM PDT"
@@ -287,24 +278,19 @@ def test_chat_graph_hit_skips_legacy_retrieval(monkeypatch):
         return profile, []
 
     async def _legacy(*_args, **_kwargs):
-        calls["legacy"] += 1
-        return []
-
-    async def _graph(*_args, **_kwargs):
-        calls["graph"] += 1
-        return [graph_atom]
+        calls["atoms"] += 1
+        return [RetrievedAtom("doctor is Dr. Reddy", F.ATOM_TYPE_FACT, 0.9, 0.9)]
 
     monkeypatch.setattr(prompt_builder, "get_user_local_datetime", _datetime)
     monkeypatch.setattr(prompt_builder, "fetch_cached_aura_data", _aura)
     monkeypatch.setattr(prompt_builder, "retrieve_relevant_memory", _legacy)
-    monkeypatch.setattr(prompt_builder, "retrieve_relevant_subgraph", _graph)
 
     blocks = asyncio.run(prompt_builder.build_turn_system_blocks(
         "u1", "who was my doctor?", "because you asked", user_doc={},
     ))
 
-    assert calls == {"legacy": 0, "graph": 1}
-    assert any("Dr. Reddy" in str(block.get("text", "")) for block in blocks)
+    assert calls == {"atoms": 0}
+    assert not any("Dr. Reddy" in str(block.get("text", "")) for block in blocks)
 
 
 # --- circuit breaker (protects time-to-first-token during an embed outage) -

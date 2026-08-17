@@ -66,16 +66,6 @@ INACTIVE_GRAPH_STATUSES = frozenset({
 
 _adjacency_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
 
-# Short acknowledgements/greetings that carry no query to retrieve against. The
-# v1 intent gate: skip retrieval (and the embed call) for these so smalltalk turns
-# stay clean and cheap. A CATEGORY + test, not an exhaustive list.
-_ACK_TOKENS = frozenset({
-    "ok", "okay", "k", "kk", "thanks", "thank you", "thx", "ty", "yes", "yeah", "yep",
-    "no", "nope", "sure", "got it", "gotcha", "cool", "nice", "great", "same", "lol",
-    "lmao", "haha", "hmm", "hi", "hey", "hello", "yo", "sup", "np", "fine",
-})
-
-
 @dataclass
 class RetrievedAtom:
     text: str
@@ -87,16 +77,14 @@ class RetrievedAtom:
     graph_hops: int = 0
     source: str = ""
     last_seen: str = ""
+    confidence: float = 0.5
+    confirmation_status: str = F.CONFIRMATION_UNKNOWN
+    provenance: tuple[dict[str, Any], ...] = ()
 
 
 def should_retrieve_for_message(message: str) -> bool:
-    """v1 intent gate. False for empty/ack/greeting turns that have nothing to recall
-    against; True otherwise. Cheap and same-turn (the LLM extractor runs AFTER the
-    stream, so it can only inform the NEXT turn, never gate this one)."""
-    text = (message or "").strip()
-    if len(text) < 3:
-        return False
-    return text.casefold().strip("!?.") not in _ACK_TOKENS
+    """Retrieve for any non-empty query; wording never decides memory access."""
+    return bool((message or "").strip())
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -208,6 +196,10 @@ async def _gather_seed_result(
             continue
         recency = decayed_weight_by_kind(1.0, data.get(F.LAST_SEEN), data.get(F.DECAY_KIND), now)
         importance = _importance_term(data)
+        try:
+            confidence = max(0.0, min(1.0, float(data.get(F.CONFIDENCE, 0.5))))
+        except (TypeError, ValueError):
+            confidence = 0.5
         categories = data.get(F.CATEGORIES) or []
         affinity = 1.0 if active_slugs and (set(categories) & active_slugs) else 0.0
         score = (
@@ -215,7 +207,7 @@ async def _gather_seed_result(
             + settings.MEMORY_W_RECENCY * recency
             + settings.MEMORY_W_IMPORTANCE * importance
             + settings.MEMORY_W_AFFINITY * affinity
-        )
+        ) * (0.85 + 0.15 * confidence)
         scored.append((score, _embedding_of(data), RetrievedAtom(
             text=str(data.get(F.TEXT, "")).strip(),
             atom_type=str(data.get(F.ATOM_TYPE, "")),
@@ -227,6 +219,15 @@ async def _gather_seed_result(
             )),
             source=str(data.get(F.SOURCE, "")),
             last_seen=str(data.get(F.LAST_SEEN, "")),
+            confidence=confidence,
+            confirmation_status=str(
+                data.get(F.CONFIRMATION_STATUS, F.CONFIRMATION_UNKNOWN)
+            ),
+            provenance=tuple(
+                dict(item)
+                for item in (data.get(F.PROVENANCE) or [])
+                if isinstance(item, dict)
+            ),
         )))
 
     scored.sort(key=lambda t: t[0], reverse=True)
@@ -598,6 +599,12 @@ def render_relevant_memory_block(
             part
             for part in (
                 f"source: {atom.source}" if atom.source else "",
+                f"confidence: {atom.confidence:.2f}",
+                (
+                    f"confirmation: {atom.confirmation_status}"
+                    if atom.confirmation_status
+                    else ""
+                ),
                 f"last seen: {atom.last_seen}" if atom.last_seen else "",
             )
             if part

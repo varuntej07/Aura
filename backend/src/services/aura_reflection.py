@@ -452,7 +452,6 @@ async def reflect_session(
 async def _upsert_graph_from_patch(uid: str, patch: ReflectionPatch) -> None:
     """Build the Phase 1 graph from reflection output without another model call."""
     try:
-        from .memory.atom_store import AtomInput
         from .memory.fields import ATOM_TYPE_FACT, ATOM_TYPE_STORYLINE
         from .memory.graph_store import (
             GraphEdgeInput,
@@ -503,7 +502,9 @@ async def _upsert_graph_from_patch(uid: str, patch: ReflectionPatch) -> None:
         })
 
 
-async def _upsert_memory_atoms_from_patch(uid: str, patch: ReflectionPatch) -> None:
+async def _upsert_memory_atoms_from_patch(
+    uid: str, patch: ReflectionPatch, *, session_id: str
+) -> None:
     """Mirror reflected storylines + canonical facts into the UNBOUNDED long-term memory
     store (services/memory) for query-relevant semantic recall. Traits are intentionally
     NOT stored as atoms: they are identity labels already surfaced via the digest's
@@ -522,10 +523,22 @@ async def _upsert_memory_atoms_from_patch(uid: str, patch: ReflectionPatch) -> N
                 decay_kind=storyline.kind,
                 importance=storyline.confidence,
                 categories=list(storyline.categories or []),
+                confidence=storyline.confidence,
+                confirmation_status="reflected",
+                source_conversation_id=session_id,
+                evidence_text=summary,
             ))
     for fact in patch.facts_canonical or []:
         if isinstance(fact, str) and fact.strip():
-            atoms.append(AtomInput(text=fact.strip(), atom_type=ATOM_TYPE_FACT, importance=0.6))
+            atoms.append(AtomInput(
+                text=fact.strip(),
+                atom_type=ATOM_TYPE_FACT,
+                importance=0.6,
+                confidence=0.7,
+                confirmation_status="reflected",
+                source_conversation_id=session_id,
+                evidence_text=fact.strip(),
+            ))
     if atoms:
         await upsert_atoms(uid, atoms, source="reflection")
     await _upsert_graph_from_patch(uid, patch)
@@ -574,7 +587,7 @@ async def consolidate_session(
         applied = await asyncio.to_thread(_apply_patch_txn, uid, session_id, turn_count, patch, now)
 
         # Mirror reflected storylines + canonical facts into the unbounded memory store.
-        await _upsert_memory_atoms_from_patch(uid, patch)
+        await _upsert_memory_atoms_from_patch(uid, patch, session_id=session_id)
 
         logger.info("AuraReflection: session consolidated", {
             "user_id": uid,

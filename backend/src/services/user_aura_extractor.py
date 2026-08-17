@@ -557,7 +557,14 @@ async def _upsert_graph_from_insight(uid: str, insight: MessageInsight) -> None:
         })
 
 
-async def _upsert_memory_atoms_from_insight(uid: str, insight: MessageInsight) -> None:
+async def _upsert_memory_atoms_from_insight(
+    uid: str,
+    insight: MessageInsight,
+    *,
+    message: str,
+    session_id: str | None,
+    turn_id: str | None,
+) -> None:
     """Persist this turn's durable facts and named interest subjects into the UNBOUNDED
     long-term memory store (services/memory), so they are recallable by semantic
     similarity forever, independent of the capped UserAura digest. Captured at extraction
@@ -566,7 +573,16 @@ async def _upsert_memory_atoms_from_insight(uid: str, insight: MessageInsight) -
     atoms: list[AtomInput] = []
     for fact in insight.explicit_facts or []:
         if isinstance(fact, str) and fact.strip():
-            atoms.append(AtomInput(text=fact.strip(), atom_type=ATOM_TYPE_FACT, importance=0.6))
+            atoms.append(AtomInput(
+                text=fact.strip(),
+                atom_type=ATOM_TYPE_FACT,
+                importance=0.6,
+                confidence=0.9,
+                confirmation_status="explicit_user",
+                source_conversation_id=session_id or "",
+                source_message_id=turn_id or "",
+                evidence_text=message,
+            ))
     for signal in insight.interests or []:
         subject = (signal.subject or "").strip()
         if subject:
@@ -575,6 +591,11 @@ async def _upsert_memory_atoms_from_insight(uid: str, insight: MessageInsight) -
                 atom_type=ATOM_TYPE_INTEREST_SUBJECT,
                 importance=0.4,
                 categories=[signal.category] if signal.category else [],
+                confidence=0.8,
+                confirmation_status="explicit_user",
+                source_conversation_id=session_id or "",
+                source_message_id=turn_id or "",
+                evidence_text=message,
             ))
     if atoms:
         await upsert_atoms(uid, atoms, source="extractor")
@@ -645,7 +666,13 @@ async def extract_and_update_user_aura(
 
         # Mirror the durable facts + named subjects into the unbounded long-term memory
         # store for query-relevant recall. Best-effort; never affects the merge above.
-        await _upsert_memory_atoms_from_insight(uid, insight)
+        await _upsert_memory_atoms_from_insight(
+            uid,
+            insight,
+            message=message,
+            session_id=session_id,
+            turn_id=turn_id,
+        )
 
         logger.info("UserAuraExtractor: profile updated", {
             "user_id": uid,

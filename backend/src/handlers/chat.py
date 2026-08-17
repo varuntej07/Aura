@@ -34,10 +34,8 @@ from ..lib.logger import logger
 from ..lib.query_logger import log_query
 from ..services import desktop_chat_store
 from ..services.analytics.llm_telemetry import bind_trace_context, reset_trace_context
-from ..services.chat_completion import handoff_store
+from ..services.chat_completion import context_assembler, handoff_store, text_compaction, turn_store
 from ..services.chat_completion import prompt_builder as _prompt_builder
-from ..services.chat_completion import text_compaction
-from ..services.chat_completion import turn_store
 from ..services.chat_completion.prompt_builder import build_turn_system_blocks, fetch_user_doc
 from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from ..services.claude_client import ClaudeClient
@@ -50,7 +48,7 @@ from ..services.tool_executor import (
 )
 from ..services.user_aura_extractor import extract_and_update_user_aura
 from ..shared.capability_claims import log_false_capability_claims
-from ..shared.tools import claude_tool_definitions
+from ..shared.tools import claude_tool_definitions, reminder_ui_payload
 
 _build_user_content = _prompt_builder.build_user_content
 _NOTIFICATION_REASON_MAX_CHARS = _prompt_builder.NOTIFICATION_REASON_MAX_CHARS
@@ -121,24 +119,6 @@ def _error_stream(message: str) -> AsyncGenerator[str, None]:
         yield "data: [DONE]\n\n"
 
     return _gen()
-
-
-async def _read_conversation_summary(
-    user_id: str, conversation_id: str | None
-) -> str:
-    """This conversation's compacted older context, or "" when there is none.
-
-    Empty for every non-desktop surface without touching Firestore: the summary
-    lives on the desktop session document, and mobile supplies its own history.
-    Fail-open by way of get_context_state, which already swallows read errors, so
-    a Firestore hiccup costs the turn its older context rather than the turn.
-    """
-    if not conversation_id:
-        return ""
-    state = await desktop_chat_store.get_context_state(user_id, conversation_id)
-    if not state:
-        return ""
-    return str(state.get(desktop_chat_store.FIELD_CONTEXT_SUMMARY) or "")
 
 
 def _chat_limit_reached_stream() -> AsyncGenerator[str, None]:
@@ -675,6 +655,24 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     headers=_sse_headers,
                 )
 
+    conversation_summary = ""
+    context_source = "client"
+    if desktop_conversation_id and client_message_id:
+        user_doc, assembled_context = await asyncio.gather(
+            fetch_user_doc(user_id),
+            context_assembler.assemble_desktop_context(
+                user_id,
+                desktop_conversation_id,
+                current_message_id=client_message_id,
+                fallback_history=history,
+            ),
+        )
+        history = assembled_context.history
+        conversation_summary = assembled_context.conversation_summary
+        context_source = assembled_context.source
+    else:
+        user_doc = await fetch_user_doc(user_id)
+
     prev_buddy_response: str | None = next(
         (h["content"] for h in reversed(history) if h["role"] == "assistant"),
         None,
@@ -688,11 +686,6 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     # second sequential await: it is one extra document read, and putting it in
     # series would add its full round trip to time-to-first-token on every
     # desktop turn. Non-desktop surfaces resolve it to "" without any read.
-    user_doc, conversation_summary = await asyncio.gather(
-        fetch_user_doc(user_id),
-        _read_conversation_summary(user_id, desktop_conversation_id),
-    )
-
     # Build the full system prompt (datetime + aura profile suffix + query-relevant
     # long-term memory) via the shared assembler, so the live turn here and the durable
     # background completion (services/chat_completion) construct the EXACT same prompt.
@@ -768,6 +761,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             "history_turns": len(history),
             "attachment_count": len(validated_attachments),
             "surface": surface,
+            "context_source": context_source,
         },
     )
 
@@ -908,6 +902,19 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     tool_names = metadata.setdefault("tool_names", [])
                     if isinstance(tool_names, list) and "save_screen_item" not in tool_names:
                         tool_names.append("save_screen_item")
+                if sse_event.get("type") == "done":
+                    metadata = sse_event.get("metadata") or {}
+                    tool_names = [
+                        str(name) for name in metadata.get("tool_names") or []
+                    ]
+                    reminder_payload = reminder_ui_payload(
+                        metadata.get("reminder"), tool_names
+                    )
+                    if reminder_payload is None:
+                        metadata.pop("reminder", None)
+                    else:
+                        metadata["reminder"] = reminder_payload
+                    sse_event["metadata"] = metadata
                 if reminder_receipt_check_armed and sse_event.get("type") == "text_delta":
                     buffered_text_events.append(sse_event)
                     continue

@@ -137,6 +137,7 @@ from .voice.text_sanitizer import (
 from .voice.tool_discovery import (
     ActiveIntentState,
     EligibilityContext,
+    IntentPendingRequirement,
     SelectionContext,
     ToolCatalog,
     ToolSelection,
@@ -651,6 +652,9 @@ class BuddyAgent(agents.Agent):
         self._finalized_stt_confidence = None
         self._guide_stop_result = None
 
+        # An accepted call that never produced a structured tool result was
+        # interrupted or otherwise terminated. It cannot become next-turn state.
+        self._active_intent.clear_unresolved_execution()
         compacted_context = self._context_compactor.apply_ready(turn_ctx)
         if compacted_context is None:
             compacted_context = self._context_compactor.enforce_hard_ceiling(turn_ctx)
@@ -861,11 +865,6 @@ class BuddyAgent(agents.Agent):
                         "</tool_selection_changed>"
                     ],
                 )
-            self._tool_catalog.commit_selection(
-                final_selection,
-                final_selection_context,
-                self._active_intent,
-            )
         # Lifetime is decided after the turn has committed to a capability, so
         # "set a reminder for 6pm" closes the card session and is answered by
         # speech instead of another card. A turn that commits to NO capability
@@ -1789,7 +1788,6 @@ class BuddyAgent(agents.Agent):
             reason_codes=policy.reason_codes + selection.reason_codes,
         )
         prompt_intent = deepcopy(self._active_intent)
-        catalog.commit_selection(selection, selection_context, prompt_intent)
         return selected_policy, selection, selection_context, prompt_intent
 
     @function_tool
@@ -1930,9 +1928,6 @@ class BuddyAgent(agents.Agent):
             if result.succeeded:
                 self._screen_capture_retry_until = 0.0
                 self._recent_screen_capture = (frame_key, time.monotonic(), result)
-                self._active_intent.record_receipt(
-                    "save_screen_item", self._action_telemetry.turn_index
-                )
             else:
                 self._screen_capture_retry_until = (
                     time.monotonic() + _SCREEN_CAPTURE_RETRY_WINDOW_S
@@ -2218,11 +2213,6 @@ class BuddyAgent(agents.Agent):
                 self._finalized_policy = policy
                 self._finalized_tool_selection = selection
                 self._finalized_selection_context = selection_context
-                catalog.commit_selection(
-                    selection,
-                    selection_context,
-                    self._active_intent,
-                )
         if not finalized:
             self._speculative_tool_fingerprint = selection.fingerprint
             self._speculative_tool_capability = (
@@ -2935,6 +2925,7 @@ class BuddyAgent(agents.Agent):
                         registration,
                         parsed_arguments,
                         provenance="finalized_user_request",
+                        active_objective=self._finalized_turn_instruction,
                         turn_index=self._action_telemetry.turn_index,
                     )
 
@@ -3007,15 +2998,22 @@ class BuddyAgent(agents.Agent):
             ):
                 return
             yield "Hmm, that didn't go through. Say it once more?"
+        if policy.finalized_turn and evaluated_calls and not surviving:
+            self._active_intent.clear()
 
     def record_voice_tool_execution(
-        self, tool_name_value: str, *, success: bool
+        self,
+        tool_name_value: str,
+        *,
+        success: bool,
+        pending_requirement: IntentPendingRequirement | None = None,
     ) -> int | None:
         latency_ms = self._action_telemetry.execution(tool_name_value, success=success)
-        if success:
-            self._active_intent.record_receipt(
-                tool_name_value, self._action_telemetry.turn_index
-            )
+        self._active_intent.resolve_tool_result(
+            tool_name_value,
+            pending_requirement=pending_requirement,
+            turn_index=self._action_telemetry.turn_index,
+        )
         self._schedule_context_compaction_check()
         return latency_ms
 
@@ -3024,13 +3022,10 @@ class BuddyAgent(agents.Agent):
             getattr(item, "role", None) == "assistant"
             and not bool(getattr(item, "interrupted", False))
         ):
-            if self._active_intent.cancellation_requested:
-                self._active_intent.mark_cancelled(self._action_telemetry.turn_index)
-            else:
-                self._active_intent.record_clarification(
-                    getattr(item, "text_content", "") or "",
-                    self._action_telemetry.turn_index,
-                )
+            self._active_intent.record_clarification(
+                getattr(item, "text_content", "") or "",
+                self._action_telemetry.turn_index,
+            )
             self._schedule_context_compaction_check()
 
     def _schedule_context_compaction_check(self) -> None:

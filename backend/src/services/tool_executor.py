@@ -23,6 +23,9 @@ from ..lib.logger import logger
 from ..prompts import REASON_STEP_SYSTEM_PROMPT, reason_step_user_prompt
 from ..shared.tools import (
     MEMORY_CATEGORIES,
+    REMINDER_RECEIPT_CREATED,
+    REMINDER_RECEIPT_EXISTING,
+    REMINDER_RECEIPT_UPDATED,
     TIER_GATED_TOOLS,
     claude_tool_definitions,
     validate_and_coerce_tool_input,
@@ -637,6 +640,11 @@ class ToolExecutor:
                 "message": duplicate.get("message", message),
                 "trigger_at": duplicate.get("trigger_at", trigger_at),
                 "status": "pending",
+                "receipt_status": (
+                    REMINDER_RECEIPT_UPDATED
+                    if duplicate_update
+                    else REMINDER_RECEIPT_EXISTING
+                ),
                 "tier": existing_tier,
                 "timezone": parsed_time.timezone,
             }
@@ -711,6 +719,7 @@ class ToolExecutor:
             "message": message,
             "trigger_at": trigger_at,
             "status": "pending",
+            "receipt_status": REMINDER_RECEIPT_CREATED,
             "tier": tier,
             "timezone": parsed_time.timezone,
         }

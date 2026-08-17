@@ -415,7 +415,7 @@ async def test_original_followup_reaches_existing_model_with_reminder_tool(monke
         "When should I remind you?",
         "Or tonight",
     ]
-    assert "<active_intent_state>" in passed_text[3]
+    assert all("<active_intent_state>" not in text for text in passed_text)
 
 
 async def test_parallel_safe_reads_from_separate_chunks_survive_in_order():

@@ -412,7 +412,7 @@ async def test_hard_blocks_never_candidate(
 
 
 @pytest.mark.asyncio
-async def test_unrelated_reminder_in_session_does_not_suppress_topic(followup_db):
+async def test_session_owned_reminder_suppresses_without_word_matching(followup_db):
     _seed_session(followup_db)
     followup_db.docs[("users", "u1", "reminders", "r1")] = {
         "session_id": "s1",
@@ -420,7 +420,9 @@ async def test_unrelated_reminder_in_session_does_not_suppress_topic(followup_db
         "message": "Buy groceries for dinner",
     }
 
-    assert await _evaluate() is not None
+    assert await _evaluate() is None
+    topic_doc = followup_db.docs[_path("u1", F.SESSION_TOPICS, "s1")]
+    assert topic_doc["topics"][0]["drop_reason"] == "reminder_created_in_session"
 
 
 @pytest.mark.asyncio
@@ -712,13 +714,13 @@ async def test_collision_window_transaction_has_one_real_winner(followup_db):
     ) == [machine.STATE_DEFERRED, machine.STATE_SUBMITTED]
 
 
-def test_clustering_falls_back_without_graph_documents():
+def test_clustering_requires_semantic_entity_keys():
     topics = cluster_turns([
         {"role": "user", "text": "plan the launch order and launch checklist"},
         {"role": "user", "text": "the launch checklist still needs an owner"},
         {"role": "user", "text": "book a dentist appointment for next week"},
     ])
-    assert sorted(topic["user_turn_count"] for topic in topics) == [1, 2]
+    assert topics == []
 
 
 @pytest.mark.asyncio

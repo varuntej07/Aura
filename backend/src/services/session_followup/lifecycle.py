@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -16,7 +15,6 @@ from ..firebase import admin_firestore
 from ..memory import graph_fields as GF
 from . import fields as F
 
-_LEXICAL_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{2,}", re.IGNORECASE)
 _SWEEP_LIMIT = 100
 
 
@@ -160,14 +158,11 @@ class SessionLifecycleService:
             return
         when = now or datetime.now(UTC)
         clean_text = text.strip()
-        lexical_terms = sorted({
-            token.casefold() for token in _LEXICAL_TOKEN.findall(clean_text)
-        })[:24]
         topic_identity = sorted({
             GF.normalized_entity_key(str(value))
             for value in entity_keys or []
             if str(value).strip()
-        }) or lexical_terms[:6]
+        })
         active_topic_id = (
             f"topic_{hashlib.sha1('|'.join(topic_identity).encode()).hexdigest()[:24]}"
             if topic_identity
@@ -210,7 +205,6 @@ class SessionLifecycleService:
                         }),
                         "text_hash": hashlib.sha1(clean_text.encode("utf-8")).hexdigest(),
                         "embedding_ref": None,
-                        "lexical_terms": lexical_terms,
                         "revision": max(1, int(input_revision)),
                         "created_at": when,
                         "inferred_sensitive": bool(inferred_sensitive),

@@ -39,6 +39,36 @@ from copy import deepcopy
 from typing import Any
 
 
+REMINDER_RECEIPT_CREATED = "created"
+REMINDER_RECEIPT_UPDATED = "updated"
+REMINDER_RECEIPT_EXISTING = "existing"
+
+
+def reminder_ui_payload(
+    receipt: Any, tool_names: list[str] | tuple[str, ...]
+) -> dict[str, Any] | None:
+    """Return a reminder receipt only when this turn changed reminder state.
+
+    Deduplication is a successful tool outcome for the model, but an unchanged
+    pre-existing reminder is not a newly-created UI artifact.  Keeping this
+    distinction structural prevents an old receipt from replacing an unrelated
+    answer without inspecting the user's words or the model's prose.
+    """
+    if not isinstance(receipt, dict):
+        return None
+    status = str(receipt.get("receipt_status") or REMINDER_RECEIPT_CREATED)
+    if status == REMINDER_RECEIPT_EXISTING:
+        return None
+    payload = dict(receipt)
+    payload["receipt_status"] = status
+    payload["display_mode"] = (
+        "supplemental"
+        if any(name != "set_reminder" for name in tool_names)
+        else "standalone"
+    )
+    return payload
+
+
 def resolve_set_reminder_tier(
     message: str, supplied_tier: Any, *, user_instruction: str = ""
 ) -> str:
@@ -104,9 +134,10 @@ CORE_TOOLS: frozenset[str] = frozenset({
 SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
     "name": "set_reminder",
     "description": (
-        "Create one new reminder. Use when the user asks to create or change a "
-        "reminder, or when their current turn answers, refines, or corrects your "
-        "immediately preceding reminder question. Do NOT use to read existing "
+        "Create one new reminder. The current user turn must itself ask to create "
+        "or change a reminder, or answer, refine, or correct your immediately "
+        "preceding reminder question. Never resurrect a reminder request from older "
+        "conversation history after the user has moved to another task. Do NOT use to read existing "
         "reminders (use list_reminders) or to cancel one (use cancel_reminder). "
         "When the user hands you the decision ('you decide', 'whatever works'), fill "
         "every fillable detail from the conversation and act; ask only when a detail "

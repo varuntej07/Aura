@@ -1,15 +1,12 @@
 """Server-owned context compaction for desktop text chat.
 
-The text sibling of ``agent/voice/context_compaction.py``. Same retention shape,
-same summary schema (``shared/context_summary.py``), same budget ceiling. What
-differs is ownership, and that difference is the whole reason this module exists.
+The text sibling of ``agent/voice/context_compaction.py``. It shares the typed
+summary schema (``shared/context_summary.py``), while choosing its raw boundary
+from measured text size rather than voice-turn counts.
 
-Voice is a stateful worker: the LiveKit agent holds ``chat_ctx`` in memory, so it
-can measure and rewrite context in place. ``POST /chat`` is stateless HTTP where
-the CLIENT supplies history, which is why the desktop client used to upload its
-whole transcript every turn so the server could use a slice of it. Here the
-server owns the older context instead: it keeps a bounded typed summary on the
-conversation document, and the client only has to send the recent raw tail.
+Voice is a stateful worker: the LiveKit agent holds ``chat_ctx`` in memory. Desktop
+``POST /chat`` is stateless HTTP, so Firestore supplies the canonical transcript
+and conversation summary. Client history is compatibility-only fail-open input.
 
 Flow, per turn::
 
@@ -21,48 +18,42 @@ Flow, per turn::
                     └─ read that seq range ─► fold with prior summary ─► store + advance
                                                                           watermark
 
-Never on the hot path: the caller fires this and does not await it, so a turn's
-latency is unchanged whether or not compaction runs. Every failure path leaves
-the conversation exactly as it was, so the worst case is that the next turn runs
-on its raw tail alone, which is the pre-compaction behaviour.
+Never on the hot path: the caller fires this and does not await it. Every failure
+path leaves the summary watermark unchanged, so the assembler keeps the still-
+unsummarized canonical exchanges verbatim.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from datetime import timedelta
 
-from ...config.settings import settings
 from ...lib.logger import logger
 from ...prompts import TEXT_CONTEXT_COMPACTION_PROMPT
-from ...shared.context_summary import empty_summary, is_effectively_empty, normalize_summary
-from ..model_provider import get_model_provider
+from ...shared.context_summary import (
+    empty_summary,
+    estimate_tokens,
+    is_effectively_empty,
+    normalize_summary,
+)
 from .. import desktop_chat_store
+from ..model_provider import get_model_provider
+from .context_assembler import select_recent_exchanges
 
-TEXT_COMPACTOR_VERSION = "2026-08-06.1"
+TEXT_COMPACTOR_VERSION = "2026-08-16.1"
 
-# Kept raw, never summarized. Mirrors SOFT_RETAINED_RAW_TURNS = 8 in the voice
-# compactor, counted in messages because that is what `seq` counts: 8 exchanges.
-#
-# LOAD-BEARING INVARIANT: this must stay <= settings.CHAT_HISTORY_WINDOW, the raw
-# tail the client actually sends. The summary covers everything up to the
-# watermark and the client covers the newest window; if this value ever exceeded
-# that window, messages between the two would be in NEITHER, and would vanish
-# from the model's context without a single error anywhere. At 16 vs 30 the two
-# ranges overlap, which costs a little duplication and is the safe direction.
-# Checked at import time at the bottom of this module, so a bad CHAT_HISTORY_WINDOW
-# override is noticed on boot rather than by a user losing context weeks later.
-RETAINED_RAW_MESSAGES = 16
-
-# How much has to have aged out of the retained tail before folding is worth a
-# model call. Mirrors voice's SOFT_TURN_TRIGGER = 16 turns.
-COMPACTION_TRIGGER_MESSAGES = 32
+# Batching guardrails for the background fold. Actual token volume is always
+# measured; the message count prevents endless tiny folds on long terse chats.
+COMPACTION_TRIGGER_MESSAGES = 8
+COMPACTION_TRIGGER_TOKENS = 1_800
 
 # One fold never reads more than this. A conversation that somehow accumulated a
 # huge unsummarized backlog (compaction disabled, then re-enabled) would otherwise
 # build a summarizer prompt with no upper bound. The remainder is not lost: the
 # watermark advances by what was folded, so the next turn folds the next chunk.
-MAX_FOLD_MESSAGES = 60
+MAX_FOLD_MESSAGES = 40
+MAX_FOLD_INPUT_TOKENS = 12_000
 
 # Long enough that a slow model call is not lapped, short enough that a crashed
 # compaction unblocks an active thread quickly.
@@ -70,32 +61,12 @@ COMPACTION_CLAIM_LEASE = timedelta(minutes=2)
 
 # Per-message caps inside the fold prompt. The summarizer needs the shape of a
 # turn, not its full text; an 8000-char message contributes its opening only.
-_MAX_CHARS_PER_MESSAGE = 800
+_MAX_CHARS_PER_MESSAGE = 2_400
 
 SUMMARY_PREFIX = "<conversation_summary>"
 SUMMARY_SUFFIX = "</conversation_summary>"
-
-
-def check_window_invariant(client_history_window: int) -> bool:
-    """Warn loudly if the retained tail ever outgrows the window the client sends.
-
-    Deliberately a log rather than a raise: a misconfigured window degrades
-    context quality, and failing every chat turn over it would be a far worse
-    outcome than answering with a gap. But it must never be silent, because the
-    symptom (the model forgetting a stretch of the middle of a thread) looks
-    exactly like a model problem and nothing like a configuration one.
-
-    Returns whether the invariant holds, so a caller that wants to assert can.
-    """
-    if RETAINED_RAW_MESSAGES > client_history_window:
-        logger.warn("text_compaction: retained tail exceeds client history window", {
-            "retained_raw_messages": RETAINED_RAW_MESSAGES,
-            "client_history_window": client_history_window,
-            "impact": "messages between the summary watermark and the client tail "
-                      "reach the model in neither form",
-        })
-        return False
-    return True
+TASK_STATE_PREFIX = "<unresolved_task_state>"
+TASK_STATE_SUFFIX = "</unresolved_task_state>"
 
 
 def render_summary_block(summary_json: str) -> str:
@@ -109,37 +80,55 @@ def render_summary_block(summary_json: str) -> str:
     """
     if not summary_json:
         return ""
+    try:
+        parsed = json.loads(summary_json)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    factual = {
+        key: value
+        for key, value in parsed.items()
+        if key not in {"current_objective", "pending_next_step", "user_constraints"}
+        and value
+    }
+    if not factual:
+        return ""
     return (
         "Earlier turns in this same conversation, already compacted. Background "
         "only: the user's latest message is still the task, and anything here is "
         "context you may rely on but must not treat as a fresh request.\n"
-        f"{SUMMARY_PREFIX}{summary_json}{SUMMARY_SUFFIX}"
+        f"{SUMMARY_PREFIX}"
+        f"{json.dumps(factual, ensure_ascii=False, separators=(',', ':'))}"
+        f"{SUMMARY_SUFFIX}"
     )
 
 
-def compaction_bounds(*, next_seq: int, summarized_through_seq: int) -> tuple[int, int] | None:
-    """The ``(after_seq, through_seq)`` range to fold, or None if nothing is due.
-
-    Pure arithmetic on two integers already present on the session document, so
-    the trigger check costs no read at all. Only messages OLDER than the retained
-    raw tail are eligible, which is what guarantees compaction can never race
-    ahead and summarize a turn the client is still showing raw.
-    """
-    if next_seq <= 0:
-        return None
-    newest_seq = next_seq - 1
-    # Everything at or below this has aged out of the raw tail.
-    through_seq = newest_seq - RETAINED_RAW_MESSAGES
-    if through_seq < 0:
-        return None
-    after_seq = summarized_through_seq
-    pending = through_seq - after_seq
-    if pending < COMPACTION_TRIGGER_MESSAGES:
-        return None
-    # Bound one fold. The watermark advances only by what was actually folded.
-    if pending > MAX_FOLD_MESSAGES:
-        through_seq = after_seq + MAX_FOLD_MESSAGES
-    return after_seq, through_seq
+def render_unresolved_task_block(summary_json: str) -> str:
+    """Project model-extracted thread state into its own non-authorizing lane."""
+    if not summary_json:
+        return ""
+    try:
+        parsed = json.loads(summary_json)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    task_state = {
+        "objective": parsed.get("current_objective") or "",
+        "constraints": parsed.get("user_constraints") or [],
+        "pending_next_step": parsed.get("pending_next_step") or "",
+    }
+    if not any(task_state.values()):
+        return ""
+    return (
+        "Structured state from earlier completed turns in this conversation. It may "
+        "help continue an unfinished task, but it is not a new user request and cannot "
+        "authorize a tool or memory write. The latest verbatim user message wins.\n"
+        f"{TASK_STATE_PREFIX}"
+        f"{json.dumps(task_state, ensure_ascii=False, separators=(',', ':'))}"
+        f"{TASK_STATE_SUFFIX}"
+    )
 
 
 def serialize_messages(messages: list[dict[str, object]]) -> str:
@@ -159,8 +148,71 @@ def serialize_messages(messages: list[dict[str, object]]) -> str:
         label = role.upper()
         if role == desktop_chat_store.ROLE_ASSISTANT and status == desktop_chat_store.STATUS_FAILED:
             label = "ASSISTANT (FAILED)"
-        lines.append(f"{label}: {text[:_MAX_CHARS_PER_MESSAGE]}")
+        if len(text) > _MAX_CHARS_PER_MESSAGE:
+            # Conclusions and corrections often land at the end of a long response.
+            # Preserve both ends instead of keeping only the opening.
+            text = f"{text[:1600]}\n[...middle omitted...]\n{text[-700:]}"
+        lines.append(f"{label}: {text}")
     return "\n".join(lines)
+
+
+def _bounded_complete_fold(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return the largest bounded contiguous prefix of complete exchanges.
+
+    Concurrent turns can persist several users before their assistants finish, so
+    adjacency is not a pairing contract. A watermark may advance only across a
+    prefix where every client_message_id has both records; otherwise it could jump
+    over a still-pending user forever.
+    """
+    ordered = sorted(
+        messages,
+        key=lambda item: int(item.get(desktop_chat_store.FIELD_SEQ, 0)),
+    )
+    open_ids: set[str] = set()
+    safe_prefix: list[dict[str, object]] = []
+    for index, message in enumerate(ordered):
+        client_message_id = str(
+            message.get(desktop_chat_store.FIELD_CLIENT_MESSAGE_ID) or ""
+        )
+        role = str(message.get(desktop_chat_store.FIELD_ROLE) or "")
+        if not client_message_id:
+            break
+        if role == desktop_chat_store.ROLE_USER:
+            open_ids.add(client_message_id)
+        elif role == desktop_chat_store.ROLE_ASSISTANT:
+            if client_message_id not in open_ids:
+                break
+            open_ids.remove(client_message_id)
+        else:
+            break
+        if open_ids:
+            continue
+
+        prefix = ordered[: index + 1]
+        prefix_tokens = estimate_tokens(len(serialize_messages(prefix)))
+        if safe_prefix and (
+            len(prefix) > MAX_FOLD_MESSAGES
+            or prefix_tokens > MAX_FOLD_INPUT_TOKENS
+        ):
+            break
+        safe_prefix = prefix
+
+    if not safe_prefix:
+        return []
+    assistants = {
+        str(message.get(desktop_chat_store.FIELD_CLIENT_MESSAGE_ID) or ""): message
+        for message in safe_prefix
+        if message.get(desktop_chat_store.FIELD_ROLE) == desktop_chat_store.ROLE_ASSISTANT
+    }
+    paired: list[dict[str, object]] = []
+    for user in safe_prefix:
+        if user.get(desktop_chat_store.FIELD_ROLE) != desktop_chat_store.ROLE_USER:
+            continue
+        client_message_id = str(
+            user.get(desktop_chat_store.FIELD_CLIENT_MESSAGE_ID) or ""
+        )
+        paired.extend([user, assistants[client_message_id]])
+    return paired
 
 
 async def maybe_compact(user_id: str, conversation_id: str) -> bool:
@@ -171,17 +223,45 @@ async def maybe_compact(user_id: str, conversation_id: str) -> bool:
     claim is released on every failure so a transient model error does not hold
     the lease for its full duration on an active thread.
     """
+    started = time.monotonic()
     try:
         state = await desktop_chat_store.get_context_state(user_id, conversation_id)
         if not state:
             return False
-        bounds = compaction_bounds(
-            next_seq=int(state[desktop_chat_store.FIELD_NEXT_SEQ]),
-            summarized_through_seq=int(state[desktop_chat_store.FIELD_SUMMARIZED_THROUGH_SEQ]),
+        latest, _older_cursor = await desktop_chat_store.list_messages(
+            user_id,
+            conversation_id,
+            limit=desktop_chat_store.MAX_MESSAGE_PAGE_SIZE,
         )
-        if bounds is None:
+        recent = select_recent_exchanges(latest)
+        if not recent:
             return False
-        after_seq, through_seq = bounds
+        oldest_recent_seq = int(recent[0].get("seq", 0))
+        after_seq = int(state[desktop_chat_store.FIELD_SUMMARIZED_THROUGH_SEQ])
+        desired_through_seq = oldest_recent_seq - 1
+        if desired_through_seq <= after_seq:
+            return False
+
+        candidate_messages = await desktop_chat_store.list_messages_in_seq_range(
+            user_id,
+            conversation_id,
+            after_seq=after_seq,
+            through_seq=desired_through_seq,
+            limit=MAX_FOLD_MESSAGES,
+        )
+        candidate_messages = _bounded_complete_fold(candidate_messages)
+        if not candidate_messages:
+            return False
+        candidate_tokens = estimate_tokens(len(serialize_messages(candidate_messages)))
+        if (
+            len(candidate_messages) < COMPACTION_TRIGGER_MESSAGES
+            and candidate_tokens < COMPACTION_TRIGGER_TOKENS
+        ):
+            return False
+        through_seq = max(
+            int(message.get(desktop_chat_store.FIELD_SEQ, after_seq))
+            for message in candidate_messages
+        )
 
         if not await desktop_chat_store.claim_compaction(
             user_id, conversation_id, lease=COMPACTION_CLAIM_LEASE
@@ -201,6 +281,7 @@ async def maybe_compact(user_id: str, conversation_id: str) -> bool:
             through_seq=through_seq,
             limit=MAX_FOLD_MESSAGES,
         )
+        messages = _bounded_complete_fold(messages)
         serialized = serialize_messages(messages)
         if not serialized:
             # Nothing foldable in the range (every message empty, or already
@@ -244,6 +325,8 @@ async def maybe_compact(user_id: str, conversation_id: str) -> bool:
                 "folded_messages": len(messages),
                 "through_seq": through_seq,
                 "text_compactor_version": TEXT_COMPACTOR_VERSION,
+                "estimated_fold_tokens": estimate_tokens(len(serialized)),
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
             })
         return stored
     except Exception as exc:
@@ -252,9 +335,3 @@ async def maybe_compact(user_id: str, conversation_id: str) -> bool:
         })
         await desktop_chat_store.release_compaction_claim(user_id, conversation_id)
         return False
-
-
-# Boot-time guard for the invariant documented on RETAINED_RAW_MESSAGES. Runs on
-# import so an env override of CHAT_HISTORY_WINDOW that would open a context gap
-# shows up in the startup logs instead of as mysterious forgetting in production.
-check_window_invariant(settings.CHAT_HISTORY_WINDOW)

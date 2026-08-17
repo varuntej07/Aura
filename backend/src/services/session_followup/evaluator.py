@@ -17,32 +17,12 @@ from ..notifications.candidate_machine import CandidateDraft
 from . import fields as F
 from .clustering import cluster_turns
 
-_FUTURE_INTENT = re.compile(
-    r"\b(i(?:'m| am)? going to|i plan to|i want to|later|next week|tomorrow)\b",
-    re.I,
-)
-_UNRESOLVED_ACTION = re.compile(
-    r"\b(need to|have to|still need|figure out|follow up|todo|to-do)\b",
-    re.I,
-)
-_NEXT_STEP = re.compile(r"\b(next step|where do i start|how should i|what should i do)\b", re.I)
-_DEADLINE = re.compile(
-    r"\b(deadline|due|by (?:monday|tuesday|wednesday|thursday|friday|"
-    r"saturday|sunday|tomorrow))\b",
-    re.I,
-)
 _SHALLOW_FACT = re.compile(r"^\s*(what|who|when|where)\s+(is|are|was|were)\b", re.I)
 _SENSITIVE = re.compile(
     r"\b(ssn|social security|bank account|credit card|diagnosis|pregnan|sexual|"
     r"therapy|medication|medical record|passport number)\b",
     re.I,
 )
-_ACTION_STOP_WORDS = frozenset({
-    "about", "after", "again", "before", "could", "from", "have", "into",
-    "just", "later", "need", "should", "that", "their", "there", "these",
-    "they", "this", "want", "what", "when", "where", "which", "with", "would",
-})
-
 W_TURNS = 0.18
 W_DEPTH = 0.12
 W_INTENT = 0.18
@@ -80,30 +60,7 @@ def _topic_text(topic: dict[str, Any]) -> str:
     parts = [str(topic.get("summary") or "")]
     for turn in topic.get("turns") or []:
         parts.append(str(turn.get("text") or turn.get("transcript") or ""))
-        terms = turn.get("lexical_terms")
-        if isinstance(terms, list):
-            parts.append(" ".join(str(term) for term in terms))
     return " ".join(parts).strip()
-
-
-def _action_terms(value: str) -> set[str]:
-    return {
-        term
-        for term in re.findall(r"[a-z0-9]{3,}", value.lower().replace("_", " "))
-        if term not in _ACTION_STOP_WORDS
-    }
-
-
-def _action_matches_topic(action: dict[str, Any], topic: dict[str, Any]) -> bool:
-    topic_terms = _action_terms(_topic_text(topic))
-    action_text = " ".join(
-        str(action.get(field) or "") for field in ("message", "subject", "question")
-    )
-    action_terms = _action_terms(action_text)
-    shared = topic_terms & action_terms
-    if not shared:
-        return False
-    return len(shared) >= 2 or len(action_terms) == 1
 
 
 def _signals(topic: dict[str, Any]) -> dict[str, Any]:
@@ -111,9 +68,12 @@ def _signals(topic: dict[str, Any]) -> dict[str, Any]:
     text = _topic_text(topic)
     def explicit(name: str) -> bool:
         return any(turn.get(name) is True for turn in turns)
-    future_intent = explicit("future_intent") or bool(_FUTURE_INTENT.search(text))
-    unresolved_action = explicit("unresolved_action") or bool(_UNRESOLVED_ACTION.search(text))
-    next_step = explicit("next_step") or bool(_NEXT_STEP.search(text))
+    # These fields must come from structured semantic analysis. User wording is
+    # never scanned to manufacture future intent, an unresolved action, or a next
+    # step; lexical coincidences cannot authorize a proactive follow-up.
+    future_intent = explicit("future_intent")
+    unresolved_action = explicit("unresolved_action")
+    next_step = explicit("next_step")
     sensitive = explicit("inferred_sensitive") or bool(_SENSITIVE.search(text))
     reminder = explicit("reminder_created_in_session")
     completed_action = explicit("completed_action")
@@ -140,11 +100,8 @@ def _value_payload(signals: dict[str, Any], topic: dict[str, Any]) -> dict[str, 
     evidence = str(topic.get("summary") or signals.get("text") or "").strip()[:220]
     if not evidence:
         return None
-    text = str(signals.get("text") or "")
     if signals["unresolved_action"]:
         payload_type = "unresolved_action"
-    elif _DEADLINE.search(text):
-        payload_type = "deadline"
     elif signals["next_step"] or signals["future_intent"]:
         payload_type = "next_step"
     elif any(turn.get("new_information") is True for turn in topic.get("turns") or []):
@@ -264,8 +221,10 @@ async def _has_session_owned_action(uid: str, session_id: str, topic: dict[str, 
                 .limit(10)
             )
             for snapshot in query.stream():
-                action = snapshot.to_dict() or {}
-                if _action_matches_topic(action, topic):
+                # The action's session provenance is authoritative. Suppressing a
+                # duplicate follow-up is safer than guessing topic identity from
+                # overlapping words in action text.
+                if snapshot.exists:
                     return True
         return False
 

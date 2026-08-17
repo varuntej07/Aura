@@ -32,6 +32,9 @@ Stored shape:
         "first_seen":    iso8601,
         "last_seen":     iso8601,
         "source":        str,            # "extractor" | "reflection" — provenance, for debugging
+        "confidence":    float,          # bounded retrieval prior, 0..1
+        "confirmation_status": str,      # explicit_user | tool_verified | reflected | unknown
+        "provenance":    [dict],         # bounded metadata; raw evidence is never stored
     }
 """
 
@@ -57,6 +60,23 @@ CATEGORIES = "categories"
 FIRST_SEEN = "first_seen"
 LAST_SEEN = "last_seen"
 SOURCE = "source"
+CONFIDENCE = "confidence"
+CONFIRMATION_STATUS = "confirmation_status"
+PROVENANCE = "provenance"
+
+PROVENANCE_SOURCE_TYPE = "source_type"
+PROVENANCE_CONVERSATION_ID = "conversation_id"
+PROVENANCE_MESSAGE_ID = "message_id"
+PROVENANCE_EVIDENCE_HASH = "evidence_hash"
+PROVENANCE_OBSERVED_AT = "observed_at"
+PROVENANCE_CONFIDENCE = "confidence"
+PROVENANCE_CONFIRMATION_STATUS = "confirmation_status"
+
+CONFIRMATION_EXPLICIT_USER = "explicit_user"
+CONFIRMATION_TOOL_VERIFIED = "tool_verified"
+CONFIRMATION_REFLECTED = "reflected"
+CONFIRMATION_UNKNOWN = "unknown"
+MAX_PROVENANCE_RECORDS = 8
 
 # --- Atom types -----------------------------------------------------------
 ATOM_TYPE_FACT = "fact"
