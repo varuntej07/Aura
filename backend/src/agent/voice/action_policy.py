@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from ast import literal_eval
 from dataclasses import dataclass
 from typing import Any
@@ -10,20 +11,17 @@ from typing import Any
 from livekit.agents import llm as lk_llm
 
 from .capabilities import VOICE_TOOL_REGISTRY, Capability, ToolEffect, VoiceSurface
-from .guide_intent import (
-    GuideDecisionIdentity,
-    GuideIntentDecision,
-    guide_start_admission,
+
+ACTION_POLICY_VERSION = "2026-08-17.2"
+UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"})
+GUIDE_START_PATTERN = re.compile(
+    r"^\s*(?:guide\s+me|walk\s+me\s+through)\b", re.IGNORECASE
 )
 
-ACTION_POLICY_VERSION = "2026-08-16.2"
-UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"})
-
-# Signal quality, not wording. Below this the transcript is not trustworthy enough to
-# carry a side effect, so writes are suppressed for the turn regardless of what the
-# words appear to say. This is deliberately the ONLY transcript-derived input to tool
-# exposure: which tools are SUGGESTED is decided by semantic selection and the model,
-# never by matching literal words against a hand-written list.
+# Below this confidence the transcript is not trustworthy enough to carry a side
+# effect, so writes are suppressed regardless of what the words appear to say. Guide
+# start is the sole product-requested literal phrase exception; other tools remain
+# semantically selected by the existing model.
 WRITE_INTENT_MIN_STT_CONFIDENCE = 0.65
 
 
@@ -35,7 +33,8 @@ class TurnCapabilityPolicy:
     allowed_tools: frozenset[str]
     reason_codes: tuple[str, ...]
     finalized_turn: bool
-    guide_intent_decision: GuideIntentDecision | None = None
+    guide_active: bool = False
+    guide_start_requested: bool = False
     required_tools: frozenset[str] = frozenset()
 
 
@@ -55,17 +54,15 @@ def derive_turn_policy(
     previous_visible_output_failed: bool = False,
     source_message_id: str = "",
     turn_index: int = 0,
-    guide_intent_decision: GuideIntentDecision | None = None,
-    guide_decision_identity: GuideDecisionIdentity | None = None,
     stt_confidence: float | None = None,
+    guide_active: bool = False,
 ) -> TurnCapabilityPolicy:
-    """Expose structurally eligible tools plus one trusted Guide admission.
+    """Expose structurally eligible tools for the existing Buddy model.
 
-    Nothing here reads the wording of the transcript. Exposure is decided by surface,
-    frame freshness, turn finalization, and transcript signal quality; which of the
-    exposed tools is right for this turn is the selector's and the model's job.
+    Guide start is the one explicit phrase-gated exception requested by the product
+    owner. Every other tool remains independent of literal wording.
     """
-    del transcript, chat_ctx, previous_visible_output_failed, source_message_id, turn_index
+    del chat_ctx, previous_visible_output_failed, source_message_id, turn_index
 
     low_confidence_turn = (
         stt_confidence is not None and stt_confidence < WRITE_INTENT_MIN_STT_CONFIDENCE
@@ -74,8 +71,12 @@ def derive_turn_policy(
     allowed: set[str] = set()
     reasons: list[str] = ["stable_surface_toolset"]
     required: set[str] = set()
-    guide_admission = guide_start_admission(
-        guide_intent_decision, guide_decision_identity
+    guide_start_requested = bool(
+        surface is VoiceSurface.DESKTOP
+        and finalized_turn
+        and not low_confidence_turn
+        and not guide_active
+        and GUIDE_START_PATTERN.match(transcript)
     )
     for name, registration in VOICE_TOOL_REGISTRY.items():
         if surface not in registration.allowed_surfaces:
@@ -90,12 +91,11 @@ def derive_turn_policy(
         if low_confidence_turn and registration.effect is not ToolEffect.READ:
             reasons.append(f"low_stt_confidence_write_suppressed:{name}")
             continue
-        if name == "set_guide_mode":
-            if not guide_admission.allowed:
-                reasons.append(guide_admission.reason_code)
-                continue
+        if name == "set_guide_mode" and not (guide_start_requested or guide_active):
+            reasons.append("guide_start_phrase_required")
+            continue
+        if name == "set_guide_mode" and guide_start_requested:
             required.add(name)
-            reasons.append(guide_admission.reason_code)
         allowed.add(name)
 
     if not finalized_turn:
@@ -107,7 +107,8 @@ def derive_turn_policy(
         allowed_tools=frozenset(allowed),
         reason_codes=tuple(reasons),
         finalized_turn=finalized_turn,
-        guide_intent_decision=guide_intent_decision,
+        guide_active=guide_active,
+        guide_start_requested=guide_start_requested,
         required_tools=frozenset(required),
     )
 
@@ -183,8 +184,6 @@ def evaluate_execution(
     arguments: str,
     policy: TurnCapabilityPolicy,
     chat_ctx: lk_llm.ChatContext,
-    *,
-    guide_decision_identity: GuideDecisionIdentity | None = None,
 ) -> ExecutionDecision:
     """Validate a model-emitted call against immutable turn authorization."""
     registration = VOICE_TOOL_REGISTRY.get(tool_name)
@@ -215,12 +214,9 @@ def evaluate_execution(
     ):
         return ExecutionDecision(False, "missing_required_tool_field")
     if tool_name == "set_guide_mode":
-        if parsed.get("enable") is not True:
-            return ExecutionDecision(False, "guide_start_only")
-        guide_admission = guide_start_admission(
-            policy.guide_intent_decision,
-            guide_decision_identity,
-        )
-        if not guide_admission.allowed:
-            return ExecutionDecision(False, guide_admission.reason_code)
+        enable = parsed.get("enable")
+        if enable is True and not policy.guide_start_requested:
+            return ExecutionDecision(False, "guide_start_phrase_required")
+        if enable is False and not policy.guide_active:
+            return ExecutionDecision(False, "guide_not_active")
     return ExecutionDecision(True, "execution_allowed")
