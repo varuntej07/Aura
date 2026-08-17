@@ -25,7 +25,7 @@ A legacy Flutter Windows client was deleted from this repo on 2026-07-11 (code, 
 ## Shared infrastructure
 
 - **Firebase project `juno-2ea45`**: Auth + Firestore, used by all three repos. All three write/read the same `users/{uid}` document shape (Aura-Web's `auth/complete/route.ts` explicitly builds a doc matching what the Flutter app writes, timestamps as ISO strings, not Firestore `Timestamp`, because Flutter's `DateTime.parse()` would crash on the latter).
-  - **Surface footprint on the root doc:** `platform` records only the single mobile device the account was born on (every account is created by the Flutter app; desktop and web are always secondary links). `linked_platforms` is an array-union accumulation of every surface the account has touched (e.g. `["android", "windows"]`), written idempotently by each surface: the mobile app unions its own platform on every app open, and `handlers/pairing.py` / `handlers/web_auth.py` union `windows` when a desktop links. `last_desktop_active_at` (ISO string, per the rule above) is stamped on each desktop link. A user's full device inventory still lives in the `users/{uid}/linked_devices/{id}` subcollection; these two root fields are a denormalized summary so one doc read reveals surface usage without the join.
+  - **Surface footprint on the root doc:** `platform` records the surface where the account was created (`android`, `ios`, or `web`). A desktop-first Google account is created by Aura-Web with `platform: "web"` before Aura-Desktop exchanges the custom token. `linked_platforms` is an array-union accumulation of every surface the account has touched (e.g. `["android", "windows"]`), written idempotently by each surface: the mobile app unions its own platform on every app open, and `handlers/pairing.py` / `handlers/web_auth.py` union `windows` when a desktop links. `last_desktop_active_at` (ISO string, per the rule above) is stamped on each desktop link. A user's full device inventory lives in `users/{uid}/linked_devices/{install_id}`. Those subcollection documents use schema version 2 and native Firestore timestamps for `linked_at` and `last_seen_at`; the root user document keeps its separate ISO-string contract.
 - **juno-backend on Cloud Run**: the only backend. Aura mobile talks to nearly its full route surface; Aura-Desktop and Aura-Web each talk to a narrow slice (see contracts below).
 - **LiveKit Cloud**: voice rooms for both mobile and desktop clients, joined by the same backend-issued token from `GET /voice/token`. The voice agent worker itself deploys separately via `lk agent deploy`, not through Cloud Run.
 - **PostHog**: the app side (Aura mobile, Aura-Desktop, and `juno-backend`'s own server-side capture) confirmed share one project; funnel event names are contract-tested (`backend/src/services/analytics/funnel_events.py` vs `lib/core/analytics/funnel_events.dart`). Aura-Web initializes its own `posthog-js` client from its own env vars (`NEXT_PUBLIC_POSTHOG_KEY`); whether that resolves to the same PostHog project as the app side has not been verified, see "Known gaps."
@@ -45,7 +45,7 @@ Aura (mobile, authenticated) requests a short code; Aura-Desktop (unauthenticate
 | Step | Caller | Endpoint | Notes |
 |---|---|---|---|
 | Request a code | Aura mobile | `POST /devices/pair/start` (authed) | 8-char code, unambiguous alphabet, 5 min TTL, capped at 3 live codes per uid |
-| Redeem the code | Aura-Desktop | `POST /devices/pair/claim` (unauthenticated by design, the code IS the credential) | Returns a Firebase custom token, single-use via a Firestore transaction |
+| Redeem the code | Aura-Desktop | `POST /devices/pair/claim` (unauthenticated by design, the code IS the credential) | Sends the durable UUID `install_id`; returns a Firebase custom token, single-use via a Firestore transaction |
 | Unlink | either client | `POST /devices/unlink` (authed) | Revokes all of the user's refresh tokens as a background task, an explicit "unlinking signs out every session" semantic |
 
 Owning code: `backend/src/handlers/pairing.py` (this repo); `SignInForm.tsx` on the desktop side.
@@ -56,7 +56,7 @@ This is the one contract that genuinely spans all three repos, and its non-obvio
 It completes the handshake by writing directly into the same Firestore project juno-backend uses, into the exact document juno-backend created.
 
 1. Aura-Desktop calls `POST /devices/web-auth/start`.
-2. juno-backend creates a pending `web_auth_sessions/{code}` document and returns the code with a 600-second TTL.
+2. juno-backend creates a pending `web_auth_sessions/{code}` document carrying the Desktop UUID `install_id`, then returns the code with a 600-second TTL.
 3. Aura-Desktop opens Aura-Web at `/auth?session=code`, where the user selects a Google account.
 4. Aura-Web verifies the token, gets or creates `users/{uid}`, and transactionally marks the session complete in Firestore. It does not call juno-backend.
 5. Aura-Desktop polls `POST /devices/web-auth/status` every two seconds.
@@ -78,6 +78,8 @@ Aura-Desktop's `SignInForm` calls Firebase `signInWithEmailAndPassword` directly
 Both Aura mobile and Aura-Desktop call `GET /voice/token` and join the same kind of LiveKit room against the same backend voice agent (`backend/src/agent/voice_agent.py`). The token stamps a `surface` value into participant metadata so the agent can tell which client type joined. Full sequence (join detection, agent state, captions, watchdogs) is documented in `Aura-Desktop/README.md`; that detail is desktop/backend-specific enough it isn't duplicated here.
 
 The response also carries `realtime_bridge_enabled: bool`, owned by the backend's `REALTIME_BRIDGE_ENABLED` setting. Aura-Desktop must read this field before calling `POST /realtime/session`. When false, the backend ignores `bridged=1`, returns an ordinary LiveKit token, and the desktop activates that room without starting any OpenAI Realtime leg. Deploy this additive backend contract before releasing the desktop consumer.
+
+Buddy's selected TTS voice is account-wide at `users/{uid}.settings.tts_voice_id`. Mobile writes that field directly through its authenticated Firestore settings path; Aura-Desktop reads and writes it through authenticated `GET /voice/preferences` and `PUT /voice/preferences` (`{voice_id}`). The backend validates the shared catalog and paid entitlement, updates only the nested voice fields, and the voice worker resolves the stored slug again when each new session starts. Deploy these backend routes before releasing the desktop picker. An active session keeps the voice pipeline it started with.
 
 ### 5. Screen-sight (desktop-only capture, backend-shared agent)
 
@@ -287,6 +289,8 @@ Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebas
 
 | Endpoint | Request | Response contract |
 |---|---|---|
+| `GET /account/onboarding` | none | Returns canonical account completion, existing profile values, minimum age/interest counts, and the backend-owned producible interest options. Desktop caches only a confirmed `complete: true`, scoped by Firebase UID. |
+| `POST /account/onboarding` | `{display_name, date_of_birth, aura_consent_granted, gender, onboarding_interests, locale, language}` | Validates the same account fields mobile collects and transactionally changes `onboarding_complete` from false to true. Users under 18 are forced to `aura_consent_granted: false`. A concurrent already-completed account is preserved rather than overwritten. |
 | `POST /devices/profile` | `{where_heard, where_heard_other, role, role_other}` where every field is `string | null` | `{ok: true}`. Profile fields use last write wins on `users/{uid}`. There is no per-user desktop chat rollout gate: the desktop shows its text lane to any signed-in user, and what keeps that safe is the server-enforced `surface` tool allowlist on `POST /chat` below, not a flag. |
 | `POST /chat` | Existing chat request plus optional `surface`, default `app` | Desktop and unrecognized surfaces receive read-only tools only. The existing app surface retains its current tool behavior. |
 | `POST /devices/guide-usage` | `{guide_session_id (32-hex), started_at, ended_at (ISO), duration_ms, outcome (completed\|abandoned\|signed_out\|session_ended), frames_sent, steps_received, agent_timeouts}` | `{ok: true}`, always (fail-soft; the desktop treats any non-2xx as a swallowed blip). Merges into a Guide Mode rollup on `users/{uid}` (lifetime counters + one latest-session snapshot; no subcollection). The voice worker's `GuideCoordinator` writes the fields the client cannot see (model, avg TTFT, tools used, last user turn, frames processed) onto the SAME rollup, keyed by `guide_session_id`; a transaction guards the snapshot so a stale writer never clobbers a newer session. |
@@ -297,6 +301,8 @@ Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebas
 | `GET /desktop/usage` | none | `{voice_minutes_used, voice_minutes_limit, drafts_used, drafts_limit, period_start, period_end}` from the daily entitlement counters. A null limit is unlimited. |
 
 The endpoint field names are snake_case. `Aura-Desktop/src/lib/dashboardApi.ts` maps them to its own camelCase models, so neither side may rename fields independently. Empty data is a successful empty payload, not an error.
+
+Account onboarding and desktop activation are separate gates. A mobile-completed account skips the account form but still receives desktop-specific setup on a new Windows installation. A desktop-first account must complete the authenticated account contract before `desktop_onboarding_seen_<uid>` can open the dashboard. Deploy the additive backend routes before releasing the desktop consumer.
 
 Guide Mode itself (the armed screen-guidance session those usage rows describe) is a substantial worker-side subsystem, not just this endpoint. Arming is native on the desktop, so the worker can only request it. Full flow in `architectures/guide-mode.md`.
 

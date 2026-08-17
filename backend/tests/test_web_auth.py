@@ -143,10 +143,14 @@ def _pending_doc(**overrides) -> dict:
 
 # ── 1. start: happy path ─────────────────────────────────────────────────────
 async def test_start_writes_session_doc_and_returns_shape(monkeypatch):
+    install_id = "550e8400-e29b-41d4-a716-446655440000"
     db = _FakeDb()
     monkeypatch.setattr(web_auth, "admin_firestore", lambda: db)
 
-    resp = await web_auth.handle_web_auth_start(_Req({"device_name": "Varun's PC"}))
+    resp = await web_auth.handle_web_auth_start(_Req({
+        "device_name": "Varun's PC",
+        "install_id": install_id,
+    }))
 
     assert resp.status_code == 200
     body = _body(resp)
@@ -158,6 +162,7 @@ async def test_start_writes_session_doc_and_returns_shape(monkeypatch):
     assert doc is not None
     assert doc[web_auth.FIELD_STATUS] == web_auth.STATUS_PENDING
     assert doc[web_auth.FIELD_DEVICE_NAME] == "Varun's PC"
+    assert doc[web_auth.FIELD_INSTALL_ID] == install_id
     expiry_delta = doc[web_auth.FIELD_EXPIRES_AT] - doc[web_auth.FIELD_CREATED_AT]
     assert expiry_delta == timedelta(seconds=600)
 
@@ -224,14 +229,18 @@ async def test_status_empty_code_returns_400(monkeypatch):
 
 # ── 5. status: completed, exactly once ───────────────────────────────────────
 async def test_status_completed_returns_token_once_then_not_found(monkeypatch):
+    install_id = "550e8400-e29b-41d4-a716-446655440000"
     db = _FakeDb(session_docs={
         "code1": _pending_doc(**{
             web_auth.FIELD_STATUS: web_auth.STATUS_COMPLETED,
             web_auth.FIELD_UID: "u1",
             web_auth.FIELD_CUSTOM_TOKEN: "tok123",
+            web_auth.FIELD_INSTALL_ID: install_id,
         }),
     })
     monkeypatch.setattr(web_auth, "admin_firestore", lambda: db)
+    upsert = MagicMock(return_value=install_id)
+    monkeypatch.setattr(web_auth, "upsert_linked_device", upsert)
     push = AsyncMock()
     monkeypatch.setattr(device_link_push.orchestrator, "submit", push)
 
@@ -239,9 +248,8 @@ async def test_status_completed_returns_token_once_then_not_found(monkeypatch):
     assert first.status_code == 200
     assert _body(first) == {"status": "completed", "custom_token": "tok123"}
 
-    # Linked device recorded + push fired, mirroring pairing's claim success path.
-    linked_payload = db.linked_ref.set.call_args.args[0]
-    assert linked_payload[web_auth.FIELD_PLATFORM] == "windows"
+    # The canonical writer receives the install id carried through the session.
+    assert upsert.call_args.args[:4] == (db, "u1", install_id, "Windows PC")
 
     # Surface footprint denormalized onto the root user doc (same helper pairing
     # uses): windows array-unioned in via a non-clobbering merge, plus a timestamp.
@@ -253,7 +261,7 @@ async def test_status_completed_returns_token_once_then_not_found(monkeypatch):
 
     push.assert_awaited_once()
     sent = push.call_args.args[0]
-    assert sent.dedup_key == "device_link:dev123"
+    assert sent.dedup_key == f"device_link:{install_id}"
 
     # Replay: the doc was deleted in the same transaction as the first read.
     second = await web_auth.handle_web_auth_status(_Req({"code": "code1"}))

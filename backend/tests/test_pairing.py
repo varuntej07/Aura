@@ -232,16 +232,23 @@ async def test_pair_start_over_cap_returns_429(monkeypatch):
 
 # ── 4. pair/claim: happy path ────────────────────────────────────────────────
 async def test_pair_claim_happy_path(monkeypatch):
+    install_id = "550e8400-e29b-41d4-a716-446655440000"
     db = _FakeDb(code_docs={"ABCD2345": _live_code_doc(uid="u1")})
     auth = MagicMock()
     auth.create_custom_token.return_value = b"tok123"  # bytes: the decode path
     submit = AsyncMock()
     monkeypatch.setattr(pairing, "admin_firestore", lambda: db)
     monkeypatch.setattr(pairing, "admin_auth", lambda: auth)
+    upsert = MagicMock(return_value=install_id)
+    monkeypatch.setattr(pairing, "upsert_linked_device", upsert)
     monkeypatch.setattr(device_link_push.orchestrator, "submit", submit)
 
     resp = await pairing.handle_pair_claim(
-        _Req({"code": "abcd-2345", "device_name": "Varun's PC"})
+        _Req({
+            "code": "abcd-2345",
+            "device_name": "Varun's PC",
+            "install_id": install_id,
+        })
     )
 
     assert resp.status_code == 200
@@ -254,11 +261,8 @@ async def test_pair_claim_happy_path(monkeypatch):
     assert code_doc[pairing.FIELD_CLAIMED_AT] is not None
     assert code_doc[pairing.FIELD_DEVICE_NAME] == "Varun's PC"
 
-    # Linked device recorded.
-    linked_payload = db.linked_ref.set.call_args.args[0]
-    assert linked_payload[pairing.FIELD_DEVICE_NAME] == "Varun's PC"
-    assert linked_payload[pairing.FIELD_PLATFORM] == "windows"
-    assert linked_payload[pairing.FIELD_LINKED_AT] is not None
+    # The canonical writer receives the durable install id, never an auto id.
+    assert upsert.call_args.args[:4] == (db, "u1", install_id, "Varun's PC")
 
     # Surface footprint denormalized onto the root user doc: windows array-unioned
     # in (idempotent) plus a desktop-active timestamp, via a non-clobbering merge.
@@ -279,7 +283,7 @@ async def test_pair_claim_happy_path(monkeypatch):
     sent = submit.call_args.args[0]
     assert sent.source == proposal_mod.SOURCE_DEVICE_LINK
     assert sent.kind == proposal_mod.ProposalKind.COMMITTED
-    assert sent.dedup_key == "device_link:dev123"
+    assert sent.dedup_key == f"device_link:{install_id}"
     assert sent.title == "Desktop connected"
     assert "Varun's PC" in sent.body
 

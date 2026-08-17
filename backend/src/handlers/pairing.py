@@ -35,7 +35,8 @@ reader reference them, per the CLAUDE.md data-layer discipline):
                                      claimed_at?, device_name?   (backend-only;
                                      denied to clients in firestore.rules)
   users/{uid}/pairing_state/state:   active_codes: {CODE: expires_at}
-  users/{uid}/linked_devices/{id}:   device_name, platform, linked_at
+  users/{uid}/linked_devices/{install_id}: schema_version, device_name,
+                                           platform, linked_at, last_seen_at
 """
 
 from __future__ import annotations
@@ -52,6 +53,12 @@ from google.cloud import firestore as gcloud_firestore
 
 from ..lib.logger import logger
 from ..services.firebase import admin_auth, admin_firestore
+from ..services.linked_devices import (
+    FIELD_DEVICE_NAME,
+    LINKED_DEVICES_SUBCOLLECTION,
+    PLATFORM_WINDOWS,
+    upsert_linked_device,
+)
 from ..services.notifications.device_link_push import send_new_device_linked_push
 from ..services.request_auth import resolve_user_id_from_request
 
@@ -73,7 +80,6 @@ PAIRING_CODES_COLLECTION = "pairing_codes"
 USERS_COLLECTION = "users"
 PAIRING_STATE_SUBCOLLECTION = "pairing_state"
 PAIRING_STATE_DOC_ID = "state"
-LINKED_DEVICES_SUBCOLLECTION = "linked_devices"
 
 FIELD_UID = "uid"
 FIELD_CREATED_AT = "created_at"
@@ -81,9 +87,6 @@ FIELD_EXPIRES_AT = "expires_at"
 FIELD_USED = "used"
 FIELD_ATTEMPTS = "attempts"
 FIELD_CLAIMED_AT = "claimed_at"
-FIELD_DEVICE_NAME = "device_name"
-FIELD_PLATFORM = "platform"
-FIELD_LINKED_AT = "linked_at"
 FIELD_ACTIVE_CODES = "active_codes"
 
 # Denormalized surface footprint on the ROOT users/{uid} doc. The root `platform`
@@ -98,7 +101,6 @@ FIELD_LINKED_PLATFORMS = "linked_platforms"  # array; e.g. ["android", "windows"
 # the Flutter client's DateTime.parse() crashes on a native Timestamp.
 FIELD_LAST_DESKTOP_ACTIVE_AT = "last_desktop_active_at"
 
-PLATFORM_WINDOWS = "windows"
 
 # The one uniform claim-failure body: every failure mode (missing, used, expired,
 # locked out, malformed) answers identically so the endpoint leaks nothing.
@@ -306,6 +308,7 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
 
     code = normalise_pairing_code(body.get("code"))
     device_name = sanitize_device_name(body.get("device_name"))
+    install_id = body.get("install_id")
 
     if code is None:
         # Malformed code: same anonymous response as every other failure (no oracle),
@@ -392,22 +395,14 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
 
     # Record the linked device. Failure here must not fail the claim (the token is
     # already minted and valid) — log loudly and continue.
-    def _write_linked_device() -> str:
+    def _write_linked_device() -> str | None:
         db = admin_firestore()
-        device_ref = (
-            db.collection(USERS_COLLECTION)
-            .document(user_id)
-            .collection(LINKED_DEVICES_SUBCOLLECTION)
-            .document()
+        linked_device_doc_id = upsert_linked_device(
+            db, user_id, install_id, device_name, now=now
         )
-        device_ref.set({
-            FIELD_DEVICE_NAME: device_name,
-            FIELD_PLATFORM: PLATFORM_WINDOWS,
-            FIELD_LINKED_AT: now,
-        })
         # Reflect this surface onto the root user doc in the same thread hop.
         stamp_linked_desktop_surface_on_user(db, user_id, PLATFORM_WINDOWS, now)
-        return device_ref.id
+        return linked_device_doc_id
 
     linked_device_doc_id: str | None = None
     try:
@@ -419,14 +414,15 @@ async def handle_pair_claim(request: Request) -> JSONResponse:
         })
 
     # "New device linked" security push. Never fails the claim (log and continue).
-    if linked_device_doc_id:
-        try:
-            await send_new_device_linked_push(user_id, device_name, linked_device_doc_id)
-        except Exception as exc:
-            logger.exception("Pairing: new-device push failed (claim still succeeds)", {
-                "user_id": user_id,
-                "error": str(exc),
-            })
+    try:
+        await send_new_device_linked_push(
+            user_id, device_name, linked_device_doc_id or secrets.token_hex(16)
+        )
+    except Exception as exc:
+        logger.exception("Pairing: new-device push failed (claim still succeeds)", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
 
     logger.info("Pairing: device linked", {
         "user_id": user_id,

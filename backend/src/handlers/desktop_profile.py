@@ -12,11 +12,11 @@ from fastapi.responses import JSONResponse
 from google.cloud import firestore as gcloud_firestore
 
 from ..services.firebase import admin_firestore
+from ..services.linked_devices import upsert_linked_device
 from ..services.request_auth import resolve_user_id_from_request
 
 _FIELDS = ("where_heard", "where_heard_other", "role", "role_other")
 _DESKTOP_EVENTS_COLLECTION = "desktop_events"
-_LINKED_DEVICES_COLLECTION = "linked_devices"
 _MAX_STRING_LENGTH = 500
 _MAX_EVENTS_PER_REQUEST = 25
 _SAFE_EVENT_ID = re.compile(r"[^A-Za-z0-9_.:-]+")
@@ -154,27 +154,25 @@ async def handle_desktop_profile(request: Request) -> JSONResponse:
         batch = db.batch()
         batch.set(root_ref, update, merge=True)
         install_id = install.get("install_id") if isinstance(install, dict) else None
-        if isinstance(install_id, str) and install_id:
-            linked_device_doc = {
-                "device_name": device.get("device_name") or "Windows PC",
-                "platform": _PLATFORM_WINDOWS,
-                "linked_at": install.get("first_started_at") or now_iso,
-                "last_seen_at": now_iso,
-                "app_version": install.get("last_started_version"),
-                "os_platform": device.get("os_platform"),
-                "os_family": device.get("os_family"),
-                "os_type": device.get("os_type"),
-                "os_version": device.get("os_version"),
-                "os_arch": device.get("os_arch"),
-                "locale": device.get("locale"),
-                "region": device.get("region"),
-                "timezone": device.get("timezone"),
-                "sign_in_method": auth.get("sign_in_method"),
-            }
-            batch.set(
-                root_ref.collection(_LINKED_DEVICES_COLLECTION).document(_event_id(install_id, "desktop")),
-                linked_device_doc,
-                merge=True,
+        if install_id:
+            upsert_linked_device(
+                db,
+                uid,
+                install_id,
+                device.get("device_name") or "Windows PC",
+                now=now,
+                metadata={
+                    "app_version": install.get("last_started_version"),
+                    "os_platform": device.get("os_platform"),
+                    "os_family": device.get("os_family"),
+                    "os_type": device.get("os_type"),
+                    "os_version": device.get("os_version"),
+                    "os_arch": device.get("os_arch"),
+                    "locale": device.get("locale"),
+                    "region": device.get("region"),
+                    "timezone": device.get("timezone"),
+                    "sign_in_method": auth.get("sign_in_method"),
+                },
             )
         for event in events:
             event_id = str(event["event_id"])

@@ -89,9 +89,20 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
 - **Write an "already did this" cache only after the side effect succeeds.**
 - **A comment is not a test.** If a rule matters it needs a test that breaks CI, so
   when the freeze below lifts, that is the first debt to pay down.
+- **A word list over user speech is a guess wearing the costume of a check.** Every
+  word it keys on is ordinary English somewhere: "can't you see my other monitor?"
+  authorized a tracking subscription. See the ban below.
 
 ## Repo-wide rules
 
+- **Voice and chat architecture latency gate.** Before changing the architecture
+  or data flow of either voice or chat, get explicit approval from Varun. The
+  approval request must explain whether the change is expected to improve,
+  preserve, or degrade user-perceived latency and why. Any voice change expected
+  to worsen latency is a hard no: do not implement it; report the impact and stop.
+  For chat, do not implement an architecture or data-flow change without a
+  reasonable, defensible justification for the change and its latency tradeoff,
+  followed by Varun's explicit approval.
 - **TEST FREEZE. YOU MUST NOT write any new test file, test function, test case, or
   fixture.** In force until Varun bumps the version or asks for tests in the current
   message. Nothing else lifts it: not a rule that "needs" a test, not a bug you just
@@ -115,6 +126,16 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
   repair. A new case, file, or fixture is not.
 
   When a change would normally warrant a test, say so in one line and move on.
+- **NO KEYWORD MATCHING ON USER INTENT.** Never add a word list, phrase list,
+  substring check, `startswith`, or regex over what the user said to decide what
+  they *meant* (invoke, authorize, gate, reset, confirm, cancel, route, pick an
+  argument). No exceptions for "narrow", "temporary", or "this phrase can't
+  misfire" — every such list here shipped a misfire. Instead: gate on a structural
+  fact (surface, finalization, entitlement, connector, STT confidence), or let the
+  model judge it via the tool description or a classifier field, or derive it from
+  collected state. No tool behind it? Register one. Regex on non-intent (BM25,
+  validators, parsers, redaction, IDs, dates) is fine. See `lessons-learnt.text`
+  2026-08-16.
 - **No feature flags.** Features ship unconditionally on. Never add a
   `*_ENABLED` setting or boolean gate. If a feature isn't ready for everyone,
   don't merge it.

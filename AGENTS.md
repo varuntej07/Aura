@@ -15,9 +15,31 @@ clearly usable result matching their description, integrate it, and leave
 subjective acceptance testing to the user. Do not inspect or evaluate the asset's
 subjective quality. Preserve everything the user said was already correct.
 
+## Never Match Keywords On User Intent
+
+Never add a word list, phrase list, substring check, `startswith`, or regex over what
+the user said to decide what they *meant* (invoke, authorize, gate, reset, confirm,
+cancel, route, pick an argument). No exceptions for "narrow" or "temporary" — every
+such list here shipped a misfire; "can't you see my other monitor?" authorized a
+tracking subscription. Instead: gate on a structural fact (surface, finalization,
+entitlement, connector, STT confidence), or let the model judge it via the tool
+description or a classifier field, or derive it from collected state. No tool behind
+it? Register one. Regex on non-intent (BM25, validators, parsers, redaction, IDs,
+dates) is fine. See `lessons-learnt.text` 2026-08-16.
+
 ## Required Project Instructions
 
 Before changing this repository, read `CLAUDE.md` completely and follow its project-specific architecture, product, safety, testing, and working-style instructions. Re-read relevant sections when a task touches their subsystem. Higher-priority instructions and the user's current explicit request take precedence.
+
+## Voice And Chat Architecture Latency Gate
+
+Before changing the architecture or data flow of either voice or chat, get
+explicit approval from Varun. The approval request must explain whether the
+change is expected to improve, preserve, or degrade user-perceived latency and
+why. Any voice change expected to worsen latency is a hard no: do not implement
+it; report the impact and stop. For chat, do not implement an architecture or
+data-flow change without a reasonable, defensible justification for the change
+and its latency tradeoff, followed by Varun's explicit approval.
 
 ## Project Structure & Module Organization
 
@@ -62,4 +84,3 @@ History favors short imperative or descriptive summaries, sometimes followed by 
 ## Security & Configuration
 
 Never commit `.env` files, service-account JSON, API keys, or generated build artifacts. Use local configuration and managed deployment secrets; redact user data from logs, fixtures, screenshots, and review notes.
-

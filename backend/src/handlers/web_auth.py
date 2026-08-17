@@ -46,7 +46,7 @@ Security model:
     the same class of defense pairing.py itself relies on.
 
 Firestore layout (field names are the module constants below):
-  web_auth_sessions/{CODE}: status, created_at, expires_at, device_name,
+  web_auth_sessions/{CODE}: status, created_at, expires_at, device_name, install_id,
                             uid?, custom_token?, completed_at?,
                             failure_reason?, failed_at?
                             (backend-only; denied to clients in firestore.rules)
@@ -66,6 +66,11 @@ from google.cloud import firestore as gcloud_firestore
 
 from ..lib.logger import logger
 from ..services.firebase import admin_firestore
+from ..services.linked_devices import (
+    FIELD_DEVICE_NAME,
+    PLATFORM_WINDOWS,
+    upsert_linked_device,
+)
 from ..services.notifications.device_link_push import send_new_device_linked_push
 from .pairing import (
     DEFAULT_DEVICE_NAME,
@@ -83,25 +88,21 @@ WEB_AUTH_START_VELOCITY_THRESHOLD = 100  # log-only, observability, not blocking
 # ── Collection / field names (single source of truth for writers AND readers) ─
 WEB_AUTH_SESSIONS_COLLECTION = "web_auth_sessions"
 USERS_COLLECTION = "users"
-LINKED_DEVICES_SUBCOLLECTION = "linked_devices"
 
 FIELD_STATUS = "status"
 FIELD_CREATED_AT = "created_at"
 FIELD_EXPIRES_AT = "expires_at"
-FIELD_DEVICE_NAME = "device_name"
+FIELD_INSTALL_ID = "install_id"
 FIELD_UID = "uid"
 FIELD_CUSTOM_TOKEN = "custom_token"
 FIELD_COMPLETED_AT = "completed_at"
 FIELD_FAILURE_REASON = "failure_reason"
 FIELD_FAILED_AT = "failed_at"
-FIELD_PLATFORM = "platform"
-FIELD_LINKED_AT = "linked_at"
 
 STATUS_PENDING = "pending"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 
-PLATFORM_WINDOWS = "windows"
 
 # In-memory (per-instance) issuance-volume tracker. Monotonic seconds of each
 # /start call; pruned to the window on every record. Log-only anomaly signal,
@@ -156,6 +157,7 @@ async def handle_web_auth_start(request: Request) -> JSONResponse:
         body = {}
 
     device_name = sanitize_device_name(body.get("device_name"))
+    install_id = body.get(FIELD_INSTALL_ID)
     code = generate_web_auth_code()
     now = datetime.now(UTC)
     expires_at = now + timedelta(seconds=WEB_AUTH_SESSION_TTL_SECONDS)
@@ -170,6 +172,7 @@ async def handle_web_auth_start(request: Request) -> JSONResponse:
             FIELD_CREATED_AT: now,
             FIELD_EXPIRES_AT: expires_at,
             FIELD_DEVICE_NAME: device_name,
+            FIELD_INSTALL_ID: install_id,
         })
 
     try:
@@ -240,6 +243,7 @@ async def handle_web_auth_status(request: Request) -> JSONResponse:
                     "uid": uid,
                     "custom_token": custom_token,
                     "device_name": data.get(FIELD_DEVICE_NAME) or DEFAULT_DEVICE_NAME,
+                    "install_id": data.get(FIELD_INSTALL_ID),
                 }
 
             if status == STATUS_FAILED:
@@ -262,27 +266,20 @@ async def handle_web_auth_status(request: Request) -> JSONResponse:
     if result["status"] == "completed":
         user_id = result["uid"]
         device_name = result["device_name"]
+        install_id = result["install_id"]
         logger.info("WebAuth: session completed, signing in", {"user_id": user_id})
 
         # Record the linked device + fire the same "new device" push pairing's
         # claim does on success. Never fails the response (log and continue) -
         # the token is already valid regardless of whether this succeeds.
-        def _write_linked_device() -> str:
+        def _write_linked_device() -> str | None:
             db = admin_firestore()
-            device_ref = (
-                db.collection(USERS_COLLECTION)
-                .document(user_id)
-                .collection(LINKED_DEVICES_SUBCOLLECTION)
-                .document()
+            linked_device_doc_id = upsert_linked_device(
+                db, user_id, install_id, device_name, now=now
             )
-            device_ref.set({
-                FIELD_DEVICE_NAME: device_name,
-                FIELD_PLATFORM: PLATFORM_WINDOWS,
-                FIELD_LINKED_AT: now,
-            })
             # Reflect this surface onto the root user doc in the same thread hop.
             stamp_linked_desktop_surface_on_user(db, user_id, PLATFORM_WINDOWS, now)
-            return device_ref.id
+            return linked_device_doc_id
 
         linked_device_doc_id: str | None = None
         try:
@@ -293,14 +290,15 @@ async def handle_web_auth_status(request: Request) -> JSONResponse:
                 "error": str(exc),
             })
 
-        if linked_device_doc_id:
-            try:
-                await send_new_device_linked_push(user_id, device_name, linked_device_doc_id)
-            except Exception as exc:
-                logger.exception("WebAuth: new-device push failed (sign-in still succeeds)", {
-                    "user_id": user_id,
-                    "error": str(exc),
-                })
+        try:
+            await send_new_device_linked_push(
+                user_id, device_name, linked_device_doc_id or secrets.token_hex(16)
+            )
+        except Exception as exc:
+            logger.exception("WebAuth: new-device push failed (sign-in still succeeds)", {
+                "user_id": user_id,
+                "error": str(exc),
+            })
 
         return JSONResponse(
             {"status": "completed", "custom_token": result["custom_token"]}, status_code=200

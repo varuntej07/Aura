@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -34,6 +35,7 @@ def test_desktop_routes_require_authentication():
 
 
 def test_profile_writes_only_authenticated_users_record(monkeypatch):
+    install_id = "550e8400-e29b-41d4-a716-446655440000"
     _as_owner(monkeypatch, "user-a")
     writes: list[tuple[str, dict, bool]] = []
 
@@ -66,6 +68,8 @@ def test_profile_writes_only_authenticated_users_record(monkeypatch):
             return _Batch()
 
     monkeypatch.setattr(desktop_profile, "admin_firestore", lambda: _Db())
+    upsert = MagicMock(return_value=install_id)
+    monkeypatch.setattr(desktop_profile, "upsert_linked_device", upsert)
     response = _client().post(
         "/devices/profile",
         json={
@@ -75,7 +79,7 @@ def test_profile_writes_only_authenticated_users_record(monkeypatch):
             "role_other": None,
             "desktop": {
                 "install": {
-                    "install_id": "install-1",
+                    "install_id": install_id,
                     "first_started_at": "2026-08-07T02:00:00Z",
                     "last_started_version": "0.8.2",
                 },
@@ -98,37 +102,25 @@ def test_profile_writes_only_authenticated_users_record(monkeypatch):
     assert writes[0][0] == "users/user-a"
     assert writes[0][1]["where_heard"] == "friend"
     assert writes[0][1]["role"] == "developer"
-    assert writes[0][1]["desktop_install"]["install_id"] == "install-1"
+    assert writes[0][1]["desktop_install"]["install_id"] == install_id
     assert writes[0][1]["desktop_device"]["region"] == "US"
     assert writes[0][1]["account_created_at"] == "2026-08-07T01:00:00Z"
     assert writes[0][1]["last_desktop_active_at"]
     assert writes[0][2] is True
-    assert writes[1] == (
-        "users/user-a/linked_devices/install-1",
-        {
-            "device_name": "Windows PC",
-            "platform": "windows",
-            "linked_at": "2026-08-07T02:00:00Z",
-            "last_seen_at": writes[1][1]["last_seen_at"],
-            "app_version": "0.8.2",
-            "os_platform": None,
-            "os_family": None,
-            "os_type": None,
-            "os_version": None,
-            "os_arch": None,
-            "locale": None,
-            "region": "US",
-            "timezone": "America/Los_Angeles",
-            "sign_in_method": None,
-        },
-        True,
+    assert upsert.call_args.args[:4] == (
+        upsert.call_args.args[0],
+        "user-a",
+        install_id,
+        "Windows PC",
     )
-    assert writes[2] == (
+    assert isinstance(upsert.call_args.kwargs["now"], datetime)
+    assert upsert.call_args.kwargs["metadata"]["region"] == "US"
+    assert writes[1] == (
         "users/user-a/desktop_events/profile_answers_saved",
         {
             "event": "desktop_profile_answers_saved",
             "occurred_at": "2026-08-07T02:01:00Z",
-            "received_at": writes[2][1]["received_at"],
+            "received_at": writes[1][1]["received_at"],
             "source": "aura_desktop",
             "properties": {"role": "developer"},
         },

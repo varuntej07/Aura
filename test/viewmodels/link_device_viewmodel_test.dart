@@ -41,6 +41,34 @@ void main() {
     );
   });
 
+  group('LinkedDevice.fromFirestore', () {
+    test('accepts both canonical timestamps and legacy ISO strings', () {
+      final instant = DateTime.utc(2026, 8, 17, 12, 30);
+
+      final canonical = LinkedDevice.fromFirestore(
+        'canonical',
+        {'device_name': 'Office PC', 'linked_at': Timestamp.fromDate(instant)},
+      );
+      final legacy = LinkedDevice.fromFirestore(
+        'legacy',
+        {'device_name': 'Office PC', 'linked_at': instant.toIso8601String()},
+      );
+
+      expect(canonical.linkedAt, instant);
+      expect(legacy.linkedAt, instant);
+    });
+
+    test('keeps malformed legacy records loadable with safe fallbacks', () {
+      final device = LinkedDevice.fromFirestore(
+        'malformed',
+        {'device_name': 42, 'linked_at': {'seconds': 1}},
+      );
+
+      expect(device.deviceName, 'Windows PC');
+      expect(device.linkedAt, isNull);
+    });
+  });
+
   group('generateCode', () {
     test('retries once on a timeout and succeeds on the next attempt', () async {
       var attempt = 0;

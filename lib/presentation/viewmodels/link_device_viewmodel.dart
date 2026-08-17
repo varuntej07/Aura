@@ -21,6 +21,24 @@ class LinkedDevice {
     required this.deviceName,
     this.linkedAt,
   });
+
+  factory LinkedDevice.fromFirestore(
+    String id,
+    Map<String, dynamic> data,
+  ) {
+    final rawName = data['device_name'];
+    final deviceName = rawName is String && rawName.trim().isNotEmpty
+        ? rawName
+        : 'Windows PC';
+    final rawLinkedAt = data['linked_at'];
+    final linkedAt = switch (rawLinkedAt) {
+      Timestamp value => value.toDate(),
+      DateTime value => value,
+      String value => DateTime.tryParse(value),
+      _ => null,
+    };
+    return LinkedDevice(id: id, deviceName: deviceName, linkedAt: linkedAt);
+  }
 }
 
 /// Phone-side state for pairing a desktop: mints the short-lived code the PC
@@ -119,11 +137,7 @@ class LinkDeviceViewModel extends SafeChangeNotifier {
           .get();
       _linkedDevices = [
         for (final doc in snapshot.docs)
-          LinkedDevice(
-            id: doc.id,
-            deviceName: (doc.data()['device_name'] as String?) ?? 'Windows PC',
-            linkedAt: (doc.data()['linked_at'] as Timestamp?)?.toDate(),
-          ),
+          LinkedDevice.fromFirestore(doc.id, doc.data()),
       ];
       safeNotifyListeners();
     } catch (e) {

@@ -30,6 +30,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
 from .handlers.account import handle_delete_account
+from .handlers.account_onboarding import (
+    handle_complete_account_onboarding,
+    handle_get_account_onboarding,
+)
 from .handlers.aura import (
     handle_consolidate_session,
     handle_delete_memory as handle_delete_aura_memory,
@@ -441,6 +445,16 @@ def _handler_response(result: dict) -> JSONResponse:
 @app.delete("/account")
 async def account_delete_endpoint(request: Request) -> JSONResponse:
     return await handle_delete_account(request)
+
+
+@app.get("/account/onboarding")
+async def account_onboarding_get_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_account_onboarding(request)
+
+
+@app.post("/account/onboarding")
+async def account_onboarding_complete_endpoint(request: Request) -> JSONResponse:
+    return await handle_complete_account_onboarding(request)
 
 
 @app.post("/devices/register")
