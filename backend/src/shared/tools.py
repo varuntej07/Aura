@@ -56,7 +56,13 @@ def reminder_ui_payload(
     """
     if not isinstance(receipt, dict):
         return None
-    status = str(receipt.get("receipt_status") or REMINDER_RECEIPT_CREATED)
+    raw_status = receipt.get("receipt_status")
+    if raw_status is None:
+        # Canonical transcripts written before receipt outcomes existed are
+        # already trusted creation artifacts. Preserve their exact shape so old
+        # sessions keep hydrating without a migration.
+        return dict(receipt)
+    status = str(raw_status)
     if status == REMINDER_RECEIPT_EXISTING:
         return None
     payload = dict(receipt)
@@ -137,7 +143,8 @@ SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
         "Create one new reminder. The current user turn must itself ask to create "
         "or change a reminder, or answer, refine, or correct your immediately "
         "preceding reminder question. Never resurrect a reminder request from older "
-        "conversation history after the user has moved to another task. Do NOT use to read existing "
+        "conversation history after the user has moved to another task. Do NOT use "
+        "to read existing "
         "reminders (use list_reminders) or to cancel one (use cancel_reminder). "
         "When the user hands you the decision ('you decide', 'whatever works'), fill "
         "every fillable detail from the conversation and act; ask only when a detail "
@@ -206,7 +213,7 @@ SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
                 ),
             },
         },
-        "required": ["message", "when", "tier"],
+        "required": ["message", "when", "tier", "tone"],
         "additionalProperties": False,
     },
 }
@@ -773,8 +780,33 @@ def _close_object_schemas(schema: dict[str, Any]) -> None:
             _close_object_schemas(items)
 
 
+def _validate_strict_object_schema(schema: dict[str, Any], *, path: str) -> None:
+    """Reject strict tool schemas that OpenAI would reject at request time."""
+    if schema.get("type") == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required")
+        if not isinstance(required, list) or set(required) != set(properties):
+            missing = sorted(set(properties) - set(required or []))
+            extra = sorted(set(required or []) - set(properties))
+            raise RuntimeError(
+                f"Invalid strict tool schema at {path}: "
+                f"missing required={missing}, unknown required={extra}"
+            )
+        for field, child in properties.items():
+            if isinstance(child, dict):
+                _validate_strict_object_schema(child, path=f"{path}.{field}")
+    if schema.get("type") == "array":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            _validate_strict_object_schema(items, path=f"{path}[]")
+
+
 for _tool_definition in TOOL_DEFINITIONS:
     _close_object_schemas(_tool_definition["inputSchema"])
+    if _tool_definition.get("strict") is True:
+        _validate_strict_object_schema(
+            _tool_definition["inputSchema"], path=_tool_definition["name"]
+        )
 
 
 _TOOL_INPUT_SCHEMAS = {

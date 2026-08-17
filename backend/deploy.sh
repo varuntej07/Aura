@@ -58,9 +58,9 @@ IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 LIVEKIT_URL="wss://aura-i06eolmd.livekit.cloud"
 MEETING_STORAGE_SERVICE_ACCOUNT="firebase-adminsdk-fbsvc@juno-2ea45.iam.gserviceaccount.com"
 DICTATION_AUDIO_BUCKET="juno-2ea45-dictation-audio"
-# Cost kill switch. Keep at zero until the approved 30-query p95, provider alerts,
-# and Phase 4 durability fault injection are all complete.
-PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD="0"
+# Bounded pilot ceiling. A quick run has a separate $1.50 hard ceiling, so this
+# permits at most three worst-case runs per UTC day and still fails closed.
+PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD="5000000"
 
 # Dodo Payments production catalog. The API key and webhook signing secret are
 # injected from Secret Manager in the Cloud Run deploy block below.
@@ -80,7 +80,22 @@ gcloud services enable \
   containerregistry.googleapis.com \
   secretmanager.googleapis.com \
   cloudscheduler.googleapis.com \
+  cloudtasks.googleapis.com \
   --project="${PROJECT_ID}"
+
+# GOOGLE_APPLICATION_CREDENTIALS points every Google client at the mounted Firebase
+# service account, so that identity, not Cloud Run's runtime identity, creates tasks.
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
+  --role="roles/cloudtasks.enqueuer" \
+  --condition=None \
+  --quiet >/dev/null
+gcloud iam service-accounts add-iam-policy-binding \
+  "juno-scheduler@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --project="${PROJECT_ID}" \
+  --member="serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
+  --role="roles/iam.serviceAccountUser" \
+  --quiet >/dev/null
 
 # Build & push image
 echo "▶ Building Docker image..."

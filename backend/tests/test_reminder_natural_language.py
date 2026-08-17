@@ -102,11 +102,10 @@ def test_set_reminder_schema_is_exact_and_strict_for_openai():
         tool for tool in claude_tool_definitions() if tool["name"] == "set_reminder"
     )
     schema = anthropic_tool["input_schema"]
-    # Exactly four fields; the core three are required. `tier` is required rather than optional
-    # on purpose: it makes the model state whether this rings or stays silent on
-    # every single call, while `tone` safely defaults to the user's own choice.
+    # OpenAI strict mode requires every property to appear in `required`.
+    # `tone=""` remains the explicit value for using the user's own choice.
     assert set(schema["properties"]) == {"message", "when", "tier", "tone"}
-    assert schema["required"] == ["message", "when", "tier"]
+    assert schema["required"] == ["message", "when", "tier", "tone"]
     assert schema["additionalProperties"] is False
     assert schema["properties"]["message"] == {
         "type": "string",

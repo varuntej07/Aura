@@ -178,17 +178,20 @@ def register_token(
 def any_alarm_capable_device(user_id: str) -> bool | None:
     """Whether ANY of the user's devices can actually ring an alarm.
 
-    Returns None when no device has reported either way, which is the case for
-    every user on an app build that predates the alarm tier. The caller must
-    treat None as "unknown", never as "no": telling someone their alarm will not
-    work when it will is its own failure.
+    Returns False when the account has no registered mobile device, None when
+    registered devices exist but none has reported either way (older app
+    builds), and otherwise ORs the reported capability values.
 
-    ORs across devices because the question being answered is "can Buddy promise
-    to wake this person", and one phone with the permission is enough.
+    The distinction matters for desktop-only users: no phone means no alarm can
+    ring, while an older phone is merely unknown. One capable phone is enough
+    for Buddy to promise a wake-up.
     """
+    devices = get_user_tokens(user_id)
+    if not devices:
+        return False
     reported = [
         doc.get(FIELD_ALARM_CAPABLE)
-        for doc in get_user_tokens(user_id)
+        for doc in devices
         if isinstance(doc.get(FIELD_ALARM_CAPABLE), bool)
     ]
     if not reported:

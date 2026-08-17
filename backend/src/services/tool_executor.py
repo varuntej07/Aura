@@ -732,8 +732,9 @@ class ToolExecutor:
     async def _any_alarm_capable_device(self) -> bool | None:
         """Whether any of this user's devices will actually ring an alarm.
 
-        None means no device has reported either way, which is every user on an
-        app build that predates the alarm tier.
+        False includes desktop-only accounts with no registered mobile device.
+        None means mobile devices exist but none has reported either way, which
+        is every user on an app build that predates the alarm tier.
         """
         from .fcm_token_registry import any_alarm_capable_device
 

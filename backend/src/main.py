@@ -173,6 +173,10 @@ from .handlers.signal_content_ingest import handle_signal_content_ingest
 from .handlers.signal_events import handle_signal_events
 from .handlers.signal_tick import handle_signal_tick
 from .handlers.threads import handle_thread_messages, handle_thread_reply
+from .handlers.voice_preferences import (
+    handle_get_voice_preferences,
+    handle_update_voice_preferences,
+)
 from .handlers.web_auth import handle_web_auth_start, handle_web_auth_status
 from .lib.logger import logger
 from .services.meetings.observability import configure_sentry
@@ -391,6 +395,16 @@ async def realtime_session(request: Request) -> JSONResponse:
     OPENAI_API_KEY stays server-side; see handlers/realtime.py.
     """
     return await create_realtime_session(request)
+
+
+@app.get("/voice/preferences")
+async def voice_preferences_get_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_voice_preferences(request)
+
+
+@app.put("/voice/preferences")
+async def voice_preferences_update_endpoint(request: Request) -> JSONResponse:
+    return await handle_update_voice_preferences(request)
 
 
 # REST endpoints
