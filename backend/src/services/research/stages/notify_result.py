@@ -130,17 +130,12 @@ async def run(ctx: StageContext) -> StageResult:
         raise RuntimeError(
             f"notify_result: delivery refused ({decision.disposition}/{decision.reason})"
         )
-    elif not getattr(decision, "delivered", False):
-        # SEND with delivered=False means the orchestrator accepted the proposal and the
-        # push itself did not land (no live token, transport error). Returning DONE here
-        # retired the stage and lost the toast permanently, on a run that is already
-        # terminal and will never produce another notification.
-        #
-        # The orchestrator RELEASES the dedup key on exactly this condition, which only
-        # makes sense if a retry is coming. This is that retry. It is bounded by the
-        # stage attempt cap, so an undeliverable user costs a few attempts, not a loop.
+    elif not getattr(decision, "accepted", False):
+        # Transport acceptance is the orchestrator's terminal contract. Device receipt
+        # is separate acknowledgement state, and an accepted send keeps its dedup claim;
+        # retrying it can only collide with that claim and create a false stage error.
         raise RuntimeError(
-            f"notify_result: accepted but not delivered ({decision.reason})"
+            f"notify_result: transport did not accept send ({decision.reason})"
         )
 
     return StageResult(

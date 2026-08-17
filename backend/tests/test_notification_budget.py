@@ -1,9 +1,8 @@
 """Unified notification budget — the cross-decider daily ceiling + spacing.
 
 The cap / spacing / daily-reset policy is a pure function so it is pinned here
-without mocking Firestore transactions. The flag-off no-op and fail-open
-behaviours are also covered, because those are the safety guarantees that let
-this land on every live notification path without changing current behaviour.
+without mocking Firestore transactions. Proactive budget failures are fail-closed
+because an optional interruption cannot bypass an unavailable safety limit.
 """
 
 from __future__ import annotations
@@ -187,14 +186,15 @@ def test_evaluate_respects_caller_supplied_adaptive_limits():
 
 # ── Fail-open safety ─────────────────────────────────────────────────────────
 
-async def test_claim_fails_open_on_error():
-    # A Firestore explosion must never silence notifications. Also patch admin_auth
-    # (the account-age lookup's dependency) so the test never attempts a real
+async def test_claim_fails_closed_on_error():
+    # A Firestore explosion must never grant an unbounded proactive send. Patch
+    # admin_auth too so the test never attempts a real
     # Firebase Admin SDK call — it already fails open to None on its own.
     with patch.object(nb, "admin_firestore", side_effect=RuntimeError("firestore down")):
         with patch.object(nb, "admin_auth", side_effect=RuntimeError("auth down")):
             result = await nb.try_claim_proactive_slot("u1", source="signal_engine", user_local_date=TODAY)
-    assert result.allowed
+    assert not result.allowed
+    assert result.reason == "budget_unavailable"
     assert isinstance(result, BudgetDecision)
 
 

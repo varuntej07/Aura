@@ -134,11 +134,11 @@ def resolve_delivery_status(
 
 @dataclass
 class NotificationDecision:
-    """Optional learning-substrate metadata for LLM-framed proactive sends.
+    """Learning and policy metadata persisted with an orchestrated send attempt.
 
-    Reminders / calendar leave this null — they have no recommender or framer to
-    improve. The signal engine fills it so ``scoring.py`` weights and the framer
-    prompt can later be tuned against real tap outcomes instead of guesses.
+    The orchestrator fills policy fields for every attempted send. The signal
+    engine additionally fills ranking and framing fields so those can be tuned
+    against real tap outcomes instead of guesses.
 
     ``components`` is stored as-is (the raw ``scoring.py`` term map: cosine, slot,
     freshness, fatigue, diversity, region, salience) so a new scoring term flows
@@ -156,6 +156,11 @@ class NotificationDecision:
     sends_today_before: int | None = None
     local_hour: int | None = None
     day_of_week: int | None = None
+    policy_version: str = ""
+    declared_kind: str = ""
+    effective_kind: str = ""
+    lane_reason: str = ""
+    policy_checks: dict[str, str] = field(default_factory=dict)
 
 
 def _decision_to_doc(decision: NotificationDecision) -> dict[str, Any]:
@@ -171,6 +176,11 @@ def _decision_to_doc(decision: NotificationDecision) -> dict[str, Any]:
         "sends_today_before": decision.sends_today_before,
         "local_hour": decision.local_hour,
         "day_of_week": decision.day_of_week,
+        "policy_version": decision.policy_version,
+        "declared_kind": decision.declared_kind,
+        "effective_kind": decision.effective_kind,
+        "lane_reason": decision.lane_reason,
+        "policy_checks": decision.policy_checks,
     }
 
 

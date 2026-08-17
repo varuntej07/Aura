@@ -1,46 +1,15 @@
 from src.agent.voice.spoken_action_guard import (
-    artifact_kind_for,
+    is_question_to_user,
     looks_copyable,
-    wants_copyable_artifact,
 )
 
-
-def test_copyable_requests_are_detected():
-    for text in (
-        "Draft me a prompt for Claude Code to review my backend",
-        "draft me a prompt",
-        "give me a command to restart the service",
-        "write the code for a debounce function",
-        "make me a prompt for Claude Code",
-    ):
-        assert wants_copyable_artifact(text), text
-
-
-def test_frustration_corrections_are_detected():
-    for text in (
-        "why are you spitting it out",
-        "I asked you to give me a prompt",
-        "don't read it out loud, put it on screen",
-        "stop reading it out",
-    ):
-        assert wants_copyable_artifact(text), text
-
-
-def test_ordinary_turns_do_not_trigger():
-    # Conversation must never be backstopped. Outbound drafting used to be
-    # excluded here too, on the grounds that it belongs to
-    # draft_outbound_message. A live session showed the failure path that
-    # assumption ignores: when that tool does not fire, the draft is read aloud,
-    # which is the exact bug this module exists to stop. The backstop only runs
-    # when NO tool fired, so a working outbound draft is still untouched; all
-    # that changed is that a narrated one now lands on a card instead of in the
-    # user's ear, at the cost of being ephemeral rather than refinable.
-    for text in (
-        "what is the weather today",
-        "can you tell me a joke",
-        "",
-    ):
-        assert not wants_copyable_artifact(text), text
+# The request-intent cases that used to live here (test_copyable_requests_are_detected,
+# test_frustration_corrections_are_detected, test_ordinary_turns_do_not_trigger,
+# test_artifact_kind_prefers_the_explicit_noun) tested wants_copyable_artifact and
+# artifact_kind_for, which are gone: nothing in the voice path arms a card or names one
+# from the user's wording any more. Opening a card is the model's call via the
+# present_visible_artifact tool, and an open ArtifactSession arms every turn after that.
+# What remains testable here is output shape, which reads Buddy's own reply.
 
 
 def test_looks_copyable_gates_out_short_confirmations():
@@ -51,8 +20,9 @@ def test_looks_copyable_gates_out_short_confirmations():
     assert looks_copyable("```\ncode\n```")
 
 
-def test_artifact_kind_prefers_the_explicit_noun():
-    # "prompt" wins even though "Code" is in the product name.
-    assert artifact_kind_for("draft me a prompt for Claude Code") == ("prompt", "Prompt")
-    assert artifact_kind_for("give me a powershell command") == ("command", "Command")
-    assert artifact_kind_for("write me a regex") == ("code", "Snippet")
+def test_is_question_to_user_separates_asking_from_delivering():
+    assert is_question_to_user("what tone do you want for this?")
+    assert not is_question_to_user("Here is the draft.")
+    # A long body that merely finishes on a question is still a body.
+    assert not is_question_to_user("x" * 300 + "?")
+    assert not is_question_to_user("para one\n\npara two, are you open to it?")

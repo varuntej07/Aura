@@ -60,6 +60,11 @@ class GuideIntentModelOutput(BaseModel):
     evidence_quote: str = Field(max_length=500)
     semantic_confidence: float = Field(ge=0.0, le=1.0)
     depends_on_previous_assistant_offer: bool
+    # Judged from previous_assistant_text in the payload. This used to be a phrase
+    # list scanned over Buddy's own reply; the list could not tell "I can guide you
+    # through this, want me to?" from "I can't guide you here", and it is the same
+    # model that has to understand the offer to route the reply to it.
+    previous_assistant_offered_guide: bool
     reason_code: GuideIntentReason
 
 
@@ -114,7 +119,9 @@ class GuideAdmissionCheck:
 _GUIDE_INTENT_SYSTEM = """You are a strict admission classifier for Aura desktop Guide Mode.
 Return exactly one structured route. You propose a route; you never activate anything.
 
-START_GUIDE only when the user clearly authorizes ongoing visual, step-by-step, or changing-screen assistance. Natural requests such as "walk me through this", "show me what to click", and "stay with me while I do this" are explicit authorization and do not need confirmation. An affirmative reply may be START_GUIDE only when previous_assistant_offered_guide is true and the immediately preceding assistant turn made that offer.
+START_GUIDE only when the user clearly authorizes ongoing visual, step-by-step, or changing-screen assistance. Natural requests such as "walk me through this", "show me what to click", and "stay with me while I do this" are explicit authorization and do not need confirmation. A reply that only makes sense as agreement to something already offered ("yes", "sure", "go ahead", "sounds good") may be START_GUIDE only when previous_assistant_text is an actual offer of ongoing guidance; set depends_on_previous_assistant_offer true for those turns.
+
+previous_assistant_offered_guide reports whether previous_assistant_text offered to guide, walk through, watch the screen, or stay with the user, phrased as an offer awaiting an answer. A refusal ("I can't guide you there"), a completed action, or a mere mention of Guide Mode is not an offer. Set it false when previous_assistant_text is empty.
 
 SCREEN_ANSWER_ONCE is a question or request about the currently visible screen that needs at most one fresh frame and does not ask for ongoing guidance. "Can you see this?", "what does this error say?", "is my API key visible?", "where is the Webhooks button?", and a bare "look at my screen" belong here or in CLARIFY, never START_GUIDE.
 
@@ -123,80 +130,6 @@ CONTINUE_GUIDE only when guide_active is true and the user continues the current
 Words such as screen, see, look, help, issue, error, here, this, or guide do not by themselves authorize Guide. Explaining an issue alone is NORMAL or SCREEN_ANSWER_ONCE. "Why did you turn Guide Mode on?", "you misunderstood me", and insults must never be START_GUIDE. A high-confidence nonsensical transcript is CLARIFY or NORMAL, not START_GUIDE.
 
 evidence_quote must be copied verbatim as one exact substring of finalized_transcript. For START_GUIDE it must contain the explicit ongoing-guidance request or the affirmative reply. task_summary must be short and must not invent a task. semantic_confidence measures confidence in the route, not STT confidence."""
-
-_CONTEXT_ONLY_AFFIRMATIVES = frozenset(
-    {
-        "yes",
-        "yes please",
-        "yeah",
-        "yeah please",
-        "yep",
-        "yep please",
-        "sure",
-        "sure please",
-        "okay",
-        "ok",
-        "please",
-        "please do",
-        "do it",
-        "go ahead",
-        "sounds good",
-    }
-)
-
-
-def preceding_assistant_offered_guide(text: str) -> bool:
-    """Recognize a narrow offer in Buddy-controlled output, never user intent."""
-    normalized = " ".join(text.casefold().split())
-    if not normalized or any(
-        denial in normalized
-        for denial in ("can't guide", "cannot guide", "won't guide", "not guide")
-    ):
-        return False
-    guide_offer = any(
-        phrase in normalized
-        for phrase in (
-            "guide you",
-            "walk you through",
-            "show you what to click",
-            "stay with you while",
-            "watch your screen",
-            "keep watching",
-        )
-    ) or (
-        "guide mode" in normalized
-        and any(
-            phrase in normalized
-            for phrase in (
-                "start guide mode",
-                "turn on guide mode",
-                "switch to guide mode",
-                "activate guide mode",
-                "use guide mode",
-            )
-        )
-    )
-    offer_language = any(
-        phrase in normalized
-        for phrase in (
-            "would you like",
-            "do you want me to",
-            "want me to",
-            "shall i",
-            "i can",
-            "let me",
-        )
-    )
-    return guide_offer and offer_language
-
-
-def context_only_affirmative(text: str) -> bool:
-    normalized = "".join(
-        character.casefold() if character.isalnum() or character.isspace() else " "
-        for character in text
-    )
-    return " ".join(normalized.split()) in _CONTEXT_ONLY_AFFIRMATIVES
-
 
 def guide_start_admission(
     decision: GuideIntentDecision | None,
@@ -259,12 +192,11 @@ class GuideIntentClassifier:
         previous_assistant_text: str,
         recent_dialogue: Sequence[dict[str, str]],
     ) -> GuideIntentDecision:
-        previous_offer = preceding_assistant_offered_guide(previous_assistant_text)
         payload = {
             "finalized_transcript": transcript,
             "stt_confidence": stt_confidence,
             "guide_active": guide_active,
-            "previous_assistant_offered_guide": previous_offer,
+            "previous_assistant_text": previous_assistant_text,
             "recent_dialogue": list(recent_dialogue)[-6:],
         }
         started = time.monotonic()
@@ -311,14 +243,12 @@ class GuideIntentClassifier:
         valid = True
         evidence = proposal.evidence_quote
         depends_on_previous_offer = proposal.depends_on_previous_assistant_offer
+        previous_offer = proposal.previous_assistant_offered_guide
         if evidence not in transcript or (route is GuideIntentRoute.START_GUIDE and not evidence):
             route = GuideIntentRoute.NORMAL
             reason = GuideIntentReason.INVALID_EVIDENCE
             valid = False
         elif route is GuideIntentRoute.START_GUIDE:
-            depends_on_previous_offer = (
-                depends_on_previous_offer or context_only_affirmative(transcript)
-            )
             if guide_active:
                 route = GuideIntentRoute.CONTINUE_GUIDE
                 reason = GuideIntentReason.GUIDE_ALREADY_ACTIVE
@@ -391,6 +321,7 @@ class GuideIntentClassifier:
             evidence_quote="",
             semantic_confidence=0.0,
             depends_on_previous_assistant_offer=False,
+            previous_assistant_offered_guide=False,
             reason_code=reason,
         )
         decision = self._decision(

@@ -13,8 +13,7 @@ present the model already has it in context and should answer naturally, and a
 canned "yes" would make the good path sound robotic to fix a bug that only
 happens on the bad one.
 
-Pure functions only, matching screen_capture_command.py; the wiring lives in
-buddy_agent.llm_node.
+Pure functions only; the wiring lives in buddy_agent.llm_node.
 """
 
 from __future__ import annotations

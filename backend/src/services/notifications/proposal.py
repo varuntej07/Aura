@@ -71,16 +71,36 @@ class DeliveryChannel(StrEnum):
 class ProposalKind(StrEnum):
     """How a proposal is allowed to travel through the orchestrator.
 
-    COMMITTED = the user asked for it (reminder, tracking subscription, calendar,
-    the guaranteed daily briefing). It is never held or arbitrated; it sends inline
-    the instant it is submitted, subject only to freshness + dedup.
+    ``kind`` is a producer request, not delivery authority. The orchestrator resolves
+    it against the central interruption policy below. COMMITTED is reserved for
+    time-exact, transactional, or explicitly-awaited outcomes whose value does not
+    depend on opening a speculative continuation.
 
-    PROACTIVE = engine-initiated (thread, icebreaker, news). It is enqueued and the
-    drain arbitrates it against everything else pending for that user.
+    PROACTIVE content is enqueued and must pass quiet hours, presence, arbitration,
+    tap value, and the adaptive budget before it may interrupt the user.
     """
 
     COMMITTED = "committed"
     PROACTIVE = "proactive"
+
+
+# The policy lives at the shared funnel boundary so a producer, model, or future
+# feature cannot grant itself the express lane. Unknown sources fail safely into the
+# proactive lane. Calendar is conditional because the same producer emits both real
+# meeting reminders and generated daily nudges.
+NOTIFICATION_POLICY_VERSION = "2026-08-16.1"
+_COMMITTED_SOURCES = frozenset({
+    SOURCE_REMINDER,
+    SOURCE_CHAT_REPLY,
+    SOURCE_DEVICE_LINK,
+    SOURCE_TRIAL,
+    SOURCE_BILLING,
+    SOURCE_MEETING,
+    SOURCE_RESEARCH,
+})
+_COMMITTED_NOTIFICATION_TYPES = {
+    SOURCE_CALENDAR: frozenset({"meeting_reminder"}),
+}
 
 
 # ── Priority ladder (higher wins arbitration) ───────────────────────────────
@@ -269,6 +289,29 @@ class NotificationProposal:
         if self.freshness_max_age is not None:
             return self.freshness_max_age
         return FRESHNESS_MAX_AGE.get(self.source)
+
+
+def resolve_delivery_kind(
+    proposal: NotificationProposal,
+) -> tuple[ProposalKind, str]:
+    """Return the authoritative lane and its auditable reason.
+
+    Producers may always choose the safer proactive lane. A COMMITTED request is
+    honored only for the narrow allowlist above; recurring/generated sources such as
+    trackers, briefings, nudges, welcome, threads, and future unknown producers must
+    earn each interruption through the proactive funnel.
+    """
+    if proposal.kind != ProposalKind.COMMITTED:
+        return ProposalKind.PROACTIVE, "producer_declared_proactive"
+    if proposal.source in _COMMITTED_SOURCES:
+        return ProposalKind.COMMITTED, f"committed_source:{proposal.source}"
+    allowed_types = _COMMITTED_NOTIFICATION_TYPES.get(proposal.source, frozenset())
+    if proposal.notification_type in allowed_types:
+        return (
+            ProposalKind.COMMITTED,
+            f"committed_type:{proposal.source}/{proposal.notification_type}",
+        )
+    return ProposalKind.PROACTIVE, "generated_or_recurring_content"
 
 
 # ── Pure decision helpers (unit-tested without any I/O) ─────────────────────

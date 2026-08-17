@@ -46,10 +46,6 @@ class SpeculationDecision(StrEnum):
     TOOL_POLICY_CHANGED = "tool_policy_changed"
     # Guide Mode owns the turn; its runtime generates instead of this path.
     GUIDE_ACTIVE = "guide_active"
-    # Finalized speech matched the deterministic screen-capture grammar. The
-    # speculative LLM reply must be discarded because this turn is handled by
-    # the local capture path before any model generation.
-    DETERMINISTIC_SCREEN_CAPTURE = "deterministic_screen_capture"
     # The speculative pass emitted a side-effecting tool call, which the
     # execution gate refused because that pass is not a finalized turn. Reusing
     # it would speak the refusal, so the turn is invalidated and the finalized
@@ -78,7 +74,6 @@ class TurnMutations:
     speculative_write_attempt: bool = False
     finalized_side_effect: bool = False
     stale_screen_context_collapsed: bool = False
-    deterministic_screen_capture: bool = False
 
     def applied(self) -> tuple[str, ...]:
         """Names of every mutation that fired, for the decision log line."""
@@ -95,7 +90,6 @@ class TurnMutations:
                 "speculative_write_attempt",
                 "finalized_side_effect",
                 "stale_screen_context_collapsed",
-                "deterministic_screen_capture",
             )
             if getattr(self, name)
         )
@@ -105,10 +99,6 @@ class TurnMutations:
 # still carries the full ``applied()`` tuple, so collapsing to one decision
 # loses nothing and keeps the metric aggregatable.
 _PRIORITY: tuple[tuple[str, SpeculationDecision], ...] = (
-    (
-        "deterministic_screen_capture",
-        SpeculationDecision.DETERMINISTIC_SCREEN_CAPTURE,
-    ),
     ("guide_active", SpeculationDecision.GUIDE_ACTIVE),
     ("finalized_side_effect", SpeculationDecision.FINALIZED_SIDE_EFFECT),
     # Ranked above everything else that could also be true, because this one is

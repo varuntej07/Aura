@@ -14,14 +14,18 @@ NEVER raises into the drain — a bookkeeping failure must not break delivery.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from ...lib.logger import logger
 from ..notification_service import NotificationResult
 from .proposal import (
+    SOURCE_BRIEFING,
     SOURCE_ICEBREAKER,
     SOURCE_MEMORY_GRAPH,
     SOURCE_NEWS,
     SOURCE_REENGAGE,
     SOURCE_THREAD,
+    SOURCE_TRACKING,
     NotificationProposal,
 )
 
@@ -45,6 +49,38 @@ async def dispatch_post_send(
             # Wired when the dormancy re-engagement producer lands (Increment 2c).
             from ..reengagement.reengagement_engine import on_reengage_accepted
             await on_reengage_accepted(proposal, result)
+        elif proposal.source == SOURCE_TRACKING:
+            if not result.accepted:
+                return
+            from ..tracking import tracking_store
+
+            tracker_id = proposal.data.get("tracker_id", "")
+            if tracker_id:
+                await tracking_store.record_tracker_outcome(
+                    tracker_id,
+                    summary=proposal.data.get("tracker_summary", proposal.body),
+                    at=datetime.now(UTC),
+                )
+        elif proposal.source == SOURCE_BRIEFING:
+            if not result.accepted:
+                return
+            from ..analytics import posthog_client
+            from ..analytics.funnel_events import (
+                EVENT_BRIEFING_SENT,
+                NOTIFICATION_ORIGIN_BRIEFING,
+                PROP_NOTIFICATION_ID,
+                PROP_NOTIFICATION_ORIGIN,
+            )
+
+            await posthog_client.capture_event(
+                distinct_id=proposal.user_id,
+                event=EVENT_BRIEFING_SENT,
+                properties={
+                    PROP_NOTIFICATION_ID: proposal.data.get(PROP_NOTIFICATION_ID, ""),
+                    PROP_NOTIFICATION_ORIGIN: NOTIFICATION_ORIGIN_BRIEFING,
+                    "local_date": proposal.data.get("briefing_date", ""),
+                },
+            )
         elif proposal.source == SOURCE_MEMORY_GRAPH:
             from .memory_graph_notifications import on_orchestrator_outcome
             from .proposal import REASON_OK, Disposition, OrchestratorDecision

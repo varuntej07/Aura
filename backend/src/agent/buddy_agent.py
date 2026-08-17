@@ -3,10 +3,9 @@ BuddyAgent — the persona that drives the LiveKit voice session.
 
 Most tools are exposed via MCP at /mcp (see backend/src/handlers/mcp.py) and run
 over HTTP in the main backend process. Session-bound tools are local
-``@function_tool`` methods on this class. Screen capture is deliberately not a
-tool: a narrow finalized-speech grammar invokes the in-process persistence path
-without exposing a schema to the model. ``report_feedback`` remains a local
-tool because it needs the trusted current finalized transcript and message ID.
+``@function_tool`` methods on this class: ``save_screen_item`` because the frame
+bytes live in this process's ScreenFrameStore, ``report_feedback`` because it
+needs the trusted current finalized transcript and message ID.
 LiveKit's ``Agent`` auto-discovers ``@function_tool``-decorated methods on
 ``self`` (``find_function_tools``), merging them with the MCP-provided tools
 into one tool list for the model — no separate registration needed. Lifecycle:
@@ -37,6 +36,7 @@ import asyncio
 import hashlib
 import json
 import random
+import re
 import time
 from collections.abc import AsyncIterable, Callable
 from copy import deepcopy
@@ -78,6 +78,7 @@ from .voice.action_policy import (
     completed_tool_results,
     derive_turn_policy,
     evaluate_execution,
+    verbatim_voice_result,
 )
 from .voice.action_telemetry import VoiceActionTelemetry
 from .voice.artifact_delivery import ArtifactDeliveryTracker
@@ -108,10 +109,6 @@ from .voice.guide_intent import (
 )
 from .voice.guide_task_runtime import GuideTaskRuntime
 from .voice.point_tag import PointTarget, filter_point_tags, publish_element_point
-from .voice.screen_capture_command import (
-    ScreenCaptureCommand,
-    match_screen_capture_command,
-)
 from .voice.screen_context_stream import (
     StructuredContext,
     StructuredContextStore,
@@ -128,10 +125,10 @@ from .voice.screen_visibility import (
 )
 from .voice.speculation import SpeculationDecision, TurnMutations, decide, is_reusable
 from .voice.spoken_action_guard import (
-    artifact_kind_for,
+    DIVERTED_ARTIFACT_KIND,
+    DIVERTED_ARTIFACT_TITLE,
     is_question_to_user,
     looks_copyable,
-    wants_copyable_artifact,
 )
 from .voice.text_sanitizer import (
     sanitize_text_stream,
@@ -173,6 +170,31 @@ _GUIDE_CLARIFICATION_REPLY = (
     "Do you want me to start Guide Mode and stay with you while you work, "
     "or just answer once?"
 )
+_GUIDE_PROACTIVE_PREFIX = "The currently visible screen changed while Guide Mode is active."
+_GUIDE_RUNTIME_UNAVAILABLE_REPLY = (
+    "I lost the live Guide connection. Please restart Guide Mode."
+)
+_VOICE_WORD_RE = re.compile(r"\b[\w'-]+\b")
+
+
+def _bounded_voice_text(
+    text: str, *, maximum_words: int = 35, maximum_sentences: int = 2
+) -> tuple[str, bool]:
+    """Apply the ordinary voice envelope to one complete direct utterance."""
+    compact = " ".join((text or "").split())
+    if not compact:
+        return "", False
+    sentence_ends = list(re.finditer(r"[.!?]+", compact))
+    bounded = compact
+    if len(sentence_ends) >= maximum_sentences:
+        bounded = compact[: sentence_ends[maximum_sentences - 1].end()]
+    words = list(_VOICE_WORD_RE.finditer(bounded))
+    if len(words) > maximum_words:
+        bounded = bounded[: words[maximum_words - 1].end()].rstrip(" ,;:-")
+        if bounded and bounded[-1] not in ".!?":
+            bounded += "."
+    return bounded, bounded != compact
+
 
 # Shortest interim transcript worth firing early memory retrieval against. An
 # interim of two or three characters is the leading edge of a word, not a query,
@@ -342,6 +364,7 @@ class BuddyAgent(agents.Agent):
         self._guide_intent_classifier = GuideIntentClassifier()
         self._finalized_guide_decision: GuideIntentDecision | None = None
         self._final_stt_confidences: list[float] = []
+        self._finalized_stt_confidence: float | None = None
         self._guide_stop_result: tuple[str, str] | None = None
         self._guide_name = context_vars.get("name") or "there"
         self._companion_instructions = instructions
@@ -353,8 +376,6 @@ class BuddyAgent(agents.Agent):
         self._last_injected_frame_scale = 1.0
         self._point_publish_tasks: set[asyncio.Task] = set()
         # Deterministic capture state. Only finalized user speech can populate
-        # `_pending_screen_capture`; the image bytes stay in ScreenFrameStore.
-        self._pending_screen_capture: tuple[str, ScreenCaptureCommand] | None = None
         self._screen_capture_results: dict[str, SaveScreenItemResult] = {}
         self._screen_capture_lock = asyncio.Lock()
         self._screen_capture_retry_until = 0.0
@@ -627,6 +648,7 @@ class BuddyAgent(agents.Agent):
         self._resolve_previous_speculation()
         self._turn_context_id = ""
         self._finalized_guide_decision = None
+        self._finalized_stt_confidence = None
         self._guide_stop_result = None
 
         compacted_context = self._context_compactor.apply_ready(turn_ctx)
@@ -640,24 +662,6 @@ class BuddyAgent(agents.Agent):
         # See _turn_instruction: endpointing splits one spoken thought across
         # several finalized messages, and the request usually lands in the first.
         turn_instruction = self._turn_instruction(turn_ctx) or finalized_transcript
-        # Lexical only, and deliberately NOT widened to include an open card
-        # session. This feeds `finalized_side_effect`, which mutates the context
-        # and so invalidates preemptive speculation. An explicit new request for
-        # copyable text is worth that cold turn; every turn for as long as a card
-        # happens to be open is not. Arming for the recitation guard is a
-        # separate, wider decision made in llm_node.
-        copyable_output_requested = self._launch_surface is VoiceSurface.DESKTOP and (
-            wants_copyable_artifact(turn_instruction)
-        )
-        screen_capture_command = None
-        if self._launch_surface is VoiceSurface.DESKTOP:
-            screen_capture_command = match_screen_capture_command(
-                finalized_transcript,
-                allow_deictic_retry=(
-                    time.monotonic() < self._screen_capture_retry_until
-                ),
-            )
-        self._pending_screen_capture = None
         # Guide Mode answers only from the current screen; pulling memory here would
         # invite the very restating/parroting Guide Mode must avoid, and costs latency.
         # Memory fetched while the user was still speaking makes this a no-op,
@@ -674,10 +678,7 @@ class BuddyAgent(agents.Agent):
         # was never retrieved against, and silently suppress retrieval for the
         # rest of the session.
         graph_context_appended = False
-        if not self._guide_active and not (
-            screen_capture_command is not None
-            and screen_capture_command.command_only
-        ):
+        if not self._guide_active:
             early_memory_id = self._early_memory_message_id
             self._early_memory_message_id = ""
             early_memory_live = bool(early_memory_id) and live_context_message_present(
@@ -743,10 +744,7 @@ class BuddyAgent(agents.Agent):
                 stale_contexts_collapsed = bool(collapse_stale_contexts(turn_ctx))
 
         frame = None
-        if self._screen_frames is not None and not (
-            screen_capture_command is not None
-            and screen_capture_command.command_only
-        ):
+        if self._screen_frames is not None:
             frame = await attach_screen_frame_to_turn(
                 self._screen_frames,
                 turn_ctx,
@@ -768,20 +766,9 @@ class BuddyAgent(agents.Agent):
         self._finalized_message_id = new_message.id
         self._finalized_transcript = finalized_transcript
         self._finalized_turn_instruction = turn_instruction
-        if screen_capture_command is not None:
-            self._pending_screen_capture = (new_message.id, screen_capture_command)
-            # The speculative reply was generated before finalized speech could
-            # authorize this local action. Mutating the turn forces LiveKit to
-            # discard that reply and enter llm_node's deterministic branch.
-            turn_ctx.add_message(
-                role="system",
-                content=[
-                    "<deterministic_screen_capture>finalized user command"
-                    "</deterministic_screen_capture>"
-                ],
-            )
         current_turn_index = self._action_telemetry.turn_index
         stt_confidence = self._consume_stt_confidence()
+        self._finalized_stt_confidence = stt_confidence
         guide_decision_identity = GuideDecisionIdentity.from_turn(
             message_id=new_message.id,
             transcript=finalized_transcript,
@@ -815,11 +802,20 @@ class BuddyAgent(agents.Agent):
             turn_index=current_turn_index,
             guide_intent_decision=self._finalized_guide_decision,
             guide_decision_identity=self._current_guide_identity(),
+            stt_confidence=stt_confidence,
         )
+        if self._guide_active:
+            policy = replace(
+                policy,
+                capabilities=frozenset(),
+                allowed_tools=frozenset(),
+                required_tools=frozenset(),
+                reason_codes=policy.reason_codes + ("guide_tools_disabled",),
+            )
         self._finalized_tool_selection = None
         self._finalized_selection_context = None
         selection_changed = False
-        finalized_side_effect = copyable_output_requested or (
+        finalized_side_effect = (
             self._finalized_guide_decision is not None
             and self._finalized_guide_decision.valid
             and self._finalized_guide_decision.route
@@ -960,7 +956,6 @@ class BuddyAgent(agents.Agent):
             speculative_write_attempt=speculative_write_attempt,
             finalized_side_effect=finalized_side_effect,
             stale_screen_context_collapsed=stale_contexts_collapsed,
-            deterministic_screen_capture=screen_capture_command is not None,
         )
         decision = decide(mutations)
         self._speculation_intent = decision
@@ -1562,9 +1557,19 @@ class BuddyAgent(agents.Agent):
         Args:
             text: Exactly what to say, in Buddy's voice. One or two sentences.
         """
-        spoken = (text or "").strip()
+        spoken, truncated = _bounded_voice_text(text)
         if not spoken:
             raise lk_llm.ToolError("speak_only requires non-empty text.")
+        if truncated:
+            logger.warn(
+                "VoiceSession: ordinary speech envelope applied",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "turn_index": self._action_telemetry.turn_index,
+                    "channel": "speak_only",
+                },
+            )
         try:
             ctx.session.say(spoken)
         except Exception as exc:
@@ -1729,7 +1734,7 @@ class BuddyAgent(agents.Agent):
         message_id: str,
         turn_index: int,
     ) -> SelectionContext:
-        corrections, prior_assistant, screen_referent = recent_dialogue_context(
+        prior_assistant, screen_referent = recent_dialogue_context(
             chat_ctx, message_id
         )
         active_objective = ""
@@ -1737,7 +1742,6 @@ class BuddyAgent(agents.Agent):
             active_objective = self._active_intent.active_objective
         return SelectionContext(
             finalized_request=transcript,
-            recent_corrections=corrections,
             active_objective=active_objective,
             screen_referent=screen_referent,
             prior_clarification=(
@@ -1788,26 +1792,32 @@ class BuddyAgent(agents.Agent):
         catalog.commit_selection(selection, selection_context, prompt_intent)
         return selected_policy, selection, selection_context, prompt_intent
 
-    async def handle_bridged_screen_capture(
-        self, transcript: str, *, request_id: str
-    ) -> tuple[ScreenCaptureCommand, SaveScreenItemResult] | None:
-        """Handle a finalized Realtime handover intent before model continuation."""
-        if self._launch_surface is not VoiceSurface.DESKTOP:
-            return None
-        command = match_screen_capture_command(
-            transcript,
-            allow_deictic_retry=time.monotonic() < self._screen_capture_retry_until,
-        )
-        if command is None:
-            return None
-        self._action_telemetry.start_turn()
+    @function_tool
+    async def save_screen_item(self) -> dict[str, object]:
+        """Save what is currently on the user's screen so they can find it later.
+
+        Call this when the user asks you to save, capture, or screenshot their
+        screen. It keeps one image of the screen they are looking at right now.
+
+        Do NOT call it when the user is asking how the feature works, telling you
+        about a screenshot they took themselves, quoting someone, or telling you
+        NOT to save something. Saving is a real, persisted action on the user's
+        account, so only call it when they are asking you to do it now.
+
+        The returned confirmation is the exact wording to speak.
+        """
         result = await self._execute_screen_capture(
-            f"bridge:{request_id}", command
+            self._finalized_message_id or f"tool:{self._action_telemetry.turn_index}",
+            allow_duplicate=False,
         )
-        return command, result
+        return {
+            "ok": result.succeeded,
+            "say": result.spoken_confirmation,
+            "render": {"mode": "verbatim", "channel": "voice"},
+        }
 
     async def _execute_screen_capture(
-        self, finalized_message_id: str, command: ScreenCaptureCommand
+        self, finalized_message_id: str, *, allow_duplicate: bool
     ) -> SaveScreenItemResult:
         """Execute one authorized capture exactly once per finalized message."""
         async with self._screen_capture_lock:
@@ -1853,7 +1863,7 @@ class BuddyAgent(agents.Agent):
             frame_key = frame.frame_id or hashlib.sha256(frame.jpeg_bytes).hexdigest()
             recent = self._recent_screen_capture
             if (
-                not command.allow_duplicate
+                not allow_duplicate
                 and recent is not None
                 and recent[0] == frame_key
                 and (time.monotonic() - recent[1]) < _DUPLICATE_SAVE_WINDOW_S
@@ -1986,24 +1996,21 @@ class BuddyAgent(agents.Agent):
             and latest_user.id == self._finalized_message_id
             and self._finalized_message_id
         )
-        capture_remainder = ""
-        pending_capture = self._pending_screen_capture
-        if (
-            finalized
-            and pending_capture is not None
-            and pending_capture[0] == self._finalized_message_id
-        ):
-            _, capture_command = pending_capture
-            self._finalized_pass_ran = True
-            capture_result = await self._execute_screen_capture(
-                self._finalized_message_id, capture_command
+        exact_tool_speech = verbatim_voice_result(chat_ctx)
+        if exact_tool_speech is not None:
+            if finalized:
+                self._finalized_pass_ran = True
+            logger.info(
+                "VoiceSession: deterministic Action Truth speech",
+                {
+                    "session_id": self._session_id,
+                    "turn_index": self._action_telemetry.turn_index,
+                    "finalized": finalized,
+                },
             )
             self._action_telemetry.first_response()
-            yield capture_result.spoken_confirmation
-            if capture_command.command_only:
-                return
-            capture_remainder = capture_command.remainder
-
+            yield exact_tool_speech
+            return
         guide_decision = self._finalized_guide_decision if finalized else None
         if (
             guide_decision is not None
@@ -2049,40 +2056,61 @@ class BuddyAgent(agents.Agent):
             return
 
         if self._guide_active:
-            if self._guide_runtime is not None and self._guide_runtime.should_delegate():
-                logger.info(
+            current_user_text = (
+                latest_user.text_content if latest_user is not None else ""
+            )
+            proactive_guide_turn = (current_user_text or "").startswith(
+                _GUIDE_PROACTIVE_PREFIX
+            )
+            continuing_guide_turn = bool(
+                finalized
+                and guide_decision is not None
+                and guide_decision.route is GuideIntentRoute.CONTINUE_GUIDE
+                and guide_decision_currency(
+                    guide_decision, self._current_guide_identity()
+                ).allowed
+            )
+            if proactive_guide_turn or continuing_guide_turn:
+                if self._guide_runtime is not None and self._guide_runtime.should_delegate():
+                    logger.info(
+                        "GuideTrace",
+                        {
+                            "session_id": self._session_id,
+                            "user_id": self._user_id,
+                            **self._guide_runtime.diagnostic_state(),
+                            "stage": "execution",
+                            "outcome": "started",
+                            "reason": "guide_runtime_delegated",
+                        },
+                    )
+                    spoken = await self._guide_runtime.generate(
+                        chat_ctx,
+                        current_turn_context_id=self._current_turn_frame_context_id,
+                    )
+                    if spoken:
+                        yield spoken
+                    return
+                logger.warn(
                     "GuideTrace",
                     {
                         "session_id": self._session_id,
                         "user_id": self._user_id,
-                        **self._guide_runtime.diagnostic_state(),
+                        **(
+                            self._guide_runtime.diagnostic_state()
+                            if self._guide_runtime is not None
+                            else {"runtime_active": False}
+                        ),
                         "stage": "execution",
-                        "outcome": "started",
-                        "reason": "guide_runtime_delegated",
+                        "outcome": "rejected",
+                        "reason": "guide_runtime_not_delegated",
                     },
                 )
-                spoken = await self._guide_runtime.generate(
-                    chat_ctx,
-                    current_turn_context_id=self._current_turn_frame_context_id,
-                )
-                if spoken:
-                    yield spoken
+                if finalized:
+                    self._action_telemetry.first_response()
+                    yield _GUIDE_RUNTIME_UNAVAILABLE_REPLY
                 return
-            logger.warn(
-                "GuideTrace",
-                {
-                    "session_id": self._session_id,
-                    "user_id": self._user_id,
-                    **(
-                        self._guide_runtime.diagnostic_state()
-                        if self._guide_runtime is not None
-                        else {"runtime_active": False}
-                    ),
-                    "stage": "execution",
-                    "outcome": "rejected",
-                    "reason": "guide_runtime_not_delegated",
-                },
-            )
+            if not finalized:
+                return
 
         generation_started_at = time.monotonic()
         fresh_frame_available = self._fresh_frame_for_turn
@@ -2161,6 +2189,17 @@ class BuddyAgent(agents.Agent):
                 guide_decision_identity=(
                     self._current_guide_identity() if finalized else None
                 ),
+                stt_confidence=(
+                    self._finalized_stt_confidence if finalized else None
+                ),
+            )
+        if self._guide_active and "guide_tools_disabled" not in policy.reason_codes:
+            policy = replace(
+                policy,
+                capabilities=frozenset(),
+                allowed_tools=frozenset(),
+                required_tools=frozenset(),
+                reason_codes=policy.reason_codes + ("guide_tools_disabled",),
             )
         selection = self._finalized_tool_selection if finalized else None
         selection_context = self._finalized_selection_context if finalized else None
@@ -2204,24 +2243,17 @@ class BuddyAgent(agents.Agent):
         # Arming is decided before the tool list is built, because it decides
         # whether the speech channel is on the list at all.
         #
-        # An OPEN card session arms every turn on its own. That is the fix:
-        # revision and critique turns ("make it a bit longer", "where is the
-        # hook?") never restate a copyable noun, so lexical arming left exactly
-        # those turns unprotected. The lexicon now only has to recognize the
-        # turn that OPENS a card, where the user does say the noun.
-        #
-        # `turn_instruction` rather than `transcript`: endpointing splits one
-        # spoken thought across several finalized messages, and matching only
-        # the last fragment discards a request made in the first.
+        # An OPEN card session arms every turn on its own, and that is now the
+        # only thing that arms. Opening-turn arming used to come from a lexicon
+        # of copyable nouns; every one of those words is also ordinary English,
+        # so it armed on "he sent me a message" and missed "test me a prompt"
+        # when STT mangled the verb. The opening turn is the model's call via
+        # present_visible_artifact, which is a registered tool it can select.
         artifact_session = self._artifact_session
-        turn_instruction = self._turn_instruction(chat_ctx) or (transcript or "")
         wants_artifact = (
             self._launch_surface is VoiceSurface.DESKTOP
             and not self._guide_active
-            and (
-                artifact_session.is_open
-                or wants_copyable_artifact(turn_instruction)
-            )
+            and artifact_session.is_open
         )
         armed = bool(finalized and wants_artifact)
         # speak_only exists only for armed turns. On every other turn Buddy
@@ -2236,13 +2268,15 @@ class BuddyAgent(agents.Agent):
         ]
         exposed_names = [tool_name(tool) for tool in inference_tools]
         inference_ctx = chat_ctx.copy()
-        if capture_remainder:
+        if self._guide_active:
             inference_ctx.add_message(
                 role="system",
                 content=[
-                    "The explicit screen-capture request was already handled "
-                    "locally. Do not discuss tools or repeat that action. Answer "
-                    f"only this remaining request: {capture_remainder}"
+                    "This finalized turn is not a Guide task continuation. For this "
+                    "turn only, ignore the one-visible-action and point-tag rules. "
+                    "Answer only the user's latest literal request in ordinary Buddy "
+                    "voice. Do not call tools, infer an action, or mention internal "
+                    "routing."
                 ],
             )
         intent_block = prompt_intent.render_for_model(exposed_names)
@@ -2324,7 +2358,9 @@ class BuddyAgent(agents.Agent):
                     if selection.active_capability is not None
                     else None
                 ),
-                "intent_control": selection.control.value,
+                "stt_confidence": (
+                    self._finalized_stt_confidence if finalized else None
+                ),
             },
         )
 
@@ -2450,7 +2486,6 @@ class BuddyAgent(agents.Agent):
         stream = self._speak_filler_on_tool_calls(raw_stream)
         stream = self._card_narrated_artifact(
             filter_point_tags(stream, on_point=_on_point),
-            transcript=turn_instruction,
             armed=armed,
         )
         if screen_visibility_prefix:
@@ -2462,6 +2497,8 @@ class BuddyAgent(agents.Agent):
                     yield content_item
 
             stream = _prepend_screen_visibility()
+        if not self._text_output:
+            stream = self._enforce_voice_envelope(stream)
         first_output_logged = False
         spoken_parts: list[str] = []
         async for item in stream:
@@ -2547,12 +2584,11 @@ class BuddyAgent(agents.Agent):
         / This is voice." arrived as three finalized turns, and the generation
         ran against the third. The request was in the first.
 
-        Anything that reads the user's INTENT must read this instead: the
-        artifact arming check, `artifact_kind_for`, and the sub-drafter's
-        instruction. Anything that means "this exact message" (report_feedback's
-        provenance, screen-capture matching, telemetry ids) must keep using
-        `_finalized_transcript`, because those are claims about one message and
-        joining would make them lie.
+        Anything that needs the user's whole REQUEST must read this instead: the
+        sub-drafter's instruction, and any future semantic classifier. Anything
+        that means "this exact message" (report_feedback's provenance, telemetry
+        ids) must keep using `_finalized_transcript`, because those are claims
+        about one message and joining would make them lie.
         """
         collected: list[str] = []
         collected_chars = 0
@@ -2580,7 +2616,76 @@ class BuddyAgent(agents.Agent):
             break
         return " ".join(reversed(collected))
 
-    async def _card_narrated_artifact(self, chunks, *, transcript, armed):
+    async def _enforce_voice_envelope(self, chunks):
+        """Stream at most two sentences and 35 words while preserving metadata."""
+        words = 0
+        sentences = 0
+        in_word = False
+        punctuation_run = False
+        stopped = False
+        truncated = False
+
+        def _bounded_piece(text: str) -> str:
+            nonlocal words, sentences, in_word, punctuation_run, stopped, truncated
+            if stopped:
+                truncated = truncated or bool(text.strip())
+                return ""
+            kept: list[str] = []
+            for index, character in enumerate(text):
+                word_character = character.isalnum() or character in "_'-"
+                if word_character:
+                    if not in_word:
+                        if words >= 35:
+                            stopped = True
+                            truncated = True
+                            break
+                        words += 1
+                    in_word = True
+                    punctuation_run = False
+                else:
+                    in_word = False
+                    if character in ".!?":
+                        if not punctuation_run:
+                            sentences += 1
+                        punctuation_run = True
+                    elif not character.isspace() and character not in "'\")]}":
+                        punctuation_run = False
+                kept.append(character)
+                if sentences >= 2:
+                    stopped = True
+                    if index < len(text) - 1:
+                        truncated = True
+                    break
+            return "".join(kept)
+
+        async for item in chunks:
+            if isinstance(item, str):
+                bounded = _bounded_piece(item)
+                if bounded:
+                    yield bounded
+                continue
+            delta = getattr(item, "delta", None)
+            content = getattr(delta, "content", None)
+            if not isinstance(content, str) or delta is None:
+                yield item
+                continue
+            bounded = _bounded_piece(content)
+            yield item.model_copy(
+                update={"delta": delta.model_copy(update={"content": bounded})}
+            )
+
+        if truncated:
+            logger.warn(
+                "VoiceSession: ordinary speech envelope applied",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "turn_index": self._action_telemetry.turn_index,
+                    "channel": "stream",
+                },
+            )
+
+    async def _card_narrated_artifact(self, chunks, *, armed):
         """Fail-closed backstop for copyable text the model recited instead of carding.
 
         prompts.py's "Visible output routing" and the tool skills already send
@@ -2676,7 +2781,7 @@ class BuddyAgent(agents.Agent):
         if session.is_open and session.kind in ARTIFACT_KINDS and session.title:
             kind, title = session.kind, session.title
         else:
-            kind, title = artifact_kind_for(transcript)
+            kind, title = DIVERTED_ARTIFACT_KIND, DIVERTED_ARTIFACT_TITLE
         ack = await _present_visible_artifact(
             user_id=self._user_id,
             session_id=self._session_id,
@@ -2946,7 +3051,6 @@ class BuddyAgent(agents.Agent):
             task.cancel()
         if self._screen_frames is not None:
             self._screen_frames.close()
-        self._pending_screen_capture = None
         self._screen_capture_results.clear()
         self._recent_screen_capture = None
         self._direct_action_recorder = None

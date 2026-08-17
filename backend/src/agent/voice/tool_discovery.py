@@ -79,20 +79,6 @@ _SEARCH_STOP_WORDS = frozenset(
         "your",
     }
 )
-_FOLLOW_UP_FRAGMENTS = frozenset(
-    {
-        "that one",
-        "this one",
-        "same one",
-    }
-)
-_AFFIRMATIVE_FRAGMENTS = frozenset(
-    {"yes", "yeah", "yep", "do it", "go ahead", "save it"}
-)
-_CANCEL_FRAGMENTS = frozenset(
-    {"cancel", "cancel that", "never mind", "nevermind", "stop that", "forget it"}
-)
-_CORRECTION_PREFIXES = ("actually", "correction", "i meant", "no ", "or ", "wait ")
 
 
 class IntentAuthorizationState(StrEnum):
@@ -100,14 +86,6 @@ class IntentAuthorizationState(StrEnum):
     PENDING = "pending"
     GRANTED = "granted"
     CANCELLED = "cancelled"
-
-
-class IntentControl(StrEnum):
-    NEW = "new"
-    CONTINUE = "continue"
-    CONFIRM = "confirm"
-    CORRECT = "correct"
-    CANCEL = "cancel"
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +185,10 @@ class ActiveIntentState:
         self.cancelled_at = None
         self._extend(turn_index)
 
+    # CANCELLED is currently unreachable: its only trigger was a hand-written list of
+    # cancel words, and nothing in the voice path infers cancellation any more. The
+    # mechanism is kept whole so a semantic canceller can re-attach to it without
+    # rebuilding the state transitions or the eligibility check that reads them.
     def request_cancellation(self, turn_index: int) -> None:
         if self.active_capability is None:
             return
@@ -362,7 +344,6 @@ class EligibilityContext:
 @dataclass(frozen=True, slots=True)
 class SelectionContext:
     finalized_request: str
-    recent_corrections: tuple[str, ...]
     active_objective: str
     screen_referent: str
     prior_clarification: str
@@ -375,7 +356,6 @@ class ToolSelection:
     primary_tool: str | None
     active_capability: Capability | None
     fingerprint: str
-    control: IntentControl
     reason_codes: tuple[str, ...]
     scores: tuple[tuple[str, float], ...]
 
@@ -505,46 +485,16 @@ class ToolCatalog:
         max_results: int = DEFAULT_MAX_RESULTS,
     ) -> ToolSelection:
         active_intent.expire_if_needed(selection.turn_index)
-        control = _intent_control(selection.finalized_request, active_intent)
         effective_eligibility = eligibility
-        if control is IntentControl.CANCEL:
-            effective_eligibility = replace(
-                eligibility,
-                authorization_state=IntentAuthorizationState.CANCELLED,
-            )
-        elif (
-            eligibility.authorization_state is IntentAuthorizationState.CANCELLED
-            and control in {IntentControl.NEW, IntentControl.CORRECT}
-        ):
-            effective_eligibility = replace(
-                eligibility,
-                authorization_state=IntentAuthorizationState.PENDING,
-            )
         eligible, eligibility_reasons = self.deterministic_eligible(
             effective_eligibility, structurally_allowed
         )
-        if control is IntentControl.CANCEL:
-            # Reads only. The user calling off an action must not leave Buddy unable to
-            # answer a question about their own data, but re-exposing the write they
-            # just cancelled is how you re-create the thing they cancelled.
-            cancel_floor = self._core_floor(eligible, reads_only=True)
-            return ToolSelection(
-                tool_names=cancel_floor,
-                primary_tool=None,
-                active_capability=None,
-                fingerprint=self.selection_fingerprint(cancel_floor),
-                control=control,
-                reason_codes=eligibility_reasons
-                + ("active_intent_cancelled", "core_floor_applied"),
-                scores=(),
-            )
         if not eligible:
             return ToolSelection(
                 tool_names=(),
                 primary_tool=None,
                 active_capability=None,
                 fingerprint=self.selection_fingerprint(()),
-                control=control,
                 reason_codes=eligibility_reasons + ("no_eligible_tools",),
                 scores=(),
             )
@@ -557,7 +507,6 @@ class ToolCatalog:
                     primary_tool=None,
                     active_capability=None,
                     fingerprint=self.selection_fingerprint(()),
-                    control=control,
                     reason_codes=eligibility_reasons
                     + ("required_tool_ineligible",),
                     scores=(),
@@ -568,13 +517,12 @@ class ToolCatalog:
                 primary_tool=primary.name,
                 active_capability=primary.metadata.capability,
                 fingerprint=self.selection_fingerprint(required_names),
-                control=control,
                 reason_codes=eligibility_reasons
                 + ("required_tool_bundle",),
                 scores=tuple((name, 1.0) for name in required_names),
             )
 
-        query = _selection_query(selection, active_intent, control)
+        query = _selection_query(selection, active_intent)
         documents = [_tokenize(entry.search_document()) for entry in eligible]
         query_tokens = _tokenize(query)
         scores = _bm25_scores(query_tokens, documents)
@@ -608,17 +556,16 @@ class ToolCatalog:
                     primary_tool=None,
                     active_capability=None,
                     fingerprint=self.selection_fingerprint(floor),
-                    control=control,
                     reason_codes=eligibility_reasons
                     + ("higher_scoring_tool_ineligible", "core_floor_applied"),
                     scores=(),
                 )
-        if active_intent.active_capability is not None and control is not IntentControl.NEW:
+        if active_intent.active_capability is not None and active_intent.missing_arguments:
             scores = [
                 score + (8.0 if entry.metadata.capability == active_intent.active_capability else 0)
                 for entry, score in zip(eligible, scores)
             ]
-        if control is IntentControl.NEW and not active_intent.referenced_object:
+        if not active_intent.referenced_object:
             scores = [
                 score
                 - (
@@ -640,7 +587,6 @@ class ToolCatalog:
                 primary_tool=None,
                 active_capability=None,
                 fingerprint=self.selection_fingerprint(floor),
-                control=control,
                 reason_codes=eligibility_reasons
                 + ("no_semantic_match", "core_floor_applied"),
                 scores=tuple((entry.name, round(score, 4)) for entry, score in ranked),
@@ -648,7 +594,7 @@ class ToolCatalog:
 
         primary = ranked[0][0]
         action_clauses = _action_clauses(selection.finalized_request)
-        if control is IntentControl.NEW and len(action_clauses) > 1:
+        if len(action_clauses) > 1:
             clause_scores = _bm25_scores(_tokenize(action_clauses[-1]), documents)
             if not active_intent.referenced_object:
                 clause_scores = [
@@ -706,12 +652,10 @@ class ToolCatalog:
             primary_tool=primary.name,
             active_capability=primary.metadata.capability,
             fingerprint=self.selection_fingerprint(selected_names),
-            control=control,
             reason_codes=eligibility_reasons
             + (
                 "core_floor_applied",
                 f"semantic_bundle:{primary.metadata.namespace}",
-                f"intent_control:{control.value}",
             ),
             scores=tuple((entry.name, round(score, 4)) for entry, score in ranked),
         )
@@ -722,9 +666,6 @@ class ToolCatalog:
         context: SelectionContext,
         active_intent: ActiveIntentState,
     ) -> None:
-        if selection.control is IntentControl.CANCEL:
-            active_intent.request_cancellation(context.turn_index)
-            return
         if selection.primary_tool is None:
             return
         entry = self.entries.get(selection.primary_tool)
@@ -736,15 +677,11 @@ class ToolCatalog:
             or entry.metadata.namespace.startswith("desktop.")
             else active_intent.referenced_object
         )
-        active_objective = active_intent.active_objective
-        if selection.control is IntentControl.NEW:
-            active_objective = context.finalized_request
-        elif selection.control is IntentControl.CORRECT:
-            active_objective = " ".join(
-                part
-                for part in (active_intent.active_objective, context.finalized_request)
-                if part
-            )[-1000:]
+        # The objective is always the turn that produced this selection. Appending to a
+        # prior objective was only ever reached by matching correction words, and a
+        # stale objective outliving its turn is what let one misread request keep
+        # steering selection for the whole intent window.
+        active_objective = context.finalized_request
         active_intent.begin(
             capability=entry.metadata.capability,
             tool_name_value=entry.name,
@@ -756,8 +693,6 @@ class ToolCatalog:
             turn_index=context.turn_index,
             effect=entry.metadata.effect,
         )
-        if selection.control is IntentControl.CONFIRM:
-            active_intent.authorization_state = IntentAuthorizationState.GRANTED
 
     def selection_fingerprint(self, names: Sequence[str]) -> str:
         payload = [
@@ -797,29 +732,27 @@ class ToolCatalog:
 def recent_dialogue_context(
     chat_ctx: object,
     current_message_id: str,
-) -> tuple[tuple[str, ...], str, str]:
-    recent_users: list[str] = []
+) -> tuple[str, str]:
+    """Return the prior assistant turn and any screen referent for tool selection.
+
+    Prior USER turns are deliberately not returned. The only thing that ever selected
+    among them was a list of correction words, and re-feeding arbitrary earlier turns
+    into the retrieval query pollutes it instead.
+    """
+    del current_message_id
     prior_assistant = ""
     screen_referent = ""
     for item in getattr(chat_ctx, "items", []):
         role = getattr(item, "role", None)
         content = getattr(item, "content", None)
         text = getattr(item, "text_content", "") or ""
-        if role == "user" and getattr(item, "id", "") != current_message_id:
-            if text.strip():
-                recent_users.append(text.strip())
-        elif role == "assistant" and text.strip():
+        if role == "assistant" and text.strip():
             prior_assistant = text.strip()
         elif role == "system" and isinstance(content, list):
             for part in content:
                 if isinstance(part, str) and "<screen_ui_context>" in part:
                     screen_referent = part.split("</screen_ui_context>", 1)[0]
-    corrections = tuple(
-        text
-        for text in recent_users[-3:]
-        if text.casefold().startswith(_CORRECTION_PREFIXES)
-    )
-    return corrections, prior_assistant[:500], screen_referent[-1500:]
+    return prior_assistant[:500], screen_referent[-1500:]
 
 
 def _schema_for_tool(
@@ -853,16 +786,21 @@ def _schema_for_tool(
 def _selection_query(
     selection: SelectionContext,
     active_intent: ActiveIntentState,
-    control: IntentControl,
 ) -> str:
-    continuity_parts: list[str] = []
-    if control is not IntentControl.NEW:
-        continuity_parts.extend(selection.recent_corrections)
+    # Continuity used to be gated on the turn matching a correction or follow-up
+    # word list. It is gated on state instead, in two independent pieces.
+    #
+    # Buddy's own last question always counts. An answer to "when should I remind
+    # you?" is "tonight", which names no tool on its own; scoring it against the
+    # question is what keeps the answer on the tool that asked. This does not
+    # depend on the user having phrased the answer any particular way, which is
+    # exactly what the word list was failing to guess.
+    continuity_parts: list[str] = [selection.prior_clarification]
+    # The rest is intent-derived, so it is only meaningful while one is open.
+    if active_intent.active_capability is not None:
         continuity_parts.append(selection.active_objective)
-        if active_intent.active_capability is not None:
-            continuity_parts.append(active_intent.active_capability.value)
+        continuity_parts.append(active_intent.active_capability.value)
         continuity_parts.append(active_intent.referenced_object)
-        continuity_parts.append(selection.prior_clarification)
     return " ".join(
         part
         for part in (
@@ -873,19 +811,6 @@ def _selection_query(
         )
         if part
     )
-
-
-def _intent_control(text: str, active_intent: ActiveIntentState) -> IntentControl:
-    normalized = " ".join(_TOKEN_PATTERN.findall(text.casefold()))
-    if active_intent.active_capability is not None and normalized in _CANCEL_FRAGMENTS:
-        return IntentControl.CANCEL
-    if active_intent.active_capability is not None and normalized in _AFFIRMATIVE_FRAGMENTS:
-        return IntentControl.CONFIRM
-    if active_intent.active_capability is not None and normalized in _FOLLOW_UP_FRAGMENTS:
-        return IntentControl.CONTINUE
-    if text.strip().casefold().startswith(_CORRECTION_PREFIXES):
-        return IntentControl.CORRECT
-    return IntentControl.NEW
 
 
 def _requests_multiple_actions(text: str) -> bool:

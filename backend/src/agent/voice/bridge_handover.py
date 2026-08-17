@@ -168,19 +168,10 @@ class BridgeHandoverCoordinator:
         pending_intent = str(msg.get("pending_intent") or "").strip()
         if pending_intent:
             try:
-                capture = await self._buddy.handle_bridged_screen_capture(
-                    pending_intent,
-                    request_id=handover_id,
-                )
-                if capture is not None:
-                    command, result = capture
-                    await self._session.say(
-                        result.spoken_confirmation,
-                        allow_interruptions=True,
-                    )
-                    if command.command_only:
-                        return
-                    pending_intent = command.remainder
+                # The handed-over intent goes to the model whole. A screen-capture
+                # request used to be pulled out of it by a speech grammar and run
+                # locally before continuation; it is now the save_screen_item tool,
+                # which the model calls from this same continuation.
                 await self._session.generate_reply(
                     instructions=DESKTOP_BRIDGE_CONTINUATION_INSTRUCTIONS.format(
                         intent=pending_intent[:_MAX_TURN_CHARS]

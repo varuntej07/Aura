@@ -351,7 +351,7 @@ async def test_committed_stale_drops(monkeypatch):
 
     monkeypatch.setattr(orchestrator, "_deliver", _fake_deliver)
 
-    p = _proposal(SOURCE_TRACKING, kind=ProposalKind.COMMITTED,
+    p = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED,
                   content_ts=NOW - timedelta(hours=10), max_age=timedelta(hours=3))
     decision = await orchestrator.submit(p, now=NOW)
 
@@ -373,7 +373,7 @@ async def test_committed_duplicate_drops(monkeypatch):
     monkeypatch.setattr(orchestrator, "_deliver", _fake_deliver)
     monkeypatch.setattr(idempotency, "idempotent", _claim)
 
-    p = _proposal(SOURCE_TRACKING, kind=ProposalKind.COMMITTED, dedup_key="dupe")
+    p = _proposal(SOURCE_REMINDER, kind=ProposalKind.COMMITTED, dedup_key="dupe")
     decision = await orchestrator.submit(p, now=NOW)
 
     assert decision.disposition == Disposition.DROP

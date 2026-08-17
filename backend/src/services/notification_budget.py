@@ -292,7 +292,7 @@ async def try_claim_proactive_slot(
     """Atomically claim one slot of the shared daily proactive budget.
 
     Returns ``allowed=False`` with a reason when the daily cap is reached or the
-    last send was within the spacing window. Fails OPEN on any error.
+    last send was within the spacing window. Fails closed on claim-store errors.
     ``priority=True`` (the icebreaker) may use one reserved slot above the cap so
     it is never starved.
     """
@@ -331,13 +331,15 @@ async def try_claim_proactive_slot(
     try:
         return await asyncio.to_thread(_claim)
     except Exception as exc:
-        # Fail OPEN: a budget read failure must never silence all notifications.
-        logger.warn("notification_budget: claim failed, allowing send (fail-open)", {
+        # Proactive interruptions are optional. If the shared counter cannot prove
+        # that this send is within the user's adaptive cap, silence is safer than an
+        # unbounded burst. Committed reminders/results do not call this path.
+        logger.warn("notification_budget: claim failed, holding send (fail-closed)", {
             "user_id": user_id,
             "source": source,
             "error": str(exc),
         })
-        return BudgetDecision(True)
+        return BudgetDecision(False, "budget_unavailable")
 
 
 async def record_committed_send(

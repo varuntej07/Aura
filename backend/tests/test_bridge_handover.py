@@ -80,9 +80,6 @@ class _Buddy:
     async def update_chat_ctx(self, chat_ctx: lk_llm.ChatContext) -> None:
         self._chat_ctx = chat_ctx
 
-    async def handle_bridged_screen_capture(self, transcript: str, *, request_id: str):
-        return None
-
     async def greet(self) -> None:
         self.greets += 1
 

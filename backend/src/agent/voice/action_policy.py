@@ -16,8 +16,15 @@ from .guide_intent import (
     guide_start_admission,
 )
 
-ACTION_POLICY_VERSION = "2026-08-13.1"
+ACTION_POLICY_VERSION = "2026-08-16.2"
 UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"})
+
+# Signal quality, not wording. Below this the transcript is not trustworthy enough to
+# carry a side effect, so writes are suppressed for the turn regardless of what the
+# words appear to say. This is deliberately the ONLY transcript-derived input to tool
+# exposure: which tools are SUGGESTED is decided by semantic selection and the model,
+# never by matching literal words against a hand-written list.
+WRITE_INTENT_MIN_STT_CONFIDENCE = 0.65
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,9 +57,19 @@ def derive_turn_policy(
     turn_index: int = 0,
     guide_intent_decision: GuideIntentDecision | None = None,
     guide_decision_identity: GuideDecisionIdentity | None = None,
+    stt_confidence: float | None = None,
 ) -> TurnCapabilityPolicy:
-    """Expose structurally eligible tools plus one trusted Guide admission."""
+    """Expose structurally eligible tools plus one trusted Guide admission.
+
+    Nothing here reads the wording of the transcript. Exposure is decided by surface,
+    frame freshness, turn finalization, and transcript signal quality; which of the
+    exposed tools is right for this turn is the selector's and the model's job.
+    """
     del transcript, chat_ctx, previous_visible_output_failed, source_message_id, turn_index
+
+    low_confidence_turn = (
+        stt_confidence is not None and stt_confidence < WRITE_INTENT_MIN_STT_CONFIDENCE
+    )
 
     allowed: set[str] = set()
     reasons: list[str] = ["stable_surface_toolset"]
@@ -69,6 +86,9 @@ def derive_turn_policy(
             continue
         if not finalized_turn and registration.effect is not ToolEffect.READ:
             reasons.append(f"finalized_turn_required:{name}")
+            continue
+        if low_confidence_turn and registration.effect is not ToolEffect.READ:
+            reasons.append(f"low_stt_confidence_write_suppressed:{name}")
             continue
         if name == "set_guide_mode":
             if not guide_admission.allowed:
@@ -103,6 +123,38 @@ def completed_tool_results(chat_ctx: lk_llm.ChatContext) -> dict[str, bool]:
         if isinstance(item, lk_llm.FunctionCallOutput) and item.name:
             results[item.name] = tool_output_succeeded(item)
     return results
+
+
+def verbatim_voice_result(chat_ctx: lk_llm.ChatContext) -> str | None:
+    """Return exact speech required by the latest Action Truth tool result."""
+    latest_user = -1
+    for index, item in enumerate(chat_ctx.items):
+        if isinstance(item, lk_llm.ChatMessage) and item.role == "user":
+            latest_user = index
+    for item in reversed(chat_ctx.items[latest_user + 1 :]):
+        if not isinstance(item, lk_llm.FunctionCallOutput) or item.is_error:
+            continue
+        parsed: Any
+        try:
+            parsed = json.loads(item.output)
+        except (TypeError, json.JSONDecodeError):
+            try:
+                parsed = literal_eval(item.output)
+            except (ValueError, SyntaxError):
+                continue
+        if not isinstance(parsed, dict):
+            continue
+        render = parsed.get("render")
+        say = parsed.get("say")
+        if (
+            isinstance(render, dict)
+            and render.get("mode") == "verbatim"
+            and render.get("channel") == "voice"
+            and isinstance(say, str)
+            and say.strip()
+        ):
+            return say.strip()
+    return None
 
 
 def tool_output_succeeded(output: lk_llm.FunctionCallOutput) -> bool:

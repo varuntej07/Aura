@@ -35,44 +35,25 @@ argument is natural language resolved server-side rather than an ISO string the
 model would have to compute without a clock.
 """
 
-import re
 from copy import deepcopy
 from typing import Any
-
-
-_EXPLICIT_ALARM_INTENT = re.compile(
-    r"\b(?:set|schedule|create|start|arm)\s+(?:me\s+)?(?:an?\s+|the\s+)?alarm\b"
-    r"|\bwake me\b|\bmake sure i(?:'m| am) up\b|\bget me up\b"
-    r"|\bdon't let me sleep through\b|\bdo not let me sleep through\b",
-    re.IGNORECASE,
-)
-_NEGATED_ALARM_INTENT = re.compile(
-    r"\b(?:don't|do not)\s+(?:set|schedule|create|start|arm)\s+"
-    r"(?:me\s+)?(?:an?\s+|the\s+)?alarm\b",
-    re.IGNORECASE,
-)
-_REMINDER_ABOUT_AN_ALARM = re.compile(
-    r"\bremind me to\b[^.?!]{0,100}\balarm\b",
-    re.IGNORECASE,
-)
 
 
 def resolve_set_reminder_tier(
     message: str, supplied_tier: Any, *, user_instruction: str = ""
 ) -> str:
-    """Resolve a missing voice tier without downgrading an explicit alarm request."""
-    supplied = str(supplied_tier or "").strip().lower()
-    if supplied in {"reminder", "alarm"}:
-        return supplied
+    """Return the caller-supplied tier, defaulting to the quiet one.
 
-    for text in (user_instruction, message):
-        if not text:
-            continue
-        if _NEGATED_ALARM_INTENT.search(text) or _REMINDER_ABOUT_AN_ALARM.search(text):
-            return "reminder"
-        if _EXPLICIT_ALARM_INTENT.search(text) or text.strip().lower().startswith("alarm"):
-            return "alarm"
-    return "reminder"
+    The tier used to be inferred from the wording when the model omitted it
+    ("wake me", "get me up" -> alarm). That inference decided whether a device
+    goes loud and full-screen, off phrases that also appear in ordinary talk,
+    and it fired on the negations it did not enumerate. The model states the
+    tier in the schema; if it does not, the quiet tier is the safe default,
+    because a missed alarm is recoverable and a surprise 6am siren is not.
+    """
+    del message, user_instruction
+    supplied = str(supplied_tier or "").strip().lower()
+    return supplied if supplied in {"reminder", "alarm"} else "reminder"
 
 # The one list of memory categories. tool_executor._store_memory reads it from here
 # rather than restating it: the two copies had already drifted from the Flutter

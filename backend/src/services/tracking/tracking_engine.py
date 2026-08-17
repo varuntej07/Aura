@@ -102,8 +102,11 @@ _RECONCILE_INTERVAL = timedelta(hours=24)
 _MAX_RECONCILE_FAILURES = 5
 _LLM_CALL_TIMEOUT_S = 10.0
 
-# Lifespan backstop when research couldn't determine an end (mirrors topic_agent).
-_FALLBACK_LIFESPAN = timedelta(days=60)
+# An open-ended tracker must earn renewal rather than becoming a silent permanent
+# subscription. Bounded events retain their researched end; everything else gets a
+# disclosed two-week stop condition.
+_OPEN_ENDED_LIFESPAN = timedelta(days=14)
+_OPEN_ENDED_END_CONDITION = "Automatically stop after 14 days unless renewed"
 
 # Per-user-per-topic daily push ceiling (founder decision 2026-07-10). A
 # wake_override RESULT (a final's outcome) bypasses the cap but still counts.
@@ -798,16 +801,18 @@ async def _fire_pulse(
 # ── delivery ─────────────────────────────────────────────────────────────────
 async def _send_tracker_push(
     *, user_id: str, topic_key: str, tracker_id: str,
-    title: str, body: str, opening_chat_message: str, dedup_key: str,
+    title: str, body: str, opening_chat_message: str, summary: str, dedup_key: str,
     content_timestamp: datetime | None = None,
 ):
-    """Hand one tracker update to the orchestrator's committed lane (the user asked
-    to be kept posted, so it sends inline; freshness + dedup still apply). The
-    orchestrator is the only thing that touches FCM."""
+    """Hand one update to the proactive funnel.
+
+    The subscription authorizes evaluation, not every interruption. Each generated
+    development still has to pass timing, arbitration, tap-value, and budget policy.
+    """
     proposal = NotificationProposal(
         user_id=user_id,
         source=SOURCE_TRACKING,
-        kind=ProposalKind.COMMITTED,
+        kind=ProposalKind.PROACTIVE,
         dedup_key=dedup_key,
         title=title,
         body=body,
@@ -817,6 +822,7 @@ async def _send_tracker_push(
             "topic_key": topic_key,
             "tracker_id": tracker_id,
             "opening_chat_message": opening_chat_message,
+            "tracker_summary": summary,
         },
         notification_type=f.NOTIFICATION_TYPE_TRACKER_UPDATE,
         collapse_key=f"tracker_{tracker_id}",
@@ -852,6 +858,7 @@ async def _fan_out(
                 user_id=sub.user_id, topic_key=topic.topic_key, tracker_id=sub.id,
                 title=copy.title, body=copy.body,
                 opening_chat_message=copy.opening_chat_message,
+                summary=copy.summary,
                 dedup_key=dedup_key,
                 content_timestamp=content_timestamp,
             )
@@ -956,12 +963,21 @@ async def _reconcile_topic(
     summary.fixtures_cancelled += len(plan.cancel_ids)
     summary.checkpoints_upserted += len(moments)
 
-    # Refresh lifespan from the fresh research; complete if it has now passed.
-    new_expires = research.expires_at or topic.expires_at
+    # Refresh a known event end, but never let an open topic silently renew itself.
+    # The original creation time anchors the two-week stop across daily reconciles.
+    lifecycle_origin = topic.created_at or now
+    effective_ends_at = research.ends_at or topic.ends_at
+    new_end_condition, new_expires = _bounded_open_lifecycle(
+        now=lifecycle_origin,
+        ends_at=effective_ends_at,
+        expires_at=research.expires_at or topic.expires_at,
+        end_condition=research.end_condition or topic.end_condition,
+    )
     if new_expires is not None and now > new_expires:
         await store.update_tracked_topic(topic.topic_key, {
             f.TOPIC_STATUS: f.TOPIC_STATUS_COMPLETED,
-            f.TOPIC_ENDS_AT: research.ends_at,
+            f.TOPIC_END_CONDITION: new_end_condition,
+            f.TOPIC_ENDS_AT: effective_ends_at,
             f.TOPIC_EXPIRES_AT: new_expires,
         })
         summary.completed += 1
@@ -976,7 +992,8 @@ async def _reconcile_topic(
         f.TOPIC_LAST_RECONCILE_ERROR: None,
         f.TOPIC_CONSECUTIVE_RECONCILE_FAILURES: 0,
         f.TOPIC_RESEARCH_CONFIDENCE: research.confidence,
-        f.TOPIC_ENDS_AT: research.ends_at,
+        f.TOPIC_END_CONDITION: new_end_condition,
+        f.TOPIC_ENDS_AT: effective_ends_at,
         f.TOPIC_EXPIRES_AT: new_expires,
         f.TOPIC_HEALTH: health,
         f.TOPIC_CHECKPOINTS_TOTAL: len(moments),
@@ -1009,6 +1026,28 @@ def _iso(value: datetime | None) -> str:
     return value.isoformat() if isinstance(value, datetime) else ""
 
 
+def _bounded_open_lifecycle(
+    *,
+    now: datetime,
+    ends_at: datetime | None,
+    expires_at: datetime | None,
+    end_condition: str,
+) -> tuple[str, datetime]:
+    """Keep researched event ends; time-box every otherwise open subscription."""
+    if ends_at is not None:
+        return end_condition, expires_at or ends_at
+    hard_stop = now + _OPEN_ENDED_LIFESPAN
+    bounded_condition = end_condition.strip()
+    if not bounded_condition:
+        bounded_condition = _OPEN_ENDED_END_CONDITION
+    elif "14 days" not in bounded_condition.casefold():
+        bounded_condition = f"{bounded_condition}; hard stop after 14 days unless renewed"
+    return (
+        bounded_condition,
+        min(expires_at, hard_stop) if expires_at is not None else hard_stop,
+    )
+
+
 async def _ensure_pulse(topic_key: str, *, interval_seconds: int, now: datetime) -> None:
     """Seed the recurring heartbeat for a topic if it has none yet (idempotent — a live
     pulse is never reset). Called from both provisioning and the reconcile self-heal."""
@@ -1027,7 +1066,11 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
     request = (request or "").strip()
     if not request:
         return {"ok": False, "message": "Tell me what you want me to keep you posted on."}
-
+    # No wording gate here. The one-time-vs-ongoing judgement belongs to the model
+    # that has the whole conversation; a regex over `request` could only see the
+    # words it was given, and refused "how's the World Cup going, keep me in the
+    # loop" while accepting "track down my order". The tool description carries
+    # the rule, and every tracker stays time-boxed and cancellable below.
     now = datetime.now(UTC)
     models = get_model_provider()
 
@@ -1053,6 +1096,12 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
 
     topic = await store.get_tracked_topic(topic_key)
     if topic is None:
+        end_condition, expires_at = _bounded_open_lifecycle(
+            now=now,
+            ends_at=(research.ends_at if research else None),
+            expires_at=(research.expires_at if research else None),
+            end_condition=(research.end_condition if research else ""),
+        )
         topic = TrackedTopic(
             topic_key=topic_key,
             title=(research.title if research else request[:120]),
@@ -1061,10 +1110,10 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
             # sanitize the raw request so the fetch searches the subject, not the whole
             # "keep me posted on …" sentence; reconcile later replaces it from research.
             research_query=(research.research_query if research else clean_topic_descriptor(request)),
-            end_condition=(research.end_condition if research else ""),
+            end_condition=end_condition,
             starts_at=(research.starts_at if research else None),
             ends_at=(research.ends_at if research else None),
-            expires_at=(research.expires_at if research else now + _FALLBACK_LIFESPAN),
+            expires_at=expires_at,
             timezone=(research.timezone if research else "UTC"),
             country=(research.country if research else ""),
             language=(research.language if research else ""),

@@ -186,6 +186,31 @@ def _anthropic_strict_schema(node: Any) -> Any:
         return [_anthropic_strict_schema(item) for item in node]
     return node
 
+
+def _gemini_json_schema(node: Any) -> Any:
+    """Keep Pydantic validation while avoiding Gemini decoder state explosion."""
+    if isinstance(node, dict):
+        return {
+            key: _gemini_json_schema(value)
+            for key, value in node.items()
+            if key not in {
+                "title",
+                "description",
+                "minLength",
+                "maxLength",
+                "minItems",
+                "maxItems",
+                "minimum",
+                "maximum",
+                "exclusiveMinimum",
+                "exclusiveMaximum",
+                "multipleOf",
+            }
+        }
+    if isinstance(node, list):
+        return [_gemini_json_schema(item) for item in node]
+    return node
+
 _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0           # Anthropic backoff: 1s, 2s, 4s
 _GEMINI_BASE_DELAY_S = 5.0    # Gemini backoff: 5s, 10s, 20s — background tasks, 503s need time to clear
@@ -671,7 +696,11 @@ class ModelProvider:
             config_kwargs["system_instruction"] = system
         if response_model is not None:
             config_kwargs["response_mime_type"] = "application/json"
-            config_kwargs["response_schema"] = response_model
+            # response_schema accepts Google's narrower OpenAPI subset and rejects
+            # Pydantic's additionalProperties. response_json_schema accepts JSON Schema.
+            config_kwargs["response_json_schema"] = _gemini_json_schema(
+                response_model.model_json_schema()
+            )
         config = types.GenerateContentConfig(**config_kwargs)
 
         # Images ride before the prompt as inline parts (mirrors the Anthropic

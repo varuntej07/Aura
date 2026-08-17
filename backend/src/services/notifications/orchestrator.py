@@ -2,7 +2,7 @@
 
 ``submit(proposal)`` is the ONLY way anything in Aura sends a push, and
 ``_deliver`` is the ONLY place ``notification_service.send_notification`` is
-called. Two lanes:
+called. The producer's requested lane is resolved against a central allowlist:
 
   * COMMITTED → sent inline now (freshness + dedup only; never held/arbitrated),
     then recorded to the budget so a later proactive push spaces away from it.
@@ -26,10 +26,12 @@ from datetime import UTC, datetime, timedelta
 from ...lib.logger import logger
 from .. import notification_budget, notification_ledger
 from ..firebase import admin_firestore
+from ..notification_ledger import NotificationDecision
 from ..notification_service import NotificationResult
 from ..timezone_utils import TimezoneResolutionError, localize
 from . import delivery_router, post_send, queue_store, tap_gate
 from .proposal import (
+    NOTIFICATION_POLICY_VERSION,
     REASON_ACTIVE_TRACKER,
     REASON_BUDGET,
     REASON_DUPLICATE,
@@ -50,6 +52,7 @@ from .proposal import (
     ProposalKind,
     is_stale,
     proposal_sort_key,
+    resolve_delivery_kind,
 )
 
 # Smart timing applies only to the lowest-priority proactive content (news, prio 10):
@@ -80,9 +83,11 @@ ACTIVE_TRACKER_HOLD_WINDOW = timedelta(minutes=90)
 async def submit(
     proposal: NotificationProposal, *, now: datetime | None = None
 ) -> OrchestratorDecision:
-    """Route a proposal. Committed sends inline; proactive enqueues for the drain."""
+    """Route a proposal using the funnel's authoritative interruption policy."""
     now = now or datetime.now(UTC)
-    if proposal.kind == ProposalKind.COMMITTED:
+    effective_kind, lane_reason = resolve_delivery_kind(proposal)
+    _attach_policy(proposal, effective_kind, lane_reason)
+    if effective_kind == ProposalKind.COMMITTED:
         return await _send_committed(proposal, now)
 
     await queue_store.enqueue(proposal, now=now)
@@ -90,6 +95,8 @@ async def submit(
         "user_id": proposal.user_id,
         "source": proposal.source,
         "priority": proposal.effective_priority,
+        "declared_kind": proposal.kind.value,
+        "lane_reason": lane_reason,
     })
     return OrchestratorDecision(Disposition.HOLD, "queued")
 
@@ -115,6 +122,7 @@ async def drain_user_queue(
     # Stage 1: freshness + cross-agent dedup. Both are terminal drops.
     survivors: list[tuple[str, NotificationProposal]] = []
     for pid, proposal in pending:
+        _attach_policy(proposal, ProposalKind.PROACTIVE, "queued_proactive")
         if is_stale(proposal, now):
             await queue_store.mark(user_id, pid, queue_store.STATUS_DROPPED, now=now)
             _log_drop(proposal, REASON_STALE)
@@ -130,6 +138,10 @@ async def drain_user_queue(
             )
             continue
         survivors.append((pid, proposal))
+        _policy_checks(proposal).update({
+            "freshness": "passed",
+            "recent_dedup": "passed",
+        })
 
     if not survivors:
         return None
@@ -165,10 +177,9 @@ async def drain_user_queue(
         })
         return OrchestratorDecision(Disposition.HOLD, REASON_PRESENCE)
 
-    # Stage 2.7: hold everything ELSE while a tracked event (a live match) is actively
-    # firing for this user. Tracking itself is COMMITTED (never reaches this queue), so
-    # this only holds thread/icebreaker/news — reserving attention for the event the user
-    # explicitly asked to be kept posted on instead of diluting it with unrelated content.
+    # Stage 2.7: hold the batch while a recently accepted tracker update is actively
+    # occupying attention. Trackers now come through this same queue, so the topic
+    # itself cannot interrupt again inside the active-event window.
     # A HOLD, so nothing is lost — it re-competes once the tracker goes quiet.
     if await _has_active_tracker(user_id, now):
         await _hold_all(user_id, survivors, now)
@@ -181,6 +192,15 @@ async def drain_user_queue(
     survivors.sort(key=lambda pair: proposal_sort_key(pair[1]), reverse=True)
     winner_pid, winner = survivors[0]
     losers = survivors[1:]
+    winner.decision.local_hour = local_now.hour
+    winner.decision.day_of_week = local_now.weekday()
+    _policy_checks(winner).update({
+        "timezone": "resolved",
+        "quiet_hours": "passed",
+        "presence": "passed",
+        "active_tracker": "passed",
+        "arbitration": f"won_of_{len(survivors)}",
+    })
 
     # Stage 3.3: smart timing. Defer a low-priority content winner (news) when this is a
     # weak engagement hour for THIS user, so it lands when they actually open the app. A
@@ -197,6 +217,10 @@ async def drain_user_queue(
             "user_id": user_id, "source": winner.source, "held": len(survivors),
         })
         return OrchestratorDecision(Disposition.HOLD, REASON_OFF_PEAK)
+    _policy_checks(winner)["smart_timing"] = (
+        "preferred_slot" if winner.effective_priority <= SMART_TIMING_MAX_PRIORITY
+        else "not_required"
+    )
 
     # Stage 3.4: privacy revalidation happens after queue delay and after framing,
     # immediately before any channel is selected. The current thread subject and
@@ -220,12 +244,17 @@ async def drain_user_queue(
                 "sensitivity_categories": sensitivity.categories,
             })
             return OrchestratorDecision(Disposition.DROP, REASON_SENSITIVE)
+        _policy_checks(winner)["sensitivity"] = "passed"
+    else:
+        _policy_checks(winner)["sensitivity"] = "not_required"
 
     # Stage 3.5: tap-worthiness gate on the winner (balanced bar). A low-value push is
     # worse than silence, so a rejected winner is DROPPED and the losers are held for a
     # later — possibly stronger — window. Judged only on the arbitration winner (one LLM
-    # call), and fails OPEN so a judge outage never silences the funnel.
+    # call). It fails CLOSED: an optional interruption whose value cannot be
+    # established is dropped rather than sent on infrastructure uncertainty.
     worthy, tap_reason = await tap_gate.passes(winner)
+    _policy_checks(winner)["tap_value"] = tap_reason
     if not worthy:
         await queue_store.mark(user_id, winner_pid, queue_store.STATUS_DROPPED, now=now)
         _log_drop(winner, f"{REASON_TAP_GATE}:{tap_reason}")
@@ -239,7 +268,7 @@ async def drain_user_queue(
         })
         return OrchestratorDecision(Disposition.DROP, REASON_TAP_GATE)
 
-    # Stage 4: budget slot (fail-open; effectively unlimited during beta).
+    # Stage 4: adaptive budget slot. An unavailable proactive counter fails closed.
     claim = await notification_budget.try_claim_proactive_slot(
         user_id,
         source=winner.source,
@@ -253,11 +282,14 @@ async def drain_user_queue(
             "user_id": user_id, "reason": claim.reason, "held": len(survivors),
         })
         return OrchestratorDecision(Disposition.HOLD, REASON_BUDGET)
+    _policy_checks(winner)["budget"] = claim.reason or "passed"
 
     # Stage 5: atomic cross-agent dedup claim (see _claim_dedup — replaces a
     # read-then-check race that let two overlapping drains both send the same
     # dedup_key), then deliver the winner and hold the losers.
-    if winner.dedup_key and not await _claim_dedup(winner.dedup_key, user_id):
+    if winner.dedup_key and not await _claim_dedup(
+        winner.dedup_key, user_id, fail_closed=True
+    ):
         await queue_store.mark(user_id, winner_pid, queue_store.STATUS_DROPPED, now=now)
         _log_drop(winner, REASON_DUPLICATE)
         await _dispatch_candidate_outcome(
@@ -268,6 +300,8 @@ async def drain_user_queue(
             "user_id": user_id, "source": winner.source, "held_losers": len(losers),
         })
         return OrchestratorDecision(Disposition.DROP, REASON_DUPLICATE)
+    _policy_checks(winner)["atomic_dedup"] = "passed"
+    _policy_checks(winner)["delivery_attempt"] = "all_required_checks_passed"
 
     try:
         result = await _deliver(winner)
@@ -331,6 +365,15 @@ async def _send_committed(
     if proposal.dedup_key and not await _claim_dedup(proposal.dedup_key, proposal.user_id):
         _log_drop(proposal, REASON_DUPLICATE)
         return OrchestratorDecision(Disposition.DROP, REASON_DUPLICATE)
+
+    _policy_checks(proposal).update({
+        "freshness": "passed",
+        "atomic_dedup": "passed",
+        "quiet_hours": "not_required",
+        "tap_value": "not_required",
+        "budget": "not_required",
+        "delivery_attempt": "committed_authority_verified",
+    })
 
     try:
         result = await _deliver(proposal)
@@ -424,7 +467,9 @@ async def _has_active_tracker(user_id: str, now: datetime) -> bool:
         return False
 
 
-async def _claim_dedup(dedup_key: str, user_id: str) -> bool:
+async def _claim_dedup(
+    dedup_key: str, user_id: str, *, fail_closed: bool = False
+) -> bool:
     """Atomic cross-agent dedup claim. Replaces a read-then-check race
     (``recent_dedup_keys`` read, then a later ``_deliver``) that let two
     concurrent sends of the same ``dedup_key`` both pass the check before
@@ -439,10 +484,35 @@ async def _claim_dedup(dedup_key: str, user_id: str) -> bool:
             f"notif_dedup:{dedup_key}", scope=user_id, ttl=DEDUP_WINDOW,
         )
     except Exception as exc:
-        logger.warn("orchestrator: dedup claim failed (fail-open)", {
-            "user_id": user_id, "dedup_key": dedup_key, "error": str(exc),
+        mode = "closed" if fail_closed else "open"
+        logger.warn(f"orchestrator: dedup claim failed (fail-{mode})", {
+            "user_id": user_id,
+            "dedup_key": dedup_key,
+            "error": str(exc),
         })
-        return True
+        return not fail_closed
+
+
+def _attach_policy(
+    proposal: NotificationProposal,
+    effective_kind: ProposalKind,
+    lane_reason: str,
+) -> None:
+    """Attach the policy envelope that the delivery ledger persists."""
+    decision = proposal.decision or NotificationDecision()
+    proposal.decision = decision
+    decision.policy_version = NOTIFICATION_POLICY_VERSION
+    decision.declared_kind = proposal.kind.value
+    decision.effective_kind = effective_kind.value
+    if not decision.lane_reason or lane_reason != "queued_proactive":
+        decision.lane_reason = lane_reason
+    decision.policy_checks = dict(decision.policy_checks)
+
+
+def _policy_checks(proposal: NotificationProposal) -> dict[str, str]:
+    if proposal.decision is None:
+        _attach_policy(proposal, ProposalKind.PROACTIVE, "queued_proactive")
+    return proposal.decision.policy_checks
 
 
 async def _release_dedup(dedup_key: str, user_id: str) -> None:

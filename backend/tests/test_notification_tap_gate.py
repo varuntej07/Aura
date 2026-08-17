@@ -18,6 +18,11 @@ def _proposal() -> NotificationProposal:
         dedup_key="thread-1",
         title="A thought about your project",
         body="Want to pick this back up?",
+        data={
+            "opening_chat_message": (
+                "I pulled together the unresolved decision and three concrete options."
+            ),
+        },
     )
 
 
@@ -41,7 +46,7 @@ async def test_passes_uses_background_gate_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_passes_fails_open_when_background_gate_times_out(monkeypatch):
+async def test_passes_fails_closed_when_background_gate_times_out(monkeypatch):
     provider = MagicMock()
     provider.cheap = AsyncMock(return_value='{"worthy": false, "reason": "generic"}')
 
@@ -52,4 +57,4 @@ async def test_passes_fails_open_when_background_gate_times_out(monkeypatch):
     monkeypatch.setattr(tap_gate, "get_model_provider", lambda: provider)
     monkeypatch.setattr(tap_gate.asyncio, "wait_for", _wait_for)
 
-    assert await tap_gate.passes(_proposal()) == (True, "gate_unavailable")
+    assert await tap_gate.passes(_proposal()) == (False, "gate_unavailable")

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -47,6 +49,18 @@ from .point_tag import PointTarget, publish_element_point
 from .screen_frames import ScreenFrame, ScreenFrameStore
 
 _TERMINAL_STATES = {GuideTaskStatus.COMPLETED, GuideTaskStatus.CANCELLED}
+_CURRENT_APP = "the current app"
+_CURRENT_APP_ALIASES = frozenset(
+    {
+        "current app",
+        "current application",
+        "the current app",
+        "the current application",
+        "unknown",
+        "unknown app",
+        "unknown application",
+    }
+)
 
 
 def _latest_user_text(chat_ctx: lk_llm.ChatContext) -> str:
@@ -71,6 +85,25 @@ def _kernel_frame(frame: ScreenFrame) -> GuideFrameInput:
         geometry_revision=frame.geometry_revision,
         age_seconds=frame.age_seconds,
         metadata=frame.semantic_metadata,
+    )
+
+
+def _spoken_target_app(target_app: str) -> str:
+    normalized = " ".join(target_app.replace("_", " ").split())
+    canonical = re.sub(r"[^a-z0-9]+", " ", normalized.casefold()).strip()
+    if not canonical or canonical in _CURRENT_APP_ALIASES:
+        return _CURRENT_APP
+    return normalized
+
+
+def _resolved_target_app(target_app: str, frame: ScreenFrame) -> str:
+    normalized = _spoken_target_app(target_app)
+    if normalized != _CURRENT_APP:
+        return normalized
+    return (
+        frame.active_process.strip()
+        or frame.attributes.get("active_window_title", "").strip()
+        or "unavailable foreground application"
     )
 
 
@@ -367,7 +400,7 @@ class GuideTaskRuntime:
                     "target application is not active",
                 )
                 return (
-                    f"Bring {task.target_app} back, then I'll continue."
+                    f"Bring {_spoken_target_app(task.target_app)} back, then I'll continue."
                     if transcript
                     else ""
                 )
@@ -579,7 +612,7 @@ class GuideTaskRuntime:
             task_profile_id=task_shape.task_profile_id,
             task_profile_version=task_shape.task_profile_version,
             goal=plan.goal,
-            target_app=task_shape.target_app,
+            target_app=_resolved_target_app(task_shape.target_app, frame),
             constraints=task_shape.constraints,
             acceptance_criteria=task_shape.acceptance_criteria,
             steps=steps,
@@ -692,7 +725,9 @@ class GuideTaskRuntime:
 
         def _reduce(updated: GuideTask) -> GuideTask:
             updated.goal = plan.goal
-            updated.target_app = self._profile.target_app_for(plan)
+            updated.target_app = _resolved_target_app(
+                self._profile.target_app_for(plan), frame
+            )
             updated.constraints = self._profile.constraints_for(plan)
             updated.acceptance_criteria = self._profile.acceptance_criteria_for(plan)
             for step in updated.steps:
@@ -727,12 +762,26 @@ class GuideTaskRuntime:
         return self._task
 
     def _frame_authorized(self, frame: ScreenFrame, task: GuideTask) -> bool:
-        return self._kernel.frame_authorized(
-            _kernel_frame(frame),
+        kernel_frame = _kernel_frame(frame)
+        authorization = {
+            "user_id": self._user_id,
+            "lease_owner": self._lease_owner,
+            "guide_session_id": self._guide_session_id,
+        }
+        if self._kernel.frame_authorized(
+            kernel_frame,
             task,
-            user_id=self._user_id,
-            lease_owner=self._lease_owner,
-            guide_session_id=self._guide_session_id,
+            **authorization,
+        ):
+            return True
+        active_window_title = frame.attributes.get("active_window_title", "").strip()
+        return bool(
+            active_window_title
+            and self._kernel.frame_authorized(
+                replace(kernel_frame, active_process=active_window_title),
+                task,
+                **authorization,
+            )
         )
 
     async def _apply_decision(

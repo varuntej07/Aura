@@ -502,6 +502,48 @@ class FirestoreResearchEngine:
                         {"stage_id": lease.stage_id, "stage_kind": lease.stage_kind,
                          "error": str(exc), "error_code": F.FAIL_PROVIDER_UNAVAILABLE},
                     )
+                # One unreadable page must not discard evidence from the other fan-out
+                # children. Preserve the normal retry, then close an exhausted child as
+                # a named source gap so the coordinator can still reach its join.
+                if (
+                    lease.stage_kind == F.STAGE_READ_SOURCE
+                    and lease.attempt >= store.STAGE_ATTEMPT_CAP
+                ):
+                    source_id = str(lease.payload.get("source_id") or lease.ordinal)
+                    error_code = (
+                        F.FAIL_WALL_CLOCK_EXPIRED
+                        if timed_out
+                        else F.FAIL_PROVIDER_UNAVAILABLE
+                    )
+                    result = StageResult(
+                        kind=StageResultKind.DONE,
+                        document_updates={
+                            F.SOURCES_SUBCOLLECTION: {
+                                source_id: {
+                                    "state": "failed",
+                                    "gap_reason": error_code,
+                                }
+                            }
+                        },
+                        stage_outputs={
+                            "source_id": source_id,
+                            "state": "failed",
+                            "gap_reason": error_code,
+                        },
+                        actuals=dict(ctx.spent),
+                        cost_microusd=ctx.spent_cost_microusd,
+                        cost_known=ctx.spent_cost_known,
+                    )
+                    child = await store.complete_child(lease, result)
+                    await _settle(
+                        int(result.cost_microusd) if result.cost_known else None
+                    )
+                    await self._deliver(uid, child.created_job_ids)
+                    return StepOutcome(
+                        disposition=child.disposition,
+                        stage_kind=lease.stage_kind,
+                        retryable=False,
+                    )
                 # A stage that raised or timed out still spent whatever it spent before it
                 # stopped. ctx carries that running total precisely because there is no
                 # StageResult on this path, and settling at None RETAINS the estimate on

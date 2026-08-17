@@ -369,6 +369,7 @@ def test_every_current_voice_tool_has_registry_metadata():
         "track_topic",
         "draft_outbound_message",
         "present_visible_artifact",
+        "save_screen_item",
         "set_guide_mode",
         "speak_only",
         "start_research",
@@ -663,21 +664,13 @@ async def test_parallel_telemetry_records_each_call_once():
     ]
 
 
-async def test_finalized_artifact_side_effect_invalidates_speculative_generation():
-    agent = BuddyAgent(
-        user_id="u",
-        context_vars=_agent_context_vars(),
-        chat_ctx=lk_llm.ChatContext(),
-        session_id="s",
-    )
-    agent._launch_surface = VoiceSurface.DESKTOP
-    turn_context = lk_llm.ChatContext()
-    message = lk_llm.ChatMessage(role="user", content=["Give me the command"])
-
-    await agent.on_user_turn_completed(turn_context, message)
-
-    assert len(turn_context.items) == 1
-    assert "finalized_side_effect" in turn_context.items[0].text_content
+# test_finalized_artifact_side_effect_invalidates_speculative_generation was removed
+# with the mechanism it covered. It asserted that the phrase "Give me the command"
+# was recognized as an artifact request and mutated the turn context to discard the
+# speculative reply. Nothing infers an artifact request from wording any more:
+# opening a card is the model's call via present_visible_artifact, and an open
+# ArtifactSession arms every turn after that. finalized_side_effect still exists and
+# is still reached, now only from the Guide CLARIFY/STOP_GUIDE routes.
 
 
 async def test_tool_and_policy_telemetry_survive_native_tool_calling(monkeypatch):

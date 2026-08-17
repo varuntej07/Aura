@@ -341,6 +341,20 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             required=("kind", "title", "content"),
         ),
         _tool(
+            # Saves the screen the user is looking at. Reached through the model
+            # like any other tool: this used to be a finalized-speech grammar that
+            # fired persistence without a schema, which meant "don't screenshot
+            # that" and "how do screenshots work" both had to be excluded by hand.
+            # No fresh frame is required because the capture path saves the most
+            # recent retained frame (screen_frames.latest_for_save).
+            "save_screen_item",
+            Capability.SCREEN_SAVE,
+            ToolEffect.WRITE,
+            namespace="desktop.screen",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+        ),
+        _tool(
             # Requests the desktop arm/disarm Guide Mode. No frame needed: arming
             # only asks; the desktop stays the sole arming authority (it pins the
             # cursor's monitor and checks the signed-in session). enable is a bool,
