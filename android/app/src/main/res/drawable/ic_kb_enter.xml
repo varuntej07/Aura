@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stable keyboard-return artwork; runtime tint follows the emphasized enter-key text token. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="@color/buddy_kb_key_text"
+        android:pathData="M19,7V11H7.83L11.41,7.41L10,6L4,12L10,18L11.41,16.59L7.83,13H21V7Z" />
+</vector>

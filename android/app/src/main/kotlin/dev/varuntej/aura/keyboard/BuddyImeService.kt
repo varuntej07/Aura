@@ -11,12 +11,16 @@ import android.content.res.ColorStateList
 import android.net.Uri
 import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.os.Bundle
 import android.os.SystemClock
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
@@ -34,26 +38,37 @@ import dev.varuntej.aura.R
 import dev.varuntej.aura.keyboard.input.BackspaceTouchHandler
 import dev.varuntej.aura.keyboard.input.DoubleSpacePeriod
 import dev.varuntej.aura.keyboard.input.KeyPopupOptions
+import dev.varuntej.aura.keyboard.input.KeyPreview
 import dev.varuntej.aura.keyboard.input.KeyTouchHandler
 import dev.varuntej.aura.keyboard.input.PunctuationSpacer
 import dev.varuntej.aura.keyboard.input.SentenceCapitalizer
+import dev.varuntej.aura.keyboard.input.ShiftMode
 import dev.varuntej.aura.keyboard.input.ShiftState
-import dev.varuntej.aura.keyboard.prediction.Autocorrector
+import dev.varuntej.aura.keyboard.performance.KeyboardPerformanceTrace
 import dev.varuntej.aura.keyboard.prediction.BaseDictionary
+import dev.varuntej.aura.keyboard.prediction.CachedAutocorrect
+import dev.varuntej.aura.keyboard.prediction.CachedAutocorrectPolicy
+import dev.varuntej.aura.keyboard.prediction.LexicalPredictionEngine
+import dev.varuntej.aura.keyboard.prediction.KeyboardPersonalizationRepository
 import dev.varuntej.aura.keyboard.prediction.NextWordPredictor
+import dev.varuntej.aura.keyboard.prediction.OnDeviceReranker
 import dev.varuntej.aura.keyboard.prediction.PersonalDictionary
-import dev.varuntej.aura.keyboard.prediction.SpellChecker
-import dev.varuntej.aura.keyboard.prediction.SqlitePersonalDictionary
+import dev.varuntej.aura.keyboard.prediction.PersonalizationEvent
+import dev.varuntej.aura.keyboard.prediction.PredictionCoordinator
+import dev.varuntej.aura.keyboard.prediction.PredictionPayload
+import dev.varuntej.aura.keyboard.prediction.PredictionRequest
+import dev.varuntej.aura.keyboard.prediction.PredictionStage
 import dev.varuntej.aura.keyboard.prediction.Suggestion
-import dev.varuntej.aura.keyboard.prediction.SuggestionRanker
+import dev.varuntej.aura.keyboard.prediction.SuggestionCommitPolicy
 import dev.varuntej.aura.keyboard.prediction.SuggestionSource
 import dev.varuntej.aura.keyboard.prediction.SystemUserDictionary
-import dev.varuntej.aura.keyboard.prediction.VocabHintsCache
 import dev.varuntej.aura.keyboard.prediction.WordComposer
-import dev.varuntej.aura.keyboard.prediction.WordSource
+import dev.varuntej.aura.keyboard.settings.KeyboardRuntimeDiagnostics
+import dev.varuntej.aura.keyboard.settings.KeyboardSettingsActivity
+import dev.varuntej.aura.keyboard.settings.KeyboardSettingsSnapshot
+import dev.varuntej.aura.keyboard.settings.KeyboardSettingsStore
+import dev.varuntej.aura.keyboard.settings.KeyboardThemeContext
 import org.json.JSONObject
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicLong
 
 // Falls back to prod when the app hasn't bridged a base URL yet (fresh install, or the keyboard
 // used before the app's first authenticated launch). Matches the prod apiBaseUrl in
@@ -74,16 +89,19 @@ private const val MAX_VOICE_CAPTION_LINES = 4
 // Two shift taps within this window latch caps lock.
 private const val SHIFT_DOUBLE_TAP_WINDOW_MS = 300L
 
-// Prediction debounce: the heavy off-thread prediction only runs this long after the last
-// keystroke, so a fast typist's intermediate keys never spend any work.
-private const val PREDICTION_DEBOUNCE_MS = 30L
-
-// Spell-check defer: a squiggle + corrections (the expensive, two-edit-capable pass) only runs
-// this much longer after the debounce, so it surfaces once typing pauses instead of mid-word.
-private const val SPELLCHECK_DEFER_MS = 170L
+// Aura tuning points. Lexical work is short-debounced and conflated; the separate correction /
+// neural pass waits inside the user-requested 150-250 ms measurement window.
+private const val LEXICAL_DEBOUNCE_MS = 24L
+private const val DEFERRED_PREDICTION_MS = 180L
+private const val NO_PERSONALIZATION_GENERATION = -1L
 
 // Two spaces within this window (between words) become ". ".
 private const val DOUBLE_SPACE_WINDOW_MS = 500L
+
+// A short local window for recognizing backspace-to-edit as feedback on the just-committed word.
+private const val COMMIT_EDIT_GUARD_MS = 3_000L
+private const val PERFORMANCE_SNAPSHOT_COMMAND =
+    "dev.varuntej.aura.keyboard.PERFORMANCE_SNAPSHOT"
 
 // How much of a long clipboard entry the paste chip previews.
 private const val CLIPBOARD_PREVIEW_CHARS = 30
@@ -125,6 +143,25 @@ class BuddyImeService : InputMethodService() {
     // The enter key's label, adapted to the field's IME action (Send / Search / Go ...).
     private var enterKeyLabel = "↵"
 
+    @Volatile
+    private var keyboardSettings = KeyboardSettingsSnapshot()
+    private lateinit var keyboardUiContext: Context
+    private var appliedKeyboardNightMode = 0
+    private var keyPreview: KeyPreview? = null
+    private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    private val suggestionsAllowed: Boolean
+        get() = fieldProfile.predictionsAllowed && keyboardSettings.suggestions
+    private val autocorrectAllowed: Boolean
+        get() = fieldProfile.autocorrectAllowed && keyboardSettings.autocorrect
+    private val learningAllowed: Boolean
+        get() = fieldProfile.learningAllowed && keyboardSettings.learnNewWords
+    private val predictionWorkAllowed: Boolean
+        get() = fieldProfile.predictionsAllowed &&
+            (keyboardSettings.suggestions || keyboardSettings.autocorrect)
+    private val typingIntelligenceAllowed: Boolean
+        get() = fieldProfile.predictionsAllowed &&
+            (predictionWorkAllowed || learningAllowed)
+
     private lateinit var typingStack: LinearLayout
     private lateinit var collapsedBar: LinearLayout
     private lateinit var keysContainer: LinearLayout
@@ -143,6 +180,7 @@ class BuddyImeService : InputMethodService() {
     private lateinit var wbSubRow: HorizontalScrollView
     private lateinit var wbSub: LinearLayout
     private lateinit var wbContext: TextView
+    private lateinit var wbPreview: ScrollView
     private lateinit var wbCanvas: LinearLayout
     // The Regenerate + green "Use this" row, shown only while a draft fills the preview box.
     private lateinit var useThisRow: LinearLayout
@@ -177,6 +215,7 @@ class BuddyImeService : InputMethodService() {
     private val letterKeyViews = mutableListOf<Pair<TextView, String>>()
     // The shift key view, so its glyph/highlight can reflect SHIFTED vs CAPS_LOCK without a rebuild.
     private var shiftKeyView: TextView? = null
+    private var lastShiftKeyMode: ShiftMode? = null
 
     // The upper/lower case the 26 letter keys are currently rendered in, so refreshLetterCase can
     // skip relabeling every key when the case has not actually changed (the common per-keystroke
@@ -203,30 +242,84 @@ class BuddyImeService : InputMethodService() {
     // suggestion strip occupy the same center slot, one visible at a time. The strip's chips
     // are built once per focus and updated by setText each keystroke (no per-keystroke view
     // rebuild). currentSuggestions is the last rendered set, re-applied when the bar rebuilds.
-    private lateinit var barActionView: TextView
+    private lateinit var idleToolbar: LinearLayout
     private lateinit var suggestionStrip: LinearLayout
     private val suggestionChips = mutableListOf<TextView>()
+    private val suggestionChipVisuals = mutableListOf<SuggestionChipVisual?>()
     private var currentSuggestions: List<Suggestion> = emptyList()
+    private enum class SuggestionStripMode { EMPTY, SUGGESTIONS, UNDO, CLIPBOARD }
+    private var suggestionStripMode = SuggestionStripMode.EMPTY
+    private var renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
+    private data class SuggestionChipVisual(val text: String, val visibility: Int, val accent: Boolean)
 
-    // The user's locally-learned words (SQLite-backed, in-memory hot path). Built lazily on the
-    // first prediction-allowed field so a numeric-only session never opens the DB. Its first touch
-    // is forced on the main thread in onStartInputView; reads then come from the background
-    // prediction thread (the cache is a ConcurrentHashMap), so the lazy is thread-safe.
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isDestroyed = false
+    private val personalizationGenerationListener: (Long) -> Unit = { generation ->
+        mainHandler.post {
+            if (!isDestroyed) onPersonalizationGenerationChanged(generation)
+        }
+    }
+
+    // The user's encrypted locally-learned state, exposed through immutable in-memory snapshots.
+    // Built lazily on the first eligible field so a numeric-only session never opens the store.
+    // Its first touch is forced on the main thread in onStartInputView; reads then come from the
+    // background
+    // prediction thread, so the lazy is thread-safe. A new snapshot generation invalidates any
+    // suggestion or autocorrect decision computed from the previous learned state.
     private val personalDictionaryLazy = lazy<PersonalDictionary> {
-        SqlitePersonalDictionary(applicationContext)
+        KeyboardPersonalizationRepository.addGenerationListener(personalizationGenerationListener)
+        KeyboardPersonalizationRepository.dictionary(applicationContext)
     }
     private val personalDictionary: PersonalDictionary by personalDictionaryLazy
 
-    // Prediction runs off the main thread so key animation never waits. Each updatePredictions bumps
-    // predictionToken; an off-thread result is dropped the moment a newer keystroke (or a commit /
-    // reset) supersedes it (last-write-wins debounce).
-    private val predictionExecutor = Executors.newSingleThreadExecutor()
-    private val predictionToken = AtomicLong(0)
-    private val mainHandler = Handler(Looper.getMainLooper())
+    // One process-lifetime lexical engine and one conflated worker. Publishing a request from the
+    // key path is constant-time; no Handler Runnable or executor job accumulates per keystroke.
+    private val lexicalEngineLazy = lazy {
+        LexicalPredictionEngine(
+            personalDictionary,
+            OnDeviceReranker(applicationContext),
+            personalizationEnabled = { keyboardSettings.personalizedSuggestions },
+            neuralRerankingEnabled = {
+                keyboardSettings.suggestions && keyboardSettings.personalizedSuggestions
+            },
+        )
+    }
+    private val predictionCoordinatorLazy = lazy {
+        PredictionCoordinator(
+            lexicalDelayMs = LEXICAL_DEBOUNCE_MS,
+            deferredDelayMs = DEFERRED_PREDICTION_MS,
+            lexicalWork = lexicalEngineLazy.value::lexical,
+            deferredWork = lexicalEngineLazy.value::deferred,
+            deliver = { generation, stage, payload ->
+                mainHandler.post { applyPrediction(generation, stage, payload) }
+            },
+            observer = KeyboardPerformanceTrace.predictionObserver,
+            workerCleanup = { lexicalEngineLazy.value.close() },
+        )
+    }
+    private val predictionCoordinator: PredictionCoordinator<PredictionRequest, PredictionPayload>
+        by predictionCoordinatorLazy
+    private var activePredictionGeneration = -1L
+    private data class CachedAutocorrectState(
+        val generation: Long,
+        val personalizationGeneration: Long,
+        val decision: CachedAutocorrect,
+    )
+    private var cachedAutocorrect: CachedAutocorrectState? = null
 
     // The last word committed by a separator or chosen from the strip, so next-word prediction
     // after a space can offer likely continuations. Cleared on a fresh field / new sentence.
     private var lastCommittedWord: String = ""
+    private val committedWordHistory = ArrayDeque<String>(2)
+    private var manualCorrectionOrigin: String? = null
+    private data class PendingCommittedWord(
+        val rawWord: String,
+        val finalWord: String,
+        val separator: String,
+        val committedAtMillis: Long,
+        val autocorrected: Boolean,
+    )
+    private var pendingCommittedWord: PendingCommittedWord? = null
 
     // The time of the last committed space, for the double-space-to-period window.
     private var lastSpaceCommitAt = 0L
@@ -235,27 +328,34 @@ class BuddyImeService : InputMethodService() {
     // strip chip until the next keypress. Null when no clipboard chip is active.
     private var clipboardChip: String? = null
 
-    // Spell check / autocorrect read the union of all on-device dictionaries: a word the user
-    // knows (base, learned, the system dictionary, or a vocab hint) is never flagged or corrected.
-    private val wordSource = object : WordSource {
-        override fun isKnown(word: String): Boolean =
-            BaseDictionary.contains(word) ||
-                personalDictionary.contains(word) ||
-                SystemUserDictionary.contains(word) ||
-                VocabHintsCache.contains(word)
-        override fun frequencyOf(word: String): Int = BaseDictionary.frequencyOf(word)
-    }
-    private val spellChecker = SpellChecker(wordSource)
-    private val autocorrector = Autocorrector(spellChecker)
-
     // The last autocorrect, kept so the strip can offer a one-tap undo until the user types on.
     private data class PendingUndo(val original: String, val corrected: String, val separator: String)
+    private data class FinalizedWord(
+        val typedWord: String,
+        val rawWord: String,
+        val finalWord: String,
+        val autocorrect: CachedAutocorrect?,
+        val manualCorrectionOrigin: String?,
+    )
     private var pendingUndo: PendingUndo? = null
 
     private val langOptions = listOf("English", "Spanish", "Hindi", "French", "German")
 
-    override fun onCreateInputView(): View {
-        val root = LayoutInflater.from(this).inflate(R.layout.buddy_keyboard_view, null)
+    override fun onCreate() {
+        super.onCreate()
+        keyboardSettings = KeyboardSettingsStore.read(this)
+        refreshKeyboardUiContext()
+        KeyboardRuntimeDiagnostics.attach(this) {
+            lexicalEngineLazy.takeIf { it.isInitialized() }?.value?.neuralDiagnostics()
+        }
+    }
+
+    override fun onCreateInputView(): View = createKeyboardInputView()
+
+    private fun createKeyboardInputView(): View {
+        keyPreview?.dismiss()
+        keyPreview = if (keyboardSettings.keyPreview) KeyPreview(keyboardUiContext) else null
+        val root = LayoutInflater.from(keyboardUiContext).inflate(R.layout.buddy_keyboard_view, null)
         typingStack = root.findViewById(R.id.typing_stack)
         collapsedBar = root.findViewById(R.id.collapsed_bar)
         keysContainer = root.findViewById(R.id.keys_container)
@@ -276,15 +376,26 @@ class BuddyImeService : InputMethodService() {
         symbolsPage = false
         fieldProfile = FieldProfile.fromEditorInfo(info)
         enterKeyLabel = enterLabelFor(info)
-        // Warm the dictionaries off the UI thread the first time a prose field is focused, and
-        // refresh the consent-gated vocab hints (read-only, at most once a day).
-        if (fieldProfile.predictionsAllowed) {
+        val latestSettings = KeyboardSettingsStore.read(this)
+        val themeChanged = latestSettings.themeMode != keyboardSettings.themeMode ||
+            KeyboardThemeContext.effectiveNightMode(this, latestSettings.themeMode) !=
+            appliedKeyboardNightMode
+        keyboardSettings = latestSettings
+        if (themeChanged) {
+            refreshKeyboardUiContext()
+            setInputView(createKeyboardInputView())
+        } else {
+            keyPreview?.dismiss()
+            keyPreview = if (keyboardSettings.keyPreview) KeyPreview(keyboardUiContext) else null
+        }
+        // Warm only local dictionaries off the UI thread the first time a prose field is focused.
+        // Cloud UserAura vocabulary is deliberately absent from automatic typing/prediction.
+        if (typingIntelligenceAllowed) {
             BaseDictionary.ensureLoaded(this)
-            SystemUserDictionary.ensureFresh(this)
-            VocabHintsCache.ensureFresh(this)
-            NextWordPredictor.ensureLoaded(this)
-            // Force the personal dictionary's first init here, on the main thread (it opens SQLite
-            // and rehydrates the cache), so the background prediction thread only ever reads it.
+            if (keyboardSettings.personalizedSuggestions) SystemUserDictionary.ensureFresh(this)
+            if (suggestionsAllowed) NextWordPredictor.ensureLoaded(this)
+            // Construction only starts the bounded personalization worker; Keystore, migration,
+            // snapshot loading, and persistence all remain off the IME thread.
             personalDictionary
         }
         // Warm the credential cache off the main thread so a later draft/voice tap reads the API
@@ -292,6 +403,11 @@ class BuddyImeService : InputMethodService() {
         // Done for every field, since the mic (voice) is available in all of them.
         KeyboardCredentialStore.warmCache(applicationContext)
         resetToTyping()
+        if (suggestionsAllowed && keyboardSettings.personalizedSuggestions) {
+            // Initialize and warm the optional ONNX session on the conflated prediction worker.
+            // A first key cancels this request immediately; typing never waits for warmup.
+            activePredictionGeneration = predictionCoordinator.submit(PredictionRequest.Warmup)
+        }
         // Seed the expected cursor position from the field's initial selection so onUpdateSelection
         // can tell our own edits from external moves without a composing region. When unknown (-1),
         // trust the first update verbatim instead.
@@ -314,6 +430,7 @@ class BuddyImeService : InputMethodService() {
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
+        keyPreview?.dismiss()
         // Drop any in-progress word buffer before the field loses focus (the letters are already
         // committed to the field, so nothing is lost).
         finishComposing()
@@ -321,6 +438,16 @@ class BuddyImeService : InputMethodService() {
         voiceController?.stop()
         teardownVoiceStage()
         super.onFinishInputView(finishingInput)
+    }
+
+    override fun onAppPrivateCommand(action: String?, data: Bundle?) {
+        if (action == PERFORMANCE_SNAPSHOT_COMMAND) {
+            KeyboardPerformanceTrace.captureRuntimeSnapshot(
+                lexicalEngineLazy.takeIf { it.isInitialized() }?.value?.neuralDiagnostics(),
+            )
+            return
+        }
+        super.onAppPrivateCommand(action, data)
     }
 
     /**
@@ -349,6 +476,15 @@ class BuddyImeService : InputMethodService() {
             return
         }
         if (!composer.isComposing) {
+            if (newSelStart != expectedSelStart || newSelEnd != expectedSelEnd) {
+                if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+                activePredictionGeneration = -1L
+                cachedAutocorrect = null
+                committedWordHistory.clear()
+                pendingCommittedWord = null
+                manualCorrectionOrigin = null
+                clearSuggestions()
+            }
             expectedSelStart = newSelStart
             expectedSelEnd = newSelEnd
             return
@@ -387,17 +523,19 @@ class BuddyImeService : InputMethodService() {
     }
 
     override fun onDestroy() {
+        isDestroyed = true
+        KeyboardRuntimeDiagnostics.detach(this)
+        keyPreview?.dismiss()
         voiceController?.stop()
         voiceController = null
         teardownVoiceStage()
-        // Drop any debounced prediction runnables still queued on the main thread, then stop the
-        // off-thread prediction worker.
         mainHandler.removeCallbacksAndMessages(null)
-        predictionExecutor.shutdownNow()
-        // Release the personal dictionary's DB + I/O thread, but only if it was ever opened (a
-        // numeric/PIN-only session never touches it, and accessing the lazy here would needlessly
-        // open SQLite just to close it).
-        if (personalDictionaryLazy.isInitialized()) personalDictionary.close()
+        if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.close()
+        if (personalDictionaryLazy.isInitialized()) {
+            KeyboardPersonalizationRepository.removeGenerationListener(
+                personalizationGenerationListener,
+            )
+        }
         super.onDestroy()
     }
 
@@ -421,12 +559,24 @@ class BuddyImeService : InputMethodService() {
         keysContainer.removeAllViews()
         letterKeyViews.clear()
         shiftKeyView = null
+        lastShiftKeyMode = null
         val rows = currentRows()
         // The half-key home-row stagger only applies to the QWERTY letters page (a-l row
         // at index 1); the numeric/phone/pin pads and the symbols page are full width.
         val isLettersPage = !symbolsPage && fieldProfile.layout in QWERTY_FAMILY
         rows.forEachIndexed { index, row ->
-            keysContainer.addView(buildRow(row, indentHalfKey = isLettersPage && index == 1))
+            val heightScale = when {
+                isLettersPage && index == 2 -> 0.86f
+                isLettersPage && index == 3 -> 0.80f
+                else -> 1f
+            }
+            keysContainer.addView(
+                buildRow(
+                    row,
+                    indentHalfKey = isLettersPage && index == 1,
+                    heightScale = heightScale,
+                ),
+            )
         }
         // Fresh views were built in base (lower) case; force one relabel so an active SHIFTED /
         // CAPS_LOCK state is applied, then the per-keystroke skip in refreshLetterCase takes over.
@@ -450,43 +600,66 @@ class BuddyImeService : InputMethodService() {
             }
     }
 
-    private fun buildRow(row: List<Key>, indentHalfKey: Boolean): LinearLayout {
-        val rowLayout = LinearLayout(this).apply {
+    private fun buildRow(
+        row: List<Key>,
+        indentHalfKey: Boolean,
+        heightScale: Float,
+    ): LinearLayout {
+        val rowLayout = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
         }
         if (indentHalfKey) rowLayout.addView(keySpacer(0.5f))
-        for (key in row) rowLayout.addView(buildKey(key))
+        for (key in row) rowLayout.addView(buildKey(key, heightScale))
         if (indentHalfKey) rowLayout.addView(keySpacer(0.5f))
         return rowLayout
     }
 
     /** A zero-width, weighted gap used to indent a row (the half-key home-row stagger). */
-    private fun keySpacer(weight: Float): View = View(this).apply {
+    private fun keySpacer(weight: Float): View = View(keyboardUiContext).apply {
         layoutParams = LinearLayout.LayoutParams(0, dp(1), weight)
     }
 
-    private fun buildKey(key: Key): View {
-        val special = isSpecialKey(key)
-        val view = TextView(this).apply {
+    private fun buildKey(key: Key, heightScale: Float): View {
+        val view = TextView(keyboardUiContext).apply {
             gravity = Gravity.CENTER
-            setBackgroundResource(
-                if (special) R.drawable.buddy_kb_key_special_bg else R.drawable.buddy_kb_key_bg
+            setBackgroundResource(keyBackground(key))
+            setTextColor(
+                color(
+                    if (key is Key.Func && key.type == FuncType.ENTER) {
+                        R.color.buddy_kb_accent_text
+                    } else {
+                        R.color.buddy_kb_key_text
+                    },
+                ),
             )
-            setTextColor(color(R.color.buddy_kb_key_text))
             text = keyLabel(key)
-            // The space watermark and a worded enter label (Send / Next ...) need a
-            // smaller size than the single-glyph keys.
-            textSize = if (key is Key.Func && (key.type == FuncType.SPACE || key.type == FuncType.ENTER)) 15f else 20f
+            applyFunctionIcon(this, key)
+            contentDescription = when (key) {
+                is Key.Char -> "aura_key_char_${key.output}"
+                is Key.Func -> "aura_key_${key.type.name.lowercase()}"
+            }
+            textSize = keyTextSize(key)
             setAllCaps(false)
             includeFontPadding = false
         }
         attachKeyTouch(view, key)
-        val lp = LinearLayout.LayoutParams(0, keyHeightPx(), keyWeight(key))
-        lp.setMargins(dp(2), dp(4), dp(2), dp(4))
+        val rowKeyHeight = keyHeightPx(heightScale)
+        val viewHeight = if (
+            key is Key.Func &&
+            (key.type == FuncType.SHIFT || key.type == FuncType.BACKSPACE)
+        ) {
+            (rowKeyHeight * 0.78f).toInt().coerceAtLeast(dp(34))
+        } else {
+            rowKeyHeight
+        }
+        val lp = LinearLayout.LayoutParams(0, viewHeight, keyWeight(key))
+        val verticalMargin = if (heightScale < 1f) dp(2) else dp(3)
+        lp.setMargins(dp(1), verticalMargin, dp(1), verticalMargin)
         view.layoutParams = lp
 
         if (key is Key.Char && key.output.length == 1 && key.output[0].isLetter()) {
@@ -497,23 +670,31 @@ class BuddyImeService : InputMethodService() {
     }
 
     /**
-     * Wire a key's touch behavior. Character keys get the rich [KeyTouchHandler] (long-press
-     * accents/alternates + a simple pressed highlight, no hover bubble); function keys use a plain
-     * click, which itself drives the pressed-state drawable for the same simple highlight.
+     * Wire a key's touch behavior. Character keys get [KeyTouchHandler] for long-press alternates,
+     * pressed state, and optional shared preview/haptics. Function keys use a plain click with the
+     * same preference-controlled feedback.
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun attachKeyTouch(view: TextView, key: Key) {
         when (key) {
             is Key.Char -> view.setOnTouchListener(
                 KeyTouchHandler(
-                    context = this,
+                    context = keyboardUiContext,
                     keyView = view,
                     alternates = KeyPopupOptions.alternatesFor(key.output),
                     isShifted = { shiftState.isUpper },
                     onTap = { onKey(key) },
                     onAlternate = { alternate ->
-                        currentInputConnection?.let { commitChar(it, alternate) }
+                        playKeySound()
+                        currentInputConnection?.let { connection ->
+                            traceKeyHandler { commitChar(connection, alternate) }
+                        }
                     },
+                    keyPreview = keyPreview.takeUnless { fieldProfile.isSecure },
+                    previewText = {
+                        if (shiftState.isUpper) key.output.uppercase() else key.output
+                    },
+                    hapticFeedbackEnabled = keyboardSettings.hapticFeedback,
                 ),
             )
             is Key.Func -> if (key.type == FuncType.BACKSPACE) {
@@ -521,16 +702,35 @@ class BuddyImeService : InputMethodService() {
                 view.setOnTouchListener(
                     BackspaceTouchHandler(
                         backspaceView = view,
-                        onDeleteChar = { currentInputConnection?.let { handleBackspace(it) } },
-                        onDeleteWord = {
-                            finishComposing()
-                            currentInputConnection?.let { deletePreviousWord(it) }
+                        onDeleteChar = {
+                            currentInputConnection?.let { connection ->
+                                traceKeyHandler { handleBackspace(connection) }
+                            }
                         },
+                        onDeleteWord = {
+                            traceKeyHandler {
+                                finishComposing()
+                                currentInputConnection?.let { deletePreviousWord(it) }
+                            }
+                        },
+                        hapticFeedbackEnabled = keyboardSettings.hapticFeedback,
+                        onPressFeedback = ::playKeySound,
                     ),
                 )
             } else {
                 // A plain clickable view shows its pressed-state background on touch-down (the simple
                 // highlight) and fires the click on release; no scale, no haptic.
+                view.setOnTouchListener { _, event ->
+                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                        KeyboardPerformanceTrace.markActionDown(
+                            KeyboardPerformanceTrace.KEY_KIND_FUNCTION,
+                        )
+                        if (keyboardSettings.hapticFeedback) {
+                            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        }
+                    }
+                    false
+                }
                 view.setOnClickListener { onKey(key) }
             }
         }
@@ -556,7 +756,51 @@ class BuddyImeService : InputMethodService() {
         is Key.Func -> if (key.type == FuncType.ENTER) enterKeyLabel else key.label
     }
 
-    private fun isSpecialKey(key: Key): Boolean = key is Key.Func
+    private fun applyFunctionIcon(view: TextView, key: Key) {
+        val iconRes = when {
+            key is Key.Func && key.type == FuncType.SHIFT -> R.drawable.ic_kb_shift
+            key is Key.Func && key.type == FuncType.BACKSPACE -> R.drawable.ic_kb_backspace
+            key is Key.Func && key.type == FuncType.EMOJI -> R.drawable.ic_kb_emoji
+            key is Key.Func && key.type == FuncType.ENTER && enterKeyLabel == "↵" ->
+                R.drawable.ic_kb_enter
+            else -> return
+        }
+        setCenteredKeyIcon(
+            view,
+            iconRes,
+            if (key is Key.Func && key.type == FuncType.ENTER) {
+                R.color.buddy_kb_accent_text
+            } else {
+                R.color.buddy_kb_key_text
+            },
+        )
+    }
+
+    private fun setCenteredKeyIcon(view: TextView, iconRes: Int, tintRes: Int) {
+        view.text = ""
+        view.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, 0, 0)
+        view.foreground = ContextCompat.getDrawable(keyboardUiContext, iconRes)?.mutate()?.apply {
+            setTint(color(tintRes))
+        }
+        view.foregroundGravity = Gravity.CENTER
+    }
+
+    private fun keyBackground(key: Key): Int = when {
+        key is Key.Func && key.type == FuncType.ENTER -> R.drawable.buddy_kb_enter_bg
+        key is Key.Func && key.type == FuncType.EMOJI -> R.drawable.buddy_kb_key_bg
+        key is Key.Func -> R.drawable.buddy_kb_key_special_bg
+        else -> R.drawable.buddy_kb_key_bg
+    }
+
+    private fun keyTextSize(key: Key): Float = when (key) {
+        is Key.Char -> if (key.output.length == 1 && key.output[0].isLetter()) 24f else 20f
+        is Key.Func -> when (key.type) {
+            FuncType.SPACE -> 14f
+            FuncType.ENTER -> if (enterKeyLabel.length > 2) 14f else 22f
+            FuncType.SYMBOLS, FuncType.LETTERS -> 14f
+            else -> 21f
+        }
+    }
 
     private fun keyWeight(key: Key): Float = when (key) {
         is Key.Char -> 1f
@@ -583,39 +827,62 @@ class BuddyImeService : InputMethodService() {
         refreshShiftKey()
     }
 
-    /** Reflect the shift state on the shift key itself: a teal highlight when active, and the
-     *  caps-lock glyph when latched, so the user can always see which mode they are in. */
+    /** Reflect the shift state with stable vector artwork and a teal highlight when active. */
     private fun refreshShiftKey() {
         val view = shiftKeyView ?: return
+        if (lastShiftKeyMode == shiftState.mode) return
         val active = shiftState.isUpper
-        // Caps lock uses a fat, filled up-arrow (bold) so the latched state is unmistakable;
-        // one-shot shift keeps the lighter outline glyph.
-        view.text = if (shiftState.isCapsLock) "⬆" else "⇧"
-        view.setTypeface(null, if (shiftState.isCapsLock) Typeface.BOLD else Typeface.NORMAL)
+        setCenteredKeyIcon(
+            view,
+            R.drawable.ic_kb_shift,
+            if (active) R.color.buddy_kb_accent_text else R.color.buddy_kb_key_text,
+        )
         view.setBackgroundResource(
-            if (active) R.drawable.buddy_kb_chip_bg else R.drawable.buddy_kb_key_special_bg,
+            if (active) R.drawable.buddy_kb_key_active_bg else R.drawable.buddy_kb_key_special_bg,
         )
         view.setTextColor(color(if (active) R.color.buddy_kb_accent_text else R.color.buddy_kb_key_text))
+        lastShiftKeyMode = shiftState.mode
     }
 
     private fun onKey(key: Key) {
         val ic = currentInputConnection ?: return
-        // Any keypress dismisses a pending clipboard paste chip.
-        clipboardChip = null
-        // Reset double-tap tracking on any non-shift key, so caps lock needs two *consecutive* taps.
-        if (key !is Key.Func || key.type != FuncType.SHIFT) lastShiftTapAt = 0L
-        when (key) {
-            is Key.Char -> commitChar(ic, key.output)
-            is Key.Func -> when (key.type) {
-                FuncType.SHIFT -> handleShift(ic)
-                FuncType.BACKSPACE -> handleBackspace(ic)
-                FuncType.SPACE -> handleSpace(ic)
-                FuncType.ENTER -> handleEnter(ic)
-                FuncType.SYMBOLS -> { symbolsPage = true; rebuildKeys() }
-                FuncType.LETTERS -> { symbolsPage = false; rebuildKeys() }
-                FuncType.GLOBE -> showKeyboardPicker()
-                FuncType.EMOJI -> openEmojiPanel()
+        playKeySound()
+        traceKeyHandler {
+            // Any keypress dismisses a pending clipboard paste chip.
+            clipboardChip = null
+            // Reset double-tap tracking on any non-shift key, so caps lock needs two *consecutive* taps.
+            if (key !is Key.Func || key.type != FuncType.SHIFT) lastShiftTapAt = 0L
+            when (key) {
+                is Key.Char -> commitChar(ic, key.output)
+                is Key.Func -> when (key.type) {
+                    FuncType.SHIFT -> handleShift(ic)
+                    FuncType.BACKSPACE -> handleBackspace(ic)
+                    FuncType.SPACE -> handleSpace(ic)
+                    FuncType.ENTER -> handleEnter(ic)
+                    FuncType.SYMBOLS -> { symbolsPage = true; rebuildKeys() }
+                    FuncType.LETTERS -> { symbolsPage = false; rebuildKeys() }
+                    FuncType.GLOBE -> showKeyboardPicker()
+                    FuncType.EMOJI -> openEmojiPanel()
+                }
             }
+        }
+    }
+
+    private fun playKeySound() {
+        if (!keyboardSettings.keypressSound) return
+        try {
+            audioManager.playSoundEffect(AudioManager.FX_KEY_CLICK)
+        } catch (_: Throwable) {
+            // Feedback is optional; a muted/unavailable audio service must never block typing.
+        }
+    }
+
+    private inline fun traceKeyHandler(action: () -> Unit) {
+        KeyboardPerformanceTrace.beginKeyHandler()
+        try {
+            action()
+        } finally {
+            KeyboardPerformanceTrace.endKeyHandler()
         }
     }
 
@@ -625,21 +892,31 @@ class BuddyImeService : InputMethodService() {
         // A fresh keypress closes any open autocorrect-undo window.
         pendingUndo = null
         when {
-            fieldProfile.predictionsAllowed && isLetter -> {
+            typingIntelligenceAllowed && isLetter -> {
                 // Commit the letter to the field NOW (no composing region, so it lands instantly with
                 // no underline) and mirror it in the word buffer for prediction / autocorrect.
                 composer.append(out)
-                ic.commitText(out, 1)
+                KeyboardPerformanceTrace.beginInputConnectionMutation()
+                try {
+                    ic.commitText(out, 1)
+                } finally {
+                    KeyboardPerformanceTrace.endInputConnectionMutation()
+                }
                 advanceCursor(out.length)
-                updatePredictions()
+                if (predictionWorkAllowed) updatePredictions()
             }
-            fieldProfile.predictionsAllowed -> {
+            typingIntelligenceAllowed -> {
                 // A non-letter ends the word: autocorrect + learn it, then commit the separator.
                 commitSeparator(ic, out)
             }
             else -> {
                 // Non-prediction field (numeric / phone / PIN / password): plain commit, as before.
-                ic.commitText(out, 1)
+                KeyboardPerformanceTrace.beginInputConnectionMutation()
+                try {
+                    ic.commitText(out, 1)
+                } finally {
+                    KeyboardPerformanceTrace.endInputConnectionMutation()
+                }
                 advanceCursor(out.length)
             }
         }
@@ -665,7 +942,18 @@ class BuddyImeService : InputMethodService() {
                 // and it is not autocorrected again.
                 composer.reset()
                 composer.append(undo.original)
-                if (fieldProfile.learningAllowed) personalDictionary.add(undo.original)
+                manualCorrectionOrigin = undo.original
+                pendingCommittedWord = null
+                removeLastCommittedHistory(undo.corrected)
+                if (learningAllowed) {
+                    personalDictionary.record(
+                        PersonalizationEvent.AutocorrectUndo(
+                            undo.original,
+                            undo.corrected,
+                            System.currentTimeMillis(),
+                        ),
+                    )
+                }
                 updatePredictions()
                 return
             }
@@ -675,16 +963,50 @@ class BuddyImeService : InputMethodService() {
         if (!selected.isNullOrEmpty()) {
             ic.commitText("", 1)
             composer.reset()
+            manualCorrectionOrigin = null
+            pendingCommittedWord = null
             clearSuggestions()
             markResync()
             return
         }
         // While a word is composing, backspace deletes its last committed char and shortens the
         // buffer; once the buffer empties, further backspaces delete from the field as before.
-        if (fieldProfile.predictionsAllowed && composer.deleteLast()) {
+        if (typingIntelligenceAllowed && composer.deleteLast()) {
             ic.deleteSurroundingText(1, 0)
             advanceCursor(-1)
             if (composer.isComposing) updatePredictions() else clearSuggestions()
+            return
+        }
+        val committed = pendingCommittedWord
+        if (committed != null && learningAllowed &&
+            System.currentTimeMillis() - committed.committedAtMillis <= COMMIT_EDIT_GUARD_MS &&
+            committed.separator.isNotEmpty() &&
+            ic.getTextBeforeCursor(committed.separator.length, 0)?.toString() == committed.separator
+        ) {
+            ic.deleteSurroundingText(committed.separator.length, 0)
+            advanceCursor(-committed.separator.length)
+            val editableWord = if (committed.autocorrected) committed.rawWord else committed.finalWord
+            if (committed.autocorrected && committed.rawWord != committed.finalWord) {
+                ic.deleteSurroundingText(committed.finalWord.length, 0)
+                ic.commitText(committed.rawWord, 1)
+                advanceCursor(committed.rawWord.length - committed.finalWord.length)
+            }
+            composer.reset()
+            composer.append(editableWord)
+            manualCorrectionOrigin = editableWord
+            pendingCommittedWord = null
+            removeLastCommittedHistory(committed.finalWord)
+            val feedback = if (committed.autocorrected) {
+                PersonalizationEvent.AutocorrectUndo(
+                    committed.rawWord,
+                    committed.finalWord,
+                    System.currentTimeMillis(),
+                )
+            } else {
+                PersonalizationEvent.WordDeleted(committed.finalWord, System.currentTimeMillis())
+            }
+            personalDictionary.record(feedback)
+            updatePredictions()
             return
         }
         ic.deleteSurroundingText(1, 0)
@@ -699,36 +1021,45 @@ class BuddyImeService : InputMethodService() {
      */
     private fun finishComposing() {
         if (!composer.isComposing) return
-        predictionToken.incrementAndGet() // drop any in-flight prediction for the word being dropped
+        if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+        activePredictionGeneration = -1L
+        cachedAutocorrect = null
         composer.reset()
+        manualCorrectionOrigin = null
+        pendingCommittedWord = null
         clearSuggestions()
     }
 
     /**
-     * Finalize the composing word for a separator: autocorrect it if confident, learn the result,
-     * and return the autocorrect that was applied (so the caller can offer an undo) or null. A word
-     * completed with a separator is intentional, so it is learned; an abandoned word (cursor move,
-     * field switch, whiteboard) goes through [finishComposing] and is never learned or corrected.
+     * Finalize the composing word for a separator. This performs no dictionary traversal: it only
+     * consumes an exact cached correction from the worker and returns the provenance needed for
+     * delayed learning after the separator itself is committed.
      */
-    private fun flushComposingWord(): Autocorrector.Decision.Replace? {
+    private fun flushComposingWord(): FinalizedWord? {
         if (!composer.isComposing) return null
-        predictionToken.incrementAndGet() // drop any in-flight prediction for this word
         val ic = currentInputConnection
         val word = composer.current
-        var applied: Autocorrector.Decision.Replace? = null
-        // Decide the final form: autocorrect if confident, else proper-noun casing (T6: a known
-        // name typed in another case, "kcr" -> "KCR"). Both are skipped in fields where autocorrect
-        // is off (email / url / secure). Proper-noun casing records no undo (a name is not a typo).
+        val correctionOrigin = manualCorrectionOrigin
+        val cachedState = cachedAutocorrect?.takeIf {
+            it.personalizationGeneration == personalDictionary.generation
+        }
+        val cached = CachedAutocorrectPolicy.consume(
+            decision = cachedState?.decision,
+            decisionGeneration = cachedState?.generation,
+            activeGeneration = activePredictionGeneration,
+            rawWord = word,
+            manualCorrectionPending = correctionOrigin != null,
+        )
+        if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+        activePredictionGeneration = -1L
+        cachedAutocorrect = null
+        var applied: CachedAutocorrect? = null
+        // Separator-time autocorrect only consumes the exact cached worker decision. If it is not
+        // ready or belongs to an older token, the user's word remains unchanged.
         var finalWord = word
-        if (fieldProfile.autocorrectAllowed) {
-            val decision = autocorrector.onSeparator(word)
-            if (decision is Autocorrector.Decision.Replace) {
-                finalWord = decision.corrected
-                applied = decision
-            } else {
-                val display = VocabHintsCache.properNounDisplayForm(word)
-                if (display != null) finalWord = display
-            }
+        if (autocorrectAllowed && cached != null) {
+            finalWord = cached.correctedWord
+            applied = cached
         }
         // The word is already committed letter-by-letter, so to change it we delete it and re-commit.
         // GUARD: only if the typed word is still intact right before the cursor (this replaces the
@@ -745,10 +1076,16 @@ class BuddyImeService : InputMethodService() {
             }
         }
         composer.reset()
+        manualCorrectionOrigin = null
         clearSuggestions()
-        maybeLearn(finalWord)
         lastCommittedWord = finalWord
-        return applied
+        return FinalizedWord(
+            typedWord = word,
+            rawWord = correctionOrigin ?: word,
+            finalWord = finalWord,
+            autocorrect = applied,
+            manualCorrectionOrigin = correctionOrigin,
+        )
     }
 
     /**
@@ -757,21 +1094,31 @@ class BuddyImeService : InputMethodService() {
      * strip stays useful instead of going blank.
      */
     private fun commitSeparator(ic: InputConnection, separator: String) {
-        val applied = flushComposingWord()
-        ic.commitText(separator, 1)
+        val finalized = flushComposingWord()
+        KeyboardPerformanceTrace.beginInputConnectionMutation()
+        try {
+            ic.commitText(separator, 1)
+        } finally {
+            KeyboardPerformanceTrace.endInputConnectionMutation()
+        }
         advanceCursor(separator.length)
+        if (finalized != null) recordFinalizedWord(finalized, separator)
         maybeAutoSpaceAfterPunctuation(ic, separator) // T5: ", " / ". " when text follows on the line
         updateAutoCap() // a new sentence after ". " starts capitalized
         if (separator == " ") lastSpaceCommitAt = SystemClock.uptimeMillis()
         when {
-            applied != null -> showUndoChip(applied.original, applied.corrected, separator)
+            finalized?.autocorrect != null -> showUndoChip(
+                finalized.autocorrect.rawWord,
+                finalized.autocorrect.correctedWord,
+                separator,
+            )
             separator == " " -> showNextWordSuggestions()
         }
     }
 
     /** Space key: convert a double space between words into ". " (T5), otherwise commit a space. */
     private fun handleSpace(ic: InputConnection) {
-        if (!composer.isComposing && fieldProfile.autocorrectAllowed) {
+        if (!composer.isComposing && autocorrectAllowed) {
             val before = ic.getTextBeforeCursor(2, 0)
             val elapsed = SystemClock.uptimeMillis() - lastSpaceCommitAt
             if (DoubleSpacePeriod.shouldConvert(before, elapsed, DOUBLE_SPACE_WINDOW_MS)) {
@@ -780,6 +1127,8 @@ class BuddyImeService : InputMethodService() {
                 advanceCursor(1) // net: -1 space + ". " = +1
                 lastSpaceCommitAt = 0L // consume, so a third space doesn't re-trigger
                 lastCommittedWord = "" // a new sentence: drop next-word context
+                committedWordHistory.clear()
+                pendingCommittedWord = null
                 clearSuggestions()
                 updateAutoCap()
                 return
@@ -791,7 +1140,7 @@ class BuddyImeService : InputMethodService() {
     /** T5: insert a space after a clause / sentence mark when more text follows on the line (the
      *  common case is inserting punctuation back into existing text or after a paste). */
     private fun maybeAutoSpaceAfterPunctuation(ic: InputConnection, separator: String) {
-        if (!fieldProfile.autocorrectAllowed || separator.length != 1) return
+        if (!autocorrectAllowed || separator.length != 1) return
         val nextChar = ic.getTextAfterCursor(1, 0)?.firstOrNull()
         if (PunctuationSpacer.shouldInsertSpace(separator[0], nextChar)) {
             ic.commitText(" ", 1)
@@ -802,21 +1151,13 @@ class BuddyImeService : InputMethodService() {
     /** Fill the strip with likely next words after a space, so it never goes blank. Off-thread
      *  (the predictor's lookup), posted back under the prediction token. */
     private fun showNextWordSuggestions() {
-        if (!fieldProfile.predictionsAllowed) return
+        if (!suggestionsAllowed) return
         val prev = lastCommittedWord
         if (prev.isBlank()) return
-        val token = predictionToken.incrementAndGet()
-        if (predictionExecutor.isShutdown) return
-        predictionExecutor.execute {
-            if (predictionToken.get() != token) return@execute
-            val words = NextWordPredictor.predictAfter(prev, SUGGESTION_LIMIT)
-            if (words.isEmpty()) return@execute
-            val suggestions = words.map { Suggestion(it, SuggestionSource.NEXT_WORD) }
-            mainHandler.post {
-                // Only if the user hasn't started a new word (or moved on) since.
-                if (predictionToken.get() == token && !composer.isComposing) renderSuggestions(suggestions)
-            }
-        }
+        cachedAutocorrect = null
+        activePredictionGeneration = submitPrediction(
+            PredictionRequest.NextWord(prev, committedWordHistory.toList()),
+        )
     }
 
     /** Set the shift state for the next letter from the text before the cursor: capitalize at a
@@ -844,17 +1185,66 @@ class BuddyImeService : InputMethodService() {
         refreshLetterCase()
     }
 
-    /** Learn a committed word into the personal dictionary, when the field allows learning and
-     *  the token is a real word (>= 2 letters, all letters). Never runs in a secure/email/url
-     *  field, so nothing typed there is ever remembered. */
-    private fun maybeLearn(word: String) {
-        if (!fieldProfile.learningAllowed) return
-        if (!isLearnableWord(word)) return
-        personalDictionary.learn(word)
+    private fun recordFinalizedWord(finalized: FinalizedWord, separator: String) {
+        val previous = committedWordHistory.lastOrNull()
+        val previousPrevious = committedWordHistory.elementAtOrNull(committedWordHistory.size - 2)
+        val now = System.currentTimeMillis()
+        if (learningAllowed) {
+            val correction = finalized.autocorrect
+            if (correction != null) {
+                // Generated output is never vocabulary credit. It is only a provenance counter;
+                // undo supplies the negative evidence and a later manual edit supplies a label.
+                personalDictionary.record(
+                    PersonalizationEvent.AutomaticCorrection(
+                        correction.rawWord,
+                        correction.correctedWord,
+                        now,
+                    ),
+                )
+            } else {
+                finalized.manualCorrectionOrigin?.takeIf {
+                    !it.equals(finalized.finalWord, ignoreCase = true)
+                }?.let { origin ->
+                    personalDictionary.record(
+                        PersonalizationEvent.ManualCorrection(origin, finalized.finalWord, now),
+                    )
+                }
+                personalDictionary.record(
+                    PersonalizationEvent.ManualWordCommitted(
+                        finalized.finalWord,
+                        previous,
+                        previousPrevious,
+                        now,
+                    ),
+                )
+            }
+        }
+        pushCommittedHistory(finalized.finalWord)
+        pendingCommittedWord = if (learningAllowed) {
+            PendingCommittedWord(
+                rawWord = finalized.autocorrect?.rawWord ?: finalized.finalWord,
+                finalWord = finalized.finalWord,
+                separator = separator,
+                committedAtMillis = now,
+                autocorrected = finalized.autocorrect != null,
+            )
+        } else {
+            null
+        }
     }
 
-    private fun isLearnableWord(word: String): Boolean =
-        word.length >= 2 && word.all { it.isLetter() }
+    private fun pushCommittedHistory(word: String) {
+        if (word.isBlank()) return
+        while (committedWordHistory.size >= 2) committedWordHistory.removeFirst()
+        committedWordHistory.addLast(word)
+    }
+
+    private fun removeLastCommittedHistory(word: String) {
+        if (committedWordHistory.lastOrNull()?.equals(word, ignoreCase = true) == true) {
+            committedWordHistory.removeLast()
+        }
+        lastCommittedWord = committedWordHistory.lastOrNull().orEmpty()
+    }
 
     private fun handleEnter(ic: InputConnection) {
         val action = (currentInputEditorInfo?.imeOptions ?: 0) and EditorInfo.IME_MASK_ACTION
@@ -863,7 +1253,7 @@ class BuddyImeService : InputMethodService() {
         } else {
             // Honour the field's action (Send / Search / Next / Go) instead of a newline. Finalize
             // the word first (no undo chip: the field is about to act on the committed text).
-            flushComposingWord()
+            flushComposingWord()?.let { recordFinalizedWord(it, separator = "") }
             sendDefaultEditorAction(true)
             markResync() // the host may clear / submit the field; re-seed from the next update
         }
@@ -876,9 +1266,15 @@ class BuddyImeService : InputMethodService() {
         imm?.showInputMethodPicker()
     }
 
+    private fun openKeyboardSettings() {
+        startActivity(
+            Intent(this, KeyboardSettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
+
     // --- Collapsed bar (the default state) ---------------------------------------
 
-    /** The field-appropriate primary action, shared by the orb and the center hint: memory
+    /** The field-appropriate primary action shared by the Aura and writing-tools buttons: memory
      *  drafting in text fields, generate-password in password fields, talk-to-Buddy elsewhere. */
     private fun triggerBarAction() {
         when {
@@ -891,32 +1287,15 @@ class BuddyImeService : InputMethodService() {
     private fun buildCollapsedBar() {
         collapsedBar.removeAllViews()
         suggestionChips.clear()
+        suggestionChipVisuals.clear()
         collapsedBar.isClickable = false
-        // Left: the Aura orb, the always-available AI entry point. It is tappable so the
-        // field-appropriate action stays reachable even while the suggestion strip covers the
-        // center hint mid-word.
-        collapsedBar.addView(
-            makeOrb(dp(30)).apply {
-                isClickable = true
-                setOnClickListener { triggerBarAction() }
-            },
-        )
-
-        // Center: the field-appropriate action hint and the word-suggestion strip share one
-        // weighted slot, exactly one visible at a time (predictions when present, else the hint).
-        // In a normal text field the Aura orb on the left IS the draft entry point, so the center
-        // stays clean (empty) until word suggestions fill it. Password / non-text fields keep a
-        // labelled hint, since their orb action is less obvious.
-        val hintLabel = when {
-            fieldProfile.memoryActionsAllowed -> ""
-            fieldProfile.passwordGenerate -> "✦ Generate strong password"
-            else -> "Talk to Buddy"
-        }
-        barActionView = makeBarAction(hintLabel) { triggerBarAction() }.apply {
+        // Match the familiar Gboard toolbar rhythm while preserving Aura's existing actions.
+        // The toolbar and suggestions occupy the same fixed-height frame, so prediction updates
+        // never resize the IME or move the host app.
+        idleToolbar = buildIdleToolbar().apply {
             layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER_VERTICAL or Gravity.START,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
             )
         }
         suggestionStrip = buildSuggestionStrip().apply {
@@ -927,32 +1306,34 @@ class BuddyImeService : InputMethodService() {
             )
             visibility = View.GONE
         }
-        val center = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            addView(barActionView)
+        val content = FrameLayout(keyboardUiContext).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            addView(idleToolbar)
             addView(suggestionStrip)
         }
-        collapsedBar.addView(center)
+        collapsedBar.addView(content)
 
-        // Right cluster (toolbar icons): clipboard, globe, mic.
-        // A clipboard paste chip, only in normal text fields. Tapping it is the explicit gesture
-        // that reads the clipboard (so the OS paste toast never fires on every focus, only when the
-        // user asks). Never offered in secure / numeric / phone / PIN fields.
-        if (fieldProfile.predictionsAllowed) {
-            collapsedBar.addView(makeClipboardButton { onClipboardButtonTapped() })
-        }
+        // Restore whatever the strip last showed (empty after a field switch -> toolbar shows).
+        renderSuggestions(currentSuggestions, renderedSuggestionPersonalizationGeneration)
+    }
 
-        // The globe / language switch lives in the toolbar now (off the bottom row, Gboard-style)
-        // and is present in EVERY field, so the user can always switch to another keyboard and is
-        // never stuck on Buddy.
-        collapsedBar.addView(makeGlobeButton { showKeyboardPicker() })
-
-        // An always-present mic, so voice works in every field and every app. In non-text / secure
-        // fields it talks to Buddy without sending the field text.
-        collapsedBar.addView(makeMicButton { openVoice() })
-
-        // Restore whatever the strip last showed (empty after a field switch -> hint shows).
-        renderSuggestions(currentSuggestions)
+    private fun buildIdleToolbar(): LinearLayout = LinearLayout(keyboardUiContext).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        addView(makeAuraToolbarButton { triggerBarAction() })
+        // These two controls intentionally remain visual-only until their product behavior is
+        // specified. Their themed surfaces keep the toolbar layout stable for that future work.
+        addView(makeToolbarLabel("GIF", "GIF"))
+        addView(makeToolbarIcon(R.drawable.ic_kb_sparkle, "Buddy writing tools") {
+            triggerBarAction()
+        })
+        addView(makeToolbarIcon(R.drawable.ic_kb_settings, "Keyboard settings") {
+            openKeyboardSettings()
+        })
+        addView(makeToolbarIcon(R.drawable.ic_widget_mic, "Talk to Buddy") { openVoice() })
     }
 
     /** The collapsed-bar clipboard affordance: one tap reads the clipboard and offers it as a
@@ -971,25 +1352,19 @@ class BuddyImeService : InputMethodService() {
     /** Show the clipboard text as a single accented paste chip in the strip (truncated preview);
      *  tapping it commits the full text. Dismissed on the next keypress. */
     private fun showClipboardChip(fullText: String) {
-        if (!::suggestionStrip.isInitialized || !::barActionView.isInitialized) return
+        if (!::suggestionStrip.isInitialized || !::idleToolbar.isInitialized) return
         if (!fieldProfile.predictionsAllowed) return
         val preview = fullText.replace('\n', ' ').take(CLIPBOARD_PREVIEW_CHARS)
         val label = "📋 " + preview + if (fullText.length > CLIPBOARD_PREVIEW_CHARS) "…" else ""
-        barActionView.visibility = View.GONE
+        renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
+        suggestionStripMode = SuggestionStripMode.CLIPBOARD
+        idleToolbar.visibility = View.GONE
         suggestionStrip.visibility = View.VISIBLE
         for (i in suggestionChips.indices) {
-            val chip = suggestionChips[i]
             if (i == 0) {
-                styleChip(chip, accent = true)
-                chip.text = label
-                chip.visibility = View.VISIBLE
-                chip.setOnClickListener { pasteClipboardChip() }
-                chip.setOnLongClickListener(null)
+                updateSuggestionChip(i, label, View.VISIBLE, accent = true)
             } else {
-                chip.text = ""
-                chip.visibility = View.INVISIBLE
-                chip.setOnClickListener(null)
-                chip.setOnLongClickListener(null)
+                updateSuggestionChip(i, "", View.INVISIBLE, accent = false)
             }
         }
     }
@@ -1008,16 +1383,17 @@ class BuddyImeService : InputMethodService() {
     /** The three reusable suggestion chips, sharing the center slot equally. Their text is set
      *  per keystroke in [renderSuggestions]; the views themselves are never rebuilt while typing. */
     private fun buildSuggestionStrip(): LinearLayout {
-        val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        repeat(SUGGESTION_LIMIT) {
-            val chip = makeSuggestionChip()
+        val strip = LinearLayout(keyboardUiContext).apply { orientation = LinearLayout.HORIZONTAL }
+        repeat(SUGGESTION_LIMIT) { index ->
+            val chip = makeSuggestionChip(index)
             suggestionChips.add(chip)
+            suggestionChipVisuals.add(null)
             strip.addView(chip)
         }
         return strip
     }
 
-    private fun makeSuggestionChip(): TextView = TextView(this).apply {
+    private fun makeSuggestionChip(index: Int): TextView = TextView(keyboardUiContext).apply {
         gravity = Gravity.CENTER
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
@@ -1029,8 +1405,29 @@ class BuddyImeService : InputMethodService() {
         val padV = dp(7)
         setPadding(padH, padV, padH, padV)
         isClickable = true
+        setOnClickListener { onSuggestionChipClicked(index) }
+        setOnLongClickListener { onSuggestionChipLongPressed(index) }
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             .apply { setMargins(dp(3), dp(2), dp(3), dp(2)) }
+    }
+
+    private fun onSuggestionChipClicked(index: Int) {
+        when (suggestionStripMode) {
+            SuggestionStripMode.CLIPBOARD -> if (index == 0) pasteClipboardChip()
+            SuggestionStripMode.UNDO -> if (index == 0) performUndo()
+            SuggestionStripMode.SUGGESTIONS -> if (!discardStaleRenderedSuggestions()) {
+                currentSuggestions.getOrNull(index)?.let { onSuggestionTapped(it.word) }
+            }
+            SuggestionStripMode.EMPTY -> Unit
+        }
+    }
+
+    private fun onSuggestionChipLongPressed(index: Int): Boolean {
+        if (suggestionStripMode != SuggestionStripMode.SUGGESTIONS) return false
+        if (discardStaleRenderedSuggestions()) return true
+        val suggestion = currentSuggestions.getOrNull(index) ?: return false
+        onSuggestionLongPressed(suggestion.word)
+        return true
     }
 
     // --- Suggestion strip state --------------------------------------------------
@@ -1038,113 +1435,158 @@ class BuddyImeService : InputMethodService() {
     /**
      * Refresh the suggestion strip for the current word WITHOUT touching the field (the letter is
      * already committed) and WITHOUT blocking the main thread. The heavy prediction (completions +
-     * ranking, and the expensive spell-check pass) runs on [predictionExecutor] and posts back.
-     * Every keystroke bumps [predictionToken], and a stale off-thread result is dropped on the way
-     * back, so the strip always reflects the latest word and the next keypress never waits.
+     * ranking, and the bounded correction pass) runs on the single conflated coordinator. Every
+     * new request cancels the pending debounce and active generation, so stale work cannot queue.
      */
     private fun updatePredictions() {
-        if (!fieldProfile.predictionsAllowed) { clearSuggestions(); return }
+        if (!predictionWorkAllowed) { clearSuggestions(); return }
         val word = composer.current
-        val token = predictionToken.incrementAndGet() // supersede any in-flight prediction
         if (word.isEmpty()) {
+            if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+            KeyboardPerformanceTrace.invalidateSuggestionRequest()
+            activePredictionGeneration = -1L
+            cachedAutocorrect = null
             clearSuggestions()
             return
         }
-        // Debounce on the main thread; only the latest keystroke reaches the executor (earlier
-        // delayed runnables bail on the token check).
-        mainHandler.postDelayed({
-            if (predictionToken.get() != token || predictionExecutor.isShutdown) return@postDelayed
-            predictionExecutor.execute { computePrediction(word, token) }
-        }, PREDICTION_DEBOUNCE_MS)
+        cachedAutocorrect = null
+        activePredictionGeneration = submitPrediction(
+            PredictionRequest.CurrentWord(word, autocorrectAllowed),
+        )
+    }
+
+    private fun submitPrediction(request: PredictionRequest): Long {
+        val generation = predictionCoordinator.submit(request)
+        KeyboardPerformanceTrace.beginSuggestionRequest(generation)
+        return generation
+    }
+
+    private fun applyPrediction(
+        generation: Long,
+        stage: PredictionStage,
+        payload: PredictionPayload,
+    ) {
+        if (generation != activePredictionGeneration || !predictionCoordinator.isCurrent(generation)) return
+        if (payload.personalizationGeneration != personalDictionary.generation) return
+        when (val request = payload.request) {
+            PredictionRequest.Warmup -> Unit
+            is PredictionRequest.CurrentWord -> {
+                if (composer.current != request.rawWord) return
+                KeyboardPerformanceTrace.markSuggestionApplied(generation, stage)
+                cachedAutocorrect = payload.autocorrect?.let {
+                    CachedAutocorrectState(generation, payload.personalizationGeneration, it)
+                }
+                if (suggestionsAllowed &&
+                    (stage == PredictionStage.LEXICAL || payload.suggestions.isNotEmpty())
+                ) {
+                    renderSuggestions(payload.suggestions, payload.personalizationGeneration)
+                }
+            }
+            is PredictionRequest.NextWord -> {
+                if (composer.isComposing || lastCommittedWord != request.previousWord) return
+                KeyboardPerformanceTrace.markSuggestionApplied(generation, stage)
+                if (suggestionsAllowed) {
+                    renderSuggestions(payload.suggestions, payload.personalizationGeneration)
+                }
+            }
+        }
     }
 
     /**
-     * Off-thread prediction for [word]. Computes completions + ranking; only for a dead-end word
-     * (no completion, unknown) does it wait a little longer and run the corrections (the expensive,
-     * two-edit-capable pass), so the correction chip never flickers mid-word. Each step re-checks
-     * [token] and bails the moment a newer keystroke or a commit supersedes this one.
+     * A learned-state generation is part of every prediction result's validity contract. When a
+     * new immutable snapshot is published, cancel work and cached autocorrect from the previous
+     * snapshot, then request fresh suggestions for the text the user is currently editing. Special
+     * action chips remain visible; changing personalization must never disrupt an undo or paste.
      */
-    private fun computePrediction(word: String, token: Long) {
-        if (predictionToken.get() != token) return
-        val base = BaseDictionary.completions(word, SUGGESTION_LIMIT)
-        // The user's own words (learned + the system personal dictionary) share the personal tier,
-        // so they outrank generic dictionary words for the same prefix.
-        val personal = personalDictionary.completions(word, SUGGESTION_LIMIT) +
-            SystemUserDictionary.completions(word, SUGGESTION_LIMIT)
-        // The user's own people/topic terms (interest subjects + storyline entities) form the
-        // highest tier, so a friend's or interest's name wins its prefix over any common word.
-        val vocab = VocabHintsCache.completions(word, SUGGESTION_LIMIT)
-        val ranked = SuggestionRanker.rank(base = base, personal = personal, vocab = vocab, limit = SUGGESTION_LIMIT)
-        if (ranked.isNotEmpty()) {
-            postPrediction(token) { renderSuggestions(ranked) }
+    private fun onPersonalizationGenerationChanged(generation: Long) {
+        if (!personalDictionaryLazy.isInitialized() ||
+            generation != personalDictionary.generation
+        ) {
             return
         }
-        if (!fieldProfile.autocorrectAllowed || !spellChecker.isMisspelled(word)) {
-            postPrediction(token) { renderSuggestions(emptyList()) }
+
+        if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+        KeyboardPerformanceTrace.invalidateSuggestionRequest()
+        activePredictionGeneration = -1L
+        cachedAutocorrect = null
+
+        if (suggestionStripMode == SuggestionStripMode.UNDO ||
+            suggestionStripMode == SuggestionStripMode.CLIPBOARD
+        ) {
             return
         }
-        // Dead-end misspelling: defer the corrections so they surface only once typing pauses.
-        sleepQuietly(SPELLCHECK_DEFER_MS)
-        if (predictionToken.get() != token) return
-        val corrections = spellChecker.corrections(word, SUGGESTION_LIMIT)
-            .map { Suggestion(Autocorrector.applyCasePattern(word, it), SuggestionSource.CORRECTION) }
-        postPrediction(token) {
-            renderSuggestions(corrections)
+        if (suggestionStripMode == SuggestionStripMode.SUGGESTIONS &&
+            renderedSuggestionPersonalizationGeneration != generation
+        ) {
+            clearSuggestions()
+        }
+        when {
+            composer.isComposing -> updatePredictions()
+            suggestionsAllowed && lastCommittedWord.isNotBlank() ->
+                showNextWordSuggestions()
         }
     }
 
-    /** Run [action] on the main thread only if [token] is still the active prediction and a word is
-     *  still composing, so a late off-thread result never renders onto a committed or reset field. */
-    private fun postPrediction(token: Long, action: () -> Unit) {
-        mainHandler.post {
-            if (predictionToken.get() == token && composer.isComposing) action()
+    /** Close the small main-thread window between snapshot publication and its posted callback. */
+    private fun discardStaleRenderedSuggestions(): Boolean {
+        if (!personalDictionaryLazy.isInitialized() ||
+            renderedSuggestionPersonalizationGeneration == personalDictionary.generation
+        ) {
+            return false
         }
-    }
-
-    private fun sleepQuietly(ms: Long) {
-        try {
-            Thread.sleep(ms)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
+        clearSuggestions()
+        when {
+            composer.isComposing -> updatePredictions()
+            suggestionsAllowed && lastCommittedWord.isNotBlank() ->
+                showNextWordSuggestions()
         }
+        return true
     }
 
     private fun clearSuggestions() = renderSuggestions(emptyList())
 
-    /** Show [suggestions] in the strip (hiding the action hint), or fall back to the hint when
+    /** Show [suggestions] in the strip (hiding the toolbar), or fall back to the toolbar when
      *  there is nothing to suggest or the field doesn't allow prediction. */
-    private fun renderSuggestions(suggestions: List<Suggestion>) {
+    private fun renderSuggestions(
+        suggestions: List<Suggestion>,
+        personalizationGeneration: Long = NO_PERSONALIZATION_GENERATION,
+    ) {
         currentSuggestions = suggestions
+        renderedSuggestionPersonalizationGeneration = personalizationGeneration
         pendingUndo = null // any normal strip render closes a pending undo window
-        if (!::suggestionStrip.isInitialized || !::barActionView.isInitialized) return
-        val show = suggestions.isNotEmpty() && fieldProfile.predictionsAllowed
+        if (!::suggestionStrip.isInitialized || !::idleToolbar.isInitialized) return
+        val show = suggestions.isNotEmpty() && suggestionsAllowed
+        suggestionStripMode = if (show) SuggestionStripMode.SUGGESTIONS else SuggestionStripMode.EMPTY
         if (!show) {
-            suggestionStrip.visibility = View.GONE
-            barActionView.visibility = View.VISIBLE
+            if (suggestionStrip.visibility != View.GONE) suggestionStrip.visibility = View.GONE
+            if (idleToolbar.visibility != View.VISIBLE) idleToolbar.visibility = View.VISIBLE
             return
         }
-        barActionView.visibility = View.GONE
-        suggestionStrip.visibility = View.VISIBLE
+        if (idleToolbar.visibility != View.GONE) idleToolbar.visibility = View.GONE
+        if (suggestionStrip.visibility != View.VISIBLE) suggestionStrip.visibility = View.VISIBLE
         for (i in suggestionChips.indices) {
-            val chip = suggestionChips[i]
             val suggestion = suggestions.getOrNull(i)
             if (suggestion == null) {
                 // Keep the empty slot laid out (stable widths) but inert.
-                chip.text = ""
-                chip.visibility = View.INVISIBLE
-                chip.setOnClickListener(null)
-                chip.setOnLongClickListener(null)
+                updateSuggestionChip(i, "", View.INVISIBLE, accent = false)
             } else {
                 // The top correction is the autocorrect target a separator will apply, so accent
                 // it (teal) to signal that; ordinary completions stay neutral.
                 val isAutocorrectTarget = i == 0 && suggestion.source == SuggestionSource.CORRECTION
-                styleChip(chip, accent = isAutocorrectTarget)
-                chip.text = suggestion.word
-                chip.visibility = View.VISIBLE
-                chip.setOnClickListener { onSuggestionTapped(suggestion.word) }
-                chip.setOnLongClickListener { onSuggestionLongPressed(suggestion.word); true }
+                updateSuggestionChip(i, suggestion.word, View.VISIBLE, isAutocorrectTarget)
             }
         }
+    }
+
+    private fun updateSuggestionChip(index: Int, text: String, visibility: Int, accent: Boolean) {
+        val next = SuggestionChipVisual(text, visibility, accent)
+        if (suggestionChipVisuals.getOrNull(index) == next) return
+        val chip = suggestionChips[index]
+        val previous = suggestionChipVisuals[index]
+        if (previous?.accent != accent) styleChip(chip, accent)
+        if (previous?.text != text) chip.text = text
+        if (previous?.visibility != visibility) chip.visibility = visibility
+        suggestionChipVisuals[index] = next
     }
 
     private fun styleChip(chip: TextView, accent: Boolean) {
@@ -1158,22 +1600,55 @@ class BuddyImeService : InputMethodService() {
      *  counts as using that word (a strong learning signal). */
     private fun onSuggestionTapped(word: String) {
         val ic = currentInputConnection ?: return
-        predictionToken.incrementAndGet() // drop any in-flight prediction
+        if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+        activePredictionGeneration = -1L
+        cachedAutocorrect = null
         // Replace the in-progress partial (a completion / correction) with the chosen word + a
         // space. The partial is already committed text now, so delete it first (guarded). A
         // next-word chip has no partial, so it just inserts the word.
         val partial = composer.current
-        if (partial.isNotEmpty() && ic.getTextBeforeCursor(partial.length, 0)?.toString() == partial) {
-            ic.deleteSurroundingText(partial.length, 0)
-            ic.commitText("$word ", 1)
-            advanceCursor(word.length + 1 - partial.length)
-        } else {
-            ic.commitText("$word ", 1)
-            advanceCursor(word.length + 1)
+        if (partial.isNotEmpty() &&
+            ic.getTextBeforeCursor(partial.length, 0)?.toString() != partial
+        ) {
+            // The host moved or edited after the chip rendered. Preserve its text; never delete or
+            // insert from a stale local mirror.
+            finishComposing()
+            markResync()
+            return
         }
+        val edit = SuggestionCommitPolicy.plan(partial, word)
+        KeyboardPerformanceTrace.beginInputConnectionMutation()
+        try {
+            if (edit.deleteBeforeCursor > 0) {
+                ic.deleteSurroundingText(edit.deleteBeforeCursor, 0)
+            }
+            ic.commitText(edit.committedText, 1)
+        } finally {
+            KeyboardPerformanceTrace.endInputConnectionMutation()
+        }
+        advanceCursor(edit.cursorDelta)
         composer.reset()
         clearSuggestions()
-        maybeLearn(word)
+        val now = System.currentTimeMillis()
+        val previous = committedWordHistory.lastOrNull()
+        val previousPrevious = committedWordHistory.elementAtOrNull(committedWordHistory.size - 2)
+        if (learningAllowed) {
+            personalDictionary.record(
+                PersonalizationEvent.SuggestionAccepted(
+                    rawWord = partial,
+                    acceptedWord = word,
+                    previousWord = previous,
+                    previousPreviousWord = previousPrevious,
+                    atMillis = now,
+                ),
+            )
+        }
+        pushCommittedHistory(word)
+        pendingCommittedWord = if (learningAllowed) {
+            PendingCommittedWord(word, word, " ", now, autocorrected = false)
+        } else {
+            null
+        }
         lastCommittedWord = word
         updateAutoCap()
         showNextWordSuggestions() // chain: offer the word likely to follow this one
@@ -1198,23 +1673,17 @@ class BuddyImeService : InputMethodService() {
      *  chip offering the word the user originally typed. */
     private fun showUndoChip(original: String, corrected: String, separator: String) {
         pendingUndo = PendingUndo(original, corrected, separator)
-        if (!::suggestionStrip.isInitialized || !::barActionView.isInitialized) return
+        if (!::suggestionStrip.isInitialized || !::idleToolbar.isInitialized) return
         if (!fieldProfile.predictionsAllowed) return
-        barActionView.visibility = View.GONE
+        renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
+        suggestionStripMode = SuggestionStripMode.UNDO
+        idleToolbar.visibility = View.GONE
         suggestionStrip.visibility = View.VISIBLE
         for (i in suggestionChips.indices) {
-            val chip = suggestionChips[i]
             if (i == 0) {
-                styleChip(chip, accent = true)
-                chip.text = "↩ $original"
-                chip.visibility = View.VISIBLE
-                chip.setOnClickListener { performUndo() }
-                chip.setOnLongClickListener(null)
+                updateSuggestionChip(i, "↩ $original", View.VISIBLE, accent = true)
             } else {
-                chip.text = ""
-                chip.visibility = View.INVISIBLE
-                chip.setOnClickListener(null)
-                chip.setOnLongClickListener(null)
+                updateSuggestionChip(i, "", View.INVISIBLE, accent = false)
             }
         }
     }
@@ -1232,7 +1701,29 @@ class BuddyImeService : InputMethodService() {
         pendingUndo = null
         clearSuggestions()
         updateAutoCap()
-        if (fieldProfile.learningAllowed) personalDictionary.add(undo.original)
+        removeLastCommittedHistory(undo.corrected)
+        val now = System.currentTimeMillis()
+        if (learningAllowed) {
+            personalDictionary.record(
+                PersonalizationEvent.AutocorrectUndo(undo.original, undo.corrected, now),
+            )
+            val previous = committedWordHistory.lastOrNull()
+            val previousPrevious = committedWordHistory.elementAtOrNull(committedWordHistory.size - 2)
+            personalDictionary.record(
+                PersonalizationEvent.ManualWordCommitted(
+                    undo.original,
+                    previous,
+                    previousPrevious,
+                    now,
+                ),
+            )
+        }
+        pushCommittedHistory(undo.original)
+        pendingCommittedWord = if (learningAllowed) {
+            PendingCommittedWord(undo.original, undo.original, undo.separator, now, autocorrected = false)
+        } else {
+            null
+        }
     }
 
     /** Generate a strong password locally and drop it into the field. Nothing is sent to
@@ -1253,59 +1744,61 @@ class BuddyImeService : InputMethodService() {
     private fun buildWhiteboard() {
         whiteboard.removeAllViews()
 
-        // Header: small orb + "Writing tools" title + close (back to keys).
-        val header = LinearLayout(this).apply {
+        // Reference-style header: a circular back control followed by the title.
+        val header = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = rowParams(bottom = dp(8))
         }
-        header.addView(makeOrb(dp(24)))
-        header.addView(TextView(this).apply {
-            text = "Writing tools"
-            textSize = 16f
+        header.addView(TextView(keyboardUiContext).apply {
+            text = "←"
+            textSize = 25f
+            gravity = Gravity.CENTER
+            setTextColor(color(R.color.buddy_kb_key_text))
+            setBackgroundResource(R.drawable.buddy_kb_writing_back_bg)
+            contentDescription = "Back to keyboard"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { backToKeys() }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginEnd = dp(12) })
+        header.addView(TextView(keyboardUiContext).apply {
+            text = "Writing Tools"
+            textSize = 20f
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(color(R.color.buddy_kb_key_text))
         })
-        header.addView(makeSpacer())
-        header.addView(TextView(this).apply {
-            text = "✕"
-            textSize = 17f
-            setTextColor(color(R.color.buddy_kb_text_muted))
-            val p = dp(8)
-            setPadding(p, p, p, p)
-            isClickable = true
-            setOnClickListener { backToKeys() }
-        })
         whiteboard.addView(header)
 
-        // Context line: what Buddy will act on.
-        wbContext = TextView(this).apply {
-            textSize = 12f
-            setTextColor(color(R.color.buddy_kb_text_muted))
-            setSingleLine(true)
-            ellipsize = TextUtils.TruncateAt.END
-            val p = dp(6)
-            setPadding(p, dp(2), p, dp(4))
+        // Kept for state compatibility; the real editor context is shown inside the large card.
+        wbContext = TextView(keyboardUiContext).apply {
+            visibility = View.GONE
         }
         whiteboard.addView(wbContext)
 
-        // Preview box: the big draft card, scrollable, filling the available height. The draft
-        // lands here and "Use this" drops it into the field (matches the reference screenshot).
-        wbCanvas = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        whiteboard.addView(ScrollView(this).apply {
+        // The same centered card shows local editor text, the loading skeleton, and the result.
+        wbCanvas = LinearLayout(keyboardUiContext).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+        wbPreview = ScrollView(keyboardUiContext).apply {
             isVerticalScrollBarEnabled = false
-            setBackgroundResource(R.drawable.buddy_kb_card_bg)
-            val p = dp(6)
-            setPadding(p, p, p, p)
+            isFillViewport = true
+            setBackgroundResource(R.drawable.buddy_kb_writing_card_bg)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
-            )
+            ).apply { setMargins(dp(2), 0, dp(2), dp(8)) }
             addView(wbCanvas)
-        })
+        }
+        whiteboard.addView(wbPreview)
 
         // Use-this row: Regenerate (left) + the green "Use this" (right). Shown only when a draft
         // fills the preview box.
-        useThisRow = LinearLayout(this).apply {
+        useThisRow = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
@@ -1318,27 +1811,35 @@ class BuddyImeService : InputMethodService() {
         useThisRow.addView(makeUseThisButton { previewText?.let { insertDraft(it) } })
         whiteboard.addView(useThisRow)
 
-        // Tone tabs (the writing tools), horizontally scrollable.
-        wbActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        whiteboard.addView(HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            layoutParams = rowParams(top = dp(6))
-            addView(wbActions)
-        })
-
         // Sub-row (language for Translate); hidden until needed.
-        wbSub = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        wbSubRow = HorizontalScrollView(this).apply {
+        wbSub = LinearLayout(keyboardUiContext).apply { orientation = LinearLayout.HORIZONTAL }
+        wbSubRow = HorizontalScrollView(keyboardUiContext).apply {
             isHorizontalScrollBarEnabled = false
             visibility = View.GONE
             layoutParams = rowParams(top = dp(6))
             addView(wbSub)
         }
         whiteboard.addView(wbSubRow)
+
+        // Large icon-first tiles stay below the card and scroll horizontally like the reference.
+        wbActions = LinearLayout(keyboardUiContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        whiteboard.addView(HorizontalScrollView(keyboardUiContext).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(0, 0, dp(8), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(94),
+            ).apply { setMargins(0, dp(8), 0, 0) }
+            addView(wbActions)
+        })
     }
 
     /** The green "Use this" confirm button from the reference: commits the previewed draft. */
-    private fun makeUseThisButton(onClick: () -> Unit): TextView = TextView(this).apply {
+    private fun makeUseThisButton(onClick: () -> Unit): TextView = TextView(keyboardUiContext).apply {
         text = "✓  Use this"
         gravity = Gravity.CENTER
         setAllCaps(false)
@@ -1449,7 +1950,9 @@ class BuddyImeService : InputMethodService() {
         cancelAnimators()
         // A fresh field starts with no composing word (the old field's InputConnection is gone)
         // and an empty strip, so the bar shows its action hint until the user types.
-        predictionToken.incrementAndGet() // drop any prediction in flight from the previous field
+        if (predictionCoordinatorLazy.isInitialized()) predictionCoordinator.invalidate()
+        activePredictionGeneration = -1L
+        cachedAutocorrect = null
         composer.reset()
         // A fresh field: until the next onUpdateSelection (or the initial-selection seed in
         // onStartInputView) we have no trusted cursor position.
@@ -1457,7 +1960,11 @@ class BuddyImeService : InputMethodService() {
         expectedSelEnd = -1
         resyncExpected = true
         currentSuggestions = emptyList()
+        renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
         lastCommittedWord = ""
+        committedWordHistory.clear()
+        pendingCommittedWord = null
+        manualCorrectionOrigin = null
         clipboardChip = null
         shiftState.reset()
         lastShiftTapAt = 0L
@@ -1486,11 +1993,67 @@ class BuddyImeService : InputMethodService() {
         wbActions.removeAllViews()
         for (tool in WritingTool.tabs) {
             wbActions.addView(
-                makeChip(tool.label, accent = tool == selectedTool) {
+                makeWritingToolTile(tool.label, selected = tool == selectedTool) {
                     onToolSelected(tool)
-                }
+                },
             )
         }
+    }
+
+    private fun makeWritingToolTile(
+        label: String,
+        selected: Boolean,
+        onClick: () -> Unit,
+    ): View = LinearLayout(keyboardUiContext).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        setBackgroundResource(
+            if (selected) {
+                R.drawable.buddy_kb_writing_tile_selected_bg
+            } else {
+                R.drawable.buddy_kb_writing_tile_bg
+            },
+        )
+        layoutParams = LinearLayout.LayoutParams(
+            dp(112),
+            dp(86),
+        ).apply { setMargins(dp(4), 0, dp(4), 0) }
+        addView(TextView(keyboardUiContext).apply {
+            text = writingToolGlyph(label)
+            gravity = Gravity.CENTER
+            textSize = 24f
+            setTextColor(
+                color(if (selected) R.color.buddy_kb_accent_text else R.color.buddy_kb_key_text),
+            )
+        })
+        addView(TextView(keyboardUiContext).apply {
+            text = label
+            gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            textSize = 13f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(
+                color(if (selected) R.color.buddy_kb_accent_text else R.color.buddy_kb_key_text),
+            )
+            setPadding(dp(5), dp(5), dp(5), 0)
+        })
+        contentDescription = label
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+
+    private fun writingToolGlyph(label: String): String = when (label) {
+        "Proofread" -> "A✓"
+        "Rephrase" -> "≡✎"
+        "Professional" -> "▣"
+        "Friendly" -> "⌁"
+        "Emoji" -> "☺"
+        "Reply as me" -> "↩"
+        "Continue" -> "→"
+        "Translate" -> "文"
+        else -> "✦"
     }
 
     private fun onToolSelected(tool: WritingTool) {
@@ -1663,7 +2226,7 @@ class BuddyImeService : InputMethodService() {
 
         // Centred caption column, anchored to the bottom. Right padding keeps the lyrics clear of
         // the waveform + Stop rail on the right edge.
-        val captions = LinearLayout(this).apply {
+        val captions = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             setPadding(dp(12), dp(8), dp(58), dp(8))
@@ -1675,7 +2238,7 @@ class BuddyImeService : InputMethodService() {
         }
         voiceCaptionStack = captions
 
-        val status = TextView(this).apply {
+        val status = TextView(keyboardUiContext).apply {
             textSize = 13f
             gravity = Gravity.CENTER
             setTextColor(color(R.color.buddy_kb_text_muted))
@@ -1688,7 +2251,7 @@ class BuddyImeService : InputMethodService() {
 
         // The waveform meter (teal, the brand accent) with the Stop button directly beneath it,
         // the whole rail pinned to the vertical centre of the right edge.
-        val meter = VoiceWaveformView(this).apply {
+        val meter = VoiceWaveformView(keyboardUiContext).apply {
             setBarColor(color(R.color.buddy_kb_accent))
             setEnergy(VoiceWaveformView.Energy.IDLE)
             layoutParams = LinearLayout.LayoutParams(dp(32), dp(40)).apply {
@@ -1697,7 +2260,7 @@ class BuddyImeService : InputMethodService() {
         }
         voiceWaveform = meter
 
-        val rail = LinearLayout(this).apply {
+        val rail = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             addView(meter)
@@ -1709,7 +2272,7 @@ class BuddyImeService : InputMethodService() {
             ).apply { rightMargin = dp(10) }
         }
 
-        val stage = FrameLayout(this).apply {
+        val stage = FrameLayout(keyboardUiContext).apply {
             minimumHeight = dp(168)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1723,7 +2286,7 @@ class BuddyImeService : InputMethodService() {
 
     /** The compact Stop control that sits under the waveform on the right rail: a small teal
      *  pill with a stop glyph. */
-    private fun makeStopButton(): View = TextView(this).apply {
+    private fun makeStopButton(): View = TextView(keyboardUiContext).apply {
         text = "■"
         gravity = Gravity.CENTER
         textSize = 13f
@@ -1834,7 +2397,7 @@ class BuddyImeService : InputMethodService() {
 
     /** A single caption line in the voice lyric stack. Styling (size / alpha / colour) is set
      *  by [restyleCaptionLines] from its position; this just establishes the box. */
-    private fun makeCaptionLine(text: String): TextView = TextView(this).apply {
+    private fun makeCaptionLine(text: String): TextView = TextView(keyboardUiContext).apply {
         this.text = text
         setAllCaps(false)
         gravity = Gravity.CENTER
@@ -1971,25 +2534,30 @@ class BuddyImeService : InputMethodService() {
         cancelAnimators()
         setUseThisVisible(false)
         wbCanvas.removeAllViews()
-        wbCanvas.addView(makeCanvasLine("Pick a tool and I'll draft it in your voice."))
+        val editorText = currentInputConnection
+            ?.getTextBeforeCursor(2000, 0)
+            ?.toString()
+            ?.trim()
+            .orEmpty()
+        wbCanvas.addView(
+            makePreviewText(
+                editorText.ifEmpty { "Type something, then choose a writing tool." },
+                muted = editorText.isEmpty(),
+            ),
+        )
     }
 
     private fun renderThinking() {
         cancelAnimators()
         setUseThisVisible(false)
         wbCanvas.removeAllViews()
-        wbCanvas.addView(makeCanvasLine("Buddy is drafting…"))
-        repeat(2) { index ->
-            val placeholder = View(this).apply {
-                setBackgroundResource(R.drawable.buddy_kb_card_bg)
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(46),
-                ).apply { setMargins(dp(2), dp(4), dp(2), dp(4)) }
-            }
+        wbCanvas.addView(makeCanvasLine("Aura is drafting…"))
+        listOf(1f, 0.82f, 0.58f).forEachIndexed { index, fill ->
+            val placeholder = makeSkeletonLine(fill)
             wbCanvas.addView(placeholder)
-            val pulse = ObjectAnimator.ofFloat(placeholder, View.ALPHA, 1f, 0.4f).apply {
+            val pulse = ObjectAnimator.ofFloat(placeholder, View.ALPHA, 1f, 0.35f).apply {
                 duration = 650
-                startDelay = (index * 200).toLong()
+                startDelay = (index * 140).toLong()
                 repeatMode = ObjectAnimator.REVERSE
                 repeatCount = ObjectAnimator.INFINITE
             }
@@ -2060,30 +2628,30 @@ class BuddyImeService : InputMethodService() {
         emojiContainer.removeAllViews()
 
         // Category tabs (Recent + each category's representative glyph), horizontally scrollable.
-        emojiTabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        emojiContainer.addView(HorizontalScrollView(this).apply {
+        emojiTabs = LinearLayout(keyboardUiContext).apply { orientation = LinearLayout.HORIZONTAL }
+        emojiContainer.addView(HorizontalScrollView(keyboardUiContext).apply {
             isHorizontalScrollBarEnabled = false
             layoutParams = rowParams(bottom = dp(2))
             addView(emojiTabs)
         })
 
         // The scrollable emoji grid, filling the available height.
-        emojiGrid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        emojiContainer.addView(ScrollView(this).apply {
+        emojiGrid = LinearLayout(keyboardUiContext).apply { orientation = LinearLayout.VERTICAL }
+        emojiContainer.addView(ScrollView(keyboardUiContext).apply {
             isVerticalScrollBarEnabled = false
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             addView(emojiGrid)
         })
 
         // Bottom row: ABC (back to keys) on the left, backspace on the right.
-        val bottom = LinearLayout(this).apply {
+        val bottom = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             layoutParams = rowParams(top = dp(2))
         }
         bottom.addView(makeFooterButton("ABC") { closeEmojiPanel() })
         bottom.addView(makeSpacer())
-        bottom.addView(TextView(this).apply {
+        bottom.addView(TextView(keyboardUiContext).apply {
             text = "⌫"
             textSize = 20f
             gravity = Gravity.CENTER
@@ -2152,7 +2720,7 @@ class BuddyImeService : InputMethodService() {
     }
 
     private fun makeEmojiTab(glyph: String, selected: Boolean, onClick: () -> Unit): TextView =
-        TextView(this).apply {
+        TextView(keyboardUiContext).apply {
             text = glyph
             textSize = 20f
             gravity = Gravity.CENTER
@@ -2188,7 +2756,7 @@ class BuddyImeService : InputMethodService() {
         }
         val cols = emojiColumns()
         for (rowEmojis in emojis.chunked(cols)) {
-            val row = LinearLayout(this).apply {
+            val row = LinearLayout(keyboardUiContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2197,7 +2765,7 @@ class BuddyImeService : InputMethodService() {
             for (emoji in rowEmojis) row.addView(makeEmojiCell(emoji))
             // Pad the last row so its cells stay the same width as the full rows above.
             repeat(cols - rowEmojis.size) {
-                row.addView(View(this).apply {
+                row.addView(View(keyboardUiContext).apply {
                     layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f)
                 })
             }
@@ -2205,12 +2773,18 @@ class BuddyImeService : InputMethodService() {
         }
     }
 
-    private fun makeEmojiCell(emoji: String): TextView = TextView(this).apply {
+    private fun makeEmojiCell(emoji: String): TextView = TextView(keyboardUiContext).apply {
         text = emoji
         textSize = 24f
         gravity = Gravity.CENTER
         isClickable = true
-        setOnClickListener { onEmojiTapped(emoji) }
+        setOnClickListener {
+            if (keyboardSettings.hapticFeedback) {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            }
+            playKeySound()
+            onEmojiTapped(emoji)
+        }
         layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
     }
 
@@ -2223,7 +2797,7 @@ class BuddyImeService : InputMethodService() {
 
     /** Emoji grid columns, sized to the screen width (each cell ~ 40dp). */
     private fun emojiColumns(): Int {
-        val dm = resources.displayMetrics
+        val dm = keyboardUiContext.resources.displayMetrics
         val widthDp = dm.widthPixels / dm.density
         return (widthDp / 40f).toInt().coerceIn(6, 10)
     }
@@ -2245,7 +2819,7 @@ class BuddyImeService : InputMethodService() {
 
     // --- View builders -----------------------------------------------------------
 
-    private fun makeOrb(size: Int): ImageView = ImageView(this).apply {
+    private fun makeOrb(size: Int): ImageView = ImageView(keyboardUiContext).apply {
         setImageResource(R.mipmap.ic_launcher)
         scaleType = ImageView.ScaleType.CENTER_CROP
         setBackgroundResource(R.drawable.buddy_kb_orb_ring)
@@ -2253,7 +2827,7 @@ class BuddyImeService : InputMethodService() {
         layoutParams = LinearLayout.LayoutParams(size, size).apply { rightMargin = dp(8) }
     }
 
-    private fun makeHint(label: String): TextView = TextView(this).apply {
+    private fun makeHint(label: String): TextView = TextView(keyboardUiContext).apply {
         text = label
         textSize = 13f
         setTextColor(color(R.color.buddy_kb_text_muted))
@@ -2267,57 +2841,73 @@ class BuddyImeService : InputMethodService() {
         setOnClickListener { onClick() }
     }
 
-    /** The always-present mic on the collapsed bar: a clean vector mic (not an emoji), one tap
-     *  to talk to Buddy from any field. The live "real-time" pulse lives on the voice panel
-     *  (see [makeVoiceMicIndicator]); this resting button stays still so it never distracts
-     *  while the user is typing. */
-    private fun makeMicButton(onClick: () -> Unit): ImageView = ImageView(this).apply {
-        setImageResource(R.drawable.ic_widget_mic)
-        imageTintList = ColorStateList.valueOf(color(R.color.buddy_kb_key_text))
-        scaleType = ImageView.ScaleType.CENTER_INSIDE
-        val p = dp(8)
-        setPadding(p, p, p, p)
-        setBackgroundResource(R.drawable.buddy_kb_action_bg)
-        isClickable = true
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { rightMargin = dp(4) }
+    private fun makeAuraToolbarButton(onClick: () -> Unit): FrameLayout {
+        val orb = makeOrb(dp(32)).apply {
+            layoutParams = FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER)
+        }
+        return makeToolbarSlot(orb, "Aura", onClick)
     }
 
-    /** The toolbar clipboard button: a crisp vector icon (not an emoji), one tap to pull the
-     *  clipboard in as a paste chip. */
-    private fun makeClipboardButton(onClick: () -> Unit): ImageView = makeToolbarIcon(
-        R.drawable.ic_kb_clipboard, onClick,
-    )
-
-    /** The toolbar globe button: one tap opens the system keyboard picker (switch input methods). */
-    private fun makeGlobeButton(onClick: () -> Unit): ImageView = makeToolbarIcon(
-        R.drawable.ic_kb_globe, onClick,
-    )
-
-    /** A toolbar icon button: a vector glyph tinted to the key color on the neutral pill, sized and
-     *  spaced like the mic so the right-hand cluster reads as one consistent toolbar. */
-    private fun makeToolbarIcon(iconRes: Int, onClick: () -> Unit): ImageView = ImageView(this).apply {
-        setImageResource(iconRes)
-        imageTintList = ColorStateList.valueOf(color(R.color.buddy_kb_key_text))
-        scaleType = ImageView.ScaleType.CENTER_INSIDE
-        val p = dp(8)
-        setPadding(p, p, p, p)
-        setBackgroundResource(R.drawable.buddy_kb_action_bg)
-        isClickable = true
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { rightMargin = dp(4) }
+    /** A fixed, evenly weighted toolbar icon. Tint and pressed state both resolve through Aura's
+     *  light/night resources; an absent listener intentionally leaves a visual placeholder inert. */
+    private fun makeToolbarIcon(
+        iconRes: Int,
+        label: String,
+        onClick: (() -> Unit)? = null,
+    ): FrameLayout {
+        val icon = ImageView(keyboardUiContext).apply {
+            setImageResource(iconRes)
+            imageTintList = ColorStateList.valueOf(color(R.color.buddy_kb_key_text))
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            layoutParams = FrameLayout.LayoutParams(dp(24), dp(24), Gravity.CENTER)
+        }
+        return makeToolbarSlot(icon, label, onClick)
     }
 
-    private fun makeSpacer(): View = View(this).apply {
+    private fun makeToolbarLabel(
+        label: String,
+        contentLabel: String,
+        onClick: (() -> Unit)? = null,
+    ): FrameLayout {
+        val textView = TextView(keyboardUiContext).apply {
+            text = label
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(color(R.color.buddy_kb_key_text))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER,
+            )
+        }
+        return makeToolbarSlot(textView, contentLabel, onClick)
+    }
+
+    private fun makeToolbarSlot(
+        content: View,
+        label: String,
+        onClick: (() -> Unit)?,
+    ): FrameLayout = FrameLayout(keyboardUiContext).apply {
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+        setBackgroundResource(R.drawable.buddy_kb_toolbar_button_bg)
+        addView(content)
+        if (onClick == null) {
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        } else {
+            contentDescription = label
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun makeSpacer(): View = View(keyboardUiContext).apply {
         layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
     }
 
     private fun makeFooterButton(label: String, onClick: () -> Unit): TextView =
-        TextView(this).apply {
+        TextView(keyboardUiContext).apply {
             text = label
             textSize = 13f
             setTextColor(color(R.color.buddy_kb_text_muted))
@@ -2329,20 +2919,42 @@ class BuddyImeService : InputMethodService() {
             setOnClickListener { onClick() }
         }
 
-    private fun makeCanvasLine(text: String): TextView = TextView(this).apply {
+    private fun makeCanvasLine(text: String): TextView = TextView(keyboardUiContext).apply {
         this.text = text
-        textSize = 13f
+        textSize = 14f
+        gravity = Gravity.CENTER
         setTextColor(color(R.color.buddy_kb_text_muted))
         val p = dp(12)
         setPadding(p, dp(10), p, dp(10))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+    }
+
+    private fun makeSkeletonLine(fill: Float): View = LinearLayout(keyboardUiContext).apply {
+        orientation = LinearLayout.HORIZONTAL
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(14),
+        ).apply { setMargins(dp(10), dp(5), dp(10), dp(5)) }
+        val weight = fill.coerceIn(0.1f, 1f)
+        addView(View(keyboardUiContext).apply {
+            setBackgroundResource(R.drawable.buddy_kb_skeleton_bg)
+        }, LinearLayout.LayoutParams(0, dp(14), weight))
+        if (weight < 1f) {
+            addView(View(keyboardUiContext), LinearLayout.LayoutParams(0, 1, 1f - weight))
+        }
     }
 
     /** The draft text inside the preview box. Read-only (editing happens in the real field after
      *  "Use this"); long-press copies it. */
-    private fun makePreviewText(text: String): TextView = TextView(this).apply {
+    private fun makePreviewText(text: String, muted: Boolean = false): TextView =
+        TextView(keyboardUiContext).apply {
         this.text = text
         textSize = 16f
-        setTextColor(color(R.color.buddy_kb_key_text))
+        gravity = Gravity.CENTER
+        setTextColor(color(if (muted) R.color.buddy_kb_text_muted else R.color.buddy_kb_key_text))
         setAllCaps(false)
         val padH = dp(12)
         val padV = dp(10)
@@ -2350,12 +2962,12 @@ class BuddyImeService : InputMethodService() {
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         )
-        isClickable = true
-        setOnLongClickListener { copyToClipboard(text); true }
-    }
+        isClickable = !muted
+        if (!muted) setOnLongClickListener { copyToClipboard(text); true }
+        }
 
     private fun makeChip(label: String, accent: Boolean, onClick: () -> Unit): TextView =
-        TextView(this).apply {
+        TextView(keyboardUiContext).apply {
             text = label
             gravity = Gravity.CENTER
             maxLines = 1
@@ -2404,16 +3016,24 @@ class BuddyImeService : InputMethodService() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
         ).apply { setMargins(0, top, 0, bottom) }
 
-    private fun color(resId: Int): Int = ContextCompat.getColor(this, resId)
+    private fun refreshKeyboardUiContext() {
+        appliedKeyboardNightMode =
+            KeyboardThemeContext.effectiveNightMode(this, keyboardSettings.themeMode)
+        keyboardUiContext = KeyboardThemeContext.wrap(this, keyboardSettings.themeMode)
+    }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun color(resId: Int): Int = ContextCompat.getColor(keyboardUiContext, resId)
+
+    private fun dp(value: Int): Int =
+        (value * keyboardUiContext.resources.displayMetrics.density).toInt()
 
     /** Letter-key height, sized to the screen like Gboard (clamped per device) so the keyboard
      *  fills a comfortable footprint instead of looking small on a tall phone. */
-    private fun keyHeightPx(): Int {
-        val dm = resources.displayMetrics
+    private fun keyHeightPx(scale: Float): Int {
+        val dm = keyboardUiContext.resources.displayMetrics
         val screenHeightDp = dm.heightPixels / dm.density
-        val keyDp = (screenHeightDp * 0.058f).coerceIn(50f, 60f)
+        val baseKeyDp = (screenHeightDp * 0.058f).coerceIn(50f, 60f)
+        val keyDp = (baseKeyDp * scale).coerceAtLeast(44f)
         return (keyDp * dm.density).toInt()
     }
 }

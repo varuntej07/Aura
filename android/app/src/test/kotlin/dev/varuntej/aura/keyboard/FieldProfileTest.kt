@@ -173,6 +173,23 @@ class FieldProfileTest {
     }
 
     @Test
+    fun paymentPrivateAndIncognitoMetadata_blocksLearning() {
+        for (metadata in listOf(
+            "cardholder name",
+            "privateImeOptions=incognito",
+            "payment_account",
+            "secure entry",
+        )) {
+            val base = profile(InputType.TYPE_CLASS_TEXT)
+            val guarded = base.copy(
+                sensitiveLearningContext = FieldProfile.hasSensitiveLearningSignal(listOf(metadata)),
+            )
+            assertTrue(guarded.predictionsAllowed)
+            assertFalse("metadata=$metadata", guarded.learningAllowed)
+        }
+    }
+
+    @Test
     fun unknownClass_fallsBackToText() {
         // A class we do not special-case degrades to the safe plain-text profile.
         val p = profile(InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME)

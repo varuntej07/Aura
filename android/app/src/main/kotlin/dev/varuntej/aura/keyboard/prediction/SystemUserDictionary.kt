@@ -2,7 +2,6 @@ package dev.varuntej.aura.keyboard.prediction
 
 import android.content.Context
 import android.provider.UserDictionary
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -27,14 +26,13 @@ object SystemUserDictionary {
     @Volatile
     private var lastLoadedAt = 0L
     private val loading = AtomicBoolean(false)
-    private val executor = Executors.newSingleThreadExecutor()
 
     /** Refresh the cache if it is stale (or never loaded). Safe to call on every focus. */
     fun ensureFresh(context: Context) {
         if (System.currentTimeMillis() - lastLoadedAt < REFRESH_INTERVAL_MS) return
         if (!loading.compareAndSet(false, true)) return
         val appContext = context.applicationContext
-        executor.execute {
+        Thread({
             try {
                 index = PrefixIndex.from(query(appContext))
                 lastLoadedAt = System.currentTimeMillis()
@@ -43,6 +41,9 @@ object SystemUserDictionary {
             } finally {
                 loading.set(false)
             }
+        }, "AuraImeSystemDictionaryRefresh").apply {
+            isDaemon = true
+            start()
         }
     }
 

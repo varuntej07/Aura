@@ -31,6 +31,9 @@ data class FieldProfile(
     // The app set IME_FLAG_NO_PERSONALIZED_LEARNING ("don't persist what is typed here"): forces
     // learn-on-commit off so a recovery code / 2FA value typed in plain text is never remembered.
     val learningOptedOut: Boolean = false,
+    // Conservative focus-time metadata detection for payment/private/incognito/OTP fields whose
+    // host omitted the standard no-personalized-learning flag.
+    val sensitiveLearningContext: Boolean = false,
 ) {
     /**
      * Whether on-device typing intelligence (the composing-text pipeline + suggestion strip)
@@ -56,7 +59,7 @@ data class FieldProfile(
      * address, a url, a password, or any secure field.
      */
     val learningAllowed: Boolean
-        get() = autocorrectAllowed && !learningOptedOut
+        get() = autocorrectAllowed && !learningOptedOut && !sensitiveLearningContext
 
     companion object {
         // The layouts that carry prose worth predicting. Numeric / phone / PIN are absent, so
@@ -73,8 +76,28 @@ data class FieldProfile(
             fieldTypeWire = "text",
         )
 
-        fun fromEditorInfo(info: EditorInfo?): FieldProfile =
-            if (info == null) text() else fromInputType(info.inputType, info.imeOptions)
+        fun fromEditorInfo(info: EditorInfo?): FieldProfile {
+            if (info == null) return text()
+            val base = fromInputType(info.inputType, info.imeOptions)
+            val metadata = buildList {
+                info.privateImeOptions?.let(::add)
+                info.fieldName?.let(::add)
+                info.hintText?.toString()?.let(::add)
+                info.extras?.let { extras ->
+                    extras.keySet().forEach { key ->
+                        add(key)
+                        extras.get(key)?.toString()?.let(::add)
+                    }
+                }
+            }
+            return base.copy(sensitiveLearningContext = hasSensitiveLearningSignal(metadata))
+        }
+
+        /** Pure metadata classifier kept separate for deterministic policy tests. */
+        fun hasSensitiveLearningSignal(values: Iterable<String>): Boolean {
+            val normalized = values.joinToString(" ").lowercase()
+            return SENSITIVE_LEARNING_MARKERS.any(normalized::contains)
+        }
 
         /** The pure core, split out so it is unit-testable without an EditorInfo (which
          *  needs the Android framework). [InputType] / [EditorInfo] flag constants are
@@ -151,6 +174,31 @@ data class FieldProfile(
             passwordGenerate = true,
             isSecure = true,
             fieldTypeWire = "password",
+        )
+
+        private val SENSITIVE_LEARNING_MARKERS = listOf(
+            "secure",
+            "incognito",
+            "private",
+            "confidential",
+            "sensitive",
+            "payment",
+            "creditcard",
+            "credit_card",
+            "credit card",
+            "cardholder",
+            "card_holder",
+            "cvv",
+            "cvc",
+            "iban",
+            "routing number",
+            "account_number",
+            "account number",
+            "one-time",
+            "one_time",
+            "otp",
+            "verification code",
+            "recovery code",
         )
     }
 }
