@@ -39,11 +39,13 @@ _MAX_FIRE_HOURS = 24.0 * 30  # 30 days
 _SENSE_TEMPERATURE = 0.1
 _SUBJECT_MAX_CHARS = 60
 _QUESTION_MAX_CHARS = 240
+_TITLE_MAX_CHARS = 40
 
 
 class NewFollowup(BaseModel):
     subject: str = ""
     question: str = ""
+    title: str = ""
     fire_in_hours: float = 24.0
 
 
@@ -131,6 +133,7 @@ async def reconcile_and_schedule(
                 kind="life_followup",
                 subject=subject,
                 question=nf.question.strip()[:_QUESTION_MAX_CHARS],
+                title=nf.title.strip()[:_TITLE_MAX_CHARS],
                 fire_at=fire_at,
                 source="intent_sense",
                 session_id=session_id,

@@ -43,6 +43,7 @@ from .fields import (
     FIELD_QUESTION,
     FIELD_RESOLUTION_REASON,
     FIELD_SESSION_ID,
+    FIELD_TITLE,
     FIELD_SOURCE,
     FIELD_STATUS,
     FIELD_SUBJECT,
@@ -72,6 +73,8 @@ class Intent:
     fire_at: datetime
     status: str
     source: str = ""
+    # Absent on intents scheduled before the framer produced a title; readers fall back.
+    title: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> Intent:
@@ -81,6 +84,7 @@ class Intent:
             kind=str(data.get(FIELD_KIND, "")),
             subject=str(data.get(FIELD_SUBJECT, "")),
             question=str(data.get(FIELD_QUESTION, "")),
+            title=str(data.get(FIELD_TITLE, "")),
             fire_at=_as_aware(data.get(FIELD_FIRE_AT)) or datetime.now(UTC),
             status=str(data.get(FIELD_STATUS, "")),
             source=str(data.get(FIELD_SOURCE, "")),
@@ -125,6 +129,7 @@ async def schedule_intent(
     subject: str,
     question: str,
     fire_at: datetime,
+    title: str = "",
     source: str = "",
     session_id: str = "",
     now: datetime | None = None,
@@ -171,6 +176,7 @@ async def schedule_intent(
                 FIELD_KIND: kind,
                 FIELD_SUBJECT: subject,
                 FIELD_QUESTION: question,
+                FIELD_TITLE: title,
                 FIELD_FIRE_AT: fire_at,
                 FIELD_STATUS: INTENT_PENDING,
                 FIELD_SOURCE: source,
@@ -235,6 +241,7 @@ def _claim_due(now: datetime, limit: int) -> list[Intent]:
                 "intent_id": preview.intent_id,
                 "subject": preview.subject,
                 "question": preview.question,
+                "title": preview.title,
                 "kind": preview.kind,
             },
             source="intent_supervisor",

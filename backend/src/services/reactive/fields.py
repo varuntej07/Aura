@@ -57,6 +57,9 @@ FIELD_INTENT_ID = "intent_id"
 FIELD_KIND = "kind"
 FIELD_SUBJECT = "subject"
 FIELD_QUESTION = "question"
+# Notification title for the follow-up push. Absent on intents scheduled before the
+# title existed, so every reader must tolerate "" and fall back (see followup.py).
+FIELD_TITLE = "title"
 FIELD_FIRE_AT = "fire_at"
 FIELD_STATUS = "status"
 FIELD_CREATED_AT = "created_at"

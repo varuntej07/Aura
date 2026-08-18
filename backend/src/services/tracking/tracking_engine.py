@@ -272,17 +272,21 @@ async def _compose_result_push(
         logger.warn("tracking_engine: result compose failed, using fallback copy", {
             "fixture_id": fixture.id, "error": str(exc),
         })
+    # Fallback copy: the LLM is down, so this is deterministic and it stays plain. Title
+    # carries the fixture, body carries the outcome, so the two never restate each other
+    # (the duplicate-line failure this whole rewrite exists to kill). No long dashes.
     if seen.status == f.FIXTURE_STATUS_CANCELLED:
-        fallback_body = f"{fixture.label} is off — {seen.note or 'it was cancelled or postponed'}."
+        fallback_body = f"It's off. {seen.note or 'Cancelled or postponed'}."
     elif seen.winner:
-        fallback_body = f"{seen.winner} won{f' {seen.score}' if seen.score else ''} — {fixture.label}."
+        fallback_body = f"{seen.winner} won it{f', {seen.score}' if seen.score else ''}!"
     else:
-        fallback_body = f"{fixture.label} has finished{f' ({seen.score})' if seen.score else ''}."
+        fallback_body = f"That's full time{f', {seen.score}' if seen.score else ''}."
+    label = fixture.label[:60] or "Tracker update"
     return _PushCopy(
-        title=fixture.label[:60] or "Tracker update",
+        title=label,
         body=fallback_body,
-        opening_chat_message=fallback_body,
-        summary=fallback_body[:100],
+        opening_chat_message=f"{label}: {fallback_body}",
+        summary=f"{label}: {fallback_body}"[:100],
     )
 
 
@@ -295,10 +299,10 @@ async def _compose_fixture_moment_push(
     minutes_to_start = max(0, int((fixture.start_at - now).total_seconds() // 60))
     if moment == f.CHECKPOINT_PHASE_PRE:
         situation = f"starts in about {minutes_to_start} minutes"
-        fallback_body = f"{fixture.label} kicks off in about {minutes_to_start} minutes!"
+        fallback_body = f"Kicks off in about {minutes_to_start} minutes!"
     else:
         situation = "is starting right now"
-        fallback_body = f"{fixture.label} is underway!"
+        fallback_body = "It's starting right now!"
     prompt = tracking_moment_user_prompt(
         topic=topic.title,
         fixture=fixture.label,
@@ -316,11 +320,12 @@ async def _compose_fixture_moment_push(
         logger.warn("tracking_engine: moment compose failed, using fallback copy", {
             "fixture_id": fixture.id, "moment": moment, "error": str(exc),
         })
+    label = fixture.label[:60] or "Heads up"
     return _PushCopy(
-        title=fixture.label[:60] or "Heads up",
+        title=label,
         body=fallback_body,
-        opening_chat_message=fallback_body,
-        summary=fallback_body[:100],
+        opening_chat_message=f"{label}: {fallback_body}",
+        summary=f"{label}: {fallback_body}"[:100],
     )
 
 

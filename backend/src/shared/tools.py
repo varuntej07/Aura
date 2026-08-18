@@ -801,6 +801,27 @@ def _validate_strict_object_schema(schema: dict[str, Any], *, path: str) -> None
             _validate_strict_object_schema(items, path=f"{path}[]")
 
 
+def assert_strict_tool_schema(definition: dict[str, Any]) -> None:
+    """Validate one strict tool contract declared OUTSIDE ``TOOL_DEFINITIONS``.
+
+    The local ``@function_tool(raw_schema=...)`` tools on BuddyAgent carry their own
+    strict schemas under a ``parameters`` key, so the import-time sweep below never
+    sees them. A strict schema whose ``required`` omits a property is rejected by
+    OpenAI at request time with a 400 that kills EVERY turn carrying the tool list,
+    not just the turn that wanted the tool, so it has to fail at import instead.
+    Non-strict definitions are a no-op: nothing validates their optional fields.
+    """
+    if definition.get("strict") is not True:
+        return
+    name = str(definition.get("name") or "<unnamed>")
+    schema = definition.get("parameters") or definition.get("inputSchema")
+    if not isinstance(schema, dict):
+        raise RuntimeError(
+            f"Strict tool {name!r} declares strict: True with no parameters schema."
+        )
+    _validate_strict_object_schema(schema, path=name)
+
+
 for _tool_definition in TOOL_DEFINITIONS:
     _close_object_schemas(_tool_definition["inputSchema"])
     if _tool_definition.get("strict") is True:

@@ -30,16 +30,26 @@ from ..intent_store import subject_id
 NOTIFICATION_TYPE_FOLLOWUP = "intent_followup"
 
 
+def _title_from_subject(subject: str) -> str:
+    """Fallback title for legacy intents with no framed title. The subject is a
+    lowercase_snake_case slug (mom_surgery, java_interview), so this reads it back
+    as words. Empty subject degrades to a bare greeting, which is the old behaviour."""
+    words = " ".join(part for part in subject.replace("_", " ").split() if part)
+    return words[:40] if words else "hey"
+
+
 @dataclass
 class _Inputs:
     subject: str = ""
     question: str = ""
+    title: str = ""
 
 
 @dataclass
 class _Result:
     subject: str = ""
     question: str = ""
+    title: str = ""
 
 
 class ScheduledFollowUpAgent:
@@ -56,6 +66,7 @@ class ScheduledFollowUpAgent:
         return _Inputs(
             subject=str(payload.get("subject", "")),
             question=str(payload.get("question", "")),
+            title=str(payload.get("title", "")),
         )
 
     async def plan(self, inputs: _Inputs) -> Plan:
@@ -65,7 +76,7 @@ class ScheduledFollowUpAgent:
 
     async def act(self, plan: Plan, attempt: int) -> _Result:
         inp: _Inputs = plan.payload
-        return _Result(subject=inp.subject, question=inp.question)
+        return _Result(subject=inp.subject, question=inp.question, title=inp.title)
 
     async def verify(self, raw: _Result) -> Verdict:
         if raw.question.strip():
@@ -86,7 +97,10 @@ class ScheduledFollowUpAgent:
             source=SOURCE_FOLLOWUP,
             kind=ProposalKind.PROACTIVE,
             dedup_key=f"followup_{subject_id(raw.subject)}",
-            title="Buddy",
+            # Intents scheduled before the framer produced a title carry none, and they
+            # can sit pending for weeks, so this path stays alive for them. The subject
+            # slug beats the old constant "Buddy": it at least names the thing.
+            title=raw.title.strip() or _title_from_subject(raw.subject),
             body=raw.question,
             data={
                 "notification_type": NOTIFICATION_TYPE_FOLLOWUP,

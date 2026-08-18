@@ -14,6 +14,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from src.services.notification_rewriter import ReminderCopy
 
 _GCC_PATH = "src.services.google_calendar_connector.GoogleCalendarConnector"
 
@@ -60,7 +61,7 @@ class TestHandleSchedulerTick:
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
                 with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
-                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="Take meds")):
+                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Take meds"))):
                         with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                             with _patch_gc():
                                 result = await handle_scheduler_tick()
@@ -79,7 +80,7 @@ class TestHandleSchedulerTick:
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
-                with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="Stand up")):
+                with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Stand up"))):
                     with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                         with _patch_gc():
                             result = await handle_scheduler_tick()
@@ -106,7 +107,7 @@ class TestHandleSchedulerTick:
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
                 with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
-                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="msg")):
+                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="msg"))):
                         with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(side_effect=send_side_effect)):
                             with _patch_gc():
                                 result = await handle_scheduler_tick()
@@ -139,7 +140,7 @@ class TestHandleSchedulerTick:
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
                 with patch("src.handlers.scheduler.mark_reminder_fired"):
-                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value="Reminder due now")) as mock_rw:
+                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Reminder due now"))) as mock_rw:
                         with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                             with _patch_gc():
                                 await handle_scheduler_tick()

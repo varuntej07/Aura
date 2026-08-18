@@ -59,7 +59,7 @@ FRAMER_UNAVAILABLE_REASON = "framer_unavailable"
 # Stamped onto every framed notification's ledger row. Bump this whenever
 # SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT changes so a tap-rate shift can be attributed to a
 # specific copy revision (the A/B hook for "what phrasing gets the click").
-FRAMER_PROMPT_VERSION = "2026-06-17"
+FRAMER_PROMPT_VERSION = "2026-08-17"
 
 # User-visible push copy must never contain long dashes (em "—" or en "–"); they read
 # as machine-authored and the product voice forbids them. The framer prompt already
@@ -301,11 +301,40 @@ _SOURCE_MENTIONS = (
 )
 _LAZY_QUESTIONS = (
     "what do you think", "thoughts?", "what do you make of", "what are your thoughts",
+    "have you seen this", "did you see that", "curious about why",
+)
+# Wire-service and newsletter register: excitement about the SUBJECT with nobody in it.
+# These are the phrases the shipped tracker and briefing copy actually used, and they
+# are what BUDDY_PUSH_ENERGY exists to replace. Energy itself is fine; this is not.
+_WIRE_COPY_PHRASES = (
+    "highly anticipated", "get ready for", "the wait is over", "what promises to be",
+    "great news", "time to get ready", "find out more", "find out what experts",
+    "see what it's doing", "don't miss out", "stay tuned",
 )
 # Only long dashes are policed in copy. Exclamation marks, hyphens, and double
 # hyphens are allowed; the live path also strips long dashes via strip_long_dashes,
 # so this linter exists to catch a regression in the framer's own output.
 _BANNED_PUNCTUATION = ("—", "–")
+
+
+def _body_restates_title(title: str, body: str) -> bool:
+    """True when the body adds nothing the title did not already carry.
+
+    This is the failure that dominated the shipped tracker copy: title "FIFA World Cup
+    2026 Final: Argentina vs Spain", body "FIFA World Cup 2026 Final: Argentina vs Spain
+    is underway!". Two lines of notification shade carrying one fact.
+
+    Word-set based rather than substring based, because the real cases re-order and
+    re-punctuate rather than repeat verbatim. Short titles are skipped: a 2-word title
+    legitimately shares its words with the body.
+    """
+    title_words = {w for w in re.findall(r"[a-z0-9]+", title.lower()) if len(w) > 2}
+    body_words = {w for w in re.findall(r"[a-z0-9]+", body.lower()) if len(w) > 2}
+    if len(title_words) < 3 or not body_words:
+        return False
+    # Every meaningful word of the title reappears in the body, and the body brings
+    # fewer than three words of its own: it is a restatement, not a second beat.
+    return title_words <= body_words and len(body_words - title_words) < 3
 
 
 def copy_violations(framed: FramedNotification) -> list[str]:
@@ -341,6 +370,11 @@ def copy_violations(framed: FramedNotification) -> list[str]:
     for question in _LAZY_QUESTIONS:
         if question in blob:
             issues.append(f"lazy dead-end question ({question!r})")
+    for phrase in _WIRE_COPY_PHRASES:
+        if phrase in blob:
+            issues.append(f"wire-copy phrase ({phrase!r})")
+    if _body_restates_title(title, body):
+        issues.append("body restates the title (two lines carrying one fact)")
     if framed.content_kind not in (CONTENT_KIND_READ, CONTENT_KIND_DISCUSS):
         issues.append(f"invalid content_kind {framed.content_kind!r}")
     return issues

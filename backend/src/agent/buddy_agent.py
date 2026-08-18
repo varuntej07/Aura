@@ -59,7 +59,7 @@ from ..lib.logger import logger
 from ..prompts import GUIDE_SYSTEM_PROMPT, voice_system_prompt
 from ..services.analytics.llm_telemetry import start_tool_span
 from ..shared.capability_claims import log_false_capability_claims
-from ..shared.tools import resolve_set_reminder_tier
+from ..shared.tools import assert_strict_tool_schema, resolve_set_reminder_tier
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import (
     VOICE_FEEDBACK_TOOL_DEFINITION,
@@ -263,6 +263,16 @@ _DRAFT_OUTBOUND_MESSAGE_TOOL_DEFINITION = {
     },
     "strict": True,
 }
+
+# Every raw schema this module hands to @function_tool, checked at import. These two
+# live outside TOOL_DEFINITIONS, so the sweep in shared/tools.py cannot see them, and
+# a strict schema missing a property from `required` 400s every voice turn rather than
+# only the turn that wanted the tool. That is what took set_reminder down once already.
+for _raw_tool_definition in (
+    VOICE_FEEDBACK_TOOL_DEFINITION,
+    _DRAFT_OUTBOUND_MESSAGE_TOOL_DEFINITION,
+):
+    assert_strict_tool_schema(_raw_tool_definition)
 
 
 # The sub-1s floor for the opening line. The memory-seeded opener

@@ -685,8 +685,14 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                     continue
 
                 raw_message = str(data.get("message", "Reminder due now"))
-                body = await rewrite_reminder_notification(raw_message)
+                copy = await rewrite_reminder_notification(raw_message)
+                body = copy.body
                 is_alarm = alarm_sync.is_alarm(data)
+                # An alarm keeps a stable, unmistakable title: someone half asleep at
+                # 6am needs to recognise it instantly, not read a witty subject line.
+                # A plain reminder takes the framed title when there is one, so the
+                # bold line names the actual thing instead of the word "Reminder".
+                title = "Buddy Alarm" if is_alarm else (copy.title or "Buddy Reminder")
 
                 # Committed lane: the user asked for this, so the orchestrator sends
                 # it inline (freshness n/a, dedup handled by the atomic claim above).
@@ -701,7 +707,7 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                         # two same-minute same-message docs collide on this key and the
                         # orchestrator drops the second within its 24h ledger window.
                         dedup_key=_reminder_dedup_key(raw_message, data.get("trigger_at")),
-                        title="Buddy Alarm" if is_alarm else "Buddy Reminder",
+                        title=title,
                         body=body,
                         data={
                             "reminder_id": reminder_id,

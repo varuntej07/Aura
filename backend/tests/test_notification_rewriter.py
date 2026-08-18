@@ -2,13 +2,15 @@
 Tests for src/services/notification_rewriter.py
 
 The rewriter now routes through model_provider.cheap() (Gemini Flash + its fallback chain)
-instead of a bespoke raw-Anthropic client. These cover: success returns the rewritten copy,
-a total cheap() failure degrades to the normalised original, empty model output degrades to
-the original, overlong output is capped, and _normalise's deterministic formatting.
+instead of a bespoke raw-Anthropic client. The rewriter now returns a ReminderCopy
+(title + body) rather than a bare string. These cover: success returns the rewritten copy,
+a total cheap() failure degrades to the normalised original, unparseable model output
+degrades to the original, overlong output is capped, and _normalise's formatting.
 """
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,14 +28,15 @@ class TestRewriteReminderNotification:
     async def test_success_returns_rewritten_text(self):
         from src.services.notification_rewriter import rewrite_reminder_notification
 
-        cheap = AsyncMock(return_value="Take your meds")
+        cheap = AsyncMock(return_value='{"title":"Meds","body":"Take your meds"}')
         with patch(
             "src.services.notification_rewriter.get_model_provider",
             return_value=_provider_with_cheap(cheap),
         ):
             result = await rewrite_reminder_notification("take medication")
 
-        assert result == "Take your meds"
+        assert result.body == "Take your meds"
+        assert result.title == "Meds"
         cheap.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -48,11 +51,12 @@ class TestRewriteReminderNotification:
         ):
             result = await rewrite_reminder_notification("take medication")
 
-        assert result == "take medication"
+        assert result.body == "take medication"
+        assert result.title == ""
 
     @pytest.mark.asyncio
-    async def test_empty_output_returns_original(self):
-        """An empty/whitespace model response must not ship a blank push."""
+    async def test_unparseable_output_returns_original(self):
+        """An empty/whitespace/non-JSON response must not ship a blank push."""
         from src.services.notification_rewriter import rewrite_reminder_notification
 
         cheap = AsyncMock(return_value="   ")
@@ -62,30 +66,32 @@ class TestRewriteReminderNotification:
         ):
             result = await rewrite_reminder_notification("walk the dog")
 
-        assert result == "walk the dog"
+        assert result.body == "walk the dog"
+        assert result.title == ""
 
     @pytest.mark.asyncio
     async def test_overlong_model_output_is_capped(self):
-        """A model that ignores the 70-char rule is truncated at a word boundary."""
+        """A model that ignores the body cap is truncated at a word boundary."""
         from src.services.notification_rewriter import (
             rewrite_reminder_notification,
-            _REMINDER_MAX_CHARS,
+            _BODY_MAX_CHARS,
         )
 
         long_copy = (
-            "Hey, check in with Varun on the Neuron Collectives stuff today and get specifics"
+            "Hey, check in with Varun on the Neuron Collectives stuff today and get the "
+            "specifics from him before the review lands on everyone"
         )
-        cheap = AsyncMock(return_value=long_copy)
+        cheap = AsyncMock(return_value=json.dumps({"title": "Varun", "body": long_copy}))
         with patch(
             "src.services.notification_rewriter.get_model_provider",
             return_value=_provider_with_cheap(cheap),
         ):
             result = await rewrite_reminder_notification("neuron collectives note")
 
-        assert len(result) <= _REMINDER_MAX_CHARS
-        assert not result.endswith(" ")
+        assert len(result.body) <= _BODY_MAX_CHARS
+        assert not result.body.endswith(" ")
         # Truncation cuts whole words, never mid-word, so the original prefix is preserved.
-        assert long_copy.startswith(result)
+        assert long_copy.startswith(result.body)
 
 
 class TestNormalise:
@@ -104,10 +110,13 @@ class TestNormalise:
         assert "—" not in _normalise("budget time — before payday")
         assert "–" not in _normalise("gym now – no excuses")
 
-    def test_caps_at_seventy_on_word_boundary(self):
-        from src.services.notification_rewriter import _normalise, _REMINDER_MAX_CHARS
-        out = _normalise("one two three four five six seven eight nine ten eleven twelve thirteen")
-        assert len(out) <= _REMINDER_MAX_CHARS
+    def test_caps_body_on_word_boundary(self):
+        from src.services.notification_rewriter import _normalise, _BODY_MAX_CHARS
+        out = _normalise(
+            "one two three four five six seven eight nine ten eleven twelve thirteen "
+            "fourteen fifteen sixteen seventeen eighteen nineteen twenty"
+        )
+        assert len(out) <= _BODY_MAX_CHARS
         # No partial trailing word.
         assert not out.endswith("thi")
 
