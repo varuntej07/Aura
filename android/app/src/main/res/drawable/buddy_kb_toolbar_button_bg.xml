@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Flat toolbar feedback. No literal light/dark colors: both states resolve through the theme. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/buddy_kb_key_pressed" />
+            <corners android:radius="22dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/buddy_kb_background" />
+            <corners android:radius="22dp" />
+        </shape>
+    </item>
+</selector>

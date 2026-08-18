@@ -4,11 +4,21 @@ import java.io.FileInputStream
 plugins {
     id("com.android.application")
     // FlutterFire Configuration
-    id("com.google.gms.google-services")
-    id("com.google.firebase.crashlytics")
+    id("com.google.gms.google-services") apply false
+    id("com.google.firebase.crashlytics") apply false
 
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// The physical IME benchmark installs a second, isolated package/UID. Firebase is deliberately
+// not configured for that artifact: ordinary typing is local, and omitting these plugins makes it
+// impossible for the benchmark build to be mistaken for the production Firebase application.
+val isImeBenchmarkTarget =
+    providers.gradleProperty("auraImeBenchmarkTarget").orNull?.toBooleanStrictOrNull() == true
+if (!isImeBenchmarkTarget) {
+    apply(plugin = "com.google.gms.google-services")
+    apply(plugin = "com.google.firebase.crashlytics")
 }
 
 val keyPropertiesFile = rootProject.file("key.properties")
@@ -25,6 +35,12 @@ android {
     namespace = "dev.varuntej.aura"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+
+    androidResources {
+        // The keyboard maps these immutable assets directly from the APK. Compression would force
+        // a heap copy and makes AssetManager.openFd unavailable.
+        noCompress += listOf("pdict", "onnx")
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -45,13 +61,18 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "dev.varuntej.aura"
+        applicationId = if (isImeBenchmarkTarget) {
+            "dev.varuntej.aura.imebenchmarktarget"
+        } else {
+            "dev.varuntej.aura"
+        }
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -89,6 +110,10 @@ dependencies {
     // that ships the MasterKey.Builder API (security-crypto never had a stable 1.1.0).
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // Offline keyboard candidate reranking. The deterministic trie/n-gram path remains primary
+    // and the IME fails open if this optional runtime or model cannot initialize.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
+
     // Native Firebase Auth for the Buddy Keyboard IME. The keyboard runs in its own
     // process and mints a FRESH Firebase ID token on demand (FirebaseAuth.getIdToken)
     // rather than reading the app-bridged token off disk, which goes stale whenever the
@@ -103,6 +128,9 @@ dependencies {
     // JVM unit tests for the keyboard's pure logic (FieldProfile field detection,
     // StrongPassword generation). Test classpath only; no effect on the app artifact.
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:core-ktx:1.7.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 
     // In-keyboard voice: native LiveKit Android SDK so the IME holds a WebRTC duplex to
     // the voice agent IN-PROCESS (tap mic in the keyboard -> talk to Buddy without

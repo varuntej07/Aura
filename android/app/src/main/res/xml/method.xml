@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Buddy Keyboard IME metadata, referenced by the <service> meta-data in
      AndroidManifest.xml (android.view.im). Declares one English keyboard subtype. -->
-<input-method xmlns:android="http://schemas.android.com/apk/res/android">
+<input-method
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="dev.varuntej.aura.keyboard.settings.KeyboardSettingsActivity">
     <subtype
         android:label="@string/buddy_keyboard_subtype_en"
         android:imeSubtypeLocale="en_US"

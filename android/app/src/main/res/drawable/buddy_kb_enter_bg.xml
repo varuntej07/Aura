@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Gboard-style emphasized enter key, expressed with Aura's theme-selective accent tokens. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/buddy_kb_key_pressed" />
+            <corners android:radius="27dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/buddy_kb_accent" />
+            <corners android:radius="27dp" />
+        </shape>
+    </item>
+</selector>

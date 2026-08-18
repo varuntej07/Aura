@@ -14,11 +14,12 @@ import android.widget.PopupWindow
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import dev.varuntej.aura.R
+import dev.varuntej.aura.keyboard.performance.KeyboardPerformanceTrace
 
 /**
- * Touch handling for a single character key: a simple pressed-state highlight (no hover bubble, no
- * scale, no per-key haptic) and a long-press accent/alternate popup. Thin and Android-coupled; the
- * alternates come from the pure [KeyPopupOptions].
+ * Touch handling for a single character key: a simple pressed-state highlight plus optional shared
+ * key preview/haptic feedback and a long-press accent popup. Thin and Android-coupled; alternates
+ * come from the pure [KeyPopupOptions].
  *
  * A normal tap fires [onTap] (the usual key commit). A long press shows the alternates; sliding
  * the finger selects one and lifting commits it via [onAlternate]; lifting off the popup commits
@@ -32,6 +33,9 @@ class KeyTouchHandler(
     private val isShifted: () -> Boolean,
     private val onTap: () -> Unit,
     private val onAlternate: (String) -> Unit,
+    private val keyPreview: KeyPreview? = null,
+    private val previewText: () -> CharSequence = { "" },
+    private val hapticFeedbackEnabled: Boolean = false,
 ) : View.OnTouchListener {
 
     private val handler = Handler(Looper.getMainLooper())
@@ -76,10 +80,15 @@ class KeyTouchHandler(
     }
 
     private fun onDown() {
+        KeyboardPerformanceTrace.markActionDown(KeyboardPerformanceTrace.KEY_KIND_CHARACTER)
         movedOffKey = false
         // Simple press feedback: the pressed-state background only (no hover bubble, no scale, no
-        // haptic), so a keystroke does no per-key window or animation work.
+        // mandatory haptic), so defaults keep the hot path lean.
         keyView.isPressed = true
+        if (hapticFeedbackEnabled) {
+            keyView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        }
+        previewText().takeIf { it.isNotEmpty() }?.let { keyPreview?.show(keyView, it) }
         if (alternates.isNotEmpty()) {
             val runnable = Runnable { showAltPopup() }
             longPressRunnable = runnable
@@ -128,6 +137,7 @@ class KeyTouchHandler(
     private fun onUp() {
         cancelLongPress()
         clearPressed()
+        keyPreview?.hideSoon()
         val popupWasOpen = altPopup != null
         val chosen = if (popupWasOpen) alternates.getOrNull(selected) else null
         // Commit the keystroke BEFORE any popup teardown: dismissing a PopupWindow is a
@@ -144,6 +154,7 @@ class KeyTouchHandler(
     private fun cancel() {
         cancelLongPress()
         clearPressed()
+        keyPreview?.dismiss()
         dismissAltPopup()
     }
 
@@ -159,7 +170,10 @@ class KeyTouchHandler(
     private fun cased(text: String): String = if (isShifted()) text.uppercase() else text
 
     private fun showAltPopup() {
-        keyView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        keyPreview?.dismiss()
+        if (hapticFeedbackEnabled) {
+            keyView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        }
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundResource(R.drawable.buddy_kb_popup_bg)
