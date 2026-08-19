@@ -27,6 +27,16 @@ class ToolEffect(StrEnum):
     READ = "read"
     WRITE = "write"
     PRESENT = "present"
+    # Changes who owns the conversation for the rest of the session: a handoff to
+    # another agent. Not a WRITE. Nothing is persisted, nothing leaves the
+    # process, and the user can undo it by asking to go back, so treating it as a
+    # write earned it an action receipt it should never have had and blocked it
+    # behind rules written for irreversible side effects.
+    #
+    # It is still not a READ, and everything keyed on "not READ" applies
+    # deliberately: it needs a finalized turn, it needs trustworthy STT, it
+    # invalidates speculation, and it is the only action its turn may emit.
+    SESSION_CONTROL = "session_control"
 
 
 class ToolRisk(StrEnum):
@@ -74,6 +84,7 @@ class Capability(StrEnum):
     OUTBOUND_DRAFT = "outbound_draft"
     VISIBLE_ARTIFACT = "visible_artifact"
     GUIDE_CONTROL = "guide_control"
+    INTERVIEW_SESSION = "interview_session"
     # Not a topic. The channel Buddy speaks on when a turn is constrained to
     # emit a tool and the right answer is ordinary speech (a clarifying
     # question, a short reply). See speak_only in the registry below.
@@ -366,6 +377,19 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             surfaces=DESKTOP_ONLY,
             concurrent=False,
             required=("enable",),
+        ),
+        _tool(
+            # A handoff, not a write: it hands the conversation to
+            # InterviewSupervisorAgent and persists nothing. SESSION_CONTROL keeps
+            # the finalized-turn and STT-confidence protection that every non-READ
+            # tool gets, while keeping it out of action receipts and out of the
+            # rules that exist for irreversible writes. See ToolEffect above.
+            "start_mock_interview",
+            Capability.INTERVIEW_SESSION,
+            ToolEffect.SESSION_CONTROL,
+            namespace="voice.interview",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
         ),
         _tool(
             # The speech channel, exposed ONLY on turns that are constrained to

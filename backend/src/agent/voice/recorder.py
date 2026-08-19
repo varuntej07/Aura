@@ -32,6 +32,7 @@ from ...services.analytics.llm_telemetry import start_llm_generation
 from .action_policy import tool_output_succeeded
 from .capabilities import VOICE_TOOL_REGISTRY, ToolEffect
 from .errors import classify_pipeline_error, publish_client_error
+from .interview import interview_owns_conversation
 from .telemetry import log_turn_metrics, log_voice_failure
 from .text_sanitizer import strip_nonverbal_cues
 from .tool_discovery import IntentPendingRequirement
@@ -234,6 +235,13 @@ class VoiceSessionRecorder:
         # companion-persona away nudge would break that flow, so suppress it.
         guide_is_active = getattr(self._guide, "is_active", None)
         if callable(guide_is_active) and guide_is_active():
+            return
+        # Same reasoning one step further: Interview Mode owns the conversation
+        # outright, and a companion-persona check-in landing on the intake task
+        # would answer a silence the interview is entitled to. Deliberately does
+        # NOT set the _away_nudged latch below, so the nudge is still available
+        # once the interview ends.
+        if interview_owns_conversation(self._session):
             return
         # Already checked in during this silence span. LiveKit re-emits "away"
         # after every agent turn while the user stays quiet, so without this latch

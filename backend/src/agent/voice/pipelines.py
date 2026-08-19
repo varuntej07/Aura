@@ -19,6 +19,7 @@ from livekit.plugins import anthropic, cartesia, deepgram, google, openai
 from ...config.settings import settings
 from ...shared.tools import openai_function_definition
 from .fallback_tts_wrapper import SpeechMarkupStrippingTTS
+from .interview import VoiceSessionState
 
 VOICE_GENERATION_TEMPERATURE = 0.2
 VOICE_MAX_OUTPUT_TOKENS = 16_384
@@ -342,6 +343,7 @@ def build_agent_session(
         tts=tts,
         vad=vad,
         mcp_servers=[mcp_server],
+        userdata=VoiceSessionState(),
         # Explicitly pin the loop ceiling instead of inheriting a dependency
         # default that can change when livekit-agents is upgraded.
         max_tool_steps=3,

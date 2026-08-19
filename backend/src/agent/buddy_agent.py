@@ -100,6 +100,7 @@ from .voice.emotion_tags import convert_audio_cue_stream
 from .voice.greeting import resolve_opener
 from .voice.guide_control import SPOKEN_GUIDE_REQUEST_FAILED, request_guide_mode
 from .voice.guide_task_runtime import GuideTaskRuntime
+from .voice.interview import InterviewSupervisorAgent, VoiceSessionState
 from .voice.point_tag import PointTarget, filter_point_tags, publish_element_point
 from .voice.screen_context_stream import (
     StructuredContext,
@@ -348,6 +349,10 @@ class BuddyAgent(agents.Agent):
         # leg and is mid-conversation. This agent joins silently (no greeting) and waits
         # for the bridge handover; the coordinator drives greet()/seed instead of on_enter.
         self._bridged = bridged
+        self._resume_from_interview = False
+        # The ownership epoch the pending interview return belongs to. -1 means no
+        # return is pending; commit_idle refuses anything that does not match it.
+        self._interview_resume_epoch = -1
         # Output mute (voice/output_mode.py). Stamped into the token metadata so
         # it is already true here, before the first word could be spoken. The
         # real suppression is the detached audio sink; this flag is the second
@@ -596,6 +601,23 @@ class BuddyAgent(agents.Agent):
         self._text_output = text_output
 
     async def on_enter(self) -> None:
+        if self._resume_from_interview:
+            self._resume_from_interview = False
+            # THE only place Interview Mode goes idle. Everything upstream merely
+            # asked to come back; ownership moves here, because this hook is the
+            # first moment Buddy is genuinely the active agent again. A return
+            # that never got this far leaves the supervisor in RETURN_PENDING,
+            # still active and still able to try again.
+            state = getattr(self.session, "userdata", None)
+            if isinstance(state, VoiceSessionState):
+                state.interview.commit_idle(self._interview_resume_epoch)
+            self._interview_resume_epoch = -1
+            await self.session.generate_reply(
+                instructions=(
+                    "Briefly acknowledge that Interview Mode ended, then continue as Buddy."
+                )
+            )
+            return
         # In bridge mode the desktop's Realtime leg is already talking; stay silent and
         # let BridgeHandoverCoordinator drive greet() (on skip) or seed context (on
         # handover). on_enter MUST return promptly here - blocking would stall
@@ -603,6 +625,54 @@ class BuddyAgent(agents.Agent):
         if self._bridged:
             return
         await self.greet()
+
+    async def prepare_interview_resume(
+        self, chat_ctx: lk_llm.ChatContext, ownership_epoch: int
+    ) -> None:
+        """Restore supervisor conversation context before Buddy resumes control.
+
+        The epoch is captured HERE rather than read in on_enter, so the commit
+        applies to the return this factory was called for. A second return that
+        superseded this one moves the epoch, and the stale commit is refused
+        instead of declaring the wrong interview over.
+        """
+        await self.update_chat_ctx(chat_ctx)
+        self._interview_resume_epoch = ownership_epoch
+        self._resume_from_interview = True
+
+    @function_tool
+    async def start_mock_interview(
+        self, context: RunContext[VoiceSessionState]
+    ) -> tuple[Agent, str] | str:
+        """Start a mock-interview session when the user asks Buddy to interview them.
+
+        Use this only when the user wants to begin a mock or practice interview.
+        Do not use it for interview advice, resume help, question explanations,
+        or unrelated conversation.
+        """
+        state = context.userdata
+        if state.buddy_factory is None:
+            # Wiring bug, not a user error: voice_agent.py sets the factory
+            # before session.start. Refuse the handoff rather than strand the
+            # user in an agent that cannot hand back.
+            raise lk_llm.ToolError("Interview Mode is unavailable right now.")
+        # Reserve, do not commit. The interview phase moves in the supervisor's
+        # on_enter, once LiveKit has actually activated it. A None claim means one
+        # is already under way, so this returns a plain string instead of building
+        # a second supervisor that would fight the first for the conversation.
+        claim = state.interview.claim_start()
+        if claim is None:
+            return "Interview Mode is already starting. Do not call this again."
+        return (
+            InterviewSupervisorAgent(
+                state=state,
+                # What was said before the interview travels with the user.
+                # Agent.__init__ re-copies this against the supervisor's own
+                # tools, which drops Buddy's tool-call history for free.
+                chat_ctx=self.chat_ctx.copy(exclude_instructions=True),
+            ),
+            "Interview Mode started.",
+        )
 
     async def greet(self) -> None:
         # Prefer the memory-seeded opener when it resolves inside the budget;

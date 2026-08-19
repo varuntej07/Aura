@@ -108,6 +108,9 @@ class _FakeAgent:
     def __init__(self, *, bridged: bool, opener_task=None) -> None:
         self._bridged = bridged
         self._opener_task = opener_task
+        # on_enter checks this first: a Buddy resuming from an Interview Mode
+        # handoff acknowledges the return instead of opening the call.
+        self._resume_from_interview = False
         self.session = _FakeSession()
 
 

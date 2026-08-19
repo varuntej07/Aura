@@ -40,6 +40,7 @@ from livekit.agents import AgentSession, JobContext
 from ...config.settings import settings
 from ...lib.logger import logger
 from .errors import publish_client_error
+from .interview import interview_owns_conversation
 
 NO_USER_AUDIO = "no_user_audio"
 NO_TRANSCRIPT = "no_transcript"
@@ -187,7 +188,19 @@ async def _raise_input_problem(
         },
     )
     # The data channel first: it lands even when the audio path out is also broken.
+    # Published unconditionally: a broken input path is a session-global fact, and
+    # the client's own error surface is the honest place for it whoever owns the
+    # conversation.
     await publish_client_error(ctx, verdict, _CLIENT_MESSAGES[verdict])
+    if interview_owns_conversation(session):
+        # The spoken half is suppressed only. It is an unsolicited turn, and
+        # spoken into Interview Mode it would land on the intake task as an answer
+        # to whatever it just asked.
+        logger.info(
+            "VoiceSession: input liveness nudge suppressed, interview mode active",
+            {"session_id": session_id, "user_id": user_id, "verdict": verdict},
+        )
+        return
     try:
         await session.generate_reply(instructions=instructions)
     except Exception as exc:

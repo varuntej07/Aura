@@ -373,6 +373,7 @@ def test_every_current_voice_tool_has_registry_metadata():
         "set_guide_mode",
         "speak_only",
         "start_research",
+        "start_mock_interview",
     }
 
 

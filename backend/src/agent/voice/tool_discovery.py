@@ -429,6 +429,12 @@ class ToolCatalog:
         minutes after the same account used that tool. Wording decides which tools are
         SUGGESTED, never which ones EXIST.
 
+        SESSION_CONTROL tools join the floor for the same reason, one step stronger.
+        A handoff is how the user LEAVES the current mode, so a turn where BM25
+        happened to rank it below seven other tools is exactly the turn where losing
+        it is worst. Making it structural is also what keeps the alternative off the
+        table: nothing here may look at what the user said to decide the tool exists.
+
         Intersected with ``eligible``, so every structural rule still holds. A
         speculative (non-finalized) turn has already had its writes stripped upstream by
         derive_turn_policy, so the floor cannot smuggle a side effect into one.
@@ -437,7 +443,10 @@ class ToolCatalog:
             sorted(
                 entry.name
                 for entry in eligible
-                if entry.name in CORE_TOOLS
+                if (
+                    entry.name in CORE_TOOLS
+                    or entry.metadata.effect is ToolEffect.SESSION_CONTROL
+                )
                 and not (reads_only and entry.metadata.effect is not ToolEffect.READ)
             )
         )

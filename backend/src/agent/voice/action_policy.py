@@ -12,7 +12,7 @@ from livekit.agents import llm as lk_llm
 
 from .capabilities import VOICE_TOOL_REGISTRY, Capability, ToolEffect, VoiceSurface
 
-ACTION_POLICY_VERSION = "2026-08-17.2"
+ACTION_POLICY_VERSION = "2026-08-18.1"
 UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"})
 GUIDE_START_PATTERN = re.compile(
     r"^\s*(?:guide\s+me|walk\s+me\s+through)\b", re.IGNORECASE
@@ -193,7 +193,11 @@ def evaluate_execution(
         return ExecutionDecision(False, "tool_not_exposed_for_turn")
     if registration.effect is not ToolEffect.READ and not policy.finalized_turn:
         return ExecutionDecision(False, "stale_turn_side_effect")
-    if registration.effect is not ToolEffect.READ:
+    # Deliberately narrower than "not READ". This rule exists so text fetched
+    # from the web or recalled from memory cannot steer a persistent side effect
+    # in the same turn; a SESSION_CONTROL handoff persists nothing and the user
+    # can ask to come straight back, so it is not the thing this protects.
+    if registration.effect in (ToolEffect.WRITE, ToolEffect.PRESENT):
         recent_results = completed_tool_results(chat_ctx)
         if any(name in UNTRUSTED_READ_TOOLS for name in recent_results):
             return ExecutionDecision(False, "fresh_turn_required_after_untrusted_read")

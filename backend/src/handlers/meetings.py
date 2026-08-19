@@ -64,6 +64,48 @@ async def _json_body(request: Request) -> dict[str, Any] | None:
     return body if isinstance(body, dict) else None
 
 
+def _meeting_event(
+    request: Request,
+    event: str,
+    *,
+    level: str = "info",
+    code: str | None = None,
+    error: Exception | str | None = None,
+    meeting_id: str = "",
+    capture_run_id: str = "",
+    capture_fence: int | None = None,
+    seq: int | None = None,
+    **fields: Any,
+) -> None:
+    payload: dict[str, Any] = {
+        "event": f"meetings.{event}",
+        "request_id": getattr(request.state, "request_id", ""),
+        "correlation_id": request.headers.get("X-Correlation-ID", "").strip(),
+        "path": request.url.path,
+        "method": request.method,
+    }
+    if meeting_id:
+        payload["meeting_id"] = meeting_id
+    if capture_run_id:
+        payload["capture_run_id"] = capture_run_id
+    if capture_fence is not None:
+        payload["capture_fence"] = capture_fence
+    if seq is not None:
+        payload["seq"] = seq
+    if code:
+        payload["error_code"] = code
+    if error is not None:
+        payload["error"] = str(error)
+    payload.update(fields)
+    level_fn = {
+        "debug": logger.debug,
+        "info": logger.info,
+        "warn": logger.warn,
+        "error": logger.error,
+    }.get(level, logger.warn)
+    level_fn("meeting.recording", payload)
+
+
 def _note_response(note: Any, *, include_transcript: bool) -> dict[str, Any] | None:
     """Public note contract with an explicit allowlist.
 
@@ -158,13 +200,31 @@ async def handle_claim(request: Request) -> JSONResponse:
     transactionally on success; idempotent for a same-device rejoin."""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
+        _meeting_event(
+            request,
+            "claim.unauthorized",
+            level="warn",
+            code="unauthorized",
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     body = await _json_body(request)
     if body is None:
+        _meeting_event(
+            request,
+            "claim.invalid_json",
+            level="warn",
+            code="invalid_json",
+        )
         return JSONResponse({"error": "Invalid JSON body."}, status_code=400)
     event_id = str(body.get("event_id") or "").strip()
     if not event_id:
+        _meeting_event(
+            request,
+            "claim.missing_event_id",
+            level="warn",
+            code="missing_event_id",
+        )
         return JSONResponse({"error": "Missing event_id."}, status_code=400)
     device_id = str(body.get("device_id") or "").strip() or "unknown"
     installation_id = str(body.get("installation_id") or device_id).strip()
@@ -174,6 +234,12 @@ async def handle_claim(request: Request) -> JSONResponse:
         if runtime_instance_id:
             evidence.require_identity(runtime_instance_id, "runtime_instance_id")
     except evidence.EvidenceValidationError as exc:
+        _meeting_event(
+            request,
+            "claim.invalid_identity",
+            level="warn",
+            code=exc.code,
+        )
         return JSONResponse({"detail": {"code": exc.code}}, status_code=400)
     correlation_id = request.headers.get("X-Correlation-ID", "").strip() or uuid.uuid4().hex
 
@@ -196,12 +262,26 @@ async def handle_claim(request: Request) -> JSONResponse:
             correlation_id=correlation_id,
         )
     except Exception as exc:
+        _meeting_event(
+            request,
+            "claim.failed",
+            level="error",
+            code="claim_temporarily_unavailable",
+            error=exc,
+        )
         # Fails closed: an allowed claim commits real STT+LLM spend, so an
         # outage denies with a retryable status instead of guessing.
         logger.warn("meetings: claim failed", {"user_id": user_id, "error": str(exc)})
         return JSONResponse({"error": "Claim temporarily unavailable."}, status_code=503)
 
     if result.denied_cap:
+        _meeting_event(
+            request,
+            "claim.denied_cap",
+            level="warn",
+            code=F.MEETING_CAP_CODE,
+            meeting_id=result.meeting_id,
+        )
         return JSONResponse(
             {
                 "detail": {
@@ -212,6 +292,13 @@ async def handle_claim(request: Request) -> JSONResponse:
             status_code=402,
         )
     if result.denied_conflict:
+        _meeting_event(
+            request,
+            "claim.denied_conflict",
+            level="warn",
+            code=F.MEETING_CONFLICT_CODE,
+            meeting_id=result.meeting_id,
+        )
         return JSONResponse(
             {"detail": {"code": F.MEETING_CONFLICT_CODE}},
             status_code=409,
@@ -231,11 +318,23 @@ async def handle_claim(request: Request) -> JSONResponse:
 
 
 def _integrity_error(
+    request: Request,
     code: str,
     status_code: int = 409,
     *,
+    meeting_id: str = "",
+    capture_run_id: str = "",
     capture_fence: int | None = None,
 ) -> JSONResponse:
+    _meeting_event(
+        request,
+        "integrity_error",
+        level="warn",
+        code=code,
+        meeting_id=meeting_id,
+        capture_run_id=capture_run_id,
+        capture_fence=capture_fence,
+    )
     detail: dict[str, Any] = {"code": code}
     # A fence rejection is recoverable when the client is merely behind, and
     # unrecoverable when it has forked. The client cannot tell those apart
@@ -275,6 +374,14 @@ async def handle_upload_segment_v2(
     """PUT V2 immutable segment ingest with receipt-bound reconciliation."""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
+        _meeting_event(
+            request,
+            "upload_v2.unauthorized",
+            level="warn",
+            code="unauthorized",
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     correlation_id = request.headers.get("X-Correlation-ID", "").strip() or uuid.uuid4().hex
     try:
@@ -335,32 +442,81 @@ async def handle_upload_segment_v2(
             )
         incomplete = incomplete_header == "true"
     except evidence.EvidenceValidationError as exc:
-        return _integrity_error(exc.code, 400)
+        return _integrity_error(
+            request,
+            exc.code,
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=None,
+        )
 
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
     except Exception:
+        _meeting_event(
+            request,
+            "upload_v2.meeting_lookup_failed",
+            level="error",
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            code="lookup_failed",
+        )
         return JSONResponse({"error": "Temporarily unavailable."}, status_code=503)
     if meeting is None:
+        _meeting_event(
+            request,
+            "upload_v2.meeting_not_found",
+            level="warn",
+            code="unknown_meeting",
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+        )
         return JSONResponse({"error": "Unknown meeting."}, status_code=404)
     if meeting.get(F.DELETION_STATE):
-        return _integrity_error(F.FAIL_DELETION_IN_PROGRESS)
+        return _integrity_error(
+            request,
+            F.FAIL_DELETION_IN_PROGRESS,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+        )
     if (
         meeting.get(F.CAPTURE_RUN_ID) != capture_run_id
         or int(meeting.get(F.CAPTURE_FENCE, -1)) != capture_fence
     ):
         return _integrity_error(
+            request,
             F.FAIL_STALE_CAPTURE_FENCE,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
             capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
         )
 
     data = await request.body()
     if len(data) != byte_length or evidence.sha256_hex(data) != content_sha256:
-        return _integrity_error("content_identity_mismatch", 400)
+        return _integrity_error(
+            request,
+            "content_identity_mismatch",
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+            seq=seq,
+        )
     try:
         stream_info = await asyncio.to_thread(evidence.decode_flac_info, data)
     except evidence.EvidenceValidationError as exc:
-        return _integrity_error(exc.code, 400)
+        return _integrity_error(
+            request,
+            exc.code,
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+            seq=seq,
+        )
     if (
         stream_info.channel_count != channel_count
         or stream_info.sample_rate_hz != sample_rate_hz
@@ -368,7 +524,15 @@ async def handle_upload_segment_v2(
         or sample_rate_hz != 16_000
         or abs(stream_info.duration_ms - duration_ms) > evidence.duration_tolerance_ms(duration_ms)
     ):
-        return _integrity_error("audio_format_or_duration_mismatch", 400)
+        return _integrity_error(
+            request,
+            "audio_format_or_duration_mismatch",
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+            seq=seq,
+        )
 
     segment = {
         "seq": seq,
@@ -436,16 +600,41 @@ async def handle_upload_segment_v2(
                     "error": str(audit_exc),
                 },
             )
-        return _integrity_error(F.FAIL_IMMUTABLE_OBJECT_CONFLICT)
+        return _integrity_error(
+            request,
+            F.FAIL_IMMUTABLE_OBJECT_CONFLICT,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+            seq=seq,
+        )
     except store.StaleCaptureFenceError:
         return _integrity_error(
+            request,
             F.FAIL_STALE_CAPTURE_FENCE,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
             capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+            seq=seq,
         )
     except store.DeletedMeetingError:
-        return _integrity_error(F.FAIL_DELETION_IN_PROGRESS)
+        return _integrity_error(
+            request,
+            F.FAIL_DELETION_IN_PROGRESS,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+            seq=seq,
+        )
     except store.MeetingIntegrityError as exc:
-        return _integrity_error(exc.code)
+        return _integrity_error(
+            request,
+            exc.code,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
+            seq=seq,
+        )
     except Exception as exc:
         code, is_config = _classify_upload_error(exc)
         observability.capture_error(
@@ -482,6 +671,13 @@ async def handle_upload_segment(
     segment is idempotent (GCS overwrite + ArrayUnion no-op)."""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
+        _meeting_event(
+            request,
+            "upload_v1.unauthorized",
+            level="warn",
+            code="unauthorized",
+            meeting_id=meeting_id,
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if seq < 0 or seq >= F.MAX_SEGMENTS_PER_MEETING:
         return JSONResponse({"error": "Segment seq out of range."}, status_code=400)
@@ -506,6 +702,13 @@ async def handle_upload_segment(
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
     except Exception as exc:
+        _meeting_event(
+            request,
+            "upload_v1.meeting_lookup_failed",
+            level="error",
+            meeting_id=meeting_id,
+            error=exc,
+        )
         logger.warn(
             "meetings: upload ownership check failed",
             {
@@ -516,6 +719,13 @@ async def handle_upload_segment(
         )
         return JSONResponse({"error": "Temporarily unavailable."}, status_code=503)
     if meeting is None:
+        _meeting_event(
+            request,
+            "upload_v1.meeting_not_found",
+            level="warn",
+            code="unknown_meeting",
+            meeting_id=meeting_id,
+        )
         return JSONResponse({"error": "Unknown meeting."}, status_code=404)
     if meeting.get(F.STATUS) not in (F.STATUS_CAPTURING, F.STATUS_UPLOADED):
         return JSONResponse(
@@ -544,9 +754,23 @@ async def handle_upload_segment(
             incomplete=incomplete,
         )
     except gcs_audio.ImmutableObjectConflict:
-        return _integrity_error(F.FAIL_IMMUTABLE_OBJECT_CONFLICT)
+        return _integrity_error(
+            request,
+            F.FAIL_IMMUTABLE_OBJECT_CONFLICT,
+            meeting_id=meeting_id,
+            seq=seq,
+        )
     except Exception as exc:
         code, is_config = _classify_upload_error(exc)
+        _meeting_event(
+            request,
+            "upload_v1.failed",
+            level="error" if is_config else "warn",
+            code=code,
+            error=exc,
+            meeting_id=meeting_id,
+            seq=seq,
+        )
         try:
             await store.record_upload_failure(user_id, meeting_id, code=code)
         except Exception as state_exc:
@@ -584,14 +808,43 @@ async def handle_complete(request: Request, meeting_id: str) -> JSONResponse:
     a client retry of an already-completed meeting answers 200."""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
+        _meeting_event(
+            request,
+            "complete.unauthorized",
+            level="warn",
+            code="unauthorized",
+            meeting_id=meeting_id,
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    _meeting_event(
+        request,
+        "complete.request",
+        level="info",
+        meeting_id=meeting_id,
+    )
 
     body = await _json_body(request) or {}
 
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
         if meeting is None:
+            _meeting_event(
+                request,
+                "complete.meeting_not_found",
+                level="warn",
+                code="unknown_meeting",
+                meeting_id=meeting_id,
+            )
             return JSONResponse({"error": "Unknown meeting."}, status_code=404)
+        if int(meeting.get(F.PROTOCOL_VERSION, 1)) >= 2:
+            _meeting_event(
+                request,
+                "complete.v2_capture_detected",
+                level="warn",
+                meeting_id=meeting_id,
+                capture_run_id=str(meeting.get(F.CAPTURE_RUN_ID, "")),
+                capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+            )
 
         # A capture that never produced a segment (mic init failure, sub-2s
         # call) has nothing to synthesize: resolve it to "failed" instead of
@@ -628,6 +881,13 @@ async def handle_complete(request: Request, meeting_id: str) -> JSONResponse:
             await asyncio.to_thread(tasks.enqueue_synthesis, user_id, meeting_id)
             status_now = F.STATUS_UPLOADED
     except Exception as exc:
+        _meeting_event(
+            request,
+            "complete.failed",
+            level="error",
+            error=exc,
+            meeting_id=meeting_id,
+        )
         logger.warn(
             "meetings: complete failed",
             {
@@ -649,14 +909,41 @@ async def handle_complete_v2(
     """POST V2 verified completion; Firestore job/outbox commit precedes dispatch."""
     user_id = resolve_user_id_from_request(request)
     if not user_id:
+        _meeting_event(
+            request,
+            "complete_v2.unauthorized",
+            level="warn",
+            code="unauthorized",
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    _meeting_event(
+        request,
+        "complete_v2.request",
+        level="info",
+        meeting_id=meeting_id,
+        capture_run_id=capture_run_id,
+    )
     correlation_id = request.headers.get("X-Correlation-ID", "").strip() or uuid.uuid4().hex
     idempotency_key = request.headers.get("Idempotency-Key", "").strip()
     if not idempotency_key or len(idempotency_key) > 512:
-        return _integrity_error("invalid_idempotency_key", 400)
+        return _integrity_error(
+            request,
+            "invalid_idempotency_key",
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+        )
     body = await _json_body(request)
     if body is None:
-        return _integrity_error("invalid_manifest", 400)
+        return _integrity_error(
+            request,
+            "invalid_manifest",
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+        )
     try:
         evidence.require_identity(meeting_id, "meeting_id")
         evidence.require_identity(capture_run_id, "capture_run_id")
@@ -683,11 +970,38 @@ async def handle_complete_v2(
             raise evidence.EvidenceValidationError("invalid_manifest", "Invalid counts.")
     except (KeyError, TypeError, ValueError, evidence.EvidenceValidationError) as exc:
         code = getattr(exc, "code", "invalid_manifest")
-        return _integrity_error(code, 400)
+        return _integrity_error(
+            request,
+            code,
+            400,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=int(
+                body.get("capture_fence", -1) if isinstance(body, dict) else -1
+            ),
+            )
+    _meeting_event(
+        request,
+        "complete_v2.body_validated",
+        level="info",
+        meeting_id=meeting_id,
+        capture_run_id=capture_run_id,
+        capture_fence=int(body.get("capture_fence", -1)),
+        segment_count=int(body.get("segment_count") or 0),
+        total_duration_ms=int(body.get("total_duration_ms") or 0),
+    )
     server_fence = -1
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
         if meeting is None:
+            _meeting_event(
+                request,
+                "complete_v2.meeting_not_found",
+                level="warn",
+                code="unknown_meeting",
+                meeting_id=meeting_id,
+                capture_run_id=capture_run_id,
+            )
             return JSONResponse({"error": "Unknown meeting."}, status_code=404)
         server_fence = int(meeting.get(F.CAPTURE_FENCE, -1))
         # Ingest is closed inside verify_v2_completion's transaction. Closing it
@@ -710,10 +1024,19 @@ async def handle_complete_v2(
         )
     except store.StaleCaptureFenceError:
         return _integrity_error(
-            F.FAIL_STALE_CAPTURE_FENCE, capture_fence=server_fence
+            request,
+            F.FAIL_STALE_CAPTURE_FENCE,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=server_fence,
         )
     except store.DeletedMeetingError:
-        return _integrity_error(F.FAIL_DELETION_IN_PROGRESS)
+        return _integrity_error(
+            request,
+            F.FAIL_DELETION_IN_PROGRESS,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+        )
     except Exception as exc:
         observability.capture_error(
             exc,
@@ -736,10 +1059,52 @@ async def handle_complete_v2(
         )
         return JSONResponse({"error": "Complete failed."}, status_code=503)
     if result.conflict_code:
-        return _integrity_error(result.conflict_code)
+        _meeting_event(
+            request,
+            "complete_v2.conflict",
+            level="warn",
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+            code=result.conflict_code,
+        )
+        return _integrity_error(
+            request,
+            result.conflict_code,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+        )
     if result.receipt is None:
+        _meeting_event(
+            request,
+            "complete_v2.receipt_missing",
+            level="error",
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+        )
         return JSONResponse({"error": "Complete failed."}, status_code=503)
+    _meeting_event(
+        request,
+        "complete_v2.verified",
+        level="info",
+        meeting_id=meeting_id,
+        capture_run_id=capture_run_id,
+        capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+    )
     try:
+        logger.info(
+            "meetings.v2: complete verified",
+            {
+                "meeting_id": meeting_id,
+                "capture_run_id": capture_run_id,
+                "capture_fence": int(meeting.get(F.CAPTURE_FENCE, -1)),
+                "receipt_id": result.receipt.get("receipt_id", ""),
+                "job_id": result.job_id,
+                "correlation_id": correlation_id,
+            },
+        )
         await tasks.dispatch_job(user_id, result.job_id)
     except Exception as exc:
         # The durable outbox is already committed. The scheduler sweeper owns
@@ -881,6 +1246,13 @@ async def handle_retry(request: Request, meeting_id: str) -> JSONResponse:
 async def handle_delete_meeting(request: Request, meeting_id: str) -> JSONResponse:
     user_id = resolve_user_id_from_request(request)
     if not user_id:
+        _meeting_event(
+            request,
+            "delete.unauthorized",
+            level="warn",
+            code="unauthorized",
+            meeting_id=meeting_id,
+        )
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     correlation_id = request.headers.get("X-Correlation-ID", "").strip() or uuid.uuid4().hex
     try:
@@ -893,8 +1265,21 @@ async def handle_delete_meeting(request: Request, meeting_id: str) -> JSONRespon
         )
         result = await deletion.run_deletion(user_id, meeting_id)
     except evidence.EvidenceValidationError as exc:
-        return _integrity_error(exc.code, 400)
+        return _integrity_error(
+            request,
+            exc.code,
+            400,
+            meeting_id=meeting_id,
+        )
     except Exception as exc:
+        _meeting_event(
+            request,
+            "delete.failed",
+            level="error",
+            error=exc,
+            meeting_id=meeting_id,
+            code="meeting_deletion_retry_required",
+        )
         observability.capture_error(
             exc,
             error_code="meeting_deletion_retry_required",

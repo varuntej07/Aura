@@ -198,7 +198,8 @@ register_mcp(app)
 # Request / Response logging middleware
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        request_id = str(uuid.uuid4())[:8]
+        request_id = request.headers.get("X-Request-ID", "").strip() or str(uuid.uuid4())[:12]
+        request.state.request_id = request_id
         start = time.monotonic()
 
         # Skip noisy health checks
@@ -207,10 +208,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "request_id": request_id,
                 "method": request.method,
                 "path": request.url.path,
+                "query": str(request.query_params),
+                "correlation_id": request.headers.get("X-Correlation-ID", "").strip(),
+                "content_type": request.headers.get("content-type", ""),
+                "content_length": request.headers.get("content-length", ""),
             })
 
         try:
             response = await call_next(request)
+            response.headers["X-Request-ID"] = request_id
             if request.url.path != "/health":
                 duration_ms = int((time.monotonic() - start) * 1000)
                 level_fn = logger.error if response.status_code >= 500 else (
@@ -240,6 +246,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                         "status": response.status_code,
                         "duration_ms": duration_ms,
                     })
+            if response.status_code >= 400:
+                logger.warn("↳ HTTP failure", {
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": duration_ms,
+                })
             return response
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -270,8 +284,28 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Requested-With",
+        "X-Segment-Start-Ms",
+        "X-Segment-Duration-Ms",
+        "X-Segment-Incomplete",
+        "Idempotency-Key",
+        "X-Correlation-ID",
+        "X-Request-ID",
+        "X-Capture-Fence",
+        "X-Content-SHA256",
+        "X-Byte-Length",
+        "X-Start-Ms",
+        "X-Duration-Ms",
+        "X-Channel-Count",
+        "X-Sample-Rate-Hz",
+        "X-Incomplete",
+        "X-Aura-Platform",
+        "X-Aura-App-Version",
+    ],
 )
 
 

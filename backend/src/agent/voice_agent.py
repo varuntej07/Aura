@@ -94,6 +94,12 @@ from .voice.screen_context import (
     deliver_screen_context,
 )
 from .voice.screen_context_stream import SCREEN_CONTEXT_TOPIC, StructuredContextStore
+from .voice.interview import (
+    INTERVIEW_MATERIAL_TOPIC,
+    MATERIAL_OVERLAY_SHOWN_TYPE,
+    InterviewMaterialStore,
+    interview_owns_conversation,
+)
 from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.telemetry import log_voice_failure, voice_session_logger
 from .voice.turn_metrics import VoiceTurnMetrics
@@ -646,6 +652,29 @@ async def entrypoint(ctx: JobContext) -> None:
                 },
             )
 
+        # Interview materials (a pasted job description) arrive on their own
+        # byte-stream topic. Registered before session.start for the same reason
+        # as the two above: a stream racing the pipeline build must be assembled,
+        # not dropped. The text lands in session userdata and nowhere else.
+        interview_materials = InterviewMaterialStore(
+            session_id=session_id,
+            user_id=user_id,
+            client_events_topic=CLIENT_EVENTS_TOPIC,
+        )
+        try:
+            ctx.room.register_byte_stream_handler(
+                INTERVIEW_MATERIAL_TOPIC, interview_materials.handle_stream
+            )
+        except Exception as exc:
+            logger.warn(
+                "VoiceSession: interview material handler registration failed",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "error": str(exc),
+                },
+            )
+
         # "there" is fetch_user_profile's no-name fallback (see voice/context.py),
         # not a real name; Buddy Drafts must never sign an email with it.
         draft_display_name = context_vars.get("name", "")
@@ -669,6 +698,22 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_metrics=turn_metrics,
             opener_task=opener_task,
         )
+
+        async def _resume_buddy(
+            return_ctx: lk_llm.ChatContext,
+        ) -> BuddyAgent:
+            # The epoch is read at the moment the return is requested and carried
+            # into on_enter, which is where IDLE is actually committed.
+            await buddy.prepare_interview_resume(
+                return_ctx, session.userdata.interview.ownership_epoch
+            )
+            return buddy
+
+        session.userdata.buddy_factory = _resume_buddy
+        session.userdata.materials = interview_materials
+        # A stalled byte-stream reader would otherwise outlive the session that
+        # armed it, holding the bytes it had already accumulated.
+        ctx.add_shutdown_callback(interview_materials.aclose)
 
         bridge = (
             BridgeHandoverCoordinator(
@@ -797,6 +842,31 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         buddy.bind_artifact_delivery(artifact_delivery)
 
+        def _suspended_by_interview(msg_type: str) -> bool:
+            """Whether Interview Mode owns the conversation, so this may not speak.
+
+            Screen and OCR context are AMBIENT: nobody asked for them this turn,
+            and they arrive as a generate_reply that would land on the intake task
+            mid-question, answering a screenshot instead of "which company".
+
+            Typed messages are deliberately NOT suspended here. Those are the
+            user's own words, and they reach whichever interview agent is active,
+            whose own tools (cancel_setup, end_mock_interview) are the right owner
+            for them. Suppressing those would leave a user on a muted mic with no
+            way out of Interview Mode.
+            """
+            if not interview_owns_conversation(session):
+                return False
+            logger.info(
+                "VoiceSession: context injection suspended, interview mode active",
+                {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "type": msg_type,
+                },
+            )
+            return True
+
         def _dispatch_context_payload(msg: dict, participant_identity: str, topic: str) -> None:
             nonlocal screen_context_fired
             msg_type = msg.get("type")
@@ -825,6 +895,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             elif msg_type == ARTIFACT_DISPLAYED_TYPE:
                 artifact_delivery.handle_ack(msg, participant_identity, topic)
+            elif msg_type == MATERIAL_OVERLAY_SHOWN_TYPE:
+                interview_materials.handle_overlay_ack(msg, participant_identity, topic)
             elif msg_type == GUIDE_MODE_TYPE:
                 if guide.apply_control(msg, participant_identity):
                     buddy.note_guide_arm_epoch(msg["generation"])
@@ -832,6 +904,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 guide.apply_heartbeat(msg, participant_identity)
             elif msg_type == SCREEN_CONTEXT_TYPE:
                 if screen_context_fired:
+                    return
+                if _suspended_by_interview(msg_type):
                     return
                 screen_context_fired = True
                 context_tasks.append(
@@ -849,6 +923,8 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
                 )
             elif msg_type == OCR_CONTEXT_TYPE:
+                if _suspended_by_interview(msg_type):
+                    return
                 context_tasks.append(
                     asyncio.create_task(
                         deliver_screen_context(

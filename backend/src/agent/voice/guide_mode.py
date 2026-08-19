@@ -35,6 +35,7 @@ from ...lib.logger import logger
 from ...prompts import GUIDE_INSTRUCTIONS
 from ...services.guide_usage_store import record_guide_usage
 from .guide_task_runtime import GuideTaskRuntime
+from .interview import interview_owns_conversation
 from .screen_frames import ScreenFrame, strip_stale_images
 
 GUIDE_MODE_TYPE = "guide.mode"
@@ -204,6 +205,42 @@ class GuideCoordinator:
         ):
             return False
         if generation <= self._generation:
+            return False
+
+        # Arming is refused while Interview Mode owns the conversation, and only
+        # arming: a disarm must always be honoured, because refusing one is how a
+        # user ends up unable to turn off screen capture.
+        #
+        # An arm here would hand the Guide persona to BuddyAgent while the
+        # supervisor is the active agent, so the persona swap would land on an
+        # agent nobody is talking to and surface later as Buddy waking up in
+        # Guide Mode. The ack is what keeps the desktop honest: without it the
+        # status dot lights for a Guide session that has no agent behind it.
+        #
+        # Deliberately does NOT consume the generation, so the next arm after the
+        # interview ends is an ordinary monotonic arm rather than a rejected one.
+        if active and interview_owns_conversation(self._session):
+            logger.info(
+                "VoiceSession: Guide arm refused, interview mode active",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "generation": generation,
+                    "stage": "execution",
+                    "outcome": "rejected",
+                    "reason": "interview_mode_active",
+                },
+            )
+            asyncio.create_task(
+                self._publish_mode_ack(
+                    active=False,
+                    generation=generation,
+                    guide_session_id=str(guide_session_id or ""),
+                    protocol_version=protocol_version,
+                    reason="interview_mode_active",
+                ),
+                name=f"guide-interview-nack-{self._session_id[:8]}",
+            )
             return False
 
         previous_guide_session_id = self._guide_session_id
@@ -644,6 +681,13 @@ class GuideCoordinator:
             if not self._active or not self._pending_nudge:
                 continue
             self._pending_nudge = False
+            # A proactive nudge is unsolicited speech. While Interview Mode owns
+            # the conversation it would land on the intake task and answer a
+            # screen change instead of the question it just asked. Dropped, not
+            # queued: by the time the interview ends the screen it described is
+            # long gone.
+            if interview_owns_conversation(self._session):
+                continue
 
             now = time.monotonic()
             if now - self._last_proactive_at < _PROACTIVE_MIN_INTERVAL_S:
