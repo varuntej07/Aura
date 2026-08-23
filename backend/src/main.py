@@ -130,14 +130,12 @@ from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
 from .handlers.mcp import register_mcp
 from .handlers.meetings import (
     handle_claim as handle_meeting_claim,
-    handle_complete as handle_meeting_complete,
     handle_complete_v2 as handle_meeting_complete_v2,
     handle_delete_meeting,
     handle_get_meeting,
     handle_internal_synthesize as handle_meeting_synthesize,
     handle_list_recent as handle_meetings_recent,
     handle_retry as handle_meeting_retry,
-    handle_upload_segment as handle_meeting_upload_segment,
     handle_upload_segment_v2 as handle_meeting_upload_segment_v2,
 )
 from .handlers.realtime import create_realtime_session
@@ -1127,13 +1125,6 @@ async def meetings_recent_endpoint(request: Request) -> JSONResponse:
     return await handle_meetings_recent(request)
 
 
-@app.post("/meetings/{meeting_id}/segments/{seq}")
-async def meetings_upload_segment_endpoint(
-    request: Request, meeting_id: str, seq: int,
-) -> JSONResponse:
-    return await handle_meeting_upload_segment(request, meeting_id, seq)
-
-
 @app.put("/meetings/{meeting_id}/capture-runs/{capture_run_id}/segments/{seq}")
 async def meetings_upload_segment_v2_endpoint(
     request: Request,
@@ -1144,11 +1135,6 @@ async def meetings_upload_segment_v2_endpoint(
     return await handle_meeting_upload_segment_v2(
         request, meeting_id, capture_run_id, seq,
     )
-
-
-@app.post("/meetings/{meeting_id}/complete")
-async def meetings_complete_endpoint(request: Request, meeting_id: str) -> JSONResponse:
-    return await handle_meeting_complete(request, meeting_id)
 
 
 @app.post("/meetings/{meeting_id}/capture-runs/{capture_run_id}/complete")

@@ -33,6 +33,7 @@ from ...prompts import (
 )
 from ..model_provider import get_model_provider
 from ..user_aura_schema import interest_prompt_lines
+from .skills import GENERAL_SKILL_ID, get_writing_skill, is_writing_skill_id
 
 Channel = Literal["on_screen", "email_reply", "cold_dm", "snippet"]
 Length = Literal["short", "medium", "detailed"]
@@ -162,6 +163,7 @@ async def draft_outbound(
     jpeg_height: int | None,
     voice_lines: list[str],
     display_name: str,
+    skill_id: str = GENERAL_SKILL_ID,
 ) -> OutboundDraftResult:
     """Draft one outbound message or snippet. Never raises.
 
@@ -175,9 +177,13 @@ async def draft_outbound(
     # screen/intent, so a blank length is valid for them; the outbound channels
     # still need one from the ladder.
     length_ok = length in LENGTHS or channel in _ADAPTIVE_LENGTH_CHANNELS
-    if channel not in CHANNELS or not length_ok:
+    if channel not in CHANNELS or not length_ok or not is_writing_skill_id(skill_id):
         return OutboundDraftResult(reason=REASON_INVALID)
-    if not jpeg_base64 and channel != SNIPPET_CHANNEL:
+    if (
+        not jpeg_base64
+        and channel != SNIPPET_CHANNEL
+        and skill_id == GENERAL_SKILL_ID
+    ):
         return OutboundDraftResult(reason=REASON_NO_FRAME)
 
     system_prompt = outbound_draft_system_prompt(
@@ -186,6 +192,8 @@ async def draft_outbound(
         voice_lines=voice_lines,
         voice_limit=VOICE_LINES_MAX,
     )
+    skill = get_writing_skill(skill_id)
+    system_prompt = f"{system_prompt}\n\nSelected writing skill:\n{skill.instructions}"
     user_prompt = outbound_draft_user_prompt(
         channel=channel,
         length=length,
@@ -256,12 +264,19 @@ async def refine_outbound(
     refine_instruction: str,
     context_summary: str,
     voice_lines: list[str],
+    skill_id: str = GENERAL_SKILL_ID,
 ) -> OutboundDraftResult:
     """Rework an existing draft per the instruction. Text-only, never raises."""
     prior = prior_draft.strip()[:PRIOR_DRAFT_MAX_CHARS]
     instruction = refine_instruction
     length_ok = length in LENGTHS or channel in _ADAPTIVE_LENGTH_CHANNELS
-    if channel not in CHANNELS or not length_ok or not prior or not instruction.strip():
+    if (
+        channel not in CHANNELS
+        or not length_ok
+        or not is_writing_skill_id(skill_id)
+        or not prior
+        or not instruction.strip()
+    ):
         return OutboundDraftResult(reason=REASON_INVALID)
 
     summary = context_summary.strip()[:CONTEXT_SUMMARY_MAX_CHARS]
@@ -271,6 +286,8 @@ async def refine_outbound(
         voice_lines=voice_lines,
         voice_limit=VOICE_LINES_MAX,
     )
+    skill = get_writing_skill(skill_id)
+    system_prompt = f"{system_prompt}\n\nSelected writing skill:\n{skill.instructions}"
     user_prompt = outbound_refine_user_prompt(
         channel=channel,
         length=length,

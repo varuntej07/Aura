@@ -34,10 +34,12 @@ from . import alarm_sync, alarm_tones
 from .analytics.llm_telemetry import start_tool_span
 from .calendar_time import parse_calendar_when
 from .chat_completion import tool_idempotency as _tool_idempotency
+from .chat_completion.prompt_builder import fetch_cached_aura_data
 from .firebase import admin_firestore
 from .gmail_connector import GmailConnector
 from .google_calendar_connector import GoogleCalendarConnector
 from .model_provider import _strip_fences, get_model_provider
+from .outbound_draft.drafter import REASON_OK, draft_outbound, writing_voice_lines
 from .reminder_time import parse_reminder_when
 
 ToolResult = dict[str, Any]
@@ -431,6 +433,7 @@ class ToolExecutor:
                 "debug": str(exc),
             }
         dispatch: dict[str, Any] = {
+            "draft_writing": self._draft_writing,
             "set_reminder": self._set_reminder,
             "list_reminders": self._list_reminders,
             "cancel_reminder": self._cancel_reminder,
@@ -1234,6 +1237,48 @@ class ToolExecutor:
             return connector.send_message(to=to, subject=subject, body=body)
 
         return await _run(_send)
+
+    async def _draft_writing(self, inp: dict[str, Any]) -> ToolResult:
+        skill_id = str(inp.get("skill_id", ""))
+        brief = str(inp.get("brief", "")).strip()
+        length = str(inp.get("length", ""))
+        if not brief:
+            raise ValueError("brief is required")
+
+        try:
+            profile, _ = await fetch_cached_aura_data(self._user_id)
+            voice_lines = writing_voice_lines(profile)
+        except Exception:
+            voice_lines = []
+
+        result = await draft_outbound(
+            self._user_id,
+            channel="on_screen",
+            length=length,
+            recipient_hint="",
+            intent=brief,
+            jpeg_base64="",
+            jpeg_width=None,
+            jpeg_height=None,
+            voice_lines=voice_lines,
+            display_name="",
+            skill_id=skill_id,
+        )
+        if result.reason != REASON_OK:
+            return {
+                "ok": False,
+                "error": True,
+                "code": result.reason,
+                "retryable": result.reason in {"timeout", "model_error"},
+                "user_message": "I couldn't get that draft together. Try once more.",
+            }
+        return {
+            "draft": result.text,
+            "skill_id": skill_id,
+            "instruction": (
+                "Show the draft exactly as returned. Do not claim it was sent or published."
+            ),
+        }
 
     # Memory
     async def _store_memory(self, inp: dict[str, Any]) -> ToolResult:

@@ -337,6 +337,38 @@ UPDATE_CALENDAR_EVENT_TOOL_DEFINITION: dict[str, Any] = {
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     SET_REMINDER_TOOL_DEFINITION,
     {
+        "name": "draft_writing",
+        "description": (
+            "Create approval-ready writing without sending or publishing it. Use "
+            "when the user wants a LinkedIn post, tweet or X post, email, or email "
+            "reply drafted. The user sees the returned draft in chat and remains "
+            "responsible for approving and sending or posting it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "skill_id": {
+                    "type": "string",
+                    "enum": ["linkedin_post", "tweet", "email"],
+                    "description": "The writing skill that fits the requested destination.",
+                },
+                "brief": {
+                    "type": "string",
+                    "description": (
+                        "The user's complete drafting request, including supplied facts, "
+                        "audience, tone, constraints, and source text."
+                    ),
+                },
+                "length": {
+                    "type": "string",
+                    "enum": ["short", "medium", "detailed"],
+                    "description": "The requested or contextually appropriate draft length.",
+                },
+            },
+            "required": ["skill_id", "brief", "length"],
+        },
+    },
+    {
         "name": "list_reminders",
         "description": (
             "Read the user's existing reminders. Use when they ask what reminders "

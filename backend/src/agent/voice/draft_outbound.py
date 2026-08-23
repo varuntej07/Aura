@@ -51,6 +51,7 @@ from ...services.outbound_draft.drafter import (
     refine_outbound,
     writing_voice_lines,
 )
+from ...services.outbound_draft.skills import get_writing_skill
 from .artifact_contract import (
     artifact_failed_event,
     artifact_generating_event,
@@ -108,6 +109,7 @@ class DraftState:
     context_summary: str
     recipient_hint: str
     revision: int
+    skill_id: str = "general"
 
 
 class DraftOutboundSession:
@@ -129,6 +131,7 @@ async def run_draft_tool(
     screen_frames: ScreenFrameStore | None,
     *,
     operation: str,
+    skill_id: str = "general",
     transcript: str,
     run_ctx: RunContext | None = None,
     current_turn_context_id: str = "",
@@ -156,6 +159,7 @@ async def run_draft_tool(
         return await _draft_new(
             state,
             screen_frames,
+            skill_id=skill_id,
             channel=DEFAULT_CHANNEL,
             # The desktop event contract still requires a valid enum. The
             # adaptive on_screen prompt ignores this storage-only default.
@@ -188,6 +192,7 @@ async def _draft_new(
     state: DraftOutboundSession,
     screen_frames: ScreenFrameStore | None,
     *,
+    skill_id: str,
     channel: str,
     length: str,
     recipient_hint: str,
@@ -197,6 +202,7 @@ async def _draft_new(
 ) -> str:
     request_id = new_request_id()
     draft_id = uuid.uuid4().hex
+    skill = get_writing_skill(skill_id)
     frame = None
     if screen_frames is not None:
         try:
@@ -208,10 +214,14 @@ async def _draft_new(
                 "user_id": state.user_id, "session_id": state.session_id,
                 "error": str(exc),
             })
-    if frame is None and channel != SNIPPET_CHANNEL:
-        # Outbound messages respond to something on screen, so no frame is a
-        # hard stop. A snippet's spec is the spoken intent; the frame is a
-        # best-effort bonus and its absence just means a text-only draft.
+    if (
+        frame is None
+        and channel != SNIPPET_CHANNEL
+        and skill_id == "general"
+    ):
+        # General desktop drafts depend on the visible destination. Named
+        # writing skills can use the user's request as their complete brief on
+        # app and keyboard voice surfaces.
         await _publish_draft_event(
             artifact_failed_event(
                 request_id=request_id,
@@ -264,7 +274,8 @@ async def _draft_new(
             length=length,
             mode="new",
             kind="code" if channel == SNIPPET_CHANNEL else "outbound_message",
-            title="Snippet" if channel == SNIPPET_CHANNEL else "Draft",
+            title="Snippet" if channel == SNIPPET_CHANNEL else skill.title,
+            skill_id=skill_id,
         ),
         state=state,
     )
@@ -300,6 +311,7 @@ async def _draft_new(
             jpeg_height=frame.height_px if frame else None,
             voice_lines=voice_lines,
             display_name=state.display_name,
+            skill_id=skill_id,
         )
 
     # The filler speaks "still on it" only if the vision call outlives the dwell.
@@ -339,6 +351,7 @@ async def _draft_new(
 
     state.current = DraftState(
         draft_id=draft_id,
+        skill_id=skill_id,
         channel=channel,
         length=length,
         text=result.text,
@@ -354,13 +367,14 @@ async def _draft_new(
             kind="code" if channel == SNIPPET_CHANNEL else "outbound_message",
             channel=channel,
             length=length,
-            title="Snippet" if channel == SNIPPET_CHANNEL else "Draft",
+            title="Snippet" if channel == SNIPPET_CHANNEL else skill.title,
             body=result.text,
             content_format="code" if channel == SNIPPET_CHANNEL else "plain_text",
             language=None,
             persisted=channel != SNIPPET_CHANNEL,
             context_summary=result.context_summary,
             recipient_hint=recipient_hint,
+            skill_id=skill_id,
         ),
         state=state,
     )
@@ -371,6 +385,7 @@ async def _draft_new(
     await draft_store.create_draft(
         state.user_id,
         draft_id,
+        skill_id=skill_id,
         channel=channel,
         length=length,
         text=result.text,
@@ -400,6 +415,7 @@ async def _refine_current(
 ) -> str:
     current = state.current
     assert current is not None  # guarded by the caller
+    skill = get_writing_skill(current.skill_id)
     request_id = new_request_id()
     await _publish_draft_event(
         artifact_generating_event(
@@ -409,7 +425,8 @@ async def _refine_current(
             length=current.length,
             mode="refine",
             kind="code" if current.channel == SNIPPET_CHANNEL else "outbound_message",
-            title="Snippet" if current.channel == SNIPPET_CHANNEL else "Draft",
+            title="Snippet" if current.channel == SNIPPET_CHANNEL else skill.title,
+            skill_id=current.skill_id,
         ),
         state=state,
     )
@@ -423,6 +440,7 @@ async def _refine_current(
         refine_instruction=refine_instruction,
         context_summary=current.context_summary,
         voice_lines=voice_lines,
+        skill_id=current.skill_id,
     )
     if result.reason != REASON_OK:
         await _publish_draft_event(
@@ -446,11 +464,12 @@ async def _refine_current(
             kind="code" if current.channel == SNIPPET_CHANNEL else "outbound_message",
             channel=current.channel,
             length=current.length,
-            title="Snippet" if current.channel == SNIPPET_CHANNEL else "Draft",
+            title="Snippet" if current.channel == SNIPPET_CHANNEL else skill.title,
             body=current.text,
             content_format="code" if current.channel == SNIPPET_CHANNEL else "plain_text",
             language=None,
             persisted=current.channel != SNIPPET_CHANNEL,
+            skill_id=current.skill_id,
         ),
         state=state,
     )

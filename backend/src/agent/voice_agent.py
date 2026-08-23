@@ -48,7 +48,6 @@ from .voice.auth import mint_firebase_id_token
 from .voice.bridge_handover import BRIDGE_CONTROL_TYPES, BridgeHandoverCoordinator
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
-from .voice.greeting import start_opener_task
 from .voice.input_liveness import InputLiveness, watch_input_liveness
 from .voice.guide_default_profile import GenericGuideProfile
 from .voice.guide_mode import (
@@ -98,7 +97,7 @@ from .voice.interview import (
     INTERVIEW_MATERIAL_TOPIC,
     MATERIAL_OVERLAY_SHOWN_TYPE,
     InterviewMaterialStore,
-    interview_owns_conversation,
+    buddy_owns_conversation,
 )
 from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.telemetry import log_voice_failure, voice_session_logger
@@ -454,14 +453,6 @@ async def entrypoint(ctx: JobContext) -> None:
         session_context = await gather_session_context(user_id, session_id, conversation_id)
         context_vars = session_context.prompt_context_vars
 
-        # Memory-seeded opener, raced against the static greeting: it runs in
-        # parallel with the pipeline build below, and on_enter waits at most
-        # VOICE_GREETING_SEED_BUDGET_S for it before falling back to a static
-        # casual line (sub-1s first-audio feel preserved).
-        opener_task = start_opener_task(
-            session_context, session_id=session_id, user_id=user_id
-        )
-
         voice_request_id, voice_requested_at_ms = _resolve_voice_request_timing(ctx)
         surface = persisted_surface or "app"
         voice_mode = _resolve_voice_mode(ctx)
@@ -696,7 +687,6 @@ async def entrypoint(ctx: JobContext) -> None:
             bridged=bridged,
             text_output=output_mode == "text",
             turn_metrics=turn_metrics,
-            opener_task=opener_task,
         )
 
         async def _resume_buddy(
@@ -750,7 +740,6 @@ async def entrypoint(ctx: JobContext) -> None:
                 "reason": "guide_runtime_configured",
             },
         )
-        buddy.bind_guide_runtime(guide_runtime)
         guide = GuideCoordinator(
             session=session,
             buddy=buddy,
@@ -758,13 +747,19 @@ async def entrypoint(ctx: JobContext) -> None:
             session_id=session_id,
             user_id=user_id,
             task_runtime=guide_runtime,
+            screen_frames=screen_frames,
+            display_name=context_vars.get("name") or "there",
         )
         screen_frames.set_frame_listener(guide.submit_frame)
         # Injects a structured snapshot into Buddy's persistent context the moment
         # it assembles, which is normally while the user is still speaking. That
         # is what lets a screen-aware turn keep its speculative reply instead of
         # paying a cold round trip (see voice/speculation.py).
-        screen_context.set_context_listener(buddy.ingest_structured_context)
+        def _route_structured_context(context) -> None:
+            if buddy_owns_conversation(session):
+                buddy.ingest_structured_context(context)
+
+        screen_context.set_context_listener(_route_structured_context)
         # Same idea for graph memory, on a different trigger. Retrieval used to
         # run inside on_user_turn_completed, where it was serial silence the
         # user sat through; the 2026-08-01 baseline measured it timing out on
@@ -775,7 +770,11 @@ async def entrypoint(ctx: JobContext) -> None:
         # reasons, which is why this is `on` and not an exclusive setter.
         session.on(
             "user_input_transcribed",
-            lambda ev: buddy.ingest_partial_transcript(ev.transcript, ev.is_final),
+            lambda ev: (
+                buddy.ingest_partial_transcript(ev.transcript, ev.is_final)
+                if buddy_owns_conversation(session)
+                else None
+            ),
         )
 
         liveness = InputLiveness()
@@ -842,8 +841,8 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         buddy.bind_artifact_delivery(artifact_delivery)
 
-        def _suspended_by_interview(msg_type: str) -> bool:
-            """Whether Interview Mode owns the conversation, so this may not speak.
+        def _ambient_context_suspended(msg_type: str) -> bool:
+            """Whether a specialized agent owns the conversation.
 
             Screen and OCR context are AMBIENT: nobody asked for them this turn,
             and they arrive as a generate_reply that would land on the intake task
@@ -855,14 +854,15 @@ async def entrypoint(ctx: JobContext) -> None:
             for them. Suppressing those would leave a user on a muted mic with no
             way out of Interview Mode.
             """
-            if not interview_owns_conversation(session):
+            if buddy_owns_conversation(session):
                 return False
             logger.info(
-                "VoiceSession: context injection suspended, interview mode active",
+                "VoiceSession: ambient context injection suspended",
                 {
                     "session_id": session_id,
                     "user_id": user_id,
                     "type": msg_type,
+                    "owner": str(session.userdata.owner),
                 },
             )
             return True
@@ -898,14 +898,13 @@ async def entrypoint(ctx: JobContext) -> None:
             elif msg_type == MATERIAL_OVERLAY_SHOWN_TYPE:
                 interview_materials.handle_overlay_ack(msg, participant_identity, topic)
             elif msg_type == GUIDE_MODE_TYPE:
-                if guide.apply_control(msg, participant_identity):
-                    buddy.note_guide_arm_epoch(msg["generation"])
+                guide.apply_control(msg, participant_identity)
             elif msg_type == GUIDE_HEARTBEAT_TYPE:
                 guide.apply_heartbeat(msg, participant_identity)
             elif msg_type == SCREEN_CONTEXT_TYPE:
                 if screen_context_fired:
                     return
-                if _suspended_by_interview(msg_type):
+                if _ambient_context_suspended(msg_type):
                     return
                 screen_context_fired = True
                 context_tasks.append(
@@ -923,7 +922,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     )
                 )
             elif msg_type == OCR_CONTEXT_TYPE:
-                if _suspended_by_interview(msg_type):
+                if _ambient_context_suspended(msg_type):
                     return
                 context_tasks.append(
                     asyncio.create_task(

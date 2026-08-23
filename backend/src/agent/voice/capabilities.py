@@ -334,12 +334,10 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             "draft_outbound_message",
             Capability.OUTBOUND_DRAFT,
             ToolEffect.WRITE,
-            namespace="desktop.screen",
-            surfaces=DESKTOP_ONLY,
-            frame=True,
+            namespace="writing.drafts",
             concurrent=False,
             complex_eligible=True,
-            required=("operation",),
+            required=("operation", "skill_id"),
         ),
         _tool(
             "present_visible_artifact",
@@ -366,13 +364,13 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             concurrent=False,
         ),
         _tool(
-            # Requests the desktop arm/disarm Guide Mode. No frame needed: arming
-            # only asks; the desktop stays the sole arming authority (it pins the
-            # cursor's monitor and checks the signed-in session). enable is a bool,
-            # not required-empty-checked (False is a valid, non-empty value).
+            # Requests the desktop to arm Guide Mode. Like Interview Mode, this is
+            # model-selected session control rather than a persistent write or a
+            # phrase-gated action. The desktop stays the sole arming authority: it
+            # pins the cursor's monitor and checks the signed-in session.
             "set_guide_mode",
             Capability.GUIDE_CONTROL,
-            ToolEffect.WRITE,
+            ToolEffect.SESSION_CONTROL,
             namespace="desktop.guide",
             surfaces=DESKTOP_ONLY,
             concurrent=False,

@@ -74,6 +74,7 @@ def artifact_ready_event(
     persisted: bool,
     context_summary: str = "",
     recipient_hint: str = "",
+    skill_id: str = "general",
 ) -> dict:
     """Build one ready event with a strict v2 artifact and v1 aliases.
 
@@ -110,6 +111,7 @@ def artifact_ready_event(
             "text": artifact.body,
             "context_summary": context_summary,
             "recipient_hint": recipient_hint,
+            "skill_id": skill_id,
             "artifact_kind": None if kind == "outbound_message" else kind,
             "content_format": artifact.format,
             "title": artifact.title,
@@ -128,6 +130,7 @@ def artifact_generating_event(
     mode: Literal["new", "refine"],
     kind: ArtifactKind,
     title: str,
+    skill_id: str = "general",
 ) -> dict:
     return {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
@@ -140,6 +143,7 @@ def artifact_generating_event(
             "channel": channel,
             "length": length,
             "mode": mode,
+            "skill_id": skill_id,
             "artifact": {
                 "id": artifact_id,
                 "kind": kind,

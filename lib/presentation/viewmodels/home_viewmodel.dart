@@ -341,6 +341,25 @@ class HomeViewModel extends SafeChangeNotifier {
           safeNotifyListeners();
         }
 
+      case 'draft.created':
+      case 'draft.updated':
+        final artifact = event.payload?['artifact'];
+        final artifactBody = artifact is Map<String, dynamic>
+            ? artifact['body']
+            : null;
+        final legacyBody = event.payload?['text'];
+        final body = artifactBody is String
+            ? artifactBody
+            : legacyBody is String
+                ? legacyBody
+                : null;
+        final text = (body ?? '').trim();
+        if (text.isNotEmpty) {
+          _appendTranscript(role: VoiceTranscriptRole.assistant, text: text);
+          unawaited(_saveVoiceMessage(text, isUser: false));
+          safeNotifyListeners();
+        }
+
       case 'error':
         _error = AppException.unexpected(
           _toVoiceErrorMessage(

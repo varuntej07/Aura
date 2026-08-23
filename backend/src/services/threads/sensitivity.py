@@ -27,7 +27,8 @@ SENSITIVE_CATEGORY_SLUGS = frozenset({
     "trauma_abuse",
 })
 
-_CLASSIFIER_TIMEOUT_S = 6.0
+# Match the proactive tap gate's cold-model headroom while staying below one scheduler tick.
+_CLASSIFIER_TIMEOUT_S = 15.0
 _SYSTEM_PROMPT = """You are Aura's privacy classifier for UNSOLICITED proactive outreach.
 Classify the subject semantically, not by matching words. Sensitive includes health and physical
 symptoms, medication or dosing, gender or identity, grief, intimate or family relationships,
