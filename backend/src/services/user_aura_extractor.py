@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -628,20 +629,35 @@ async def extract_and_update_user_aura(
 
     All exceptions are caught and logged. This function never raises.
     """
+    started_at = time.monotonic()
+    consent_ms = 0
+    profile_read_ms = 0
+    model_ms = 0
+    provenance_write_ms = 0
+    profile_merge_ms = 0
+    memory_mirror_ms = 0
     # Step 0: GDPR consent gate. Skip if the user has not opted in, but log it so a
     # frozen profile (a user actively chatting whose Aura never updates) shows up in
     # logs instead of looking identical to "healthy and quiet". This skip being
     # silent is exactly what hid a 5-week profile freeze. The check reads
     # users/{uid}.aura_consent_granted, written at onboarding and by the memory toggle.
-    if not await _user_has_granted_aura_consent(uid, user_doc):
+    stage_started = time.monotonic()
+    has_consent = await _user_has_granted_aura_consent(uid, user_doc)
+    consent_ms = round((time.monotonic() - stage_started) * 1000)
+    if not has_consent:
         logger.info("UserAuraExtractor: extraction skipped, Aura consent not granted", {
             "user_id": uid,
+            "surface": surface,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "consent_ms": consent_ms,
         })
         return
 
     insight: MessageInsight | None = None
     try:
+        stage_started = time.monotonic()
         profile = await _read_user_aura_profile(uid)
+        profile_read_ms = round((time.monotonic() - stage_started) * 1000)
         prev_query: str | None = profile.get("prev_user_query")
 
         prompt = user_aura_extraction_user_prompt(
@@ -649,6 +665,7 @@ async def extract_and_update_user_aura(
             previous_query=prev_query or "",
             previous_response=prev_buddy_response or "",
         )
+        stage_started = time.monotonic()
         insight = cast(MessageInsight, await get_model_provider().cheap(
             prompt,
             system=USER_AURA_EXTRACTION_SYSTEM_PROMPT,
@@ -656,16 +673,22 @@ async def extract_and_update_user_aura(
             temperature=_EXTRACTION_TEMPERATURE,
             model=settings.TIER_EXTRACTION,
         ))
+        model_ms = round((time.monotonic() - stage_started) * 1000)
 
         # Provenance is one immutable document per turn. It is captured from the
         # extraction result before the eventually-consistent graph write below.
+        stage_started = time.monotonic()
         await _write_graph_turn_provenance(
             uid, insight, message, session_id, turn_id, turn_index, surface,
         )
+        provenance_write_ms = round((time.monotonic() - stage_started) * 1000)
+        stage_started = time.monotonic()
         updated = await _merge_and_write_user_aura(uid, insight, message)
+        profile_merge_ms = round((time.monotonic() - stage_started) * 1000)
 
         # Mirror the durable facts + named subjects into the unbounded long-term memory
         # store for query-relevant recall. Best-effort; never affects the merge above.
+        stage_started = time.monotonic()
         await _upsert_memory_atoms_from_insight(
             uid,
             insight,
@@ -673,6 +696,7 @@ async def extract_and_update_user_aura(
             session_id=session_id,
             turn_id=turn_id,
         )
+        memory_mirror_ms = round((time.monotonic() - stage_started) * 1000)
 
         logger.info("UserAuraExtractor: profile updated", {
             "user_id": uid,
@@ -684,18 +708,37 @@ async def extract_and_update_user_aura(
             "extraction_count": updated.get("extraction_count"),
             "turn_score": insight.turn_score,
             "signal_type": insight.signal_type,
+            "surface": surface,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "consent_ms": consent_ms,
+            "profile_read_ms": profile_read_ms,
+            "model_ms": model_ms,
+            "provenance_write_ms": provenance_write_ms,
+            "profile_merge_ms": profile_merge_ms,
+            "memory_mirror_ms": memory_mirror_ms,
         })
 
     except ValidationError as exc:
         logger.warn("UserAuraExtractor: insight parse failed -- Gemini returned malformed JSON", {
             "user_id": uid,
             "error": str(exc),
+            "surface": surface,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "model_ms": model_ms,
         })
     except Exception as exc:
         logger.warn("UserAuraExtractor: extraction failed", {
             "user_id": uid,
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "surface": surface,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "consent_ms": consent_ms,
+            "profile_read_ms": profile_read_ms,
+            "model_ms": model_ms,
+            "provenance_write_ms": provenance_write_ms,
+            "profile_merge_ms": profile_merge_ms,
+            "memory_mirror_ms": memory_mirror_ms,
         })
 
     # Turn signal logging only makes sense when there is a previous response to score.

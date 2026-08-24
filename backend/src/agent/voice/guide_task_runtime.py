@@ -1,4 +1,4 @@
-"""Durable, deterministic Guide task orchestration behind one BuddyAgent."""
+"""Durable, deterministic Guide task orchestration behind the Guide supervisor."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ from .guide_models import (
     GuideStepStatus,
     GuideTask,
     GuideTaskStatus,
+    GuideTaskStep,
     GuideVisualDecision,
 )
 from .guide_prompt import (
@@ -68,10 +69,6 @@ def _latest_user_text(chat_ctx: lk_llm.ChatContext) -> str:
         if isinstance(item, lk_llm.ChatMessage) and item.role == "user":
             return item.text_content.strip()
     return ""
-
-
-def _is_proactive_text(text: str) -> bool:
-    return text.startswith("The currently visible screen changed while Guide Mode")
 
 
 def _kernel_frame(frame: ScreenFrame) -> GuideFrameInput:
@@ -132,7 +129,7 @@ class GuideTaskRuntime:
         self._run_id = uuid.uuid4().hex
         self._lease_owner = f"{voice_session_id}:{self._run_id}"
         self._guide_session_id = ""
-        self._protocol_version = 1
+        self._protocol_version = 2
         self._resume_task_id = ""
         self._task: GuideTask | None = None
         self._speech_epoch = 0
@@ -163,7 +160,7 @@ class GuideTaskRuntime:
         self._failure_handler = handler
 
     def should_delegate(self) -> bool:
-        return self._active and self._protocol_version >= 2
+        return self._active
 
     def diagnostic_state(self) -> dict[str, object]:
         return {
@@ -279,7 +276,12 @@ class GuideTaskRuntime:
                 )
 
     async def generate(
-        self, chat_ctx: lk_llm.ChatContext, *, current_turn_context_id: str = ""
+        self,
+        chat_ctx: lk_llm.ChatContext,
+        *,
+        current_turn_context_id: str = "",
+        proactive: bool = False,
+        force_replan: bool = False,
     ) -> str:
         if not self._active:
             return ""
@@ -287,7 +289,13 @@ class GuideTaskRuntime:
         self.cancel_generation()
         epoch = self._speech_epoch
         task = asyncio.create_task(
-            self._process(chat_ctx, epoch, current_turn_context_id),
+            self._process(
+                chat_ctx,
+                epoch,
+                current_turn_context_id,
+                proactive=proactive,
+                force_replan=force_replan,
+            ),
             name=f"guide-decision-{self._voice_session_id[:8]}",
         )
         self._decision_task = task
@@ -304,9 +312,11 @@ class GuideTaskRuntime:
         chat_ctx: lk_llm.ChatContext,
         speech_epoch: int,
         current_turn_context_id: str = "",
+        *,
+        proactive: bool = False,
+        force_replan: bool = False,
     ) -> str:
         raw_transcript = _latest_user_text(chat_ctx)
-        proactive = _is_proactive_text(raw_transcript)
         transcript = "" if proactive else raw_transcript
         frame = await self._screen_frames.fresh_frame(
             current_turn_context_id=current_turn_context_id
@@ -349,6 +359,7 @@ class GuideTaskRuntime:
                 return ""
             if task is None:
                 return ""
+            replanned = False
             if task.status == GuideTaskStatus.BLOCKED and task.blocked_reason == "blocked_provider":
                 if not transcript or not had_task:
                     return (
@@ -357,9 +368,10 @@ class GuideTaskRuntime:
                         else ""
                     )
                 task = await self._replan_task(task, transcript, frame)
+                replanned = True
                 if task.status == GuideTaskStatus.BLOCKED:
                     # A planning-provider failure is an interpretation-lane error, not
-                    # a reason to tear the mode down. Stay armed in the guide persona
+                    # a reason to tear the mode down. Stay armed in the Guide supervisor
                     # and let the next user turn retry; the switch (Guide on/off) is
                     # owned only by the user hotkey, sign-out, and durable completion.
                     # This previously called the fail-closed handler after two failures,
@@ -368,10 +380,19 @@ class GuideTaskRuntime:
                     # self-heals when the provider recovers. fail_closed remains for a
                     # genuine unrecoverable switch-lane failure, never for this path.
                     return "I couldn't plan that just now. Ask me again in a moment."
-            if task.status == GuideTaskStatus.REPLANNING:
+            if force_replan and transcript and had_task and not replanned:
+                task = await self._replan_task(task, transcript, frame)
+            elif task.status in {
+                GuideTaskStatus.CLARIFYING,
+                GuideTaskStatus.REPLANNING,
+            }:
                 if not transcript:
                     return ""
                 task = await self._replan_task(task, transcript, frame)
+            if task.status == GuideTaskStatus.CLARIFYING:
+                return task.clarification_question or (
+                    "What outcome should I help you complete?" if transcript else ""
+                )
             if not self._frame_authorized(frame, task):
                 # Break the single authorization bool into its raw inputs so a false
                 # PAUSED_APP ("Bring CapCut back" while CapCut is on screen) can be
@@ -624,6 +645,7 @@ class GuideTaskRuntime:
                 if plan.clarification_question
                 else GuideTaskStatus.ACTIVE
             ),
+            clarification_question=plan.clarification_question,
             blocked_reason="blocked_provider" if planner_failed else None,
             lease_owner=self._lease_owner,
             lease_expires_at=now,
@@ -720,35 +742,54 @@ class GuideTaskRuntime:
             task=task,
             replan=True,
         )
-        planned_by_id = {step.step_id: step for step in plan.steps}
+        task_shape = self._kernel.task_shape(plan)
         expected = task.revision
 
         def _reduce(updated: GuideTask) -> GuideTask:
+            previous_by_id = {step.step_id: step for step in updated.steps}
+            rebuilt_steps: list[GuideTaskStep] = []
+            active_assigned = False
+            for planned in task_shape.steps:
+                previous = previous_by_id.get(planned.step_id)
+                step_data = planned.model_dump()
+                if previous is not None and previous.status == GuideStepStatus.VERIFIED:
+                    step_data.update(
+                        status=GuideStepStatus.VERIFIED,
+                        attempt_count=previous.attempt_count,
+                        last_instruction_id=previous.last_instruction_id,
+                        verified_evidence_refs=previous.verified_evidence_refs,
+                    )
+                elif not active_assigned:
+                    step_data["status"] = GuideStepStatus.ACTIVE
+                    active_assigned = True
+                else:
+                    step_data["status"] = GuideStepStatus.PENDING
+                rebuilt_steps.append(GuideTaskStep.model_validate(step_data))
+
             updated.goal = plan.goal
             updated.target_app = _resolved_target_app(
-                self._profile.target_app_for(plan), frame
+                task_shape.target_app, frame
             )
-            updated.constraints = self._profile.constraints_for(plan)
-            updated.acceptance_criteria = self._profile.acceptance_criteria_for(plan)
-            for step in updated.steps:
-                planned = planned_by_id.get(step.step_id)
-                if planned is not None and step.status != GuideStepStatus.VERIFIED:
-                    step.title = planned.title
-                    step.expected_user_action = planned.expected_user_action
-                    step.expected_duration_seconds = planned.expected_duration_seconds
+            updated.constraints = task_shape.constraints
+            updated.acceptance_criteria = task_shape.acceptance_criteria
+            updated.steps = rebuilt_steps
+            updated.current_step_id = next(
+                (
+                    step.step_id
+                    for step in rebuilt_steps
+                    if step.status == GuideStepStatus.ACTIVE
+                ),
+                None,
+            )
             updated.plan_revision += 1
             updated.planning_calls += 1
-            updated.status = GuideTaskStatus.ACTIVE
+            updated.clarification_question = plan.clarification_question
+            updated.status = (
+                GuideTaskStatus.CLARIFYING
+                if plan.clarification_question
+                else GuideTaskStatus.ACTIVE
+            )
             updated.blocked_reason = None
-            if updated.current_step_id is None:
-                updated.current_step_id = next(
-                    (
-                        step.step_id
-                        for step in updated.steps
-                        if step.status != GuideStepStatus.VERIFIED
-                    ),
-                    None,
-                )
             return updated
 
         self._task = await self._store.mutate(
@@ -1271,8 +1312,6 @@ class GuideTaskRuntime:
         )
 
     async def _publish(self, message_type: str, payload: dict[str, Any]) -> None:
-        if self._protocol_version < 2:
-            return
         message = json.dumps({"type": message_type, "payload": payload}).encode()
         try:
             await self._room.local_participant.publish_data(message, reliable=True)

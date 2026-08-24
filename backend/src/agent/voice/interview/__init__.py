@@ -84,6 +84,7 @@ from .models import (
     InterviewState,
     QuestionPlan,
     VoiceSessionState,
+    buddy_owns_conversation,
     interview_owns_conversation,
 )
 from .question_plan import QUESTION_COUNT, QuestionPlanService
@@ -129,6 +130,7 @@ __all__ = [
     "FINAL_WARNING_S",
     "HARD_CAP_S",
     "VoiceSessionState",
+    "buddy_owns_conversation",
     "interview_owns_conversation",
     "request_material_overlay",
 ]

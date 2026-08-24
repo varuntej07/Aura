@@ -419,6 +419,20 @@ async def _run_dictation_audio_reconciliation() -> None:
         )
 
 
+async def _run_dictation_metadata_reconciliation() -> None:
+    """Delete expired Firestore trace metadata when TTL is delayed or unavailable."""
+    from ..services.dictation import store as dictation_store
+
+    try:
+        result = await dictation_store.reconcile_expired_metadata()
+        logger.info("scheduler: dictation metadata reconciliation", result)
+    except Exception as exc:
+        logger.error(
+            "scheduler: dictation metadata reconciliation failed",
+            {"error": str(exc), "error_type": type(exc).__name__},
+        )
+
+
 async def _run_meeting_reconciliation() -> None:
     from ..services.meetings.operations import reconciliation_snapshot
 
@@ -643,6 +657,8 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         # scheduler response ends, so a detached task would not be reliable.
         if now_minute == 40:
             await _run_dictation_audio_reconciliation()
+        if now_minute == 41:
+            await _run_dictation_metadata_reconciliation()
 
         # Proactive notification queue drain, EVERY minute. The producers (thread /
         # icebreaker / news / re-engage) only ENQUEUE; this is where their proposals are

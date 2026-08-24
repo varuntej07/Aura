@@ -122,22 +122,24 @@ class AuraGuideDecisionProvider(GuideDecisionProvider):
         provider = get_model_provider()
         result = await self._bounded(
             kind="planning",
-            primary=lambda: provider.balanced(
+            primary=lambda: provider.cheap(
                 prompt,
                 system=GUIDE_PLANNER_SYSTEM_PROMPT,
                 response_model=GuidePlanningDecision,
                 temperature=0.1,
+                max_output_tokens=1800,
             ),
-            fallback=lambda: provider.cheap(
+            fallback=lambda: provider.balanced(
                 prompt,
                 system=GUIDE_PLANNER_SYSTEM_PROMPT,
                 response_model=GuidePlanningDecision,
                 temperature=0.1,
+                max_output_tokens=1800,
             ),
             first_timeout=settings.GUIDE_PLANNING_FIRST_ATTEMPT_TIMEOUT_S,
             total_timeout=settings.GUIDE_PLANNING_DEADLINE_S,
-            primary_model=settings.TIER_BALANCED,
-            fallback_model=settings.TIER_CHEAP,
+            primary_model=settings.TIER_CHEAP,
+            fallback_model=settings.TIER_BALANCED,
             correlation=dict(correlation),
         )
         return GuidePlanningDecision.model_validate(result)

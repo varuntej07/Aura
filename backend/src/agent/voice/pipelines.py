@@ -14,7 +14,7 @@ from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
 from livekit.agents import vad as lk_vad
-from livekit.plugins import anthropic, cartesia, deepgram, google, openai
+from livekit.plugins import anthropic, cartesia, deepgram, openai
 
 from ...config.settings import settings
 from ...shared.tools import openai_function_definition
@@ -38,7 +38,7 @@ def build_stt_pipeline() -> lk_stt.FallbackAdapter:
 
 
 def build_llm_pipeline(user_id: str) -> lk_llm.FallbackAdapter:
-    """GPT-4.1 via LiveKit Inference -> GPT-4.1 direct -> Claude Haiku -> Gemini Flash."""
+    """GPT-4.1 via LiveKit Inference -> GPT-4.1 direct -> Claude Haiku."""
     llm_adapters: list[lk_llm.LLM] = []
     if settings.OPENAI_API_KEY:
         # Legs 1 and 2 are the SAME MODEL on purpose — do not "de-duplicate" them.
@@ -90,21 +90,12 @@ def build_llm_pipeline(user_id: str) -> lk_llm.FallbackAdapter:
             max_tokens=VOICE_MAX_OUTPUT_TOKENS,
         )
     )
-    llm_adapters.append(
-        google.LLM(
-            model=settings.TIER_CHEAP,
-            api_key=settings.GEMINI_API_KEY.strip(),
-            temperature=VOICE_GENERATION_TEMPERATURE,
-            max_output_tokens=VOICE_MAX_OUTPUT_TOKENS,
-        )
-    )
-    # attempt_timeout caps how long a HUNG provider stalls the turn before
-    # failover. A healthy leg answers well under 1s (measured llm_ttft_ms
-    # 846-1982), so 3s is generous; the previous 10s meant one wedged provider
-    # could eat ten seconds of a live call. max_retry_per_llm=0 keeps this a
-    # true ceiling — with internal retries the wall-clock would be a multiple of
-    # it (llm/fallback_adapter.py passes both into the per-attempt conn options).
-    return lk_llm.FallbackAdapter(llm_adapters, attempt_timeout=3.0, max_retry_per_llm=0)
+    # attempt_timeout caps how long a hung provider stalls before failover. The
+    # measured healthy range tops out just under two seconds, so 2.5 seconds
+    # preserves healthy responses while bounding the three-leg staircase to 7.5
+    # seconds instead of the former four-leg, 12-second tail. max_retry_per_llm=0
+    # prevents hidden retries from multiplying that ceiling.
+    return lk_llm.FallbackAdapter(llm_adapters, attempt_timeout=2.5, max_retry_per_llm=0)
 
 
 def describe_llm_fallback_legs(adapter: lk_llm.FallbackAdapter) -> list[str]:
@@ -347,8 +338,9 @@ def build_agent_session(
         # Explicitly pin the loop ceiling instead of inheriting a dependency
         # default that can change when livekit-agents is upgraded.
         max_tool_steps=3,
-        # LiveKit emits "away" after this much user silence. recorder.py owns
-        # the one check-in allowed for that continuous silence span.
-        user_away_timeout=settings.VOICE_AWAY_FIRST_NUDGE_S,
+        # The user summoned this call. Ordinary silence is not a new request and
+        # never authorizes Buddy to speak. Fault-specific input-liveness checks
+        # remain separate; Guide and Interview own their active workflows.
+        user_away_timeout=None,
         turn_handling=turn_handling,
     )

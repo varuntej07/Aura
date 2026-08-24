@@ -47,6 +47,7 @@ async def create_draft(
     uid: str,
     draft_id: str,
     *,
+    skill_id: str,
     channel: str,
     length: str,
     text: str,
@@ -61,6 +62,7 @@ async def create_draft(
     card must never lose a draft to a Firestore hiccup."""
     now = now or datetime.now(UTC)
     doc = {
+        F.SKILL_ID: skill_id,
         F.CHANNEL: channel,
         F.LENGTH: length,
         F.TEXT: text,
@@ -145,6 +147,7 @@ async def list_drafts(uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, 
                 continue
             rows.append({
                 "draft_id": snap.id,
+                F.SKILL_ID: data.get(F.SKILL_ID, "general"),
                 F.CHANNEL: data.get(F.CHANNEL, ""),
                 F.LENGTH: data.get(F.LENGTH, ""),
                 F.TEXT: data.get(F.TEXT, ""),

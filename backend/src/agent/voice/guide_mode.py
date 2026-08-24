@@ -5,18 +5,16 @@ armed, stamping each frame ``change:"1"`` when its own change-filter classified 
 real visible change and ``change:"0"`` for a forced static-screen refresh. This
 module does two things with that stream:
 
-* Acks every received frame immediately (a ``guide.step`` "Screen checked."
-  message) so the desktop's per-frame handshake never stalls and the next frame
-  can flow. Acking is decoupled from replying.
+* Acks every received frame immediately with ``guide.frame_ack`` so the
+  desktop's per-frame handshake never stalls and the next frame can flow.
+  Acking is decoupled from replying.
 * On a ``change:"1"`` frame it fires ONE terse proactive nudge ("Now click Save,
   top right") at a quiet turn boundary, debounced so it never stacks on a spoken
   reply or on a burst of rapid changes.
 
-Spoken user questions are NOT answered here anymore: ``BuddyAgent.llm_node``
-answers them with the same terse guide brain (see ``guide_prompt`` and
-``buddy_agent``) when Guide Mode is active, so there is exactly one reply per
-spoken turn. This coordinator only handles acking, proactive change nudges, and
-usage rollup.
+Spoken user questions are answered by ``GuideSupervisorAgent``. This
+coordinator owns the native control handshake, same-session handoffs, frame
+acking, proactive change nudges, and usage rollup.
 """
 
 from __future__ import annotations
@@ -34,13 +32,14 @@ from livekit.agents import llm as lk_llm
 from ...lib.logger import logger
 from ...prompts import GUIDE_INSTRUCTIONS
 from ...services.guide_usage_store import record_guide_usage
+from .guide_session_state import GuidePhase, GuideStartClaim
+from .guide_supervisor import GuideSupervisorAgent
 from .guide_task_runtime import GuideTaskRuntime
-from .interview import interview_owns_conversation
-from .screen_frames import ScreenFrame, strip_stale_images
+from .interview import VoiceSessionState, interview_owns_conversation
+from .screen_frames import ScreenFrame, ScreenFrameStore, strip_stale_images
 
 GUIDE_MODE_TYPE = "guide.mode"
 GUIDE_HEARTBEAT_TYPE = "guide.heartbeat"
-GUIDE_STEP_TYPE = "guide.step"
 GUIDE_FRAME_ACK_TYPE = "guide.frame_ack"
 GUIDE_MODE_ACK_TYPE = "guide.mode_ack"
 
@@ -56,19 +55,19 @@ _PROACTIVE_MIN_INTERVAL_S = 4.0
 # Stay silent this long after the user actually spoke: the spoken turn already
 # answered them, and their own action is what usually changed the screen.
 _PROACTIVE_AFTER_TURN_QUIET_S = 2.0
+_HANDOFF_TIMEOUT_S = 5.0
 
 
 class GuideBuddy(Protocol):
     @property
     def chat_ctx(self) -> lk_llm.ChatContext: ...
 
-    async def update_chat_ctx(self, chat_ctx: lk_llm.ChatContext) -> None: ...
-
-    def set_guide_frame(self, frame_id: str, model_scale: float = 1.0) -> None: ...
-
-    async def apply_guide_persona(self, active: bool) -> None: ...
-
-    def is_guide_active(self) -> bool: ...
+    async def prepare_guide_resume(
+        self,
+        chat_ctx: lk_llm.ChatContext,
+        ownership_epoch: int | None,
+        ready: asyncio.Future[bool],
+    ) -> None: ...
 
 
 class GuideCoordinator:
@@ -83,6 +82,8 @@ class GuideCoordinator:
         session_id: str,
         user_id: str,
         task_runtime: GuideTaskRuntime,
+        screen_frames: ScreenFrameStore,
+        display_name: str,
     ) -> None:
         self._session = session
         self._buddy = buddy
@@ -90,8 +91,11 @@ class GuideCoordinator:
         self._session_id = session_id
         self._user_id = user_id
         self._task_runtime = task_runtime
+        self._screen_frames = screen_frames
+        self._display_name = display_name
+        self._guide_agent: GuideSupervisorAgent | None = None
         self._active = False
-        self._protocol_version = 1
+        self._protocol_version = 2
         self._guide_session_id = ""
         self._generation = -1
         self._latest_frame: ScreenFrame | None = None
@@ -180,7 +184,7 @@ class GuideCoordinator:
         active = message.get("active")
         generation = message.get("generation")
         guide_session_id = message.get("guide_session_id")
-        protocol_version = message.get("protocol_version", 1)
+        protocol_version = message.get("protocol_version")
         resume_task_id = message.get("resume_task_id")
         if (
             not isinstance(active, bool)
@@ -189,7 +193,7 @@ class GuideCoordinator:
             or generation < 0
             or isinstance(protocol_version, bool)
             or not isinstance(protocol_version, int)
-            or protocol_version not in (1, 2)
+            or protocol_version != 2
             or (
                 resume_task_id is not None
                 and (
@@ -207,19 +211,17 @@ class GuideCoordinator:
         if generation <= self._generation:
             return False
 
-        # Arming is refused while Interview Mode owns the conversation, and only
-        # arming: a disarm must always be honoured, because refusing one is how a
-        # user ends up unable to turn off screen capture.
-        #
-        # An arm here would hand the Guide persona to BuddyAgent while the
-        # supervisor is the active agent, so the persona swap would land on an
-        # agent nobody is talking to and surface later as Buddy waking up in
-        # Guide Mode. The ack is what keeps the desktop honest: without it the
-        # status dot lights for a Guide session that has no agent behind it.
-        #
-        # Deliberately does NOT consume the generation, so the next arm after the
-        # interview ends is an ordinary monotonic arm rather than a rejected one.
-        if active and interview_owns_conversation(self._session):
+        state = getattr(self._session, "userdata", None)
+        if not isinstance(state, VoiceSessionState):
+            return False
+
+        # Arming is refused while Interview Mode owns or is reserving the
+        # conversation. Disarm is always honoured so screen capture can never be
+        # trapped on by a cross-mode race.
+        if active and (
+            interview_owns_conversation(self._session)
+            or state.interview.pending_start is not None
+        ):
             logger.info(
                 "VoiceSession: Guide arm refused, interview mode active",
                 {
@@ -243,6 +245,27 @@ class GuideCoordinator:
             )
             return False
 
+        claim: GuideStartClaim | None = None
+        if active:
+            claim = state.guide.claim_start(
+                guide_session_id=guide_session_id,
+                generation=generation,
+                protocol_version=protocol_version,
+                resume_task_id=resume_task_id,
+            )
+            if claim is None:
+                asyncio.create_task(
+                    self._publish_mode_ack(
+                        active=False,
+                        generation=generation,
+                        guide_session_id=guide_session_id,
+                        protocol_version=protocol_version,
+                        reason="guide_transition_in_progress",
+                    ),
+                    name=f"guide-transition-nack-{self._session_id[:8]}",
+                )
+                return False
+
         previous_guide_session_id = self._guide_session_id
         self._generation = generation
         self._active = active
@@ -264,13 +287,16 @@ class GuideCoordinator:
                     self._flush_usage(previous_guide_session_id),
                     name=f"guide-usage-{self._session_id[:8]}",
                 )
+        transition_guide_session_id = (
+            self._guide_session_id if active else previous_guide_session_id
+        )
         self._schedule_control_transition(
             active=active,
             generation=generation,
-            guide_session_id=self._guide_session_id,
+            guide_session_id=transition_guide_session_id,
             protocol_version=protocol_version,
-            resume_task_id=resume_task_id,
             reason=None,
+            claim=claim,
         )
         logger.info(
             "VoiceSession: Guide Mode changed",
@@ -302,8 +328,8 @@ class GuideCoordinator:
             generation=self._generation,
             guide_session_id=guide_session_id,
             protocol_version=self._protocol_version,
-            resume_task_id=None,
             reason=reason,
+            claim=None,
         )
         logger.warn(
             "VoiceSession: Guide Mode failed closed",
@@ -344,8 +370,8 @@ class GuideCoordinator:
         generation: int,
         guide_session_id: str,
         protocol_version: int,
-        resume_task_id: str | None,
         reason: str | None,
+        claim: GuideStartClaim | None,
     ) -> None:
         if self._control_task is not None:
             self._control_task.cancel()
@@ -355,8 +381,8 @@ class GuideCoordinator:
                 generation=generation,
                 guide_session_id=guide_session_id,
                 protocol_version=protocol_version,
-                resume_task_id=resume_task_id,
                 reason=reason,
+                claim=claim,
             ),
             name=f"guide-control-{self._session_id[:8]}-{generation}",
         )
@@ -368,12 +394,30 @@ class GuideCoordinator:
         generation: int,
         guide_session_id: str,
         protocol_version: int,
-        resume_task_id: str | None,
         reason: str | None,
+        claim: GuideStartClaim | None,
     ) -> None:
         try:
             if active:
-                await self._buddy.apply_guide_persona(True)
+                if claim is None:
+                    raise RuntimeError("missing_guide_start_claim")
+                activation_ready = asyncio.get_running_loop().create_future()
+                guide_agent = GuideSupervisorAgent(
+                    state=self._session.userdata,
+                    claim=claim,
+                    chat_ctx=self._buddy.chat_ctx.copy(exclude_instructions=True),
+                    screen_frames=self._screen_frames,
+                    task_runtime=self._task_runtime,
+                    user_id=self._user_id,
+                    session_id=self._session_id,
+                    display_name=self._display_name,
+                    activation_ready=activation_ready,
+                )
+                self._guide_agent = guide_agent
+                self._session.update_agent(guide_agent)
+                activated = await asyncio.wait_for(
+                    asyncio.shield(activation_ready), timeout=_HANDOFF_TIMEOUT_S
+                )
                 if (
                     self._closed
                     or generation != self._generation
@@ -381,25 +425,24 @@ class GuideCoordinator:
                     or guide_session_id != self._guide_session_id
                 ):
                     return
-                if not self._buddy.is_guide_active():
-                    self._active = False
-                    await self._task_runtime.deactivate(cancelled=True)
-                    await self._publish_mode_ack(
-                        active=False,
-                        generation=generation,
-                        guide_session_id=guide_session_id,
-                        protocol_version=protocol_version,
-                        reason="persona_unavailable",
-                    )
-                    return
-                self._task_runtime.activate(
-                    guide_session_id=guide_session_id,
-                    protocol_version=protocol_version,
-                    resume_task_id=resume_task_id,
-                )
+                if not activated:
+                    raise RuntimeError("guide_supervisor_not_activated")
             else:
                 await self._task_runtime.deactivate(cancelled=reason is None)
-                await self._buddy.apply_guide_persona(False)
+                state = self._session.userdata
+                guide = state.guide
+                resume_epoch: int | None = None
+                pending = guide.pending_start
+                if pending is not None:
+                    guide.cancel_start(pending, reason or "native_disarm")
+                elif guide.phase is not GuidePhase.IDLE:
+                    if guide.phase is not GuidePhase.RETURN_PENDING:
+                        guide.request_return(reason or "native_disarm")
+                    resume_epoch = guide.ownership_epoch
+                resumed = await self._resume_buddy(resume_epoch)
+                if not resumed:
+                    raise RuntimeError("buddy_not_activated")
+                self._guide_agent = None
                 if self._closed or generation != self._generation:
                     return
             await self._publish_mode_ack(
@@ -427,6 +470,13 @@ class GuideCoordinator:
             )
             if active and generation == self._generation:
                 self._active = False
+                await self._task_runtime.deactivate(cancelled=True)
+                await self._recover_failed_activation(claim)
+                # A reservation that never committed must not consume the
+                # desktop generation. If entry did commit before failing, the
+                # session state keeps that generation and requires the next one.
+                self._generation = self._session.userdata.guide.generation
+                self._guide_session_id = ""
                 await self._publish_mode_ack(
                     active=False,
                     generation=generation,
@@ -438,6 +488,44 @@ class GuideCoordinator:
             if self._control_task is asyncio.current_task():
                 self._control_task = None
 
+    async def _recover_failed_activation(
+        self, claim: GuideStartClaim | None
+    ) -> None:
+        """Restore Buddy after a supervisor reservation or activation failed."""
+        state = self._session.userdata
+        guide = state.guide
+        resume_epoch: int | None = None
+        if claim is not None and guide.pending_start == claim:
+            guide.cancel_start(claim, "activation_failed")
+        elif guide.phase is not GuidePhase.IDLE:
+            if guide.phase is not GuidePhase.RETURN_PENDING:
+                guide.request_return("activation_failed")
+            resume_epoch = guide.ownership_epoch
+        try:
+            await self._resume_buddy(resume_epoch)
+        except Exception as exc:
+            logger.warn(
+                "GuideCoordinator: Buddy recovery failed",
+                {
+                    "session_id": self._session_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        self._guide_agent = None
+
+    async def _resume_buddy(self, ownership_epoch: int | None) -> bool:
+        chat_ctx = (
+            self._guide_agent.chat_ctx.copy(exclude_instructions=True)
+            if self._guide_agent is not None
+            else self._buddy.chat_ctx.copy(exclude_instructions=True)
+        )
+        ready = asyncio.get_running_loop().create_future()
+        await self._buddy.prepare_guide_resume(chat_ctx, ownership_epoch, ready)
+        self._session.update_agent(self._buddy)
+        return await asyncio.wait_for(
+            asyncio.shield(ready), timeout=_HANDOFF_TIMEOUT_S
+        )
+
     async def _publish_mode_ack(
         self,
         *,
@@ -447,8 +535,6 @@ class GuideCoordinator:
         protocol_version: int,
         reason: str | None,
     ) -> None:
-        if protocol_version < 2:
-            return
         payload = json.dumps(
             {
                 "type": GUIDE_MODE_ACK_TYPE,
@@ -539,8 +625,6 @@ class GuideCoordinator:
         return True
 
     def _reject_frame(self, frame: ScreenFrame, reason: str) -> None:
-        if self._protocol_version < 2:
-            return
         asyncio.create_task(
             self._publish_frame_ack(frame, accepted=False, reason=reason),
             name=f"guide-reject-{self._session_id[:8]}",
@@ -727,8 +811,19 @@ class GuideCoordinator:
                     self._log_frame_drop(frame, "stale_at_generation")
                     continue
                 self._inflight_frame_id = frame.frame_id
+                guide_agent = self._guide_agent
+                if guide_agent is None:
+                    continue
                 await self._prepare_context(frame)
+                proactive_message_id = f"guide-proactive-{frame.frame_id}"
+                guide_agent.prepare_proactive_turn(
+                    message_id=proactive_message_id,
+                    frame_id=frame.frame_id,
+                    model_scale=frame.model_scale,
+                    turn_context_id=frame.turn_context_id,
+                )
                 message = lk_llm.ChatMessage(
+                    id=proactive_message_id,
                     role="user",
                     content=[
                         "The currently visible screen changed while Guide Mode is active.",
@@ -784,14 +879,16 @@ class GuideCoordinator:
                 self._inflight_frame_id = ""
 
     async def _prepare_context(self, frame: ScreenFrame) -> None:
-        context = self._buddy.chat_ctx.copy()
+        guide_agent = self._guide_agent
+        if guide_agent is None:
+            return
+        context = guide_agent.chat_ctx.copy()
         stripped = strip_stale_images(context)
         if stripped:
-            await self._buddy.update_chat_ctx(context)
-        self._buddy.set_guide_frame(frame.frame_id, frame.model_scale)
+            await guide_agent.update_chat_ctx(context)
 
     async def _ack_frame(self, frame: ScreenFrame) -> None:
-        """Publish a ``guide.step`` ack so the desktop frame handshake advances.
+        """Publish a ``guide.frame_ack`` so the desktop handshake advances.
 
         Fires for EVERY accepted frame (change or forced), decoupled from replying.
         Fail-soft: the desktop's own 15s response timeout is the safety net if this
@@ -800,39 +897,7 @@ class GuideCoordinator:
         match = _GUIDE_FRAME_RE.fullmatch(frame.frame_id)
         if match is None or not self._active:
             return
-        if self._protocol_version >= 2:
-            await self._publish_frame_ack(frame, accepted=True, reason=None)
-            return
-        # Protocol v1 preserves the legacy guide.step transport acknowledgement.
-        self._last_acked_frame_id = frame.frame_id
-        self._step_index += 1
-        payload = json.dumps(
-            {
-                "type": GUIDE_STEP_TYPE,
-                "payload": {
-                    "frame_id": frame.frame_id,
-                    "frame_seq": int(match.group(2)),
-                    "step_index": self._step_index,
-                    "instruction": "Screen checked.",
-                    "done": False,
-                },
-            }
-        ).encode("utf-8")
-        try:
-            await self._room.local_participant.publish_data(payload, reliable=True)
-        except Exception as exc:
-            logger.warn(
-                "VoiceSession: Guide Mode acknowledgement failed",
-                {
-                    "session_id": self._session_id,
-                    "user_id": self._user_id,
-                    "frame_id": frame.frame_id,
-                    "error": str(exc),
-                    "stage": "execution",
-                    "outcome": "failed",
-                    "reason": "legacy_frame_ack_publish_failed",
-                },
-            )
+        await self._publish_frame_ack(frame, accepted=True, reason=None)
 
     async def _publish_frame_ack(
         self,

@@ -153,6 +153,7 @@ class GuideTask(BaseModel):
     current_step_id: str | None = None
     plan_revision: int = 1
     status: GuideTaskStatus = GuideTaskStatus.ACTIVE
+    clarification_question: str | None = Field(default=None, max_length=180)
     pause_reason: str | None = None
     blocked_reason: str | None = None
     revision: int = 1

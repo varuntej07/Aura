@@ -33,6 +33,7 @@ Design notes (see plan + CLAUDE.md two-tier architecture):
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -556,38 +557,70 @@ async def consolidate_session(
     The shared entry point for BOTH text chat and voice (voice passes its transcript here),
     so there is exactly one session-reflection implementation.
     """
+    started_at = time.monotonic()
+    consent_ms = 0
+    profile_read_ms = 0
+    model_ms = 0
+    profile_merge_ms = 0
+    memory_mirror_ms = 0
     try:
         # GDPR gate — identical to the capture tier. No consent, no profiling.
-        if not await _user_has_granted_aura_consent(uid):
-            logger.info("AuraReflection: skipped, Aura consent not granted", {"user_id": uid})
+        stage_started = time.monotonic()
+        has_consent = await _user_has_granted_aura_consent(uid)
+        consent_ms = round((time.monotonic() - stage_started) * 1000)
+        if not has_consent:
+            logger.info("AuraReflection: skipped, Aura consent not granted", {
+                "user_id": uid,
+                "modality": modality,
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+                "consent_ms": consent_ms,
+            })
             return
 
         cleaned, user_turns = _normalize_turns(turns)
         if user_turns < MIN_USER_TURNS:
             logger.info("AuraReflection: skipped, session too small to reflect on", {
-                "user_id": uid, "user_turns": user_turns,
+                "user_id": uid,
+                "user_turns": user_turns,
+                "modality": modality,
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+                "consent_ms": consent_ms,
             })
             return
         turn_count = len(cleaned)
 
         # Idempotency pre-check (avoids an LLM call on an already-reflected session) — but a
         # GROWN session (more turns than last time) passes through and re-reflects.
+        stage_started = time.monotonic()
         profile = await _read_profile(uid)
+        profile_read_ms = round((time.monotonic() - stage_started) * 1000)
         if _session_already_reflected(profile, session_id, turn_count):
             logger.info("AuraReflection: skipped, session already reflected at this size", {
-                "user_id": uid, "session_id": session_id, "turn_count": turn_count,
+                "user_id": uid,
+                "session_id": session_id,
+                "turn_count": turn_count,
+                "modality": modality,
+                "duration_ms": round((time.monotonic() - started_at) * 1000),
+                "consent_ms": consent_ms,
+                "profile_read_ms": profile_read_ms,
             })
             return
 
+        stage_started = time.monotonic()
         patch = await reflect_session(turns, profile)
+        model_ms = round((time.monotonic() - stage_started) * 1000)
         if patch is None:
             return
 
         now = datetime.now(UTC)
+        stage_started = time.monotonic()
         applied = await asyncio.to_thread(_apply_patch_txn, uid, session_id, turn_count, patch, now)
+        profile_merge_ms = round((time.monotonic() - stage_started) * 1000)
 
         # Mirror reflected storylines + canonical facts into the unbounded memory store.
+        stage_started = time.monotonic()
         await _upsert_memory_atoms_from_patch(uid, patch, session_id=session_id)
+        memory_mirror_ms = round((time.monotonic() - stage_started) * 1000)
 
         logger.info("AuraReflection: session consolidated", {
             "user_id": uid,
@@ -603,6 +636,12 @@ async def consolidate_session(
             "goals_canonical": len(patch.goals_canonical),
             "life_fact_corrections": len(patch.life_fact_corrections),
             "user_turns": user_turns,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "consent_ms": consent_ms,
+            "profile_read_ms": profile_read_ms,
+            "model_ms": model_ms,
+            "profile_merge_ms": profile_merge_ms,
+            "memory_mirror_ms": memory_mirror_ms,
         })
     except Exception as exc:
         logger.warn("AuraReflection: consolidation failed", {
@@ -610,4 +649,11 @@ async def consolidate_session(
             "session_id": session_id,
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "modality": modality,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "consent_ms": consent_ms,
+            "profile_read_ms": profile_read_ms,
+            "model_ms": model_ms,
+            "profile_merge_ms": profile_merge_ms,
+            "memory_mirror_ms": memory_mirror_ms,
         })

@@ -9,6 +9,7 @@ never silently split the writer/reader contract.
 Stored shape (latest version only - refines overwrite ``text`` in place):
 
     UserAura/{uid}/drafts/{draft_id} = {
+        "skill_id":         str,        # selected writing skill
         "channel":          str,        # "email_reply" | "cold_dm" | "snippet"
         "length":           str,        # "short" | "medium" | "detailed", latest target
                                         #   (always "short" for snippet, which has no ladder)
@@ -44,6 +45,7 @@ ITEM_PARENT_COLLECTION = "UserAura"
 ITEM_SUBCOLLECTION = "drafts"
 
 # --- drafts item fields ---------------------------------------------------------
+SKILL_ID = "skill_id"
 CHANNEL = "channel"
 LENGTH = "length"
 TEXT = "text"

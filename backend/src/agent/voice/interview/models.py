@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ....lib.logger import logger
+from ..guide_session_state import GuideSessionState
 from .contracts import START_CLAIM_TTL_S, BuddyFactory
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ class InterviewPhase(StrEnum):
 class ConversationOwner(StrEnum):
     BUDDY = "buddy"
     INTERVIEW = "interview"
+    GUIDE = "guide"
 
 
 # The one authority on which phase moves exist. Anything absent is refused.
@@ -559,11 +561,21 @@ class VoiceSessionState:
     """The object held by ``AgentSession.userdata``, shared across handoffs."""
 
     interview: InterviewState = field(default_factory=InterviewState)
+    guide: GuideSessionState = field(default_factory=GuideSessionState)
     buddy_factory: BuddyFactory | None = None
     # Wired in voice_agent.py alongside the byte-stream handler registration.
     # Reached through userdata rather than a module global so a second concurrent
     # session in the same worker process cannot see this one's materials.
     materials: InterviewMaterialStore | None = None
+
+    @property
+    def owner(self) -> ConversationOwner:
+        """The single live conversation owner across all specialized modes."""
+        if self.interview.active:
+            return ConversationOwner.INTERVIEW
+        if self.guide.active:
+            return ConversationOwner.GUIDE
+        return ConversationOwner.BUDDY
 
 
 def interview_owns_conversation(session: object) -> bool:
@@ -580,6 +592,17 @@ def interview_owns_conversation(session: object) -> bool:
         userdata = getattr(session, "userdata", None)
         if not isinstance(userdata, VoiceSessionState):
             return False
-        return userdata.interview.owner is ConversationOwner.INTERVIEW
+        return userdata.owner is ConversationOwner.INTERVIEW
     except Exception:
         return False
+
+
+def buddy_owns_conversation(session: object) -> bool:
+    """Whether the long-lived BuddyAgent currently owns this session."""
+    try:
+        userdata = getattr(session, "userdata", None)
+        if not isinstance(userdata, VoiceSessionState):
+            return True
+        return userdata.owner is ConversationOwner.BUDDY
+    except Exception:
+        return True
