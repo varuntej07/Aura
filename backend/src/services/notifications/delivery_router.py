@@ -44,6 +44,7 @@ async def deliver(proposal: NotificationProposal) -> NotificationResult:
             decision=proposal.decision,
             notification_id=notification_id,
             record_ledger=False,
+            valid_until=proposal.valid_until,
         )
 
     async def _desktop() -> desktop_outbox.OutboxWriteResult:

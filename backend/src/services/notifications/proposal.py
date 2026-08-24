@@ -211,6 +211,7 @@ class OrchestratorDecision:
     tokens_targeted: int | None = None
     success_count: int | None = None
     failure_count: int | None = None
+    desktop_queued_count: int | None = None
 
     @property
     def transport_accepted(self) -> bool:
@@ -269,6 +270,12 @@ class NotificationProposal:
     # Per-proposal override of the source priority. ``None`` falls back to PRIORITY.
     priority: int | None = None
 
+    # Absolute business-validity deadline. Unlike content freshness, this also
+    # applies to committed work: a reminder that was useful at 09:00 must not be
+    # resurrected days later just because transport never accepted it. Producers
+    # of time-bounded work set this structurally from their durable schedule.
+    valid_until: datetime | None = None
+
     # Optional learning-substrate metadata persisted to the ledger (signal/news).
     decision: NotificationDecision | None = None
 
@@ -320,11 +327,15 @@ def _as_aware(value: datetime) -> datetime:
 
 
 def is_stale(proposal: NotificationProposal, now: datetime) -> bool:
-    """True when the proposal's content is older than its freshness window.
+    """True when business validity or content freshness has elapsed.
 
-    No window or no content_timestamp => never stale (personal openers, time-exact
-    sends). This is a HARD gate: a stale proposal is dropped, never sent.
+    ``valid_until`` is an absolute gate for time-bounded committed work. Content
+    age remains the source/default gate for proposals that carry a timestamp.
+    This is a HARD gate: a stale proposal is dropped, never sent.
     """
+    if proposal.valid_until is not None:
+        if _as_aware(now) > _as_aware(proposal.valid_until):
+            return True
     max_age = proposal.effective_max_age
     if max_age is None or proposal.content_timestamp is None:
         return False

@@ -11,6 +11,7 @@ must be patched at its source module rather than at src.handlers.scheduler.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,13 +20,21 @@ from src.services.notification_rewriter import ReminderCopy
 _GCC_PATH = "src.services.google_calendar_connector.GoogleCalendarConnector"
 
 
-def _make_decision(delivered: bool, tokens_targeted: int = 1, success_count: int = 1):
+def _make_decision(
+    delivered: bool,
+    tokens_targeted: int = 1,
+    success_count: int = 1,
+    desktop_queued_count: int = 0,
+):
     """The OrchestratorDecision the reminder path now receives from submit()."""
     from src.services.notifications.proposal import Disposition, OrchestratorDecision
 
     return OrchestratorDecision(
         Disposition.SEND, "ok",
-        delivered=delivered, tokens_targeted=tokens_targeted, success_count=success_count,
+        delivered=delivered,
+        tokens_targeted=tokens_targeted,
+        success_count=success_count,
+        desktop_queued_count=desktop_queued_count,
     )
 
 
@@ -55,8 +64,12 @@ class TestHandleSchedulerTick:
     async def test_due_reminder_delivered_marks_fired(self):
         from src.handlers.scheduler import handle_scheduler_tick
 
-        due = [{"userId": "u1", "reminderId": "r1", "data": {"message": "Take meds"}}]
-        send_result = _make_decision(delivered=True)
+        due = [{
+            "userId": "u1",
+            "reminderId": "r1",
+            "data": {"message": "Take meds", "trigger_at": datetime.now(UTC).isoformat()},
+        }]
+        send_result = _make_decision(delivered=True, desktop_queued_count=1)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
             with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
@@ -69,13 +82,19 @@ class TestHandleSchedulerTick:
         body = json.loads(result["body"])
         assert body["scanned"] == 1
         assert body["accepted"] == 1
+        assert body["mobile_accepted"] == 1
+        assert body["desktop_queued"] == 1
         mock_mark.assert_called_once_with("u1", "r1")
 
     @pytest.mark.asyncio
     async def test_due_reminder_not_delivered_does_not_mark_fired(self):
         from src.handlers.scheduler import handle_scheduler_tick
 
-        due = [{"userId": "u1", "reminderId": "r1", "data": {"message": "Stand up"}}]
+        due = [{
+            "userId": "u1",
+            "reminderId": "r1",
+            "data": {"message": "Stand up", "trigger_at": datetime.now(UTC).isoformat()},
+        }]
         send_result = _make_decision(delivered=False, tokens_targeted=0, success_count=0)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
@@ -94,8 +113,16 @@ class TestHandleSchedulerTick:
         from src.handlers.scheduler import handle_scheduler_tick
 
         due = [
-            {"userId": "u1", "reminderId": "r_fail", "data": {"message": "Bad one"}},
-            {"userId": "u2", "reminderId": "r_ok", "data": {"message": "Good one"}},
+            {
+                "userId": "u1",
+                "reminderId": "r_fail",
+                "data": {"message": "Bad one", "trigger_at": datetime.now(UTC).isoformat()},
+            },
+            {
+                "userId": "u2",
+                "reminderId": "r_ok",
+                "data": {"message": "Good one", "trigger_at": datetime.now(UTC).isoformat()},
+            },
         ]
         good_result = _make_decision(delivered=True)
 
@@ -134,7 +161,11 @@ class TestHandleSchedulerTick:
         """data dict with no 'message' key should not crash."""
         from src.handlers.scheduler import handle_scheduler_tick
 
-        due = [{"userId": "u1", "reminderId": "r1", "data": {}}]
+        due = [{
+            "userId": "u1",
+            "reminderId": "r1",
+            "data": {"trigger_at": datetime.now(UTC).isoformat()},
+        }]
         send_result = _make_decision(delivered=True)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):

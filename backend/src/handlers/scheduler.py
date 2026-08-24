@@ -17,6 +17,7 @@ from typing import Any
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..services import alarm_sync
 from ..services.notification_rewriter import rewrite_reminder_notification
 from ..services.notifications import orchestrator
 from ..services.notifications.proposal import (
@@ -25,11 +26,13 @@ from ..services.notifications.proposal import (
     NotificationProposal,
     ProposalKind,
 )
-from ..services import alarm_sync
 from ..services.tool_executor import (
     claim_reminder_for_processing,
     fetch_due_reminders,
     mark_reminder_fired,
+    mark_reminder_expired,
+    reminder_delivery_deadline,
+    reminder_delivery_terminal_reason,
     requeue_stuck_reminders,
 )
 
@@ -679,6 +682,9 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         asyncio.create_task(_run_session_followup_drain(now=now_utc))
 
         accepted = 0
+        mobile_accepted = 0
+        desktop_queued = 0
+        expired = 0
 
         for item in due:
             user_id: str = item["userId"]
@@ -686,6 +692,22 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             data: dict[str, Any] = item["data"]
 
             try:
+                terminal_reason = reminder_delivery_terminal_reason(data)
+                if terminal_reason is not None:
+                    did_expire = await asyncio.to_thread(
+                        mark_reminder_expired,
+                        user_id,
+                        reminder_id,
+                        terminal_reason,
+                    )
+                    expired += int(did_expire)
+                    logger.warn("Reminder delivery terminalized before send", {
+                        "user_id": user_id,
+                        "reminder_id": reminder_id,
+                        "reason": terminal_reason,
+                    })
+                    continue
+
                 # Atomically claim the reminder before any slow work (model call, FCM).
                 # If another scheduler tick already claimed it, skip — prevents duplicate fires.
                 claimed = await asyncio.to_thread(
@@ -765,15 +787,34 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                         # Plain reminders keep the OS-rendered banner: there is
                         # nothing local to duplicate.
                         data_only=is_alarm,
+                        valid_until=reminder_delivery_deadline(data),
                     )
                 )
 
                 if decision.disposition == Disposition.SEND and decision.transport_accepted:
                     await asyncio.to_thread(mark_reminder_fired, user_id, reminder_id)
                     accepted += 1
+                    mobile_accepted += decision.success_count or 0
+                    desktop_queued += decision.desktop_queued_count or 0
                     logger.info("Reminder transport accepted", {
                         "user_id": user_id,
                         "reminder_id": reminder_id,
+                        "logical_accepted": 1,
+                        "mobile_accepted": decision.success_count or 0,
+                        "desktop_queued": decision.desktop_queued_count or 0,
+                    })
+                elif decision.disposition == Disposition.DROP:
+                    did_expire = await asyncio.to_thread(
+                        mark_reminder_expired,
+                        user_id,
+                        reminder_id,
+                        f"orchestrator_{decision.reason}",
+                    )
+                    expired += int(did_expire)
+                    logger.warn("Reminder terminally dropped", {
+                        "user_id": user_id,
+                        "reminder_id": reminder_id,
+                        "reason": decision.reason,
                     })
                 else:
                     logger.warn("Reminder transport not accepted", {
@@ -799,6 +840,9 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         logger.info("Scheduler tick complete", {
             "scanned": len(due),
             "accepted": accepted,
+            "mobile_accepted": mobile_accepted,
+            "desktop_queued": desktop_queued,
+            "expired": expired,
             "calendar_syncs": synced_calendars,
             "renewed_calendar_channels": renewed_channels,
             "periodic_sync_users": periodic_synced,
@@ -806,6 +850,9 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
         return _json(200, {
             "scanned": len(due),
             "accepted": accepted,
+            "mobile_accepted": mobile_accepted,
+            "desktop_queued": desktop_queued,
+            "expired": expired,
             "calendar_syncs": synced_calendars,
             "renewed_calendar_channels": renewed_channels,
             "periodic_sync_users": periodic_synced,

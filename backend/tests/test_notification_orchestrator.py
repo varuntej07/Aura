@@ -262,6 +262,8 @@ def test_is_stale_respects_window():
                       content_ts=NOW - timedelta(hours=2))
     assert proposal.is_stale(old, NOW) is True
     assert proposal.is_stale(fresh, NOW) is False
+    fresh.valid_until = NOW - timedelta(seconds=1)
+    assert proposal.is_stale(fresh, NOW) is True
 
 
 def test_is_stale_false_without_window_or_timestamp():
@@ -285,9 +287,11 @@ def test_proactive_queue_round_trip_preserves_channels_and_legacy_defaults():
     item = _proposal(SOURCE_NEWS, kind=ProposalKind.PROACTIVE)
     item.notification_type = "generic"
     item.channels = frozenset({DeliveryChannel.MOBILE, DeliveryChannel.DESKTOP})
+    item.valid_until = NOW + timedelta(hours=1)
     doc = queue_store._proposal_to_doc(item, NOW)
 
     assert queue_store._doc_to_proposal(doc).channels == item.channels
+    assert queue_store._doc_to_proposal(doc).valid_until == item.valid_until
     doc.pop(queue_store.FIELD_CHANNELS)
     assert queue_store._doc_to_proposal(doc).channels == frozenset({DeliveryChannel.MOBILE})
 

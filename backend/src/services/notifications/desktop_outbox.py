@@ -162,6 +162,13 @@ def build_document(
         raise ValueError("invalid desktop notification dedup key")
     resource_id = _bounded_text(data.get("resource_id"), maximum=MAX_ID_LENGTH) or None
     expires_at = _parse_expiry(data.get("expires_at", ""), now=now)
+    if proposal.valid_until is not None:
+        valid_until = (
+            proposal.valid_until
+            if proposal.valid_until.tzinfo
+            else proposal.valid_until.replace(tzinfo=UTC)
+        )
+        expires_at = min(expires_at, valid_until.astimezone(UTC))
 
     return {
         FIELD_NOTIFICATION_ID: notification_id,

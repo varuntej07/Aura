@@ -6,6 +6,7 @@ Covers: send_notification (all branches), NotificationResult.delivered
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -299,13 +300,22 @@ class TestSendNotification:
 
         with patch("src.services.notification_service.get_user_tokens", return_value=tokens):
             with patch("src.services.notification_service.admin_messaging", return_value=mock_msg):
-                with patch("src.services.notification_service.messaging.MulticastMessage", side_effect=capture_message):
+                with patch(
+                    "src.services.notification_service.messaging.MulticastMessage",
+                    side_effect=capture_message,
+                ):
                     await send_notification(
-                        "user1", title="T", body="B", collapse_key="reminder_abc"
+                        "user1",
+                        title="T",
+                        body="B",
+                        collapse_key="reminder_abc",
+                        valid_until=datetime.now(UTC) + timedelta(minutes=30),
                     )
 
         assert captured[0].android.collapse_key == "reminder_abc"
+        assert timedelta(minutes=29) < captured[0].android.ttl <= timedelta(minutes=30)
         assert captured[0].apns.headers["apns-collapse-id"] == "reminder_abc"
+        assert "apns-expiration" in captured[0].apns.headers
         mock_msg.send_each_for_multicast.assert_called_once()
 
     @pytest.mark.parametrize("identity", ["x" * 500, "🧬" * 200])

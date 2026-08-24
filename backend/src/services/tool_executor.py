@@ -1751,6 +1751,64 @@ def fetch_due_reminders() -> list[dict[str, Any]]:
     return results
 
 
+# A reminder is useful near the instant the user chose, not indefinitely. These
+# bounds are durable recovery policy, independent of scheduler cadence. Alarms
+# get one server fallback because the on-device schedule is authoritative;
+# ordinary banners get a short retry window for transient transport outages.
+REMINDER_DELIVERY_GRACE = timedelta(hours=1)
+ALARM_FALLBACK_GRACE = timedelta(minutes=5)
+MAX_REMINDER_DELIVERY_ATTEMPTS = 4
+MAX_ALARM_FALLBACK_ATTEMPTS = 1
+
+
+def _reminder_trigger_at(data: dict[str, Any]) -> datetime | None:
+    raw = data.get("trigger_at")
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def reminder_delivery_deadline(data: dict[str, Any]) -> datetime | None:
+    """Absolute business-validity deadline derived from the durable schedule."""
+    trigger_at = _reminder_trigger_at(data)
+    if trigger_at is None:
+        return None
+    grace = ALARM_FALLBACK_GRACE if alarm_sync.is_alarm(data) else REMINDER_DELIVERY_GRACE
+    return trigger_at + grace
+
+
+def reminder_delivery_terminal_reason(
+    data: dict[str, Any], *, now: datetime | None = None
+) -> str | None:
+    """Return why another delivery attempt is forbidden, if it is terminal."""
+    deadline = reminder_delivery_deadline(data)
+    if deadline is None:
+        return "invalid_trigger_at"
+    when = now or datetime.now(UTC)
+    when = when if when.tzinfo else when.replace(tzinfo=UTC)
+    if when > deadline:
+        return "delivery_window_elapsed"
+    raw_attempts = data.get("delivery_attempt_count", 0)
+    try:
+        attempts = max(0, int(raw_attempts))
+    except (TypeError, ValueError):
+        attempts = 0
+    max_attempts = (
+        MAX_ALARM_FALLBACK_ATTEMPTS
+        if alarm_sync.is_alarm(data)
+        else MAX_REMINDER_DELIVERY_ATTEMPTS
+    )
+    if attempts >= max_attempts:
+        return "delivery_attempts_exhausted"
+    return None
+
+
 def claim_reminder_for_processing(user_id: str, reminder_id: str) -> bool:
     """Atomically claim a pending reminder for processing.
 
@@ -1767,12 +1825,34 @@ def claim_reminder_for_processing(user_id: str, reminder_id: str) -> bool:
         snap = doc_ref.get(transaction=txn)
         if not snap.exists:
             return False
-        if (snap.to_dict() or {}).get("status") != "pending":
+        data = snap.to_dict() or {}
+        if data.get("status") != "pending":
             return False
-        txn.update(doc_ref, {
+        now = datetime.now(UTC)
+        terminal_reason = reminder_delivery_terminal_reason(data, now=now)
+        if terminal_reason is not None:
+            txn.update(doc_ref, {
+                "status": "expired",
+                "expired_at": now.isoformat(),
+                "delivery_terminal_reason": terminal_reason,
+                "processing_at": None,
+            })
+            return False
+        raw_attempts = data.get("delivery_attempt_count", 0)
+        try:
+            attempt_count = max(0, int(raw_attempts)) + 1
+        except (TypeError, ValueError):
+            attempt_count = 1
+        now_iso = now.isoformat()
+        update = {
             "status": "processing",
-            "processing_at": datetime.now(UTC).isoformat(),
-        })
+            "processing_at": now_iso,
+            "last_delivery_attempt_at": now_iso,
+            "delivery_attempt_count": attempt_count,
+        }
+        if not data.get("first_delivery_attempt_at"):
+            update["first_delivery_attempt_at"] = now_iso
+        txn.update(doc_ref, update)
         return True
 
     return _claim(transaction, ref)
@@ -1785,7 +1865,35 @@ def mark_reminder_fired(user_id: str, reminder_id: str) -> None:
     db.collection("users").document(user_id).collection("reminders").document(reminder_id).update({
         "status": "fired",
         "fired_at": now_iso,
+        "processing_at": None,
     })
+
+
+def mark_reminder_expired(
+    user_id: str, reminder_id: str, reason: str
+) -> bool:
+    """Terminalize a stale/invalid reminder without overriding user actions."""
+    db = admin_firestore()
+    ref = db.collection("users").document(user_id).collection("reminders").document(reminder_id)
+    transaction = db.transaction()
+
+    @fs.transactional
+    def _expire(txn, doc_ref):
+        snap = doc_ref.get(transaction=txn)
+        if not snap.exists:
+            return False
+        status = (snap.to_dict() or {}).get("status")
+        if status not in {"pending", "processing"}:
+            return False
+        txn.update(doc_ref, {
+            "status": "expired",
+            "expired_at": datetime.now(UTC).isoformat(),
+            "delivery_terminal_reason": reason,
+            "processing_at": None,
+        })
+        return True
+
+    return _expire(transaction, ref)
 
 
 # How long a claimed reminder may sit in "processing" before it is considered
@@ -1821,10 +1929,23 @@ def requeue_stuck_reminders(limit: int = 200) -> int:
         return 0
 
     requeued = 0
+    expired = 0
+    now = datetime.now(UTC)
     for doc in docs:
         try:
-            doc.reference.update({"status": "pending", "processing_at": None})
-            requeued += 1
+            data = doc.to_dict() or {}
+            terminal_reason = reminder_delivery_terminal_reason(data, now=now)
+            if terminal_reason is not None:
+                doc.reference.update({
+                    "status": "expired",
+                    "expired_at": now.isoformat(),
+                    "delivery_terminal_reason": terminal_reason,
+                    "processing_at": None,
+                })
+                expired += 1
+            else:
+                doc.reference.update({"status": "pending", "processing_at": None})
+                requeued += 1
         except Exception as exc:
             logger.warn("requeue_stuck_reminders: update failed", {
                 "doc_id": doc.id,
@@ -1836,6 +1957,7 @@ def requeue_stuck_reminders(limit: int = 200) -> int:
     # looking at every time it appears.
     logger.warn("requeue_stuck_reminders: recovered abandoned reminders", {
         "requeued": requeued,
+        "expired": expired,
         "found": len(docs),
         "cutoff": cutoff,
     })

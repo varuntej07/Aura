@@ -60,7 +60,7 @@ Every proactive interruption must satisfy two distinct value checks: the push mu
 
 Every orchestrated send writes `policy_version`, requested and effective lane, lane authority, local send context, and the passed interruption checks into the notification ledger's `decision` map. Pre-send holds and drops remain reason-coded in orchestrator logs. Together these answer why a send was authorized without equating transport acceptance with device receipt or human attention.
 
-Transport acceptance, device receipt, and human engagement are distinct. FCM success means `accepted`; an outbox write means `queued`; desktop acknowledgements advance the same logical row through `received`, `seen`, and `acted`. Initial sends never infer device receipt from FCM acceptance or a durable desktop row. Deduplication, cooldowns, and budgets close on transport acceptance so a queued desktop item is not resent, while delivery analytics use only confirmed receipt and engagement transitions. Legacy `sent`/`delivered` rows remain readable.
+Transport acceptance, device receipt, and human engagement are distinct. FCM success means `accepted`; an outbox write means `queued`; desktop acknowledgements advance the same logical row through `received`, `seen`, and `acted`. Initial sends never infer device receipt from FCM acceptance or a durable desktop row. Deduplication, cooldowns, and budgets close on transport acceptance so a queued desktop item is not resent, while delivery analytics use only confirmed receipt and engagement transitions. Retries retain one logical ID and cumulative attempt count, with separate mobile/Desktop attempt and acceptance counts; surfaces never inflate the logical notification or budget count. Legacy `sent`/`delivered` rows remain readable.
 
 Desktop capability is stored at `users/{uid}/notification_preferences/desktop`. Aura-Desktop refreshes it after owner binding and every five minutes while signed in. A missing or failed preference read fails closed to mobile-only. The desktop outbox remains owner-scoped under the same Firebase UID, and account IDs are never guessed or merged.
 
@@ -77,6 +77,9 @@ Producer repeats proposal ------> dedup key prevents duplicate logical delivery
 Producer requests bypass -------> central allowlist keeps or downgrades the lane
 Proactive item is too early ----> held for a later minute drain
 Item exceeds freshness TTL -----> dropped as stale
+Committed item exceeds validity -> dropped as stale before transport
+Mobile accepts before deadline -> Android TTL and APNs expiration cap delivery
+Desktop queues before deadline -> outbox expiry is capped to the same deadline
 Tap has no incremental payoff --> dropped as low_tap_value
 Tap/budget/dedup gate unavailable -> proactive candidate held or dropped fail-closed
 Desktop not registered ---------> mobile-only delivery
@@ -87,14 +90,17 @@ Invalid outbound payload ------> rejected before FCM; no token is pruned
 FCM unregistered/mismatch -----> only the affected token is pruned; caches invalidated
 Drain crashes ------------------> queued proposals remain durable for next drain
 Committed delivery fails -------> caller receives and records the inline failure
+Reminder recovery -------------> retries only inside validity and attempt bounds
+Reminder exhausts either bound -> terminal expired; never requeued to pending
 ```
 
 ## Obvious walkthrough: reminder fires
 
-1. The reminder scheduler atomically claims a due reminder.
-2. It submits a committed proposal because the user explicitly requested delivery.
-3. The orchestrator resolves the user's currently eligible surfaces and delivers inline.
-4. The reminder is marked fired only through the scheduler's claim/update path.
+1. The scheduler derives validity from `trigger_at` and tier, terminalizing stale or malformed rows before copy generation.
+2. Its atomic claim increments the durable attempt count and refuses exhausted work.
+3. It submits a committed proposal because the user explicitly requested delivery, carrying the same absolute validity deadline into the central funnel.
+4. The orchestrator resolves the user's currently eligible surfaces and delivers inline under one logical notification ID.
+5. The reminder is marked fired on transport acceptance; scheduler telemetry reports one logical acceptance plus separate mobile-accepted and Desktop-queued counts.
 
 ## Non-obvious walkthrough: briefing competes with an icebreaker
 

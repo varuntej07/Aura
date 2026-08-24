@@ -1,4 +1,4 @@
-enum ReminderStatus { pending, fired, dismissed, snoozed }
+enum ReminderStatus { pending, fired, dismissed, snoozed, expired }
 
 /// Centralised status classification — update here when new statuses are added.
 extension ReminderStatusX on ReminderStatus {
@@ -10,6 +10,8 @@ extension ReminderStatusX on ReminderStatus {
       this == ReminderStatus.fired;
 
   /// Visible in the "Completed" section — only explicit user dismissal qualifies.
+  /// [expired] is a backend delivery terminal state and is intentionally absent
+  /// from both lists: it must not look delivered or become undoable/retryable.
   bool get isCompleted => this == ReminderStatus.dismissed;
 }
 

@@ -226,6 +226,11 @@ Aura-Desktop registers its notification capability with authenticated `PUT /desk
 
 Channel selection is backend-owned and evaluated at delivery time. Enabled desktop users receive compatible committed, proactive, and account notifications on both mobile and desktop under one logical notification ID and budget decision. Meeting lifecycle events remain desktop-only; device-link security alerts remain mobile-only. A missing capability or failed preference lookup fails closed to mobile-only. Desktop received, seen, and acted acknowledgements update the existing notification ledger row, so adaptive engagement counts one logical send rather than one send per surface.
 
+Retries keep that same logical notification ID. The ledger stores one cumulative
+`attempt_count` plus per-channel `channel_attempt_counts` and
+`channel_accept_counts`, so mobile and Desktop transport remain independently
+observable without inflating the user's logical notification or budget count.
+
 The Firebase UID is the ownership boundary on both sides. The system does not infer that two different UIDs belong to one person and does not merge their outboxes or preferences.
 
 ### 5e. Alarm schedule sync
@@ -269,6 +274,19 @@ local timer:
 Snooze keeps `status = "pending"` and moves `trigger_at` forward. No consumer may
 introduce a `snoozed` status: the due-scan selects on `pending` alone, so a
 snoozed row would never fire again.
+
+Server delivery is bounded by business validity, not merely worker recovery.
+Ordinary reminder banners may be attempted at most four times within one hour of
+`trigger_at`; an alarm gets one data-only server fallback within five minutes
+because its local device schedule is authoritative. Each atomic claim increments
+`delivery_attempt_count` and records first/last attempt timestamps. A row that is
+late, malformed, or out of attempts becomes terminal `status = "expired"` with
+`expired_at` and `delivery_terminal_reason`; it is never returned to `pending`.
+The same deadline becomes Android FCM TTL, APNs expiration, and a cap on the
+Desktop outbox row's `expires_at`, preventing delayed transport from resurfacing
+an otherwise-valid send after its useful moment.
+Current Flutter clients hide `expired` rows rather than presenting them as
+delivered or allowing an undo to re-arm them.
 
 Alarm tone slugs are a shared contract mirrored by Flutter, Android, and the
 backend: `ripple`, `dawn`, `tide`, `pulse`, `chime`, `ascent`, `buddy`, `device`,

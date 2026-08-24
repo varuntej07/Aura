@@ -82,6 +82,10 @@ async def test_record_send_writes_core_and_decision():
     assert doc[nl.FIELD_DELIVERY]["accepted"] is True
     assert doc[nl.FIELD_DELIVERY]["delivered"] is False
     assert doc[nl.FIELD_DELIVERY][nl.FIELD_CHANNELS]["mobile"]["success_count"] == 2
+    assert doc[nl.FIELD_ATTEMPT_COUNT] == 1
+    assert doc[nl.FIELD_FIRST_ATTEMPT_AT] == doc[nl.FIELD_LAST_ATTEMPT_AT]
+    assert doc[nl.FIELD_DELIVERY]["channel_attempt_counts"] == {"mobile": 1}
+    assert doc[nl.FIELD_DELIVERY]["channel_accept_counts"] == {"mobile": 1}
     assert doc[nl.FIELD_EXPIRES_AT] > doc[nl.FIELD_SENT_AT]
     # Decision sub-map (the learning substrate).
     decision = doc[nl.FIELD_DECISION]

@@ -29,6 +29,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from firebase_admin import messaging
@@ -46,6 +47,7 @@ from .firebase import admin_messaging
 _ANDROID_CHANNEL_ID = "aura_default"
 _APNS_COLLAPSE_ID_MAX_BYTES = 64
 _FCM_PAYLOAD_MAX_BYTES = 4096
+_FCM_MAX_TTL = timedelta(days=28)
 _SAFE_COLLAPSE_KEY = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
@@ -189,6 +191,7 @@ async def send_notification(
     decision: notification_ledger.NotificationDecision | None = None,
     notification_id: str | None = None,
     record_ledger: bool = True,
+    valid_until: datetime | None = None,
 ) -> NotificationResult:
     """Send an FCM push notification to all registered devices for a user.
 
@@ -227,6 +230,9 @@ async def send_notification(
                            components, framer relevance reason / prompt version)
                            for LLM-framed proactive sends. Persisted on the
                            notification ledger row; deterministic paths omit it.
+        valid_until:       Absolute business-validity deadline. FCM receives the
+                           remaining lifetime so an offline device cannot surface
+                           the notification after it stops being useful.
 
     Returns:
         ``NotificationResult`` with delivery counts and a list of invalid
@@ -237,6 +243,15 @@ async def send_notification(
     # share the same audit identity. Direct mobile callers keep UUID behavior.
     notification_id = notification_id or str(uuid.uuid4())
     data_in = data or {}
+    transport_ttl: timedelta | None = None
+    if valid_until is not None:
+        deadline = (
+            valid_until if valid_until.tzinfo else valid_until.replace(tzinfo=UTC)
+        )
+        transport_ttl = min(
+            deadline.astimezone(UTC) - datetime.now(UTC),
+            _FCM_MAX_TTL,
+        )
 
     async def _record_to_ledger(
         *, accepted: bool, tokens_targeted: int, success_count: int, failure_count: int
@@ -262,6 +277,25 @@ async def send_notification(
             success_count=success_count,
             failure_count=failure_count,
             decision=decision,
+        )
+
+    if transport_ttl is not None and transport_ttl <= timedelta(0):
+        logger.warn("send_notification: validity elapsed before FCM", {
+            "user_id": user_id,
+            "notification_type": notification_type,
+            "valid_until": valid_until.isoformat() if valid_until else None,
+        })
+        await _record_to_ledger(
+            accepted=False,
+            tokens_targeted=0,
+            success_count=0,
+            failure_count=0,
+        )
+        return NotificationResult(
+            tokens_targeted=0,
+            success_count=0,
+            failure_count=0,
+            notification_id=notification_id,
         )
 
     # 1. Fetch registered tokens
@@ -346,6 +380,11 @@ async def send_notification(
     }
     if collapse_key:
         apns_headers["apns-collapse-id"] = collapse_key
+    if valid_until is not None:
+        deadline = (
+            valid_until if valid_until.tzinfo else valid_until.replace(tzinfo=UTC)
+        )
+        apns_headers["apns-expiration"] = str(int(deadline.timestamp()))
 
     # In data-only mode the Android side carries no display notification — the
     # app's background handler renders it (with interactive suggestion chips) —
@@ -365,6 +404,7 @@ async def send_notification(
         android=messaging.AndroidConfig(
             priority="high" if priority == "high" else "normal",
             collapse_key=collapse_key,
+            ttl=transport_ttl,
             notification=android_notification,
         ),
         apns=messaging.APNSConfig(

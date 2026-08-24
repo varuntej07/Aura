@@ -351,6 +351,7 @@ async def drain_user_queue(
         tokens_targeted=result.tokens_targeted,
         success_count=result.success_count,
         failure_count=result.failure_count,
+        desktop_queued_count=result.desktop_queued_count,
     )
 
 
@@ -402,6 +403,7 @@ async def _send_committed(
         tokens_targeted=result.tokens_targeted,
         success_count=result.success_count,
         failure_count=result.failure_count,
+        desktop_queued_count=result.desktop_queued_count,
     )
 
 

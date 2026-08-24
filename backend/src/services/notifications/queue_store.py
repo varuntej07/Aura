@@ -53,6 +53,7 @@ FIELD_APNS_CATEGORY = "apns_category"
 FIELD_CHANNELS = "channels"
 FIELD_CONTENT_TIMESTAMP = "content_timestamp"
 FIELD_FRESHNESS_MAX_AGE_S = "freshness_max_age_seconds"
+FIELD_VALID_UNTIL = "valid_until"
 FIELD_PRIORITY = "priority"
 FIELD_DECISION = "decision"
 FIELD_STATUS = "status"
@@ -107,6 +108,7 @@ def _proposal_to_doc(proposal: NotificationProposal, now: datetime) -> dict[str,
         FIELD_CHANNELS: sorted(channel.value for channel in proposal.channels),
         FIELD_CONTENT_TIMESTAMP: proposal.content_timestamp,
         FIELD_FRESHNESS_MAX_AGE_S: max_age.total_seconds() if max_age else None,
+        FIELD_VALID_UNTIL: proposal.valid_until,
         FIELD_PRIORITY: proposal.effective_priority,
         FIELD_DECISION: dataclasses.asdict(decision) if decision else None,
         FIELD_STATUS: STATUS_PENDING,
@@ -139,6 +141,7 @@ def _doc_to_proposal(data: dict[str, Any]) -> NotificationProposal:
         ),
         content_timestamp=data.get(FIELD_CONTENT_TIMESTAMP),
         freshness_max_age=timedelta(seconds=max_age_s) if max_age_s is not None else None,
+        valid_until=data.get(FIELD_VALID_UNTIL),
         priority=int(data[FIELD_PRIORITY]) if data.get(FIELD_PRIORITY) is not None else None,
         decision=decision,
     )

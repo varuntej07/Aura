@@ -40,6 +40,7 @@ def _proposal(*, action: str = "view_meeting") -> NotificationProposal:
 def test_build_document_matches_versioned_contract_and_caps_expiry():
     proposal = _proposal()
     proposal.data["expires_at"] = (NOW + timedelta(days=90)).isoformat()
+    proposal.valid_until = NOW + timedelta(hours=1)
 
     doc = outbox.build_document(proposal, "notification-1", now=NOW)
 
@@ -47,7 +48,7 @@ def test_build_document_matches_versioned_contract_and_caps_expiry():
     assert doc[outbox.FIELD_TYPE] == "meeting_ready"
     assert doc[outbox.FIELD_ACTION] == "view_meeting"
     assert doc[outbox.FIELD_SENSITIVE] is True
-    assert doc[outbox.FIELD_EXPIRES_AT] == NOW + timedelta(days=30)
+    assert doc[outbox.FIELD_EXPIRES_AT] == proposal.valid_until
 
 
 def test_build_document_rejects_malformed_action():

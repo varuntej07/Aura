@@ -66,6 +66,9 @@ FIELD_CONTENT_KIND = "content_kind"
 # item) can be deduped against recent history. Empty on legacy/direct sends.
 FIELD_DEDUP_KEY = "dedup_key"
 FIELD_SENT_AT = "sent_at"
+FIELD_FIRST_ATTEMPT_AT = "first_attempt_at"
+FIELD_LAST_ATTEMPT_AT = "last_attempt_at"
+FIELD_ATTEMPT_COUNT = "attempt_count"
 FIELD_STATUS = "status"
 FIELD_DELIVERY = "delivery"
 FIELD_CHANNELS = "channels"
@@ -279,7 +282,40 @@ async def record_send(
     }
 
     def _put() -> None:
-        _notification_ref(user_id, notification_id).set(doc)
+        ref = _notification_ref(user_id, notification_id)
+        snap = ref.get()
+        current = snap.to_dict() if getattr(snap, "exists", False) else {}
+        if not isinstance(current, dict):
+            current = {}
+        previous_delivery = current.get(FIELD_DELIVERY)
+        if not isinstance(previous_delivery, dict):
+            previous_delivery = {}
+        previous_channel_attempts = previous_delivery.get("channel_attempt_counts")
+        if not isinstance(previous_channel_attempts, dict):
+            previous_channel_attempts = {}
+        previous_channel_accepts = previous_delivery.get("channel_accept_counts")
+        if not isinstance(previous_channel_accepts, dict):
+            previous_channel_accepts = {}
+
+        channel_attempt_counts = dict(previous_channel_attempts)
+        channel_accept_counts = dict(previous_channel_accepts)
+        for channel, outcome in channels.items():
+            channel_attempt_counts[channel] = int(channel_attempt_counts.get(channel, 0)) + 1
+            if bool(outcome.get("accepted")):
+                channel_accept_counts[channel] = int(channel_accept_counts.get(channel, 0)) + 1
+
+        previous_attempts = current.get(FIELD_ATTEMPT_COUNT, 0)
+        try:
+            attempt_count = max(0, int(previous_attempts)) + 1
+        except (TypeError, ValueError):
+            attempt_count = 1
+        first_attempt_at = current.get(FIELD_FIRST_ATTEMPT_AT) or now
+        doc[FIELD_FIRST_ATTEMPT_AT] = first_attempt_at
+        doc[FIELD_LAST_ATTEMPT_AT] = now
+        doc[FIELD_ATTEMPT_COUNT] = attempt_count
+        doc[FIELD_DELIVERY]["channel_attempt_counts"] = channel_attempt_counts
+        doc[FIELD_DELIVERY]["channel_accept_counts"] = channel_accept_counts
+        ref.set(doc)
 
     try:
         await asyncio.to_thread(_put)
