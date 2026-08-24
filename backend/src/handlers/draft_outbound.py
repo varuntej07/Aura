@@ -39,6 +39,7 @@ from ..services.outbound_draft.drafter import (
     refine_outbound,
     writing_voice_lines,
 )
+from ..services.outbound_draft.skills import WritingSkillId
 from ..services.request_auth import resolve_user_id_from_request
 
 # Chip slugs the desktop sends; anything else is a free-form instruction and gets
@@ -52,6 +53,7 @@ class RefineRequest(BaseModel):
     """Validated body of POST /desktop/draft-outbound/refine."""
 
     channel: str
+    skill_id: WritingSkillId = "general"
     length: str
     prior_draft: str = Field(min_length=1, max_length=PRIOR_DRAFT_MAX_CHARS)
     refine_instruction: str = Field(min_length=1, max_length=HINT_MAX_CHARS)
@@ -98,6 +100,7 @@ async def handle_draft_outbound_refine(request: Request) -> JSONResponse:
         refine_instruction=req.refine_instruction,
         context_summary=req.context_summary,
         voice_lines=voice_lines,
+        skill_id=req.skill_id,
     )
 
     if result.reason == REASON_OK and req.draft_id:

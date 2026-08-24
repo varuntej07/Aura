@@ -39,7 +39,6 @@ EVENT_ID = "event_id"
 TITLE = "title"
 START_TIME = "start_time"
 END_TIME = "end_time"
-DEVICE_ID = "device_id"
 INSTALLATION_ID = "installation_id"
 RUNTIME_INSTANCE_ID = "runtime_instance_id"
 PROTOCOL_VERSION = "protocol_version"
@@ -51,7 +50,6 @@ DELETED_AT = "deleted_at"
 AUDIT_SEQUENCE = "audit_sequence"
 STATUS = "status"
 CAP_MINUTES = "cap_minutes"
-SEGMENTS = "segments"
 SEGMENT_COUNT = "segment_count"
 TOTAL_DURATION_MS = "total_duration_ms"
 CREATED_AT = "created_at"
@@ -69,11 +67,10 @@ ARTIFACTS = "artifacts"
 QUALITY_OUTCOME = "quality_outcome"
 QUALITY_POLICY_VERSION = "quality_policy_version"
 
-# --- durable processing metadata (additive; explains the coarse STATUS) --------
-# STATUS above stays the compatibility contract; these fields let the desktop
-# show a stage, a safe reason, and a Retry affordance without reading logs. A
-# client that ignores them still works off STATUS + NOTE. Every status-changing
-# write bumps STATUS_REVISION (used in notification dedup keys).
+# --- durable processing metadata (explains the coarse STATUS) -------------------
+# These fields let the desktop show a stage, a safe reason, and a Retry
+# affordance without reading logs. Every status-changing write bumps
+# STATUS_REVISION, which is used in notification dedup keys.
 PROCESSING_STAGE = "processing_stage"
 FAILURE_CODE = "failure_code"
 FAILURE_MESSAGE = "failure_message"
@@ -85,7 +82,6 @@ STATUS_REVISION = "status_revision"
 # --- claim-lock fields ----------------------------------------------------------
 CLAIM_EVENT_ID = "event_id"
 CLAIM_MEETING_ID = "meeting_id"
-CLAIM_DEVICE_ID = "device_id"
 CLAIM_INSTALLATION_ID = "installation_id"
 CLAIM_RUNTIME_INSTANCE_ID = "runtime_instance_id"
 CLAIM_CAPTURE_RUN_ID = "capture_run_id"
@@ -195,7 +191,6 @@ MAX_SEGMENT_START_MS = MAX_CAPTURE_MINUTES * 60_000
 # Cloud Tasks redelivery is allowed to re-claim it (crashed-worker recovery
 # without letting a concurrent duplicate double-run STT+LLM).
 SYNTHESIS_LEASE_MS = 30 * 60_000
-SYNTHESIS_STARTED_AT_MS = "synthesis_started_at_ms"
 
 # How long a meeting may sit in a non-terminal state before reconciliation calls
 # it stalled and stamps FAIL_PROCESSING_TIMEOUT. Deliberately far beyond the

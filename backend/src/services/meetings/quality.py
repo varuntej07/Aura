@@ -78,6 +78,7 @@ def evaluate(
     forced_english_attempted: bool,
 ) -> dict[str, Any]:
     failures: list[str] = []
+    warnings: list[str] = []
     mic_vad = sum(int(row["audio_metrics"]["mic_vad_speech_ms"]) for row in segments)
     system_vad = sum(int(row["audio_metrics"]["system_vad_speech_ms"]) for row in segments)
     vad_total = mic_vad + system_vad
@@ -106,7 +107,7 @@ def evaluate(
     if abs(decoded_total - total_duration_ms) > duration_tolerance_ms(total_duration_ms):
         failures.append("flac_duration")
     if any(row.get("incomplete") is True for row in segments):
-        failures.append("unaccounted_gap")
+        warnings.append("unaccounted_gap")
     if any(
         float(row["audio_metrics"]["mic_clipping_ratio"]) > MAX_CLIPPING_RATIO
         or float(row["audio_metrics"]["system_clipping_ratio"]) > MAX_CLIPPING_RATIO
@@ -147,6 +148,7 @@ def evaluate(
         "mode": "enforced",
         "decision": decision,
         "failure_codes": failures,
+        "warning_codes": warnings,
         "capture": {
             "segment_count": len(segments),
             "total_duration_ms": total_duration_ms,

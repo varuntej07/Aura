@@ -212,9 +212,8 @@ async def claim_meeting(
     title: str,
     start_time: str,
     end_time: str,
-    device_id: str,
     effective_tier: str,
-    installation_id: str | None = None,
+    installation_id: str,
     runtime_instance_id: str = "",
     correlation_id: str = "",
 ) -> ClaimResult:
@@ -231,7 +230,6 @@ async def claim_meeting(
     event_key = event_key_for(event_id)
     is_capped_tier = effective_tier != "pro"
     cap_minutes = F.FREE_SYNTHESIS_CAP_MINUTES if is_capped_tier else F.PRO_SYNTHESIS_CAP_MINUTES
-    installation_id = installation_id or device_id
     lease_expires_at = now + timedelta(minutes=F.CAPTURE_LEASE_MINUTES)
 
     # The lock expires at the event's scheduled end plus grace, or (for manual
@@ -256,7 +254,7 @@ async def claim_meeting(
 
             lock = lock_snap.to_dict() or {}
             if lock and lock.get(F.CLAIM_EXPIRES_AT_MS, 0) > now_ms:
-                lock_owner = lock.get(F.CLAIM_INSTALLATION_ID) or lock.get(F.CLAIM_DEVICE_ID)
+                lock_owner = lock.get(F.CLAIM_INSTALLATION_ID)
                 if lock_owner != installation_id:
                     return ClaimResult(denied_conflict=True)
                 # Same-device rejoin is only a continuation while the meeting
@@ -379,7 +377,6 @@ async def claim_meeting(
                     F.TITLE: title,
                     F.START_TIME: start_time,
                     F.END_TIME: end_time,
-                    F.DEVICE_ID: device_id,
                     F.INSTALLATION_ID: installation_id,
                     F.RUNTIME_INSTANCE_ID: runtime_instance_id,
                     F.PROTOCOL_VERSION: F.MEETING_SCHEMA_VERSION,
@@ -388,7 +385,6 @@ async def claim_meeting(
                     F.LEASE_EXPIRES_AT: lease_expires_at.isoformat(),
                     F.STATUS: F.STATUS_CAPTURING,
                     F.CAP_MINUTES: cap_minutes,
-                    F.SEGMENTS: [],
                     F.CREATED_AT: now.isoformat(),
                     F.UPDATED_AT: now.isoformat(),
                     F.PROCESSING_STAGE: F.STAGE_CAPTURING,
@@ -417,7 +413,6 @@ async def claim_meeting(
                 {
                     F.CLAIM_EVENT_ID: event_id,
                     F.CLAIM_MEETING_ID: meeting_id,
-                    F.CLAIM_DEVICE_ID: device_id,
                     F.CLAIM_INSTALLATION_ID: installation_id,
                     F.CLAIM_RUNTIME_INSTANCE_ID: runtime_instance_id,
                     F.CLAIM_CAPTURE_RUN_ID: capture_run_id,
@@ -484,44 +479,6 @@ async def get_meeting(uid: str, meeting_id: str) -> dict[str, Any] | None:
         return data
 
     return await asyncio.to_thread(_read)
-
-
-async def append_segment_meta(
-    uid: str,
-    meeting_id: str,
-    *,
-    seq: int,
-    start_ms: int,
-    duration_ms: int,
-    incomplete: bool,
-) -> None:
-    """Record one uploaded segment's offsets on the meeting doc. ArrayUnion
-    makes a client upload retry idempotent (an identical element is a no-op).
-    `incomplete` marks a segment that may contain a silent hole (device
-    re-bind mid-segment) so synthesis can caveat the note honestly."""
-
-    def _update() -> None:
-        _meetings_ref(uid).document(meeting_id).update(
-            {
-                F.SEGMENTS: gcloud_firestore.ArrayUnion(
-                    [
-                        {
-                            "seq": seq,
-                            "start_ms": start_ms,
-                            "duration_ms": duration_ms,
-                            "incomplete": incomplete,
-                        },
-                    ]
-                ),
-                F.UPDATED_AT: datetime.now(UTC).isoformat(),
-                F.PROCESSING_STAGE: F.STAGE_UPLOADING,
-                F.RETRYABLE: False,
-                F.FAILURE_CODE: gcloud_firestore.DELETE_FIELD,
-                F.FAILURE_MESSAGE: gcloud_firestore.DELETE_FIELD,
-            }
-        )
-
-    await asyncio.to_thread(_update)
 
 
 @dataclass(frozen=True)
@@ -1236,21 +1193,6 @@ def clear_failure_meta() -> dict[str, Any]:
     }
 
 
-async def record_upload_failure(uid: str, meeting_id: str, *, code: str) -> None:
-    """Persist a safe upload problem without changing the coarse status.
-
-    The encrypted desktop queue remains authoritative until /complete, so the
-    meeting must continue accepting segment retries while the backend exposes a
-    durable reason to newer clients.
-    """
-    update = {
-        F.PROCESSING_STAGE: F.STAGE_UPLOADING,
-        F.UPDATED_AT: datetime.now(UTC).isoformat(),
-        **failure_meta(code=code, retryable=True),
-    }
-    await asyncio.to_thread(_meetings_ref(uid).document(meeting_id).update, update)
-
-
 async def mark_failed(
     uid: str,
     meeting_id: str,
@@ -1295,86 +1237,6 @@ async def set_stage(uid: str, meeting_id: str, stage: str) -> None:
                 "error": str(exc),
             },
         )
-
-
-def synthesis_lease_is_fresh(meeting: dict[str, Any], *, now_ms: int | None = None) -> bool:
-    """Whether a synthesizing meeting is still owned by a live worker."""
-    if meeting.get(F.STATUS) != F.STATUS_SYNTHESIZING:
-        return False
-    current_ms = now_ms if now_ms is not None else int(datetime.now(UTC).timestamp() * 1000)
-    started_ms = int(meeting.get(F.SYNTHESIS_STARTED_AT_MS, 0))
-    return current_ms - started_ms < F.SYNTHESIS_LEASE_MS
-
-
-async def claim_synthesis(uid: str, meeting_id: str) -> tuple[bool, str]:
-    """Transactional synthesis lease. Grants the run when the meeting sits at
-    "uploaded", or when a previous "synthesizing" claim is older than the
-    lease (crashed worker). A concurrent Cloud Tasks duplicate arriving while
-    a fresh lease is held is refused, so one meeting can never pay for STT+LLM
-    twice at once. Returns (claimed, status_now). Raises on Firestore failure."""
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
-
-    def _run() -> tuple[bool, str]:
-        db = admin_firestore()
-        doc_ref = _meetings_ref(uid).document(meeting_id)
-        transaction = db.transaction()
-
-        @gcloud_firestore.transactional
-        def _execute(txn) -> tuple[bool, str]:
-            snap = doc_ref.get(transaction=txn)
-            if not snap.exists:
-                return False, ""
-            data = snap.to_dict() or {}
-            current = data.get(F.STATUS, "")
-            lease_fresh = synthesis_lease_is_fresh(data, now_ms=now_ms)
-            if current == F.STATUS_SYNTHESIZING and lease_fresh:
-                return False, current
-            if current not in (F.STATUS_UPLOADED, F.STATUS_SYNTHESIZING):
-                return False, current
-            sequence = int(data.get(F.AUDIT_SEQUENCE, 0)) + 1
-            occurred_at = datetime.now(UTC).isoformat()
-            txn.update(
-                doc_ref,
-                {
-                    F.STATUS: F.STATUS_SYNTHESIZING,
-                    F.SYNTHESIS_STARTED_AT_MS: now_ms,
-                    F.UPDATED_AT: occurred_at,
-                    F.PROCESSING_STAGE: F.STAGE_TRANSCRIBING,
-                    F.ATTEMPT_COUNT: gcloud_firestore.Increment(1),
-                    F.STATUS_REVISION: gcloud_firestore.Increment(1),
-                    F.AUDIT_SEQUENCE: sequence,
-                },
-            )
-            _audit_event(
-                txn,
-                uid=uid,
-                meeting_id=meeting_id,
-                sequence=sequence,
-                event_type="job_leased",
-                occurred_at=occurred_at,
-                runtime_instance_id=str(data.get(F.RUNTIME_INSTANCE_ID, "")),
-                capture_run_id=str(data.get(F.CAPTURE_RUN_ID, "")),
-                capture_fence=int(data.get(F.CAPTURE_FENCE, 0)),
-                attempt=int(data.get(F.ATTEMPT_COUNT, 0)) + 1,
-                prior_state=current,
-                next_state=F.STATUS_SYNTHESIZING,
-                reason_code="legacy_worker_lease",
-            )
-            return True, F.STATUS_SYNTHESIZING
-
-        return _execute(transaction)
-
-    claimed, status_now = await asyncio.to_thread(_run)
-    logger.info(
-        "meetings.store: synthesis claim",
-        {
-            "user_id": uid,
-            "meeting_id": meeting_id,
-            "claimed": claimed,
-            "status_now": status_now,
-        },
-    )
-    return claimed, status_now
 
 
 @dataclass(frozen=True)
@@ -1993,82 +1855,6 @@ async def publish_v2_result(
         return _execute(txn)
 
     return await asyncio.to_thread(_run)
-
-
-async def save_note(
-    uid: str,
-    meeting_id: str,
-    note: dict[str, Any],
-    *,
-    effective_tier: str,
-) -> None:
-    """Persist the synthesized note and flip status to ready. Non-pro notes get
-    the RETENTION_DAYS TTL stamp; pro notes carry no expiry (full history is
-    the paid feature). Raises on failure so the worker marks the run failed
-    instead of deleting audio for a note that never landed."""
-    now = datetime.now(UTC)
-    update: dict[str, Any] = {
-        F.NOTE: note,
-        F.STATUS: F.STATUS_READY,
-        F.UPDATED_AT: now.isoformat(),
-        F.PROCESSING_STAGE: F.STAGE_READY,
-        F.STATUS_REVISION: gcloud_firestore.Increment(1),
-        # A successful (re)run clears any earlier failure signal.
-        F.RETRYABLE: False,
-        F.FAILURE_CODE: gcloud_firestore.DELETE_FIELD,
-        F.FAILURE_MESSAGE: gcloud_firestore.DELETE_FIELD,
-    }
-    if effective_tier != "pro":
-        update[F.EXPIRES_AT] = now + timedelta(days=F.RETENTION_DAYS)
-
-    def _run() -> None:
-        db = admin_firestore()
-        doc_ref = _meetings_ref(uid).document(meeting_id)
-        transaction = db.transaction()
-
-        @gcloud_firestore.transactional
-        def _execute(txn) -> None:
-            snap = doc_ref.get(transaction=txn)
-            if not snap.exists:
-                raise MeetingIntegrityError("meeting_missing", "Meeting disappeared.")
-            meeting = snap.to_dict() or {}
-            sequence = int(meeting.get(F.AUDIT_SEQUENCE, 0)) + 1
-            update[F.AUDIT_SEQUENCE] = sequence
-            txn.update(doc_ref, update)
-            _audit_event(
-                txn,
-                uid=uid,
-                meeting_id=meeting_id,
-                sequence=sequence,
-                event_type="note_published",
-                occurred_at=now.isoformat(),
-                runtime_instance_id=str(meeting.get(F.RUNTIME_INSTANCE_ID, "")),
-                capture_run_id=str(meeting.get(F.CAPTURE_RUN_ID, "")),
-                capture_fence=int(meeting.get(F.CAPTURE_FENCE, 0)),
-                prior_state=str(meeting.get(F.STATUS, "")),
-                next_state=F.STATUS_READY,
-                reason_code="legacy_note_published",
-            )
-
-        _execute(transaction)
-
-    await asyncio.to_thread(_run)
-    logger.info(
-        "meetings.store: note saved",
-        {
-            "user_id": uid,
-            "meeting_id": meeting_id,
-            "tier": effective_tier,
-            "summary_chars": len(note.get("summary", "")),
-            "action_items": len(note.get("action_items", [])),
-            "transcript_turns": len(note.get(F.NOTE_TRANSCRIPT, [])),
-            "transcript_chars": sum(
-                len(turn.get(F.TRANSCRIPT_TEXT, ""))
-                for turn in note.get(F.NOTE_TRANSCRIPT, [])
-                if isinstance(turn, dict)
-            ),
-        },
-    )
 
 
 async def list_recent(uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, Any]]:

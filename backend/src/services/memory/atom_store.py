@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -151,6 +152,10 @@ async def upsert_atoms(
     if not by_id:
         return 0
 
+    started_at = time.monotonic()
+    read_ms = 0
+    embed_ms = 0
+    write_ms = 0
     try:
         collection = _atoms_collection(uid)
 
@@ -162,7 +167,9 @@ async def upsert_atoms(
                 if snap.exists
             }
 
+        stage_started = time.monotonic()
         existing = await asyncio.to_thread(_read_existing)
+        read_ms = round((time.monotonic() - stage_started) * 1000)
 
         # Re-embed only atoms whose normalized text changed (or that are new).
         need_embed: list[tuple[str, str]] = [
@@ -172,7 +179,9 @@ async def upsert_atoms(
         ]
         vectors: dict[str, list[float]] = {}
         if need_embed:
+            stage_started = time.monotonic()
             embedded = await embed_texts([text for _, text in need_embed])
+            embed_ms = round((time.monotonic() - stage_started) * 1000)
             vectors = {aid: vec for (aid, _), vec in zip(need_embed, embedded)}
 
         def _write() -> None:
@@ -226,12 +235,18 @@ async def upsert_atoms(
                     })
             batch.commit()
 
+        stage_started = time.monotonic()
         await asyncio.to_thread(_write)
+        write_ms = round((time.monotonic() - stage_started) * 1000)
         logger.info("memory.atom_store: upserted atoms", {
             "user_id": uid,
             "total": len(by_id),
             "embedded": len(need_embed),
             "source": source,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "read_ms": read_ms,
+            "embed_ms": embed_ms,
+            "write_ms": write_ms,
         })
         return len(by_id)
     except Exception as exc:
@@ -239,6 +254,11 @@ async def upsert_atoms(
             "user_id": uid,
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "source": source,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
+            "read_ms": read_ms,
+            "embed_ms": embed_ms,
+            "write_ms": write_ms,
         })
         return 0
 

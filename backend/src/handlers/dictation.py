@@ -10,7 +10,7 @@ import json
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
@@ -64,7 +64,7 @@ async def handle_put_trace(request: Request, trace_id: str) -> JSONResponse:
         decoded = json.loads(raw)
         if not isinstance(decoded, dict):
             raise ValueError("metadata must be an object")
-        payload = TracePayload.model_validate(decoded)
+        payload = TypeAdapter(TracePayload).validate_python(decoded)
     except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
         # Never echo validation input: the body contains speech and corrected text.
         return JSONResponse({"error": "Invalid trace metadata."}, status_code=422)
@@ -139,7 +139,7 @@ async def handle_put_audio(request: Request, trace_id: str) -> JSONResponse:
             status_code=409,
         )
 
-    expected_bytes = int(trace.get("audioBytes", -1))
+    expected_bytes = trace.get(F.AUDIO_BYTES)
     content_length = request.headers.get("content-length")
     try:
         if content_length is not None and int(content_length) > F.MAX_AUDIO_BYTES:
@@ -152,7 +152,7 @@ async def handle_put_audio(request: Request, trace_id: str) -> JSONResponse:
         return JSONResponse({"error": "Empty audio body."}, status_code=400)
     if len(data) > F.MAX_AUDIO_BYTES:
         return JSONResponse({"error": "Audio too large."}, status_code=413)
-    if len(data) != expected_bytes:
+    if expected_bytes is not None and len(data) != int(expected_bytes):
         return JSONResponse({"error": "Audio size conflicts with trace metadata."}, status_code=409)
     if hashlib.sha256(data).hexdigest() != digest:
         return JSONResponse({"error": "Audio digest mismatch."}, status_code=409)

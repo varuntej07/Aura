@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -65,6 +65,33 @@ INACTIVE_GRAPH_STATUSES = frozenset({
 })
 
 _adjacency_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+
+
+@dataclass
+class RetrievalObservation:
+    """PII-free measurements for one bounded graph retrieval."""
+
+    outcome: str = "started"
+    duration_ms: int = 0
+    seed_count: int = 0
+    result_count: int = 0
+    adjacency_hops_attempted: int = 0
+    max_result_hops: int = 0
+    graph_nodes_requested: int = 0
+    adjacency_cache_hits: int = 0
+    adjacency_cache_misses: int = 0
+    _started_at: float = field(default_factory=time.monotonic, repr=False)
+
+    def finish(self, outcome: str, results: list[RetrievedAtom] | None = None) -> None:
+        self.outcome = outcome
+        self.duration_ms = round((time.monotonic() - self._started_at) * 1000)
+        if results is not None:
+            self.result_count = len(results)
+            self.max_result_hops = max(
+                (atom.graph_hops for atom in results),
+                default=0,
+            )
+
 
 @dataclass
 class RetrievedAtom:
@@ -317,7 +344,11 @@ async def _read_graph_nodes(uid: str, node_ids: list[str]) -> dict[str, dict[str
     return await asyncio.to_thread(_read)
 
 
-async def _read_adjacency(uid: str, node_ids: list[str]) -> dict[str, tuple[str, ...]]:
+async def _read_adjacency(
+    uid: str,
+    node_ids: list[str],
+    observation: RetrievalObservation | None = None,
+) -> dict[str, tuple[str, ...]]:
     now_mono = time.monotonic()
     resolved: dict[str, tuple[str, ...]] = {}
     missing: list[str] = []
@@ -325,8 +356,12 @@ async def _read_adjacency(uid: str, node_ids: list[str]) -> dict[str, tuple[str,
         cached = _adjacency_cache.get((uid, node_id))
         if cached and now_mono - cached[0] < ADJACENCY_CACHE_TTL_S:
             resolved[node_id] = cached[1]
+            if observation is not None:
+                observation.adjacency_cache_hits += 1
         else:
             missing.append(node_id)
+            if observation is not None:
+                observation.adjacency_cache_misses += 1
     if not missing:
         return resolved
 
@@ -361,6 +396,7 @@ async def _traverse_graph(
     query_vector: list[float],
     active_slugs: set[str],
     now: datetime,
+    observation: RetrievalObservation | None = None,
 ) -> list[RetrievedAtom]:
     """Expand active graph nodes up to two hops. Seed atoms remain directly recallable."""
     results = list(seeds)
@@ -370,6 +406,8 @@ async def _traverse_graph(
 
     seed_nodes = await _read_graph_nodes(uid, seed_ids[:MAX_NODES])
     inspected += len(seed_ids[:MAX_NODES])
+    if observation is not None:
+        observation.graph_nodes_requested += len(seed_ids[:MAX_NODES])
     frontier: list[str] = []
     for seed in seeds:
         data = seed_nodes.get(seed.node_id)
@@ -382,7 +420,9 @@ async def _traverse_graph(
     for hops in range(1, MAX_HOPS + 1):
         if not frontier or inspected >= MAX_NODES:
             break
-        adjacency = await _read_adjacency(uid, frontier)
+        if observation is not None:
+            observation.adjacency_hops_attempted = hops
+        adjacency = await _read_adjacency(uid, frontier, observation)
         candidate_ids: list[str] = []
         for node_id in frontier:
             for neighbor_id in adjacency.get(node_id, ())[:FANOUT_CAP]:
@@ -395,6 +435,8 @@ async def _traverse_graph(
                 break
         node_data = await _read_graph_nodes(uid, candidate_ids)
         inspected += len(candidate_ids)
+        if observation is not None:
+            observation.graph_nodes_requested += len(candidate_ids)
         next_frontier: list[str] = []
         for node_id in candidate_ids:
             data = node_data.get(node_id)
@@ -509,6 +551,7 @@ async def retrieve_relevant_subgraph(
     active_slugs: list[str] | None = None,
     now: datetime | None = None,
     budget_s: float | None = None,
+    observation: RetrievalObservation | None = None,
 ) -> list[RetrievedAtom]:
     """Return re-ranked atom seeds plus a bounded two-hop graph expansion.
 
@@ -516,13 +559,16 @@ async def retrieve_relevant_subgraph(
     exist, traversal is independently time-boxed so a slow graph degrades to those
     seeds instead of erasing useful memory from the turn.
     """
+    observation = observation or RetrievalObservation()
     if not uid or not should_retrieve_for_message(query):
+        observation.finish("invalid_request", [])
         return []
     if _circuit_open():
         logger.info(
             "memory.retrieval: circuit open, skipping graph retrieval",
             {"user_id": uid},
         )
+        observation.finish("circuit_open", [])
         return []
 
     started_at = time.monotonic()
@@ -534,6 +580,7 @@ async def retrieve_relevant_subgraph(
             _gather_seed_result(uid, query, SEED_K, slugs, current_time),
             timeout=max(0.001, budget),
         )
+        observation.seed_count = len(seeds)
         _record_outcome(True)
     except TimeoutError:
         _record_outcome(False)
@@ -541,7 +588,11 @@ async def retrieve_relevant_subgraph(
             "memory.retrieval: seed budget exceeded, skipping memory this turn",
             {"user_id": uid, "budget_s": budget},
         )
+        observation.finish("seed_timeout", [])
         return []
+    except asyncio.CancelledError:
+        observation.finish("cancelled", [])
+        raise
     except Exception as exc:
         _record_outcome(False)
         logger.warn(
@@ -552,24 +603,40 @@ async def retrieve_relevant_subgraph(
                 "error_type": type(exc).__name__,
             },
         )
+        observation.finish("seed_error", [])
         return []
 
     if not seeds:
+        observation.finish("no_seeds", [])
         return []
     remaining = budget - (time.monotonic() - started_at)
     if remaining <= 0:
+        observation.finish("seed_only_budget_exhausted", seeds)
         return seeds
     try:
-        return await asyncio.wait_for(
-            _traverse_graph(uid, seeds, query_vector, slugs, current_time),
+        results = await asyncio.wait_for(
+            _traverse_graph(
+                uid,
+                seeds,
+                query_vector,
+                slugs,
+                current_time,
+                observation,
+            ),
             timeout=remaining,
         )
+        observation.finish("ok", results)
+        return results
     except TimeoutError:
         logger.info(
             "memory.retrieval: graph traversal timed out, using seeds",
             {"user_id": uid, "budget_s": budget, "seed_count": len(seeds)},
         )
+        observation.finish("traversal_timeout_seed_fallback", seeds)
         return seeds
+    except asyncio.CancelledError:
+        observation.finish("cancelled", seeds)
+        raise
     except Exception as exc:
         logger.warn(
             "memory.retrieval: graph traversal failed, using seeds",
@@ -580,6 +647,7 @@ async def retrieve_relevant_subgraph(
                 "seed_count": len(seeds),
             },
         )
+        observation.finish("traversal_error_seed_fallback", seeds)
         return seeds
 
 

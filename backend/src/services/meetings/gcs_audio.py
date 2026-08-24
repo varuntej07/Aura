@@ -10,10 +10,7 @@ All V2 writes use generation-match zero. An existing object is accepted only
 when its immutable identity, digest, and size match; mismatches are terminal
 split-brain evidence. Successful transcription and note publication never
 delete source audio. Explicit deletion targets the recorded object path and
-generation, never a broad prefix.
-
-The legacy ``meetings/{uid}/{meeting_id}/{seq:04d}.flac`` surface remains only
-for rollout compatibility and is also create-only.
+    generation, never a broad prefix.
 
 Same module shape as services/gcs.py (lazy client singleton, every blocking
 call in ``asyncio.to_thread``). Audio and transcript bucket names come from
@@ -94,66 +91,6 @@ def transcript_revision_path(
     filename: str,
 ) -> str:
     return f"transcripts/v2/{uid}/{meeting_id}/revisions/{revision_id}/{filename}"
-
-
-def object_path_for(uid: str, meeting_id: str, seq: int) -> str:
-    return f"meetings/{uid}/{meeting_id}/{seq:04d}.flac"
-
-
-def prefix_for(uid: str, meeting_id: str) -> str:
-    return f"meetings/{uid}/{meeting_id}/"
-
-
-def user_prefix_for(uid: str) -> str:
-    return f"meetings/{uid}/"
-
-
-async def upload_segment(uid: str, meeting_id: str, seq: int, data: bytes) -> str:
-    """Compatibility upload that is still create-only.
-
-    New claims use the V2 route. This old path exists only for captures already
-    in flight during rollout and must never regain overwrite semantics.
-    """
-    path = object_path_for(uid, meeting_id, seq)
-    digest = sha256_hex(data)
-
-    def _upload() -> None:
-        from google.api_core.exceptions import PreconditionFailed  # type: ignore
-
-        blob = _client().bucket(bucket_name()).blob(path)
-        blob.metadata = {
-            "content_sha256": digest,
-            "byte_length": str(len(data)),
-            "compatibility_protocol": "1",
-        }
-        try:
-            blob.upload_from_string(
-                data,
-                content_type="audio/flac",
-                if_generation_match=0,
-                checksum="auto",
-            )
-        except PreconditionFailed:
-            existing = _client().bucket(bucket_name()).get_blob(path)
-            metadata = (existing.metadata or {}) if existing else {}
-            if (
-                existing is None
-                or int(existing.size or -1) != len(data)
-                or metadata.get("content_sha256") != digest
-            ):
-                raise ImmutableObjectConflict(path)
-
-    await asyncio.to_thread(_upload)
-    logger.info(
-        "meetings.gcs: compatibility segment accepted",
-        {
-            "meeting_id": meeting_id,
-            "seq": seq,
-            "byte_length": len(data),
-            "content_sha256": digest,
-        },
-    )
-    return path
 
 
 async def create_v2_segment(
@@ -350,28 +287,6 @@ async def delete_exact_object(
     return await asyncio.to_thread(_delete)
 
 
-async def list_segment_paths(uid: str, meeting_id: str) -> list[str]:
-    """All uploaded segment object paths for one meeting, sorted by name
-    (names embed the zero-padded seq, so name order is seq order). Raises on
-    failure - the worker must not synthesize from a partial listing."""
-    prefix = prefix_for(uid, meeting_id)
-
-    def _list() -> list[str]:
-        blobs = _client().list_blobs(bucket_name(), prefix=prefix)
-        return sorted(blob.name for blob in blobs)
-
-    return await asyncio.to_thread(_list)
-
-
-async def download_segment(path: str) -> bytes:
-    """One segment's bytes. Raises on failure (worker retries or fails the run)."""
-
-    def _download() -> bytes:
-        return _client().bucket(bucket_name()).blob(path).download_as_bytes()
-
-    return await asyncio.to_thread(_download)
-
-
 async def download_exact(
     path: str,
     generation: str,
@@ -387,56 +302,6 @@ async def download_exact(
     return await asyncio.to_thread(_download)
 
 
-async def delete_meeting_audio(uid: str, meeting_id: str) -> int:
-    """Legacy V1 prefix cleanup; unused by V2 processing and deletion.
-
-    V2 user deletion must use receipt-derived exact paths and generation
-    preconditions through ``delete_exact_object``. This compatibility helper
-    is retained only for old operational callers and must never be wired into
-    successful synthesis.
-    """
-    prefix = prefix_for(uid, meeting_id)
-
-    def _delete() -> int:
-        bucket = _client().bucket(bucket_name())
-        deleted = 0
-        for blob in _client().list_blobs(bucket_name(), prefix=prefix):
-            try:
-                bucket.blob(blob.name).delete()
-                deleted += 1
-            except Exception as exc:
-                logger.warn(
-                    "meetings.gcs: segment delete failed",
-                    {
-                        "path": blob.name,
-                        "error": str(exc),
-                    },
-                )
-        return deleted
-
-    try:
-        count = await asyncio.to_thread(_delete)
-        logger.info(
-            "meetings.gcs: audio deleted",
-            {
-                "user_id": uid,
-                "meeting_id": meeting_id,
-                "deleted": count,
-            },
-        )
-        return count
-    except Exception as exc:
-        logger.warn(
-            "meetings.gcs: audio delete failed",
-            {
-                "user_id": uid,
-                "meeting_id": meeting_id,
-                "error": str(exc),
-            },
-        )
-        return 0
-
-
 async def delete_user_audio(uid: str) -> int:
     """Strict account-deletion cleanup for every raw meeting object owned by a user.
 
@@ -446,7 +311,7 @@ async def delete_user_audio(uid: str) -> int:
     remains. Partial deletion is safe because object deletes are idempotent and
     a retry lists only what remains.
     """
-    prefix = user_prefix_for(uid)
+    prefix = f"audio/v2/{uid}/"
 
     def _delete() -> int:
         bucket = _client().bucket(bucket_name())

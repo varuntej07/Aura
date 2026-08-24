@@ -8,10 +8,11 @@ PARENT_COLLECTION = "users"
 TRACE_SUBCOLLECTION = "dictation_traces"
 USAGE_SUBCOLLECTION = "usage"
 
-TRACE_SCHEMA_VERSION = 1
-CONSENT_VERSION = 1
+TRACE_SCHEMA_VERSION = 2
+CONSENT_VERSION = 2
 MONTHLY_TRACE_CAP = 500
 AUDIO_RETENTION_DAYS = 180
+METADATA_RETENTION_DAYS = 180
 
 MAX_METADATA_BYTES = 256 * 1024
 MAX_AUDIO_BYTES = 8 * 1024 * 1024
@@ -31,6 +32,8 @@ AUDIO_PATH = "audio_path"
 AUDIO_GENERATION = "audio_generation"
 AUDIO_UPLOADED_AT = "audio_uploaded_at"
 AUDIO_EXPIRES_AT = "audio_expires_at"
+METADATA_EXPIRES_AT = "expires_at"
+AUDIO_BYTES = "audioBytes"
 DELETION_STATE = "deletion_state"
 DELETION_REQUESTED_AT = "deletion_requested_at"
 DELETED_AT = "deleted_at"
@@ -38,6 +41,13 @@ QUOTA_MONTH = "quota_month"
 
 DELETION_PENDING = "pending"
 DELETION_COMPLETE = "complete"
+
+# The only label qualities a client may assert. "human_gold" is deliberately
+# absent: it means a reviewer listened to the audio and confirmed the
+# transcript, which no device can attest to about its own data. Only the
+# reviewer path, server-side, may write it. "unobserved" and "rejected" are
+# absent because a trace carrying either is never uploaded at all.
+CLIENT_LABEL_QUALITIES = ("unchanged_silver", "corrected_silver")
 
 EDIT_CLASSES = ("verbatim", "casing", "punctuation", "disfluency", "style")
 GROUND_TRUTH_EDIT_CLASSES = frozenset(("verbatim", "casing", "punctuation"))

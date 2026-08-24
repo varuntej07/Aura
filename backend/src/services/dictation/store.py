@@ -60,6 +60,7 @@ async def put_metadata(
     payload: TracePayload,
 ) -> MetadataResult:
     now = datetime.now(UTC)
+    expires_at = now + timedelta(days=F.METADATA_RETENTION_DAYS)
     month_key, resets_at_ms = _month_window(now)
     fingerprint = payload.fingerprint(trace_id)
     metadata = payload.normalized_dict(trace_id)
@@ -105,6 +106,7 @@ async def put_metadata(
                     F.AUDIO_GENERATION: None,
                     F.AUDIO_UPLOADED_AT: None,
                     F.AUDIO_EXPIRES_AT: None,
+                    F.METADATA_EXPIRES_AT: expires_at,
                     F.DELETION_STATE: None,
                     F.DELETED_AT: None,
                     F.QUOTA_MONTH: month_key,
@@ -168,9 +170,13 @@ async def attach_audio(
             current = snap.to_dict() or {}
             if current.get(F.DELETED_AT) or current.get(F.DELETION_STATE):
                 return AttachResult("deleted")
+            current_audio_bytes = current.get(F.AUDIO_BYTES)
             if (
                 current.get("audioSha256") != content_sha256
-                or int(current.get("audioBytes", -1)) != byte_length
+                or (
+                    current_audio_bytes is not None
+                    and int(current_audio_bytes) != byte_length
+                )
             ):
                 return AttachResult("conflict")
 
@@ -189,6 +195,7 @@ async def attach_audio(
                     F.AUDIO_GENERATION: str(generation),
                     F.AUDIO_UPLOADED_AT: now,
                     F.AUDIO_EXPIRES_AT: expires_at,
+                    F.AUDIO_BYTES: byte_length,
                 },
             )
             return AttachResult("attached")
@@ -347,3 +354,49 @@ async def reconcile_expired_audio(limit: int = F.RECONCILE_BATCH_LIMIT) -> dict[
         {"candidates": len(snapshots), "checked": checked, "marked_missing": marked_missing},
     )
     return {"candidates": len(snapshots), "checked": checked, "marked_missing": marked_missing}
+
+
+async def reconcile_expired_metadata(limit: int = F.RECONCILE_BATCH_LIMIT) -> dict[str, int]:
+    """Delete expired metadata and its audio when Firestore TTL has not run yet."""
+    now = datetime.now(UTC)
+
+    def _query():
+        return list(
+            admin_firestore()
+            .collection_group(F.TRACE_SUBCOLLECTION)
+            .where(filter=FieldFilter(F.METADATA_EXPIRES_AT, "<=", now))
+            .limit(limit)
+            .stream()
+        )
+
+    snapshots = await asyncio.to_thread(_query)
+    deleted = 0
+    failed = 0
+    for snapshot in snapshots:
+        uid = snapshot.reference.parent.parent.id
+        trace_id = snapshot.id
+        try:
+            target = await begin_delete(uid, trace_id)
+            if target.status in ("absent", "tombstoned"):
+                deleted += 1
+                continue
+            path = target.path
+            if path is None and target.content_sha256:
+                path = gcs_audio.object_path_for(uid, trace_id, target.content_sha256)
+            if path:
+                generation = target.generation or await gcs_audio.current_generation(path)
+                if generation:
+                    await gcs_audio.delete_exact(path, generation)
+            await finish_delete(uid, trace_id)
+            deleted += 1
+        except Exception as exc:
+            failed += 1
+            logger.warn(
+                "dictation: expired metadata reconciliation failed",
+                {"trace_id": trace_id, "error": type(exc).__name__},
+            )
+    logger.info(
+        "dictation: metadata expiry reconciliation complete",
+        {"candidates": len(snapshots), "deleted": deleted, "failed": failed},
+    )
+    return {"candidates": len(snapshots), "deleted": deleted, "failed": failed}

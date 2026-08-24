@@ -7,6 +7,7 @@ failures so callers can run it only after their established atom/profile write.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -168,6 +169,7 @@ async def upsert_graph(
     """Idempotently upsert nodes/edges and maintain adjacency. Never raises."""
     if not uid or (not entities and not edges):
         return {"nodes": 0, "edges": 0}
+    started_at = time.monotonic()
     now = now or datetime.now(UTC)
 
     clean_nodes = {
@@ -346,6 +348,7 @@ async def upsert_graph(
             "nodes": result["nodes"],
             "edges": result["edges"],
             "source": source,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
         })
         return result
     except Exception as exc:
@@ -353,6 +356,8 @@ async def upsert_graph(
             "user_id": uid,
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "source": source,
+            "duration_ms": round((time.monotonic() - started_at) * 1000),
         })
         return {"nodes": 0, "edges": 0}
 
