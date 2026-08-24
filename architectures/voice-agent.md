@@ -140,6 +140,133 @@ See `architectures/alarm-tier.md`.
 5. The worker uploads the retained JPEG, then writes the Firestore item with a stable retry-safe id. It speaks success only after both operations succeed.
 6. The recorder stores the deterministic action receipt through the same durable receipt path used by write tools.
 
+## Specialized agent handoffs
+
+Interview Mode and Guide Mode replace Buddy with specialized agents inside the
+same `AgentSession`. Neither mutates Buddy's prompt or tools in place. Both keep
+one room and one speech pipeline, carry state in `AgentSession.userdata`, isolate
+their tool surfaces with `mcp_servers=None`, and return the same `BuddyAgent`
+instance.
+
+```text
+BuddyAgent --native Guide arm--> GuideSupervisorAgent
+                                      | quick screen turn: direct grounded reply
+                                      | multi-step: await GuidePlanningTask[result]
+                                      |             then resume same supervisor
+BuddyAgent <--native disarm----- GuideSupervisorAgent
+```
+
+```text
+one AgentSession (STT/LLM/TTS/VAD, one voice connection, one room)
+  BuddyAgent --start_mock_interview--> InterviewSupervisorAgent
+                                         await InterviewIntakeTask[InterviewDossier]
+                                           company
+                                           has JD?  no  -> role + experience, spoken
+                                                    yes -> revisioned overlay + byte stream
+                                           -> typed dossier
+                                         validate, one retry if incomplete
+                                         report setup captured
+                                         -> InterviewerAgent
+                                            fixed role-aware plan
+                                            30m heads-up; 34m final warning
+                                            35m: debrief, then hand back
+  BuddyAgent <--return---------------- InterviewSupervisorAgent / InterviewerAgent
+```
+
+The split follows LiveKit's own distinction, and it is the load-bearing decision
+here. A **handoff** is for when conversational identity and responsibility change:
+Buddy stops being responsible and the supervisor takes over. An **`AgentTask`** is
+for bounded work that returns a result and gives control back: Interview intake
+returns a dossier, and Guide planning returns one typed task result to the same
+Guide supervisor. Neither is a second personality. Getting this backwards
+produces either a supervisor that never owns its mode or a bounded operation that
+is handed conversational identity it does not want.
+
+Where the task may be awaited is fixed by the SDK: `AgentTask` raises unless it is
+awaited inside a tool function or an `on_enter`/`on_exit` hook. Interview awaits
+intake in `on_enter`; Guide awaits planning from the supervisor's model-selected
+tool. The quick Guide lane never enters an `AgentTask`.
+
+Five things make the boundary work, and each is load-bearing:
+
+1. **The trigger is ordinary tool reasoning.** `start_mock_interview` is a normal
+   `@function_tool` on `BuddyAgent`, registered in `VOICE_TOOL_REGISTRY` like any
+   other. No phrase list, no UI affordance, no second voice session. The same is
+   true one level down: nothing keyword-matches whether the user has a JD, the
+   model picks `request_job_description` or `record_role_and_experience`.
+2. **The handoff is the tool's return value.** Returning `(Agent, str)` makes
+   LiveKit call `session.update_agent()`. The same session, pipelines and room are
+   reused throughout, so the handoff costs no connection latency.
+3. **Isolation comes from `mcp_servers=None`, not from the prompt.**
+   `AgentActivity` resolves MCP servers as "the agent's own if given, otherwise the
+   session's", and the session carries the entire production MCP surface. Without
+   that explicit `None` the supervisor and the intake task would silently inherit
+   reminders, calendar, memory and web.
+4. **State lives in `AgentSession.userdata`, never on an agent.** Agent instances do
+   not survive a handoff. `VoiceSessionState` does, and nests feature state so the
+   next feature to need session state does not churn every `RunContext` annotation.
+   Intake commits its draft to that state on every tool, not only at completion, so
+   a cancelled or timed-out setup still keeps what the user answered.
+5. **The return trip hands back the SAME `BuddyAgent` instance**, through a
+   `buddy_factory` wired in `voice_agent.py` before `session.start`. Every
+   coordinator (recorder, guide, artifact tracker, bridge, screen context) holds a
+   reference to that instance; returning a fresh Buddy would orphan all of them.
+
+### Job description transfer
+
+A bounded LiveKit byte stream, not a database upload. The JD never touches
+Firestore, GCS or a REST endpoint: the decoded text lands in `session.userdata` and
+dies with the session.
+
+The overlay request rides the reliable `client_events` topic and is revisioned and
+acknowledged, reusing `artifact_delivery.py` wholesale, including its lesson:
+publishing a packet is not evidence the user can see a paste box, so the waiter is
+armed before publishing and a missing ack means "no overlay", never "probably
+fine". Without the ack the intake says the box did not open and falls back to
+asking, rather than telling the user to paste into nothing.
+
+The text arrives on the `interview_material` topic carrying `interview_id`,
+`revision`, `material_type` and `schema_version` as stream attributes. The receiver
+matches `(interview_id, revision)` against what is armed, both before reading and
+again after assembly, because a newer revision can be armed while bytes are in
+flight. That check is the important one: a paste answering an earlier request would
+otherwise be accepted as the answer to this one, which is a bug that looks like
+nothing at all. Size, UTF-8, blankness and sender identity are all enforced on
+receipt regardless of what the client claims.
+
+The payload is UNTRUSTED, being text pasted out of someone else's web page, and is
+treated the same way `screen_context_stream.render_for_model` treats its own.
+
+### Known boundaries
+
+- The supervisor and the intake task are plain agents, so they have none of
+  `BuddyAgent.llm_node`: no action policy, no speculative generation, no artifact or
+  `[POINT]` handling, no Action Truth envelopes, no `speak_only` constraint.
+- Their tool calls are not observed. `VoiceSessionRecorder`'s tool observer is bound
+  to Buddy, and its action receipts key off `ToolEffect.WRITE` registry entries;
+  neither agent's tools are in either. Transcript still records, since that is
+  session-level.
+- Ambient screen/OCR context, early graph-memory injection, and input-liveness
+  speech are gated by the session owner. They do not target inactive Buddy while
+  either specialized mode owns the floor. Typed user messages remain routed to
+  the current agent so a muted user can still ask to leave the mode.
+- `evaluate_execution` refuses any non-READ tool in a turn where `web_surf`,
+  `query_memory` or `get_user_context` already returned, and the BM25 core floor
+  always exposes `query_memory`. A turn that reads memory first and then calls
+  `start_mock_interview` drops the handoff silently. A selected handoff is not a
+  guaranteed handoff.
+- Aura-Desktop implements the paste overlay contract. Its source wiring is
+  present, but this repository has not yet proven the cross-repo exchange in a
+  live desktop session.
+- Answer records and the debrief exist only in `AgentSession.userdata`. This
+  phase adds no interview database write, history, score, or hiring prediction.
+- The interviewer owns a monotonic, session-only wall clock from its first
+  question: it warns at 30 minutes, reminds the candidate at 34 that no more
+  questions will be asked after 35, then waits for the in-flight utterance to
+  finish, gives one bounded debrief, and returns to Buddy. It does not close the
+  LiveKit room or voice window. A disconnect or the independent five-minute
+  no-transcript safety watchdog can still end a session earlier.
+
 ## Code anchors
 
 - `backend/src/agent/voice_agent.py`
@@ -152,6 +279,7 @@ See `architectures/alarm-tier.md`.
 - `backend/src/agent/voice/screen_saves.py`
 - `backend/src/agent/voice/tool_skills.py`
 - `backend/src/agent/voice/recorder.py`
+- `backend/src/agent/voice/interview/`
 
 See also [../backend/docs/voice_action_orchestration.md](../backend/docs/voice_action_orchestration.md)
 and [guide-mode.md](guide-mode.md) for armed screen guidance on desktop.
@@ -206,6 +334,25 @@ a non-finalized turn still exposes no writes. Reason code: `core_floor_applied`.
 
 Wording decides which tools are SUGGESTED. It never decides which ones EXIST. This is the
 same lesson as "arming is session state, not wording" below, applied to the tool list.
+
+### A strict tool contract ships twice, and the worker's copy is the one that counts
+
+The schema the model actually sees for an MCP tool is produced in two independent
+places, and each deploys on its own pipeline:
+
+- the backend advertises it (`handlers/mcp.py` `_enforce_canonical_tool_contract`
+  replaces the FastMCP signature-derived schema with the canonical one), shipped by
+  `backend/deploy.sh`;
+- the worker then OVERRIDES it (`voice/pipelines.py` `AuraMCPServerHTTP._make_function_tool`
+  swaps in `openai_function_definition(name)` for any `strict: True` tool), shipped by
+  `lk agent deploy`.
+
+The override wins, so a correct backend cannot rescue a worker carrying an older
+`shared/tools.py`. Changing a strict contract means deploying BOTH, worker included.
+A strict schema whose `required` omits a property is a 400 on every turn that carries
+the tool list, not just the turn that wanted the tool; `assert_strict_tool_schema` and
+the `TOOL_DEFINITIONS` sweep in `shared/tools.py` turn that into an import-time failure,
+but only for the revision that actually runs.
 
 So a "Buddy can't create events" report is almost never a missing tool. There are two real
 causes, both prompt-level:

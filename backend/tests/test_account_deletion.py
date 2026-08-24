@@ -101,10 +101,10 @@ def test_user_audio_cleanup_deletes_only_the_users_prefix(monkeypatch):
 
         def list_blobs(self, name: str, *, prefix: str):
             assert name == gcs_audio.bucket_name()
-            assert prefix == "meetings/user-1/"
+            assert prefix == "audio/v2/user-1/"
             return [
-                _Blob("meetings/user-1/meeting-a/0000.flac"),
-                _Blob("meetings/user-1/meeting-b/0000.flac"),
+                _Blob("audio/v2/user-1/meeting-a/run-a/000000/a.flac"),
+                _Blob("audio/v2/user-1/meeting-b/run-b/000000/b.flac"),
             ]
 
     monkeypatch.setattr(gcs_audio, "_client", lambda: _Client())
@@ -113,8 +113,8 @@ def test_user_audio_cleanup_deletes_only_the_users_prefix(monkeypatch):
 
     assert count == 2
     assert deleted == [
-        "meetings/user-1/meeting-a/0000.flac",
-        "meetings/user-1/meeting-b/0000.flac",
+        "audio/v2/user-1/meeting-a/run-a/000000/a.flac",
+        "audio/v2/user-1/meeting-b/run-b/000000/b.flac",
     ]
 
 

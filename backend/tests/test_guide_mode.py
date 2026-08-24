@@ -7,8 +7,10 @@ import time
 from livekit.agents import llm as lk_llm
 
 from src.agent.voice.guide_mode import GuideCoordinator
+from src.agent.voice.guide_supervisor import GuideSupervisorAgent
+from src.agent.voice.interview import ConversationOwner, VoiceSessionState
+from src.agent.voice.screen_frames import ScreenFrame, ScreenFrameStore
 from src.prompts import GUIDE_INSTRUCTIONS
-from src.agent.voice.screen_frames import ScreenFrame
 
 GUIDE_SESSION_ID = "a" * 32
 USER_ID = "u" * 28
@@ -27,6 +29,8 @@ class _Session:
         self.says: list[str] = []
         self.handlers: dict[str, list] = {}
         self.interrupts = 0
+        self.userdata = VoiceSessionState()
+        self.current_agent = None
 
     def on(self, event: str, handler) -> None:
         self.handlers.setdefault(event, []).append(handler)
@@ -44,6 +48,18 @@ class _Session:
         # a canned apology like "I can't see the current screen".
         self.says.append(text)
 
+    def update_agent(self, agent) -> None:
+        previous = self.current_agent
+        self.current_agent = agent
+
+        async def _handoff() -> None:
+            if previous is not None and hasattr(previous, "on_exit"):
+                await previous.on_exit()
+            if hasattr(agent, "on_enter"):
+                await agent.on_enter()
+
+        asyncio.create_task(_handoff())
+
 
 class _Participant:
     def __init__(self) -> None:
@@ -59,12 +75,12 @@ class _Room:
 
 
 class _Buddy:
-    def __init__(self) -> None:
+    def __init__(self, session: _Session) -> None:
+        self._session = session
         self._chat_ctx = lk_llm.ChatContext()
-        self.frames: list[str] = []
-        self.frame_scales: list[float] = []
         self.updates = 0
-        self.guide_active: bool | None = None
+        self.resume_epoch: int | None = None
+        self.resume_ready: asyncio.Future[bool] | None = None
 
     @property
     def chat_ctx(self) -> lk_llm.ChatContext:
@@ -74,15 +90,24 @@ class _Buddy:
         self._chat_ctx = chat_ctx
         self.updates += 1
 
-    def set_guide_frame(self, frame_id: str, model_scale: float = 1.0) -> None:
-        self.frames.append(frame_id)
-        self.frame_scales.append(model_scale)
+    async def prepare_guide_resume(
+        self,
+        chat_ctx: lk_llm.ChatContext,
+        ownership_epoch: int | None,
+        ready: asyncio.Future[bool],
+    ) -> None:
+        await self.update_chat_ctx(chat_ctx)
+        self.resume_epoch = ownership_epoch
+        self.resume_ready = ready
 
-    async def apply_guide_persona(self, active: bool) -> None:
-        self.guide_active = active
-
-    def is_guide_active(self) -> bool:
-        return self.guide_active is True
+    async def on_enter(self) -> None:
+        committed = True
+        if self.resume_epoch is not None:
+            committed = self._session.userdata.guide.commit_idle(self.resume_epoch)
+        if self.resume_ready is not None and not self.resume_ready.done():
+            self.resume_ready.set_result(committed)
+        self.resume_epoch = None
+        self.resume_ready = None
 
 
 class _TaskRuntime:
@@ -138,9 +163,11 @@ def _frame(
 
 def _coordinator():
     session = _Session()
-    buddy = _Buddy()
+    buddy = _Buddy(session)
+    session.current_agent = buddy
     room = _Room()
     task_runtime = _TaskRuntime()
+    screen_frames = ScreenFrameStore(session_id="voice-session", user_id=USER_ID)
     guide = GuideCoordinator(
         session=session,
         buddy=buddy,
@@ -148,6 +175,8 @@ def _coordinator():
         session_id="voice-session",
         user_id=USER_ID,
         task_runtime=task_runtime,
+        screen_frames=screen_frames,
+        display_name="there",
     )
     return guide, session, buddy, room, task_runtime
 
@@ -157,7 +186,7 @@ def _control(
     active: bool = True,
     generation: int = 1,
     session_id=GUIDE_SESSION_ID,
-    protocol_version: int = 1,
+    protocol_version: int = 2,
 ):
     return {
         "type": "guide.mode",
@@ -184,18 +213,18 @@ async def test_control_requires_authenticated_participant_and_valid_session_id()
     assert guide.apply_control(_control(), USER_ID)
     assert not guide.apply_control(_control(), USER_ID)
     await _settle()
-    # Arming must swap the agent to the guide persona.
-    assert buddy.guide_active is True
+    assert isinstance(guide._session.current_agent, GuideSupervisorAgent)
+    assert guide._session.userdata.owner is ConversationOwner.GUIDE
 
 
-async def test_protocol_v2_ack_is_published_only_after_persona_and_runtime_activate():
+async def test_protocol_v2_ack_is_published_only_after_supervisor_and_runtime_activate():
     guide, _, buddy, room, runtime = _coordinator()
     assert guide.apply_control(_control(protocol_version=2), USER_ID)
     assert room.local_participant.published == []
 
     await _settle()
 
-    assert buddy.guide_active is True
+    assert isinstance(guide._session.current_agent, GuideSupervisorAgent)
     assert runtime.activations == [
         {
             "guide_session_id": GUIDE_SESSION_ID,
@@ -229,7 +258,8 @@ async def test_runtime_failure_fails_closed_and_acknowledges_the_same_generation
     await _settle()
 
     assert not guide.is_active()
-    assert buddy.guide_active is False
+    assert session.current_agent is buddy
+    assert session.userdata.owner is ConversationOwner.BUDDY
     assert runtime.cancelled >= 1
     assert session.interrupts == 1
     assert _acks(room) == [
@@ -263,18 +293,19 @@ async def test_changed_frame_fires_one_terse_pointed_nudge():
         isinstance(part, lk_llm.ImageContent)
         for part in call["user_input"].content
     )
-    assert buddy.frames == [f"{GUIDE_SESSION_ID}:8"]
+    assert isinstance(session.current_agent, GuideSupervisorAgent)
     assert session.says == []
     # The frame is also acked so the desktop handshake advances.
-    assert _acks(room) == [
+    frame_acks = [ack for ack in _acks(room) if ack["type"] == "guide.frame_ack"]
+    assert frame_acks == [
         {
-            "type": "guide.step",
+            "type": "guide.frame_ack",
             "payload": {
                 "frame_id": f"{GUIDE_SESSION_ID}:8",
                 "frame_seq": 8,
-                "step_index": 1,
-                "instruction": "Screen checked.",
-                "done": False,
+                "accepted": True,
+                "rejection_reason": None,
+                "newest_frame_id": f"{GUIDE_SESSION_ID}:8",
             },
         }
     ]
@@ -290,8 +321,9 @@ async def test_forced_static_frame_is_acked_but_not_spoken():
 
     assert session.calls == []
     assert session.says == []
-    assert len(_acks(room)) == 1
-    assert _acks(room)[0]["payload"]["frame_id"] == f"{GUIDE_SESSION_ID}:5"
+    frame_acks = [ack for ack in _acks(room) if ack["type"] == "guide.frame_ack"]
+    assert len(frame_acks) == 1
+    assert frame_acks[0]["payload"]["frame_id"] == f"{GUIDE_SESSION_ID}:5"
 
 
 async def test_every_accepted_frame_is_acked():
@@ -304,7 +336,11 @@ async def test_every_accepted_frame_is_acked():
     await _settle()
     await guide.close()
 
-    seqs = [ack["payload"]["frame_seq"] for ack in _acks(room)]
+    seqs = [
+        ack["payload"]["frame_seq"]
+        for ack in _acks(room)
+        if ack["type"] == "guide.frame_ack"
+    ]
     assert seqs == [1, 2]
 
 
@@ -320,7 +356,15 @@ async def test_non_guide_and_wrong_session_frames_are_ignored():
     await guide.close()
 
     assert session.calls == []
-    assert room.local_participant.published == []
+    rejected = [
+        ack
+        for ack in _acks(room)
+        if ack["type"] == "guide.frame_ack" and not ack["payload"]["accepted"]
+    ]
+    assert [ack["payload"]["rejection_reason"] for ack in rejected] == [
+        "wrong_mode",
+        "wrong_session",
+    ]
 
 
 async def test_redelivered_frame_is_reacked_without_speaking_twice():
@@ -335,7 +379,8 @@ async def test_redelivered_frame_is_reacked_without_speaking_twice():
     await guide.close()
 
     assert len(session.calls) == 1
-    assert len(_acks(room)) == 2
+    frame_acks = [ack for ack in _acks(room) if ack["type"] == "guide.frame_ack"]
+    assert len(frame_acks) == 2
 
 
 async def test_two_rapid_changes_fire_one_nudge():
@@ -377,17 +422,19 @@ async def test_stale_frame_is_acked_but_not_spoken():
 
     assert session.calls == []
     assert session.says == []
-    assert len(_acks(room)) == 1
+    frame_acks = [ack for ack in _acks(room) if ack["type"] == "guide.frame_ack"]
+    assert len(frame_acks) == 1
 
 
-async def test_disarm_flips_guide_persona_off():
-    guide, _, buddy, _, _ = _coordinator()
+async def test_disarm_hands_back_to_the_same_buddy():
+    guide, session, buddy, _, _ = _coordinator()
     guide.apply_control(_control(active=True, generation=1), USER_ID)
     await _settle()
-    assert buddy.guide_active is True
+    assert isinstance(session.current_agent, GuideSupervisorAgent)
     guide.apply_control(_control(active=False, generation=2), USER_ID)
     await _settle()
-    assert buddy.guide_active is False
+    assert session.current_agent is buddy
+    assert session.userdata.owner is ConversationOwner.BUDDY
 
 
 async def test_old_images_are_stripped_before_next_guide_frame():
@@ -407,7 +454,7 @@ async def test_old_images_are_stripped_before_next_guide_frame():
     await _settle()
     await guide.close()
 
-    assert buddy.updates == 1
-    message = buddy.chat_ctx.items[0]
+    assert isinstance(guide._session.current_agent, GuideSupervisorAgent)
+    message = guide._session.current_agent.chat_ctx.items[0]
     assert isinstance(message, lk_llm.ChatMessage)
     assert not any(isinstance(part, lk_llm.ImageContent) for part in message.content)

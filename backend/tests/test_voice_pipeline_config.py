@@ -236,39 +236,6 @@ async def test_anthropic_outgoing_requests_use_shared_voice_profile(
         assert tool["input_schema"]["additionalProperties"] is False
 
 
-async def test_gemini_outgoing_requests_use_shared_voice_profile(
-    monkeypatch,
-) -> None:
-    captured: list[dict[str, Any]] = []
-    _configure_provider_keys(monkeypatch)
-    pipeline = pipelines.build_llm_pipeline("user-123")
-    gemini_adapter = next(
-        leg for leg in pipeline._llm_instances if type(leg) is pipelines.google.LLM
-    )
-
-    async def _capture_generate_content_stream(**kwargs):
-        captured.append(kwargs)
-        return _SingleTextGoogleStream()
-
-    monkeypatch.setattr(
-        gemini_adapter._client.aio.models,
-        "generate_content_stream",
-        _capture_generate_content_stream,
-    )
-    await _complete_request(gemini_adapter, _chat_context())
-    await _complete_request(gemini_adapter, _post_tool_chat_context())
-
-    assert len(captured) == 2
-    for request in captured:
-        config = request["config"]
-        serialized = config.model_dump(exclude_none=True, mode="json")
-        assert config.temperature == pipelines.VOICE_GENERATION_TEMPERATURE
-        assert config.max_output_tokens == pipelines.VOICE_MAX_OUTPUT_TOKENS
-        assert "top_p" not in serialized
-        assert "thinking_config" not in serialized
-        assert config.tools
-
-
 def test_voice_adapter_order_with_openai(monkeypatch) -> None:
     _configure_provider_keys(monkeypatch)
 
@@ -280,7 +247,6 @@ def test_voice_adapter_order_with_openai(monkeypatch) -> None:
         pipelines.inference.LLM,
         pipelines.openai.LLM,
         pipelines.anthropic.LLM,
-        pipelines.google.LLM,
     ]
 
 
@@ -289,7 +255,4 @@ def test_voice_adapter_order_without_openai(monkeypatch) -> None:
 
     adapters = pipelines.build_llm_pipeline("user-123")._llm_instances
 
-    assert [type(adapter) for adapter in adapters] == [
-        pipelines.anthropic.LLM,
-        pipelines.google.LLM,
-    ]
+    assert [type(adapter) for adapter in adapters] == [pipelines.anthropic.LLM]

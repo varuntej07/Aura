@@ -1,6 +1,6 @@
 # Notification delivery architecture
 
-All notification intent is normalized into `NotificationProposal`. Committed proposals deliver inline; proactive proposals enter a queue and compete under one policy funnel.
+All notification intent is normalized into `NotificationProposal`. A producer may request a lane, but the orchestrator is the delivery authority: only allowlisted time-exact, transactional, or explicitly awaited outcomes remain committed. Generated, recurrent, and unknown sources enter the proactive queue and compete under one policy funnel.
 
 ## Component and data flow
 
@@ -13,21 +13,23 @@ All notification intent is normalized into `NotificationProposal`. Committed pro
                                    v
                         +-------------------------+
                         | NotificationProposal    |
-                        | kind, priority, TTL, key|
+                        | requested kind, TTL, key|
                         +------------+------------+
+                                     |
+                         central lane resolution
                                      |
                        +-------------+-------------+
                        |                           |
                        v                           v
             +---------------------+     +-----------------------+
             | COMMITTED inline    |     | PROACTIVE queue       |
-            | expected user action|     | scheduler drains/min  |
+            | exact/awaited outcome|    | scheduler drains/min  |
             +----------+----------+     +-----------+-----------+
                        |                            |
                        |                 +----------v-----------+
                        |                 | stale/dedup/presence |
                        |                 | quiet/budget/timing  |
-                       |                 | arbitration          |
+                       |                 | arbitration/tap value|
                        |                 +----------+-----------+
                        +----------------------------+
                                                     v
@@ -52,7 +54,11 @@ All notification intent is normalized into `NotificationProposal`. Committed pro
                                       +-------------------------+
 ```
 
-The orchestrator owns delivery policy, so producers do not independently implement quiet hours, caps, channel selection, or cross-feature priority. Automatic channel selection is resolved at delivery time from the authenticated user's current desktop capability and category preferences. Explicit meeting desktop delivery and mobile-only device-link security alerts retain their source contracts.
+The orchestrator owns delivery policy, so producers do not independently grant themselves committed delivery or implement quiet hours, caps, channel selection, or cross-feature priority. Explicit reminders, alarms, security/account transitions, and user-awaited task completions may deliver without needing a tap. A tracking subscription authorizes Aura to evaluate updates; it does not commit every generated update. Briefings, daily nudges, welcome, tracking, curiosity, follow-up, re-engagement, news, memory-graph, and unknown future sources must pass the proactive funnel.
+
+Every proactive interruption must satisfy two distinct value checks: the push must contain a material user-serving development, not merely a technically distinct fact or a question that primarily helps Aura learn; and its tap destination must add an artifact, source, action, or context beyond repeating the push. Missing/repeat-only destinations, malformed judgments, tap-gate outages, budget-store outages, and atomic-dedup outages fail closed for proactive delivery. Committed delivery retains availability-oriented behavior because silence can violate an explicit reminder or awaited-result contract.
+
+Every orchestrated send writes `policy_version`, requested and effective lane, lane authority, local send context, and the passed interruption checks into the notification ledger's `decision` map. Pre-send holds and drops remain reason-coded in orchestrator logs. Together these answer why a send was authorized without equating transport acceptance with device receipt or human attention.
 
 Transport acceptance, device receipt, and human engagement are distinct. FCM success means `accepted`; an outbox write means `queued`; desktop acknowledgements advance the same logical row through `received`, `seen`, and `acted`. Initial sends never infer device receipt from FCM acceptance or a durable desktop row. Deduplication, cooldowns, and budgets close on transport acceptance so a queued desktop item is not resent, while delivery analytics use only confirmed receipt and engagement transitions. Legacy `sent`/`delivered` rows remain readable.
 
@@ -68,8 +74,11 @@ Curiosity threads have a fail-closed semantic sensitivity gate at creation and i
 Timezone alias -----------------> canonical IANA name before local-day decisions
 Timezone unavailable -----------> proactive batch held as timezone_unresolved
 Producer repeats proposal ------> dedup key prevents duplicate logical delivery
+Producer requests bypass -------> central allowlist keeps or downgrades the lane
 Proactive item is too early ----> held for a later minute drain
 Item exceeds freshness TTL -----> dropped as stale
+Tap has no incremental payoff --> dropped as low_tap_value
+Tap/budget/dedup gate unavailable -> proactive candidate held or dropped fail-closed
 Desktop not registered ---------> mobile-only delivery
 Desktop preference read fails --> mobile-only delivery, warning emitted
 Outbox row already exists ------> queued as idempotent transport acceptance

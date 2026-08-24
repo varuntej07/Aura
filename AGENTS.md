@@ -31,6 +31,12 @@ dates) is fine. See `lessons-learnt.text` 2026-08-16.
 
 Before changing this repository, read `CLAUDE.md` completely and follow its project-specific architecture, product, safety, testing, and working-style instructions. Re-read relevant sections when a task touches their subsystem. Higher-priority instructions and the user's current explicit request take precedence.
 
+## Skills
+
+When a request matches an installed skill, invoke it as the first action rather
+than asking whether to. Routing: CTO-level technical/product questions ->
+cto-briefing.
+
 ## Voice And Chat Architecture Latency Gate
 
 Before changing the architecture or data flow of either voice or chat, get

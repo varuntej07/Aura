@@ -35,7 +35,7 @@ All public meeting routes require a Firebase ID token.
 
 `POST /meetings/claim`
 
-The V2 request adds:
+The request requires:
 
 ```json
 {
@@ -44,8 +44,8 @@ The V2 request adds:
 }
 ```
 
-`event_id` remains required. `title`, `start_time`, `end_time`, and the legacy
-`device_id` field remain accepted for compatibility and meeting metadata.
+`event_id`, `installation_id`, and `runtime_instance_id` are required.
+`title`, `start_time`, and `end_time` remain meeting metadata.
 
 The response includes:
 
@@ -62,7 +62,8 @@ The response includes:
 }
 ```
 
-A same-installation recovery keeps the run and increments the fence. A live
+A same-installation recovery keeps the run. It retains the fence for the same
+runtime instance and increments it for a different runtime instance. A live
 claim owned by another installation returns 409 `meeting_already_claimed`.
 
 ### Immutable segment upload
@@ -142,9 +143,6 @@ creates the authoritative job, outbox row, and audit event.
 
 Deletion currently returns `state`, `deletion_id`, and `completed_at`. A
 retryable interruption returns 503 `meeting_deletion_retry_required`.
-
-The legacy V1 segment and completion routes remain only for rollout
-compatibility. Their storage writes are also create-only.
 
 ## Internal synthesis delivery
 
@@ -227,11 +225,13 @@ the object path, generation, SHA-256, schema version, quality-policy version,
 and revision.
 
 `meeting-quality-v1` gates capture integrity, decoded FLAC format/duration,
-energy/clipping/zero-ratio/VAD/gap evidence, empty-with-speech, one-sided
+energy/clipping/zero-ratio/VAD, empty-with-speech, one-sided
 recognition, minimum word count, timing coverage, and implausibly short
 long-meeting output. Malformed, truncated, missing, or unexpectedly empty
 provider output is a typed failure, never inferred silence. Forced-English
-retry applies when the first evidence requires it.
+retry applies when the first evidence requires it. A truthful incomplete-segment
+marker is retained as `warning_codes: ["unaccounted_gap"]`; usable recognized
+speech still publishes a note marked `partial: true`.
 
 Quality enforcement is unconditional because this repository has no meeting
 quality feature-flag system. Do not introduce an ad-hoc shadow flag; add one
@@ -309,10 +309,6 @@ desktop runtime lease
   -> V2 workers
   -> publication quality enforcement
 ```
-
-Backfill only known metadata with
-`src.services.meetings.backfill.label_known_legacy_meetings`. Never invent
-digests, generations, or receipts.
 
 Useful verification:
 

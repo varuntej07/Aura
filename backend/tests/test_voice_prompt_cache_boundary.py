@@ -12,14 +12,14 @@ from livekit.plugins import openai
 
 from src.agent.buddy_agent import BuddyAgent
 from src.agent.voice import pipelines
+from src.agent.voice_prompt import (
+    VOICE_SESSION_CONTEXT_START,
+    render_voice_session_context,
+)
 from src.prompts import (
     DESKTOP_VOICE_SYSTEM_PROMPT,
     GUIDE_SYSTEM_PROMPT,
     MOBILE_VOICE_SYSTEM_PROMPT,
-)
-from src.agent.voice_prompt import (
-    VOICE_SESSION_CONTEXT_START,
-    render_voice_session_context,
 )
 
 _ENCODING = tiktoken.get_encoding("o200k_base")
@@ -241,28 +241,12 @@ def test_static_prompt_has_no_session_placeholders_or_values() -> None:
     )
 
 
-async def test_guide_mode_restores_byte_identical_companion_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_guide_mode_prompt_is_isolated_from_buddy() -> None:
     agent = _agent("desktop", _CONTEXT_ONE)
-    companion = agent._companion_instructions
-    instruction_updates: list[str] = []
+    guide_prompt = GUIDE_SYSTEM_PROMPT.format(name=_CONTEXT_ONE["name"])
 
-    async def _update_instructions(instructions: str) -> None:
-        instruction_updates.append(instructions)
-
-    async def _update_tools(_tools: list) -> None:
-        return None
-
-    monkeypatch.setattr(agent, "update_instructions", _update_instructions)
-    monkeypatch.setattr(agent, "update_tools", _update_tools)
-
-    await agent.apply_guide_persona(True)
-    await agent.apply_guide_persona(False)
-
-    assert instruction_updates == [
-        GUIDE_SYSTEM_PROMPT.format(name=_CONTEXT_ONE["name"]),
-        companion,
-    ]
-    assert companion not in instruction_updates[0]
-    assert instruction_updates[1].encode() == companion.encode()
+    assert not hasattr(agent, "apply_guide_persona")
+    assert guide_prompt != agent.instructions
+    assert "plan_guide_task" in guide_prompt
+    assert "You are Buddy, the companion inside Aura." in agent.instructions
+    assert "plan_guide_task" not in agent.instructions

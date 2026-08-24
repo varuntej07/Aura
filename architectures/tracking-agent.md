@@ -1,12 +1,12 @@
 # Tracking agent architecture
 
-Tracked topics are researched once per shared topic, reconciled into stable fixtures, and scheduled as a small set of meaningful moments. The current design does not create a recurring poll grid.
+Tracked topics require an explicit request for ongoing updates, are researched once per shared topic, reconciled into stable fixtures, and scheduled as a small set of meaningful moments. A one-time question is rejected at provisioning, and a topic without a researched event end automatically stops after 14 days unless renewed.
 
 ## Component and data flow
 
 ```text
-+----------------------+    track_topic tool    +----------------------+
-| text or voice user   | ---------------------> | topic agent          |
++----------------------+ explicit ongoing intent +----------------------+
+| text or voice user   | ----------------------> | topic agent          |
 +----------------------+                        | research + structure |
                                                 +----------+-----------+
                                                            |
@@ -36,9 +36,9 @@ Tracked topics are researched once per shared topic, reconciled into stable fixt
                                                 | fact transition gate |
                                                 +----------+-----------+
                                                            |
-                                                meaningful change only
+                                             material user change only
                                                            v
-                                                notification proposal
+                                             proactive notification proposal
 ```
 
 One `TrackedTopic` is shared across subscribers, while each `Tracker` holds a user's subscription. Tracking is request-driven, so fresh-user versus returning-user memory does not change the scheduling architecture.
@@ -46,7 +46,9 @@ One `TrackedTopic` is shared across subscribers, while each `Tracker` holds a us
 ## Failure, retry, and recovery
 
 ```text
-Research fails --------------------> setup reports retryable failure; no fake schedule
+Research fails --------------------> bounded minimal topic; reconcile researches ASAP
+One-time request ------------------> no tracker is created; answer remains one-time
+Open topic reaches 14 days --------> topic completes unless explicitly renewed
 Reconcile rewords a fixture -------> echoed ID, then time/token matching keeps identity
 Weak/empty reconcile result -------> do not cancel the existing future schedule
 Duplicate due scan ----------------> atomic checkpoint claim prevents double processing
@@ -61,8 +63,9 @@ Topic ends/no subscribers ---------> stop or expire future work
 1. The user asks Buddy to keep them posted.
 2. The topic agent researches the tournament and stores shared fixtures.
 3. Each fixture gets pre, live, and result moments rather than dozens of polling documents.
-4. A due moment fetches evidence, verifies a new fact, and submits a tracking proposal.
-5. All subscribed users can reuse the shared research result.
+4. A due moment fetches evidence, verifies a material fact change, and submits a proactive tracking proposal.
+5. The shared notification funnel independently applies user-local quiet hours, arbitration, adaptive budget, and tap payoff before delivery.
+6. All subscribed users can reuse the shared research result.
 
 ## Non-obvious walkthrough: fixture name changes
 

@@ -245,7 +245,8 @@ When a request matches an installed skill, invoke it as the first action rather
 than asking whether to. Routing: product ideas -> office-hours · strategy ->
 plan-ceo-review · bugs -> investigate · ship/PR -> ship · QA -> qa · code review
 -> review · docs -> document-release · new feature planning -> plan-feature ·
-architecture -> plan-eng-review.
+architecture -> plan-eng-review · CTO-level technical/product questions ->
+cto-briefing.
 
 **Boundaries always win over skill routing.** Anything that commits, pushes,
 deploys, sends, publishes, or schedules needs explicit confirmation in the

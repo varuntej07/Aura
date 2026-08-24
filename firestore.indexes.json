@@ -694,6 +694,17 @@
       ]
     },
     {
+      "collectionGroup": "dictation_traces",
+      "fieldPath": "expires_at",
+      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
       "collectionGroup": "get_better_activity",
       "fieldPath": "expires_at",
       "ttl": true,

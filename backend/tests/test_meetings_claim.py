@@ -137,7 +137,7 @@ def docs(monkeypatch) -> dict:
     return store_docs
 
 
-def _claim(tier: str, *, event_id: str = EVENT, device: str = "desktop-a",
+def _claim(tier: str, *, event_id: str = EVENT, installation: str = "desktop-a",
            end_in_minutes: int = 30) -> store.ClaimResult:
     end_time = (datetime.now(UTC) + timedelta(minutes=end_in_minutes)).isoformat()
     return asyncio.run(store.claim_meeting(
@@ -146,8 +146,8 @@ def _claim(tier: str, *, event_id: str = EVENT, device: str = "desktop-a",
         title="Weekly sync",
         start_time=datetime.now(UTC).isoformat(),
         end_time=end_time,
-        device_id=device,
         effective_tier=tier,
+        installation_id=installation,
     ))
 
 
@@ -187,7 +187,7 @@ def test_free_and_companion_are_capped_pro_is_not(docs):
     assert result.cap_minutes == F.PRO_SYNTHESIS_CAP_MINUTES
 
 
-def test_same_device_reclaim_is_idempotent_and_free(docs):
+def test_same_installation_reclaim_is_idempotent_and_free(docs):
     first = _claim("free")
     again = _claim("free")
     assert again.meeting_id == first.meeting_id
@@ -207,9 +207,9 @@ def test_reclaim_after_complete_mints_a_new_meeting(docs):
     assert _counter(docs) == 2  # a fresh capture is a fresh charge
 
 
-def test_other_device_gets_conflict_while_lock_is_live(docs):
-    _claim("free", device="desktop-a")
-    other = _claim("free", device="desktop-b")
+def test_other_installation_gets_conflict_while_lock_is_live(docs):
+    _claim("free", installation="desktop-a")
+    other = _claim("free", installation="desktop-b")
     assert other.denied_conflict
     assert not other.meeting_id
     assert _counter(docs) == 1
@@ -254,90 +254,5 @@ def test_transition_status_moves_only_from_allowed_states(docs):
 
 # ── Note persistence / retention ──────────────────────────────────────────────
 
-def _note() -> dict:
-    return {"summary": "s", "decisions": [], "action_items": [],
-            "open_questions": [], "language": "en", "one_sided": False,
-            "partial": False,
-            F.NOTE_TRANSCRIPT: [
-                {F.TRANSCRIPT_SPEAKER: "You", F.TRANSCRIPT_TEXT: "Stored turn"},
-            ]}
-
-
-def test_save_note_stamps_ttl_for_non_pro_only(docs):
-    for tier, expects_ttl in (("free", True), ("companion", True), ("pro", False)):
-        result = _claim(tier, event_id=f"evt-note-{tier}")
-        asyncio.run(store.save_note(UID, result.meeting_id, _note(), effective_tier=tier))
-        meeting = docs[("users", UID, "meetings", result.meeting_id)]
-        assert meeting[F.STATUS] == F.STATUS_READY
-        assert meeting[F.NOTE][F.NOTE_TRANSCRIPT] == _note()[F.NOTE_TRANSCRIPT]
-        assert (F.EXPIRES_AT in meeting) == expects_ttl, tier
-
-
-def test_append_segment_meta_is_idempotent(docs):
-    result = _claim("free")
-    for _ in range(2):
-        asyncio.run(store.append_segment_meta(
-            UID, result.meeting_id, seq=0, start_ms=0, duration_ms=300_000,
-            incomplete=False,
-        ))
-    meeting = docs[("users", UID, "meetings", result.meeting_id)]
-    assert meeting[F.SEGMENTS] == [
-        {"seq": 0, "start_ms": 0, "duration_ms": 300_000, "incomplete": False},
-    ]
-
-
-def test_upload_failure_is_durable_and_success_clears_it(docs):
-    result = _claim("free")
-    mid = result.meeting_id
-
-    asyncio.run(store.record_upload_failure(
-        UID,
-        mid,
-        code=F.FAIL_UPLOAD_STORAGE_UNAVAILABLE,
-    ))
-    meeting = docs[("users", UID, "meetings", mid)]
-    assert meeting[F.STATUS] == F.STATUS_CAPTURING
-    assert meeting[F.PROCESSING_STAGE] == F.STAGE_UPLOADING
-    assert meeting[F.FAILURE_CODE] == F.FAIL_UPLOAD_STORAGE_UNAVAILABLE
-    assert meeting[F.RETRYABLE] is True
-    assert meeting[F.LAST_ERROR_AT]
-
-    asyncio.run(store.append_segment_meta(
-        UID,
-        mid,
-        seq=0,
-        start_ms=0,
-        duration_ms=300_000,
-        incomplete=False,
-    ))
-    meeting = docs[("users", UID, "meetings", mid)]
-    assert F.FAILURE_CODE not in meeting
-    assert F.FAILURE_MESSAGE not in meeting
-    assert meeting[F.RETRYABLE] is False
-
-
 # ── Synthesis lease (Cloud Tasks at-least-once defense) ───────────────────────
 
-def test_synthesis_lease_refuses_concurrent_duplicate_but_allows_stale(docs):
-    result = _claim("free")
-    mid = result.meeting_id
-    asyncio.run(store.transition_status(
-        UID, mid, from_statuses=(F.STATUS_CAPTURING,), to_status=F.STATUS_UPLOADED,
-    ))
-
-    claimed, now = asyncio.run(store.claim_synthesis(UID, mid))
-    assert claimed and now == F.STATUS_SYNTHESIZING
-
-    # A duplicate delivery while the lease is fresh must NOT re-run the work.
-    claimed, now = asyncio.run(store.claim_synthesis(UID, mid))
-    assert not claimed and now == F.STATUS_SYNTHESIZING
-
-    # A crashed worker's stale lease is reclaimable.
-    docs[("users", UID, "meetings", mid)][F.SYNTHESIS_STARTED_AT_MS] = 1
-    claimed, now = asyncio.run(store.claim_synthesis(UID, mid))
-    assert claimed and now == F.STATUS_SYNTHESIZING
-
-    # Settled meetings are never claimable.
-    docs[("users", UID, "meetings", mid)][F.STATUS] = F.STATUS_READY
-    claimed, now = asyncio.run(store.claim_synthesis(UID, mid))
-    assert not claimed and now == F.STATUS_READY

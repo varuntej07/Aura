@@ -96,6 +96,24 @@ The draft text and its screen-derived context summary are what persist; the SCRE
 The one REST piece is `POST /desktop/draft-outbound/refine` (`backend/src/handlers/draft_outbound.py`), called by the desktop card's refine chips with a Firebase ID token; when the desktop sends the worker-minted `draft_id` (optional, so old clients keep working), a successful refine also updates the stored doc, strictly update-only-if-exists so a REST caller can never mint a doc and a dashboard-deleted draft stays deleted.
 The endpoint is text-only by design and cannot mint a new draft, which is also how refines stay outside the free-tier daily draft cap (`users/{uid}/usage/daily_outbound_draft`).
 
+### 5a. Interview Mode job-description transfer (desktop-only, session-memory only)
+
+Rides the same voice worker as contract 4. Buddy hands off to a separate LiveKit agent in the same `AgentSession`; the setup step asks for the company, then whether the user has the job description to hand.
+
+The transfer is one step of a longer flow that is otherwise entirely worker-internal: Buddy -> `InterviewSupervisorAgent` (setup, then one structured planning call) -> `InterviewerAgent` (asks the planned questions) -> the same Buddy instance. Only the paste overlay crosses the repo boundary; the plan, the questions, and the interview itself never leave the worker and are never sent to any client.
+
+When they do, the worker publishes `interview.material.request` on the reliable `client_events` topic with `{schema_version, interview_id, revision, material_type: "job_description"}`. The desktop shows one paste overlay and MUST echo `interview.material.overlay_shown {interview_id, revision}` on the same topic; the worker waits briefly, resends once idempotently at the same id and revision, and if no acknowledgement arrives it tells the user the box did not open and asks for the role conversationally instead. Acknowledging packet receipt, a hidden overlay, or a stale revision is forbidden, exactly as for `artifact.displayed` in contract 5.
+
+The pasted text goes back over a LiveKit byte stream on topic `interview_material`, carrying `interview_id`, `revision`, `material_type` and `schema_version` as stream attributes. The worker accepts one stream per armed `(interview_id, revision)` and rejects everything else: a mismatched pair, an unparseable or superseded revision, a `material_type` other than `job_description`, an unsupported `schema_version`, a sender that is not the session user, more than 64,000 bytes, non-UTF-8, or blank. `revision` increments per request within one interview and `interview_id` is minted per interview, which is what makes a paste answering an earlier overlay unusable against a later one.
+
+**The job description is session memory only.** It lives in the worker's `AgentSession.userdata` and dies with the session: no Firestore, no GCS, no REST, no logs. Only its character count is ever logged.
+
+Old desktop builds that do not implement the overlay simply never acknowledge, and the worker falls back to collecting the role and background by voice, so neither side has to ship first. Aura-Desktop now implements the overlay (`src/overlay/interview/`), so both paths are live: a current build shows the box, an older one silently takes the voice fallback, and the worker cannot tell the difference except by the ack.
+
+The desktop ranks the paste box directly below the chat slot and above every other card, because the worker has just told the user out loud to look at it. Chat still wins, and that degradation is honest by construction: the box never renders, so it is never acknowledged, so the worker takes the voice fallback rather than claiming a box is on screen.
+
+Worker side: `backend/src/agent/voice/interview/` (`contracts.py` holds every constant named above). Desktop side: `src/overlay/interview/interviewMaterial.ts` holds the matching constants, and `interview.material.request` is registered in `src/lib/agentData.ts`.
+
 ### 5b. Meeting Notes (desktop-only capture, REST + Cloud Tasks synthesis)
 
 Desktop-exclusive (Windows WASAPI capture; source architecture
@@ -117,13 +135,13 @@ restamp, stranding the capture permanently. A different
 installation receives the existing `meeting_already_claimed` conflict. Stale-fence
 mutations return 409 `stale_capture_fence`, and that response body now also carries the
 server's current `capture_fence` so a client can distinguish "behind" (adopt and resume)
-from "forked" (unrecoverable); older clients ignore the additive field.
+from "forked" (unrecoverable).
 `PUT /meetings/{id}/capture-runs/{capture_run_id}/segments/{seq}` takes raw
 two-channel 16 kHz FLAC with the V2 integrity headers. It creates only
 `audio/v2/{uid}/{meeting_id}/{capture_run_id}/{seq:06}/{plaintext_sha256}.flac`
 using generation-match zero and returns a persisted receipt bound to digest, size,
-object, generation, run, fence, meeting, and sequence. The V1 POST route remains a
-temporary compatibility surface; it must not regain overwrite semantics.
+object, generation, run, fence, meeting, and sequence. There is no V1 upload or
+completion surface.
 The bucket plus that lifecycle rule are a VERIFIED deploy prerequisite, not a comment: `backend/deploy.sh` runs `scripts/check_meeting_storage.py --check` before shifting traffic and aborts the deploy when the bucket is missing, in the wrong region, or lacks the lifecycle rule (2026-07-14 incident: the bucket was never provisioned, so every segment upload 404'd, the handler answered 503, and a real 22-minute meeting produced no note; the desktop's durable encrypted queue held the audio and recovered on the next signed-in restart once the bucket existed).
 `POST /meetings/{id}/capture-runs/{capture_run_id}/complete` verifies the canonical
 ordered manifest against deterministic segment documents and real upload receipts.
@@ -131,8 +149,9 @@ The same Firestore transaction advances state and creates a durable job, outbox 
 and append-only audit event. Cloud Tasks is only delivery. Workers use attempt/token
 leases, transcribe per segment, persist immutable provider and transcript artifacts,
 apply `meeting-quality-v1`, and can publish `ready` only through a fenced transaction
-with a passing quality report. The insight model never authors transcript text or
-speaker labels.
+with a passing quality report. Incomplete-segment evidence remains an auditable
+warning and produces a note marked partial when recognized speech is otherwise
+usable. The insight model never authors transcript text or speaker labels.
 Free and Companion meeting documents carry a 7-day `expires_at` TTL. Pro notes remain
 until explicit deletion or account deletion. Successful upload, completion,
 transcription, and publication do not delete cloud audio. `DELETE /meetings/{id}`
@@ -143,7 +162,7 @@ a retryable storage or Firestore interruption returns 503
 handoff: server `block_new_work`, desktop durable `local_delete` receipt, then exact
 cloud deletion through `delete_complete`. Uploads and stale workers must remain
 blocked throughout.
-`GET /meetings/recent` returns the note without transcript turns for a bounded dashboard payload. `GET /meetings/{id}` returns the full note with transcript. Both use an explicit public note-field allowlist, and legacy notes without transcripts remain valid.
+`GET /meetings/recent` returns the note without transcript turns for a bounded dashboard payload. `GET /meetings/{id}` returns the full note with transcript. Both use an explicit public note-field allowlist and project the immutable canonical pointer as `transcript_artifact`.
 Capture trust model is load-bearing for the brand: user-armed only (global toggle default OFF), visible recording indicator the entire time, session-lock pause.
 Duration is TEMPORARILY clamped to 60 minutes on every tier (product decision 2026-07-11): events scheduled longer than an hour are not armable, the desktop engine hard-stops capture at 60 minutes per meeting, and the backend synthesis caps mirror the clamp (design values of 4h capture / 240min Pro synthesis return when long-meeting support lands).
 Join detection polls only inside the event's exact scheduled window, start to end, because detection is not link-matched in v1 and a wider armed window widens the misattribution surface.

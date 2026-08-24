@@ -9,7 +9,7 @@ def _body(response) -> dict:
     return json.loads(response.body.decode("utf-8"))
 
 
-def test_meeting_response_keeps_old_fields_and_adds_processing_contract():
+def test_meeting_response_includes_processing_contract():
     response = meetings._meeting_response({
         "meeting_id": "meeting-1",
         F.EVENT_ID: "event-1",
@@ -36,6 +36,14 @@ def test_detail_includes_transcript_and_recent_projection_omits_it():
     meeting = {
         "meeting_id": "meeting-1",
         F.STATUS: F.STATUS_READY,
+        F.ARTIFACTS: {
+            "canonical": {
+                "path": "transcripts/v2/user-1/meeting-1/revisions/r1/canonical.json",
+                "generation": "1",
+                "sha256": "a" * 64,
+            }
+        },
+        F.QUALITY_OUTCOME: "quality_passed",
         F.NOTE: {
             "summary": "Discussed the launch.",
             "decisions": ["Ship Friday"],
@@ -62,23 +70,8 @@ def test_detail_includes_transcript_and_recent_projection_omits_it():
     assert "internal_future_field" not in detail[F.NOTE]
 
 
-def test_legacy_note_gets_an_empty_detail_transcript():
-    response = meetings._meeting_response({
-        "meeting_id": "meeting-1",
-        F.STATUS: F.STATUS_READY,
-        F.NOTE: {"summary": "Legacy note"},
-    })
-
-    assert response[F.NOTE][F.NOTE_TRANSCRIPT] == []
-
-
 def test_retry_rejects_ready_and_actively_synthesizing_meetings(monkeypatch):
     monkeypatch.setattr(meetings, "resolve_user_id_from_request", lambda request: "user-1")
-    monkeypatch.setattr(
-        meetings.store,
-        "synthesis_lease_is_fresh",
-        lambda meeting_doc: meeting_doc.get(F.STATUS) == F.STATUS_SYNTHESIZING,
-    )
 
     async def run(meeting_doc: dict):
         async def get_meeting(uid, meeting_id):
@@ -88,36 +81,35 @@ def test_retry_rejects_ready_and_actively_synthesizing_meetings(monkeypatch):
         return await meetings.handle_retry(object(), "meeting-1")
 
     ready = asyncio.run(run({F.STATUS: F.STATUS_READY}))
-    active = asyncio.run(run({
-        F.STATUS: F.STATUS_SYNTHESIZING,
-        F.SYNTHESIS_STARTED_AT_MS: 10_000,
-    }))
+    active = asyncio.run(run({F.STATUS: F.STATUS_SYNTHESIZING}))
 
     assert ready.status_code == 409
     assert active.status_code == 409
 
 
-def test_retry_reenqueues_a_stale_synthesis_lease(monkeypatch):
+def test_retry_dispatches_the_current_v2_job(monkeypatch):
     monkeypatch.setattr(meetings, "resolve_user_id_from_request", lambda request: "user-1")
 
     async def get_meeting(uid, meeting_id):
         return {
-            F.STATUS: F.STATUS_SYNTHESIZING,
-            F.SYNTHESIS_STARTED_AT_MS: 1,
+            F.STATUS: F.STATUS_FAILED,
             F.ATTEMPT_COUNT: 3,
         }
 
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str]] = []
 
-    def enqueue(uid, meeting_id, *, dedup_suffix=""):
-        calls.append((uid, meeting_id, dedup_suffix))
-        return "task"
+    async def retry_v2_job(uid, meeting_id):
+        return "meeting:job-4"
+
+    async def dispatch_job(uid, job_id):
+        calls.append((uid, job_id))
 
     monkeypatch.setattr(meetings.store, "get_meeting", get_meeting)
-    monkeypatch.setattr(meetings.tasks, "enqueue_synthesis", enqueue)
+    monkeypatch.setattr(meetings.store, "retry_v2_job", retry_v2_job)
+    monkeypatch.setattr(meetings.tasks, "dispatch_job", dispatch_job)
 
     response = asyncio.run(meetings.handle_retry(object(), "meeting-1"))
 
     assert response.status_code == 200
-    assert _body(response)["status"] == F.STATUS_SYNTHESIZING
-    assert calls == [("user-1", "meeting-1", "r3")]
+    assert _body(response)["status"] == F.STATUS_UPLOADED
+    assert calls == [("user-1", "meeting:job-4")]
