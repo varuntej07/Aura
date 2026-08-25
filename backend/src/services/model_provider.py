@@ -19,7 +19,8 @@ To upgrade a tier: change ONE line in settings.py — zero call-site changes.
 Provider routing is inferred from the model ID prefix:
     "gemini-*"  → Google Gen AI SDK
     "claude-*"  → Anthropic SDK
-    (future) "gpt-*" → OpenAI SDK, "sonar-*" → Perplexity SDK
+    "gpt-*"     → OpenAI SDK for latency-sensitive text streaming
+    (future) "sonar-*" → Perplexity SDK
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ import asyncio
 import hashlib
 import random
 import re
-from collections.abc import Iterator
+from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -42,6 +43,7 @@ from ..prompts import STRUCTURED_OUTPUT_RETRY_INSTRUCTION
 from .analytics.llm_telemetry import (
     anthropic_usage_tokens,
     gemini_usage_tokens,
+    openai_usage_tokens,
     start_llm_generation,
 )
 
@@ -229,7 +231,7 @@ _ANTHROPIC_RETRYABLE = (
 _PROVIDER_PREFIXES: dict[str, str] = {
     "gemini": "gemini",
     "claude": "anthropic",
-    "gpt": "openai",       # future
+    "gpt": "openai",
     "sonar": "perplexity",   # future
     "o1": "openai",       # future
     "o3": "openai",       # future
@@ -353,6 +355,7 @@ class ModelProvider:
     def __init__(self) -> None:
         self._anthropic: anthropic.AsyncAnthropic | None = None
         self._gemini_client: Any = None   # google.genai.Client, lazy
+        self._openai_client: Any = None
 
     async def cheap(
         self,
@@ -421,6 +424,139 @@ class ModelProvider:
             temperature=temperature,
             max_output_tokens=max_output_tokens,
         )
+
+    async def stream_text(
+        self,
+        prompt: str,
+        *,
+        model_id: str,
+        system: str | None = None,
+        images: list[dict] | None = None,
+        temperature: float = 0.5,
+        max_output_tokens: int | None = None,
+        caller: str = "text_stream",
+    ) -> AsyncGenerator[str, None]:
+        """Stream one latency-sensitive text response without buffering it.
+
+        This is intentionally a single-attempt path. A caller may fall back only
+        before exposing text; once text is visible, switching models would splice
+        two different answers together.
+        """
+        provider = _infer_provider(model_id)
+        recording = start_llm_generation(model=model_id, provider=provider, caller=caller)
+        _spend_attempt()
+
+        if provider == "anthropic":
+            messages: list[dict] = []
+            if images:
+                content: list[dict] = [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": image.get("media_type", "image/jpeg"),
+                            "data": image["data"],
+                        },
+                    }
+                    for image in images
+                ]
+                content.append({"type": "text", "text": prompt})
+                messages.append({"role": "user", "content": content})
+            else:
+                messages.append({"role": "user", "content": prompt})
+            kwargs: dict[str, Any] = {
+                "model": model_id,
+                "max_tokens": max(1, int(max_output_tokens or 2048)),
+                "messages": messages,
+                "temperature": temperature,
+            }
+            if system:
+                kwargs["system"] = system
+            try:
+                async with self._get_anthropic_client().messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        if text:
+                            yield text
+                    message = await stream.get_final_message()
+            except BaseException as exc:
+                recording.finish(success=False, error_type=type(exc).__name__)
+                _emit_usage(model_id, None)
+                raise
+            raw_usage = getattr(message, "usage", None)
+            recording.finish(tokens=anthropic_usage_tokens(raw_usage))
+            _emit_usage(model_id, raw_usage)
+            return
+
+        if provider == "openai":
+            user_content: str | list[dict[str, Any]] = prompt
+            if images:
+                user_content = [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": (
+                                f"data:{image.get('media_type', 'image/jpeg')};base64,"
+                                f"{image['data']}"
+                            )
+                        },
+                    }
+                    for image in images
+                ]
+                user_content.append({"type": "text", "text": prompt})
+            messages = []
+            if system:
+                messages.append({"role": "system", "content": system})
+            messages.append({"role": "user", "content": user_content})
+            raw_usage: Any = None
+            try:
+                stream = await self._get_openai_client().chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    reasoning_effort="none",
+                    max_completion_tokens=max(1, int(max_output_tokens or 2048)),
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                async for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        raw_usage = usage
+                    for choice in getattr(chunk, "choices", []):
+                        text = getattr(getattr(choice, "delta", None), "content", None)
+                        if text:
+                            yield text
+            except BaseException as exc:
+                recording.finish(success=False, error_type=type(exc).__name__)
+                _emit_usage(model_id, None)
+                raise
+            recording.finish(tokens=openai_usage_tokens(raw_usage))
+            _emit_usage(model_id, raw_usage)
+            return
+
+        recording.finish(success=False, error_type="NotImplementedError")
+        _emit_usage(model_id, None)
+        raise NotImplementedError(f"text streaming is unavailable for provider '{provider}'")
+
+    async def stream_balanced_text(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        images: list[dict] | None = None,
+        temperature: float = 0.5,
+        max_output_tokens: int | None = None,
+        caller: str = "balanced_stream",
+    ) -> AsyncGenerator[str, None]:
+        async for text in self.stream_text(
+            prompt,
+            model_id=settings.TIER_BALANCED,
+            system=system,
+            images=images,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+            caller=caller,
+        ):
+            yield text
 
     async def expert(
         self,
@@ -1242,6 +1378,15 @@ class ModelProvider:
             from google import genai  # type: ignore
             self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
         return self._gemini_client
+
+    def _get_openai_client(self) -> Any:
+        if self._openai_client is None:
+            if not settings.OPENAI_API_KEY:
+                raise ValueError("OPENAI_API_KEY is not set - OpenAI tier unavailable")
+            from openai import AsyncOpenAI  # type: ignore
+
+            self._openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY.strip())
+        return self._openai_client
 
 
 #  Module-level singleton

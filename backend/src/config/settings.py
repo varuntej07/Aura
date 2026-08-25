@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
     OPENAI_TEXT_CHAT_MODEL: str = "gpt-5.6-luna"
     INTERVIEW_COMPANY_RESEARCH_MODEL: str = "gpt-5.6-terra"
+    INTERVIEW_ANSWER_PRIMARY_MODEL: str = "claude-haiku-4-5-20251001"
+    INTERVIEW_ANSWER_FALLBACK_MODEL: str = "gpt-5.6-luna"
+    INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S: float = 3.0
+    INTERVIEW_ANSWER_STREAM_IDLE_TIMEOUT_S: float = 3.0
+    INTERVIEW_ANSWER_MAX_STREAM_S: float = 20.0
 
     # OpenAI Realtime bridge: the instant speech-to-speech leg the desktop opens
     # while the LiveKit cascade worker cold-starts. The desktop connects direct to

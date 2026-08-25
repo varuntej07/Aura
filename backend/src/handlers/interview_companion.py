@@ -14,6 +14,8 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Literal
 
+import anthropic
+import openai
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -29,17 +31,80 @@ from ..services.interview_preparation import (
     assemble_interview_brief,
     interview_brief_prompt,
 )
-from ..services.model_provider import get_model_provider
+from ..services.model_provider import attempt_budget, get_model_provider, is_quota_exhausted
 from ..services.request_auth import resolve_user_id_from_request
 
 _DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
 _TOKEN_MINT_TIMEOUT_S = 6.0
 _GATE_CONFIDENCE = 0.78
+_PROVIDER_CIRCUITS: dict[str, tuple[float, str]] = {}
+_PROVIDER_SLOW_STARTS: dict[str, int] = {}
 _SSE_HEADERS = {
     "Cache-Control": "no-cache, no-store",
     "X-Accel-Buffering": "no",
     "Connection": "keep-alive",
 }
+
+
+class _FirstVisibleTokenTimeout(TimeoutError):
+    pass
+
+
+class _StreamIdleTimeout(TimeoutError):
+    pass
+
+
+class _StreamDeadlineExceeded(TimeoutError):
+    pass
+
+
+def _provider_circuit_reason(model_id: str) -> str | None:
+    circuit = _PROVIDER_CIRCUITS.get(model_id)
+    if circuit is None:
+        return None
+    open_until, reason = circuit
+    if time.monotonic() < open_until:
+        return reason
+    _PROVIDER_CIRCUITS.pop(model_id, None)
+    return None
+
+
+def _open_provider_circuit(model_id: str, seconds: float, reason: str) -> None:
+    _PROVIDER_CIRCUITS[model_id] = (time.monotonic() + seconds, reason)
+
+
+def _record_provider_success(model_id: str) -> None:
+    _PROVIDER_SLOW_STARTS.pop(model_id, None)
+    _PROVIDER_CIRCUITS.pop(model_id, None)
+
+
+def _record_provider_failure(model_id: str, exc: Exception) -> str:
+    if isinstance(exc, _FirstVisibleTokenTimeout):
+        slow_starts = _PROVIDER_SLOW_STARTS.get(model_id, 0) + 1
+        _PROVIDER_SLOW_STARTS[model_id] = slow_starts
+        if slow_starts >= 2:
+            _open_provider_circuit(model_id, 30.0, "slow_first_token")
+        return "slow_first_token"
+    if is_quota_exhausted(exc):
+        _open_provider_circuit(model_id, 600.0, "credits_or_quota")
+        return "credits_or_quota"
+    status_code = getattr(exc, "status_code", None)
+    if status_code in (401, 403, 404):
+        _open_provider_circuit(model_id, 600.0, "provider_access")
+        return "provider_access"
+    if status_code == 429:
+        _open_provider_circuit(model_id, 30.0, "rate_limited")
+        return "rate_limited"
+    if isinstance(status_code, int) and status_code >= 500:
+        _open_provider_circuit(model_id, 30.0, "provider_outage")
+        return "provider_outage"
+    if isinstance(
+        exc,
+        (anthropic.APIConnectionError, openai.APIConnectionError, ConnectionError, OSError),
+    ):
+        _open_provider_circuit(model_id, 30.0, "connection_failure")
+        return "connection_failure"
+    return "request_failure"
 
 
 class TranscriptTurn(BaseModel):
@@ -576,6 +641,207 @@ def _answer_prompt(payload: InterviewAnswerRequest, decision: GateDecision) -> s
     )
 
 
+async def _grounded_answer_deltas(
+    payload: InterviewAnswerRequest,
+    decision: GateDecision,
+    evidence_ids: list[str],
+    model_id: str,
+) -> AsyncGenerator[str, None]:
+    candidate_evidence, target_evidence = _evidence_ids_by_scope(payload.brief)
+    source_sets = {
+        "candidate_fact": candidate_evidence,
+        "target_fact": target_evidence,
+        "general": set(),
+    }
+    system = (
+        "You write truthful, speakable interview answers. Return one to ten lines and "
+        "nothing else. Every line must be KIND|SOURCE_IDS|SENTENCE. KIND is exactly "
+        "candidate_fact, target_fact, or general. Put comma-separated verified source IDs "
+        "in SOURCE_IDS for factual lines, and put - for general lines. Put the kind and "
+        "source IDs before writing the sentence so Aura can validate them before showing "
+        "text. Never use line breaks inside a sentence. Never claim experience, metrics, "
+        "employers, projects, or skills without verified candidate evidence. Company and "
+        "role statements use target evidence and cannot describe candidate experience."
+    )
+    images = (
+        [{"media_type": "image/jpeg", "data": payload.screen_sight.data}]
+        if payload.screen_sight
+        else None
+    )
+    buffer = ""
+    active_kind: str | None = None
+    active_length = 0
+    sentence_count = 0
+    separate_next_sentence = False
+
+    async for chunk in get_model_provider().stream_text(
+        _answer_prompt(payload, decision),
+        model_id=model_id,
+        system=system,
+        images=images,
+        temperature=0.25,
+        max_output_tokens=650,
+        caller="interview_companion_answer",
+    ):
+        buffer += chunk.replace("\r", "")
+        while True:
+            if active_kind is None:
+                first_separator = buffer.find("|")
+                second_separator = buffer.find("|", first_separator + 1)
+                first_newline = buffer.find("\n")
+                if first_newline >= 0 and (
+                    first_separator < 0
+                    or second_separator < 0
+                    or first_newline < second_separator
+                ):
+                    raise ValueError("streamed answer line had no grounding header")
+                if first_separator < 0 or second_separator < 0:
+                    break
+                kind = buffer[:first_separator].strip()
+                raw_source_ids = buffer[first_separator + 1 : second_separator].strip()
+                buffer = buffer[second_separator + 1 :]
+                if kind not in source_sets:
+                    raise ValueError("streamed answer used an unsupported sentence kind")
+                line_source_ids = [] if raw_source_ids == "-" else [
+                    source_id.strip()
+                    for source_id in raw_source_ids.split(",")
+                    if source_id.strip()
+                ]
+                if kind == "general":
+                    if line_source_ids:
+                        raise ValueError("general streamed answer sentence claimed evidence")
+                elif not line_source_ids or any(
+                    source_id not in source_sets[kind] for source_id in line_source_ids
+                ):
+                    raise ValueError("streamed answer referenced evidence from the wrong scope")
+                for source_id in line_source_ids:
+                    if source_id not in evidence_ids:
+                        evidence_ids.append(source_id)
+                sentence_count += 1
+                if sentence_count > 10:
+                    raise ValueError("streamed answer returned too many sentences")
+                active_kind = kind
+                active_length = 0
+                if separate_next_sentence:
+                    yield " "
+                    separate_next_sentence = False
+
+            newline = buffer.find("\n")
+            if newline >= 0:
+                delta = buffer[:newline]
+                buffer = buffer[newline + 1 :]
+                if delta:
+                    active_length += len(delta)
+                    if active_length > 1_000:
+                        raise ValueError("streamed answer sentence was too long")
+                    yield delta
+                if active_length == 0:
+                    raise ValueError("streamed answer sentence was empty")
+                active_kind = None
+                separate_next_sentence = True
+                continue
+            if buffer:
+                active_length += len(buffer)
+                if active_length > 1_000:
+                    raise ValueError("streamed answer sentence was too long")
+                yield buffer
+                buffer = ""
+            break
+
+    if active_kind is None:
+        if buffer.strip():
+            raise ValueError("streamed answer ended with an incomplete grounding header")
+    else:
+        if buffer:
+            active_length += len(buffer)
+            if active_length > 1_000:
+                raise ValueError("streamed answer sentence was too long")
+            yield buffer
+        if active_length == 0:
+            raise ValueError("streamed answer sentence was empty")
+    if sentence_count == 0:
+        raise ValueError("streamed answer was empty")
+
+
+async def _provider_answer_deltas(
+    payload: InterviewAnswerRequest,
+    decision: GateDecision,
+    evidence_ids: list[str],
+    model_id: str,
+) -> AsyncGenerator[str, None]:
+    if payload.contract_version == 1:
+        async for chunk in get_model_provider().stream_text(
+            _answer_prompt(payload, decision),
+            model_id=model_id,
+            system=(
+                "You write truthful, speakable interview answers for the candidate. "
+                "Never claim experience, metrics, employers, projects, or skills that are "
+                "not present in the supplied context. Return answer text only."
+            ),
+            temperature=0.35,
+            max_output_tokens=450,
+            caller="interview_companion_answer",
+        ):
+            yield chunk
+        return
+
+    async for delta in _grounded_answer_deltas(
+        payload,
+        decision,
+        evidence_ids,
+        model_id,
+    ):
+        yield delta
+
+
+async def _timed_answer_deltas(
+    payload: InterviewAnswerRequest,
+    decision: GateDecision,
+    evidence_ids: list[str],
+    model_id: str,
+) -> AsyncGenerator[str, None]:
+    stream = _provider_answer_deltas(payload, decision, evidence_ids, model_id)
+    started = time.monotonic()
+    first_deadline = started + settings.INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S
+    first_delta = True
+    try:
+        while True:
+            now = time.monotonic()
+            remaining = settings.INTERVIEW_ANSWER_MAX_STREAM_S - (now - started)
+            if remaining <= 0:
+                raise _StreamDeadlineExceeded("answer stream exceeded its total deadline")
+            timeout = min(
+                first_deadline - now
+                if first_delta
+                else settings.INTERVIEW_ANSWER_STREAM_IDLE_TIMEOUT_S,
+                remaining,
+            )
+            if timeout <= 0:
+                raise _FirstVisibleTokenTimeout(
+                    "provider did not produce visible answer text in time"
+                )
+            try:
+                delta = await asyncio.wait_for(anext(stream), timeout=timeout)
+            except StopAsyncIteration:
+                return
+            except TimeoutError as exc:
+                if first_delta:
+                    raise _FirstVisibleTokenTimeout(
+                        "provider did not produce visible answer text in time"
+                    ) from exc
+                if remaining <= timeout:
+                    raise _StreamDeadlineExceeded(
+                        "answer stream exceeded its total deadline"
+                    ) from exc
+                raise _StreamIdleTimeout("answer stream stopped producing text") from exc
+            if first_delta and not delta.strip():
+                continue
+            first_delta = False
+            yield delta
+    finally:
+        await stream.aclose()
+
+
 async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str, None]:
     provider = get_model_provider()
     identity = {
@@ -615,20 +881,22 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
         yield _terminal()
         return
     try:
-        decision = await asyncio.wait_for(
-            provider.cheap(
-                _gate_prompt(payload),
-                system=(
-                    "You are a strict interview turn classifier. Return only the requested "
-                    "structured decision. Physical source is already verified as remote; do "
-                    "not infer that remote automatically means addressed to the candidate."
+        with attempt_budget(1):
+            decision = await asyncio.wait_for(
+                provider.cheap(
+                    _gate_prompt(payload),
+                    system=(
+                        "You are a strict interview turn classifier. Return only the requested "
+                        "structured decision. Physical source is already verified as remote; do "
+                        "not infer that remote automatically means addressed to the candidate."
+                    ),
+                    response_model=GateDecision,
+                    temperature=0.0,
+                    model=settings.TIER_CHEAP_FALLBACK,
+                    max_output_tokens=350,
                 ),
-                response_model=GateDecision,
-                temperature=0.0,
-                max_output_tokens=350,
-            ),
-            timeout=8.0,
-        )
+                timeout=2.0,
+            )
         if not isinstance(decision, GateDecision):
             raise TypeError("gate returned the wrong response type")
     except Exception as exc:
@@ -687,67 +955,72 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
         return
 
     answer_started = time.perf_counter()
+    answer_streamed = False
+    answer_model = ""
+    answer_ttft_ms: int | None = None
     try:
-        if payload.contract_version == 1:
-            legacy_answer = await asyncio.wait_for(
-                provider.balanced(
-                    _answer_prompt(payload, decision),
-                    system=(
-                        "You write truthful, speakable interview answers for the candidate. "
-                        "Never claim experience, metrics, employers, projects, or skills that are "
-                        "not present in the supplied context. Return answer text only."
-                    ),
-                    temperature=0.35,
-                    max_output_tokens=450,
-                ),
-                timeout=15.0,
-            )
-            if not isinstance(legacy_answer, str) or not legacy_answer.strip():
-                raise ValueError("answer was empty")
-            answer = legacy_answer.strip()
-            evidence_ids: list[str] = []
-        else:
-            grounded = await asyncio.wait_for(
-                provider.balanced(
-                    _answer_prompt(payload, decision),
-                    system=(
-                        "You write truthful, speakable interview answers. Return only the "
-                        "requested structured sentences. Never claim experience, metrics, "
-                        "employers, projects, or skills without verified candidate evidence. A "
-                        "company or role statement must use target evidence and cannot describe "
-                        "candidate experience. A generic approach must use kind general with no "
-                        "source ID."
-                    ),
-                    response_model=GroundedAnswer,
-                    images=(
-                        [{"media_type": "image/jpeg", "data": payload.screen_sight.data}]
-                        if payload.screen_sight
-                        else None
-                    ),
-                    temperature=0.25,
-                    max_output_tokens=650,
-                ),
-                timeout=15.0,
-            )
-            if not isinstance(grounded, GroundedAnswer):
-                raise TypeError("answer returned the wrong response type")
-            candidate_evidence, target_evidence = _evidence_ids_by_scope(payload.brief)
-            evidence_ids = []
-            for sentence in grounded.sentences:
-                permitted = (
-                    candidate_evidence
-                    if sentence.kind == "candidate_fact"
-                    else target_evidence
-                    if sentence.kind == "target_fact"
-                    else set()
+        models = tuple(dict.fromkeys((
+            settings.INTERVIEW_ANSWER_PRIMARY_MODEL,
+            settings.INTERVIEW_ANSWER_FALLBACK_MODEL,
+        )))
+        last_exception: Exception | None = None
+        for model_id in models:
+            circuit_reason = _provider_circuit_reason(model_id)
+            if circuit_reason is not None:
+                logger.warn(
+                    "interview_companion: skipping unhealthy answer provider",
+                    {"model": model_id, "reason": circuit_reason},
                 )
-                if any(source_id not in permitted for source_id in sentence.source_ids):
-                    raise ValueError("answer referenced evidence from the wrong scope")
-                evidence_ids.extend(sentence.source_ids)
-            answer = " ".join(sentence.text.strip() for sentence in grounded.sentences).strip()
-            if not answer:
-                raise ValueError("answer was empty")
-            evidence_ids = list(dict.fromkeys(evidence_ids))
+                continue
+            leg_started = time.perf_counter()
+            leg_evidence_ids: list[str] = []
+            answer_parts: list[str] = []
+            try:
+                async for delta in _timed_answer_deltas(
+                    payload,
+                    decision,
+                    leg_evidence_ids,
+                    model_id,
+                ):
+                    if not answer_streamed:
+                        answer_streamed = True
+                        answer_model = model_id
+                        answer_ttft_ms = round((time.perf_counter() - leg_started) * 1_000)
+                        _record_provider_success(model_id)
+                        logger.info(
+                            "interview_companion: answer stream visible",
+                            {"model": model_id, "ttft_ms": answer_ttft_ms},
+                        )
+                    answer_parts.append(delta)
+                    yield _frame(
+                        "answer_delta",
+                        {
+                            "type": "answer_delta",
+                            **identity,
+                            "delta": delta,
+                        },
+                    )
+                answer = "".join(answer_parts).strip()
+                if not answer:
+                    raise ValueError("answer was empty")
+                evidence_ids = list(dict.fromkeys(leg_evidence_ids))
+                break
+            except Exception as stream_exc:
+                if answer_streamed:
+                    raise
+                reason = _record_provider_failure(model_id, stream_exc)
+                logger.warn(
+                    "interview_companion: answer provider failed before visible text",
+                    {
+                        "model": model_id,
+                        "reason": reason,
+                        "error_type": type(stream_exc).__name__,
+                        "elapsed_ms": round((time.perf_counter() - leg_started) * 1_000),
+                    },
+                )
+                last_exception = stream_exc
+        else:
+            raise last_exception or RuntimeError("no healthy answer provider was available")
     except Exception as exc:
         logger.warn(
             "interview_companion: answer generation failed",
@@ -765,15 +1038,16 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
         yield _terminal()
         return
 
-    for offset in range(0, len(answer), 64):
-        yield _frame(
-            "answer_delta",
-            {
-                "type": "answer_delta",
-                **identity,
-                "delta": answer[offset : offset + 64],
-            },
-        )
+    if not answer_streamed:
+        for offset in range(0, len(answer), 64):
+            yield _frame(
+                "answer_delta",
+                {
+                    "type": "answer_delta",
+                    **identity,
+                    "delta": answer[offset : offset + 64],
+                },
+            )
     yield _frame(
         "answer_done",
         {
@@ -786,6 +1060,8 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
                 for source_id in evidence_ids
             ],
             "answer_ms": round((time.perf_counter() - answer_started) * 1_000),
+            "answer_model": answer_model,
+            "answer_ttft_ms": answer_ttft_ms,
         },
     )
     yield _terminal()
