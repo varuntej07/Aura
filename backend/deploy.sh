@@ -65,10 +65,10 @@ PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD="5000000"
 # Dodo Payments production catalog. The API key and webhook signing secret are
 # injected from Secret Manager in the Cloud Run deploy block below.
 DODO_API_BASE="https://live.dodopayments.com"
-DODO_PRODUCT_COMPANION_MONTHLY="pdt_ONIKvXgFDbrgO4EC5Ads0"
-DODO_PRODUCT_COMPANION_YEARLY="pdt_ONIKvfUD1Bic9YM9Olz4L"
-DODO_PRODUCT_PRO_MONTHLY="pdt_ONIKvmk9Uzm0A4W7j3DNA"
-DODO_PRODUCT_PRO_YEARLY="pdt_ONIKvfC3x3KbqpGY9Hap"
+DODO_PRODUCT_COMPANION_MONTHLY="pdt_0NlKvXgFDbrqO4EC5Ads0"
+DODO_PRODUCT_COMPANION_YEARLY="pdt_0NlKvfUD1Bic9YM9Olz4L"
+DODO_PRODUCT_PRO_MONTHLY="pdt_0NlKvmk9Uzm0A4W7j3DNA"
+DODO_PRODUCT_PRO_YEARLY="pdt_0NlKvvfC3x3KbqpGY9Hap"
 
 echo "▶ Deploying ${SERVICE_NAME} to project=${PROJECT_ID} region=${REGION}"
 

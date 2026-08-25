@@ -75,7 +75,7 @@ class _PaywallScreenState extends State<PaywallScreen>
     '3d_warning' => "Your trial wraps up in 3 days. Let's keep this going.",
     'expired' =>
       "Your trial's over, but Buddy's not going anywhere. Pick back up anytime.",
-    _ => '$kTrialDurationDays-day free trial. Cancel anytime.',
+    _ => '$kTrialDurationDays-day free trial. No card required.',
   };
 
   @override

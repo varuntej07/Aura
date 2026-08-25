@@ -154,8 +154,8 @@
       "title": "Aura beta and supported platforms",
       "summary": "Aura is in beta, with an Android mobile app and a Windows desktop app; there is no iOS release.",
       "answers": {
-        "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS, and Aura Desktop is available on Windows.",
-        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows."
+        "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS yet, and Aura Desktop is available on Windows not MacOS yet.",
+        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows not MacOS yet"
       },
       "surfaces": ["all"],
       "platforms": ["all"],

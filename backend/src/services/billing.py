@@ -113,36 +113,17 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.DODO_API_KEY}"}
 
 
-async def _fetch_customer_identity(uid: str) -> dict[str, str] | None:
-    """Best-effort {email, name} from the Firebase account, to prefill the
-    hosted checkout. None when unavailable; Dodo's page collects email itself."""
-    from ..services.firebase import admin_auth
-
-    def _lookup() -> dict[str, str] | None:
-        user = admin_auth().get_user(uid)
-        email = getattr(user, "email", None)
-        if not email:
-            return None
-        return {"email": email, "name": getattr(user, "display_name", None) or ""}
-
-    try:
-        return await asyncio.to_thread(_lookup)
-    except Exception as exc:
-        logger.warn("billing: customer identity lookup failed", {
-            "user_id": uid, "error": str(exc),
-        })
-        return None
-
-
 async def create_checkout_session(
     uid: str, tier: str, period: str, customer_id: str | None = None
 ) -> str:
     """Creates a Dodo checkout session, returns the hosted checkout URL.
 
     metadata = {firebase_uid, tier, period} is the account handshake: the
-    payment webhook reads it back to know which uid to unlock. When the account
-    already has a Dodo customer (customer_id), the session is pinned to it so a
-    re-purchase or plan change never mints a second customer record.
+    payment webhook reads it back to know which uid to unlock. New customers
+    enter their own payment email, billing name, and address on Dodo's hosted
+    checkout. When the account already has a Dodo customer (customer_id), the
+    session is pinned to it so a re-purchase or plan change never mints a second
+    customer record.
     Raises DodoApiError on any failure (the handler maps it to 502).
     """
     product_id = settings.dodo_product_ids[(tier, period)]
@@ -153,10 +134,6 @@ async def create_checkout_session(
     }
     if customer_id:
         payload["customer"] = {"customer_id": customer_id}
-    else:
-        customer = await _fetch_customer_identity(uid)
-        if customer:
-            payload["customer"] = customer
 
     url = f"{settings.DODO_API_BASE}/checkouts"
     try:
