@@ -143,6 +143,9 @@ omit = [
 where = ["."]
 include = ["src*"]
 
+[tool.setuptools.package-data]
+"src.services.product_knowledge" = ["content/*.json"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

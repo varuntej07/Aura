@@ -64,6 +64,7 @@ TOOL_ACTIVITY_LABELS: dict[str, str] = {
     "create_calendar_event": "Adding to your calendar",
     "delete_memory": "Forgetting something",
     "get_upcoming_events": "Checking your calendar",
+    "get_aura_product_info": "Checking Aura's product guide",
     "get_user_context": "Pulling up your details",
     "list_emails": "Checking your inbox",
     "list_reminders": "Checking your reminders",

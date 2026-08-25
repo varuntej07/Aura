@@ -112,6 +112,8 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 # Anything else (or a missing value) collapses to "app", the neutral default.
 _KNOWN_SURFACES = frozenset({"app", "keyboard", "desktop"})
 _KNOWN_VOICE_MODES = frozenset({"standard", "guide", "onboarding"})
+_KNOWN_CLIENT_PLATFORMS = frozenset({"android", "ios", "windows"})
+_APP_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}$")
 _ARTIFACT_ACK_CAPABILITY = "displayed-v1"
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
@@ -147,6 +149,25 @@ def _resolve_voice_mode(ctx: JobContext) -> str:
     except Exception:
         pass
     return "standard"
+
+
+def _resolve_product_client_context(ctx: JobContext) -> tuple[str, str]:
+    """Return bounded platform and app version stamped by the token endpoint."""
+    try:
+        for participant in ctx.room.remote_participants.values():
+            raw = (getattr(participant, "metadata", "") or "").strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            platform = str(data.get("platform") or "").casefold()
+            app_version = str(data.get("app_version") or "").strip()
+            return (
+                platform if platform in _KNOWN_CLIENT_PLATFORMS else "",
+                app_version if _APP_VERSION_RE.fullmatch(app_version) else "",
+            )
+    except Exception:
+        pass
+    return "", ""
 
 
 def _resolve_bridged(ctx: JobContext) -> bool:
@@ -455,6 +476,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
         voice_request_id, voice_requested_at_ms = _resolve_voice_request_timing(ctx)
         surface = persisted_surface or "app"
+        client_platform, app_version = _resolve_product_client_context(ctx)
         voice_mode = _resolve_voice_mode(ctx)
         # Realtime-bridge session: the API only stamps signed `bridged` participant
         # metadata after it has admitted the Realtime leg. Treat that metadata as the
@@ -682,6 +704,8 @@ async def entrypoint(ctx: JobContext) -> None:
             user_tier=session_context.user_tier,
             display_name=draft_display_name,
             launch_surface=surface,
+            client_platform=client_platform,
+            app_version=app_version,
             voice_mode=voice_mode,
             connector_states=session_context.connector_states,
             bridged=bridged,

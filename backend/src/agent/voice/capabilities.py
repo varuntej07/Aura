@@ -12,6 +12,7 @@ from typing import Any
 
 from ...shared.tools import (
     CREATE_CALENDAR_EVENT_TOOL_DEFINITION,
+    GET_AURA_PRODUCT_INFO_TOOL_DEFINITION,
     SET_REMINDER_TOOL_DEFINITION,
     UPDATE_CALENDAR_EVENT_TOOL_DEFINITION,
 )
@@ -69,6 +70,7 @@ class ToolPrerequisite(StrEnum):
 
 
 class Capability(StrEnum):
+    PRODUCT_INFO_READ = "product_info_read"
     REMINDER_READ = "reminder_read"
     REMINDER_WRITE = "reminder_write"
     CALENDAR_READ = "calendar_read"
@@ -192,6 +194,15 @@ def _tool(
 VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
     item.name: item
     for item in (
+        _tool(
+            "get_aura_product_info",
+            Capability.PRODUCT_INFO_READ,
+            ToolEffect.READ,
+            namespace="product.help",
+            concurrent=False,
+            complex_eligible=True,
+            required=_execution_required_fields(GET_AURA_PRODUCT_INFO_TOOL_DEFINITION),
+        ),
         _tool(
             "list_reminders",
             Capability.REMINDER_READ,

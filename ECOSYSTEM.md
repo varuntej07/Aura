@@ -16,7 +16,7 @@ Do not update it for internal refactors, UI changes, or anything that stays insi
 
 | Repo | Path (this machine) | GitHub remote | Stack | Deploy mechanism | Role |
 |---|---|---|---|---|---|
-| **Aura** (this repo) | `MobileApps/Aura` | `varuntej07/juno` (repo renamed Aura, remote URL still says juno) | Flutter (mobile, Android/iOS) + FastAPI (`backend/`) | Mobile: Play Store / manual `.aab`. Backend: `docker build` straight from local disk (`backend/deploy.sh`), no git trigger, Cloud Run `juno-2ea45`/`us-central1` | Primary client (full API surface) and the shared backend every other repo talks to |
+| **Aura** (this repo) | `MobileApps/Aura` | `varuntej07/juno` (repo renamed Aura, remote URL still says juno) | Flutter mobile client (Android release target; iOS source exists but is not distributed) + FastAPI (`backend/`) | Product is in beta. Mobile: Android through Play Store / manual `.aab`; no iOS release. Backend: `docker build` straight from local disk (`backend/deploy.sh`), no git trigger, Cloud Run `juno-2ea45`/`us-central1` | Primary client (full API surface) and the shared backend every other repo talks to |
 | **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` + `latest.json`) | Current live Windows companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
 | **Aura-Web** | `MobileApps/Aura-Web` | `varuntej07/aura-web` | Next.js (App Router) + React + Framer Motion | Git-triggered deploy to Vercel (push to main auto-builds) | Marketing site (`auravoiceapp.com`), hosts the Google sign-in browser leg, and serves as the download page for Aura-Desktop |
 

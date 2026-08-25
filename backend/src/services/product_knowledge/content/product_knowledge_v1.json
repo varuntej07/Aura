@@ -1,0 +1,757 @@
+{
+  "schema_version": 1,
+  "knowledge_version": "2026.08.25.5",
+  "product_release": {
+    "stage": "beta",
+    "answers": {
+      "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS yet, and Aura Desktop is available on Windows not MacOS yet.",
+      "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows not MacOS yet"
+    },
+    "clients": [
+      {"surface": "app", "platform": "android", "availability": "available", "distribution": "Google Play beta or Android App Bundle"},
+      {"surface": "keyboard", "platform": "android", "availability": "available", "distribution": "Included with the Android app"},
+      {"surface": "desktop", "platform": "windows", "availability": "available", "distribution": "Aura Desktop for Windows"},
+      {"surface": "app", "platform": "ios", "availability": "unavailable", "distribution": "No iOS release"}
+    ]
+  },
+  "entries": [
+    {
+      "id": "capabilities.all",
+      "kind": "capabilities",
+      "status": "shipped",
+      "title": "What Aura can do across devices",
+      "summary": "Aura is a beta companion available as an Android mobile app and Windows desktop app, with account-scoped state and surface-specific tools.",
+      "answers": {
+        "voice": "Aura is currently in beta, with the mobile app on Android, not iOS, and Aura Desktop on Windows. I can chat or talk with you, remember useful things, manage reminders, work with your calendar and Gmail when linked, research the web, track topics, send useful follow-ups, provide a daily briefing, and help you write. Android adds Buddy Keyboard, a voice widget, and loud alarm reminders. Windows adds dictation, screen help when you ask, Screen Saves, Guide Mode, Buddy Drafts, meeting notes, Interview Companion, mock interviews, research, and a dashboard for conversations, drafts, and saved items.",
+        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS, and Aura Desktop is available on **Windows**. Across supported devices, Buddy provides chat and voice, account-scoped memory and Your Aura context, reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive follow-ups, a daily briefing, feedback, and writing help. Android adds Buddy Keyboard, a one-tap voice widget, notifications, loud alarm reminders, and the Get Better idea feed. Windows adds text and voice shortcuts, dictation, screen understanding when you ask, Screen Saves, Guide Mode, Buddy Drafts and visible artifacts, meeting notes, Interview Companion, mock interviews, background research, insights, notifications, and dashboard pages for conversations, drafts, saved items, meetings, research, and connectors. Durable account data is shared, while each surface keeps its own visible conversation scrollback."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": ["set_reminder", "query_memory", "get_upcoming_events", "web_surf", "track_topic"],
+      "search_terms": ["what can aura do", "what can buddy do", "features", "abilities", "help me", "across devices", "phone and pc", "everything you do"],
+      "evidence": [
+        {"path": "CLAUDE.md", "symbol": "Architecture map and canonical product areas", "verified_at": "2026-08-25"},
+        {"path": "backend/src/agent/voice/capabilities.py", "symbol": "VOICE_TOOL_REGISTRY", "verified_at": "2026-08-25"},
+        {"path": "architectures/user-aura.md", "symbol": "account-scoped user context", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "capabilities.app",
+      "kind": "capabilities",
+      "status": "shipped",
+      "title": "Aura phone app capabilities",
+      "summary": "The beta Android app provides Buddy chat and voice plus Android keyboard, widget, alarm, notification, memory, connector, and profile experiences.",
+      "answers": {
+        "voice": "Aura's mobile app is currently in beta on Android; there is no iOS app yet. On Android I can chat or talk with you, remember useful details, manage regular or loud alarm reminders, work with Google Calendar and Gmail when linked, search the web, track topics, send useful follow-ups, show a daily briefing, and help with writing. Android also includes Buddy Keyboard, a one-tap voice widget, notifications, and Get Better ideas. Settings covers voice, responses, reminders, connectors, Your Aura, PC linking, your plan, account controls, feedback, and legal pages.",
+        "chat": "Aura's mobile app is currently in **beta on Android**; it is **not available on iOS**. The Android app includes Buddy chat and voice, useful memory and Your Aura, regular reminders and loud alarm reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive notifications and follow-up questions, a daily briefing, the Get Better idea feed and chat, writing help, Buddy Keyboard, and a one-tap voice widget. Settings contains voice and response controls, reminders and alarms, connectors, Your Aura, PC linking, plan and account controls, feedback, privacy, and terms."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open Aura", "Open the side menu", "Tap Settings"],
+      "action_tools": ["set_reminder", "list_reminders", "query_memory", "web_surf", "track_topic"],
+      "search_terms": ["mobile features", "phone features", "app capabilities", "what can i do here", "settings features"],
+      "evidence": [
+        {"path": "README.md", "symbol": "What Aura can do", "verified_at": "2026-08-25"},
+        {"path": "lib/core/router/router.dart", "symbol": "mobile product routes", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "SettingsScreen", "verified_at": "2026-08-25"},
+        {"path": "backend/src/agent/voice/capabilities.py", "symbol": "VOICE_TOOL_REGISTRY", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "capabilities.desktop",
+      "kind": "capabilities",
+      "status": "shipped",
+      "title": "Aura Windows capabilities",
+      "summary": "The beta Windows client provides chat, voice, dictation, screen-aware help, dashboard workflows, meetings, interviews, research, and settings.",
+      "answers": {
+        "voice": "Aura Desktop is currently in beta on Windows. I can chat or talk with you, use your shared reminders, memory, Google Calendar, connectors, trackers, and research, and help through global text, voice, and dictation shortcuts. When you ask, I can understand your screen, save screen items, create Buddy Drafts and reusable cards, point things out, guide you through tasks, and run mock interviews. The dashboard also includes conversations, drafts, saved items, meeting notes, Interview Companion, research, insights, connectors, notifications, and settings.",
+        "chat": "Aura Desktop is currently in **beta on Windows**. It uses the same account-scoped reminders, memories, Your Aura profile, Google Calendar tools, Calendar and Gmail connections, trackers, and research as Android. Its companion overlay supports text and voice shortcuts, hold-to-talk dictation, screen understanding when you ask, Screen Saves, pointing, Guide Mode, Buddy Drafts, visible artifacts, and mock interviews. Its dashboard provides Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, notifications, General/Voice/System settings, account, billing, privacy, updates, and a link to the Android app."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": ["save_screen_item", "present_visible_artifact", "set_guide_mode", "start_mock_interview", "start_research"],
+      "search_terms": ["windows features", "desktop capabilities", "pc features", "screen help", "guide mode", "mock interview", "screen saves"],
+      "evidence": [
+        {"path": "ECOSYSTEM.md", "symbol": "desktop cross-repository capabilities", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src/dashboard/navConfig.ts", "symbol": "desktop product navigation", "verified_at": "2026-08-25"},
+        {"path": "backend/src/agent/voice/capabilities.py", "symbol": "DESKTOP_ONLY registry entries", "verified_at": "2026-08-25"},
+        {"path": "architectures/guide-mode.md", "symbol": "Guide Mode", "verified_at": "2026-08-25"},
+        {"path": "architectures/voice-agent.md", "symbol": "specialized agents and artifacts", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "capabilities.keyboard",
+      "kind": "capabilities",
+      "status": "shipped",
+      "title": "Buddy Keyboard capabilities",
+      "summary": "Buddy Keyboard brings authenticated writing help into Android text fields.",
+      "answers": {
+        "voice": "Buddy Keyboard brings Aura into text fields on Android, so you can ask for a draft or writing help without switching apps. It uses your signed-in Aura account, and you can also launch Buddy voice from the keyboard experience.",
+        "chat": "Buddy Keyboard provides authenticated drafting and writing help from Android text fields, without requiring you to switch back to the Aura app. The keyboard experience can also hand screen context into a Buddy voice session when you choose to start one."
+      },
+      "surfaces": ["keyboard"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["enable Buddy Keyboard in Android system settings"], "minimum_versions": {}},
+      "navigation": ["Open Aura Settings", "Tap Add to home screen or the keyboard setup entry when shown", "Follow Android's keyboard enablement screen"],
+      "action_tools": [],
+      "search_terms": ["buddy keyboard", "android keyboard", "write in other apps", "typing assistant", "keyboard draft", "keyboard voice"],
+      "evidence": [
+        {"path": "lib/data/services/keyboard_credential_bridge.dart", "symbol": "KeyboardCredentialBridge", "verified_at": "2026-08-25"},
+        {"path": "lib/data/services/voice_session_service.dart", "symbol": "keyboard screen context handoff", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "background.shared_state",
+      "kind": "product_background",
+      "status": "shipped",
+      "title": "What syncs across Aura devices",
+      "summary": "Durable account state is shared, while surface conversation scrollbacks remain separate.",
+      "answers": {
+        "voice": "Your reminders, memories, profile details, trackers, and research belong to your Aura account, so Buddy can use them across your phone and Windows. The chat scrollback on each surface is separate, even though the useful things you save or set are shared.",
+        "chat": "Aura shares durable account state across phone and Windows: reminders, memories, profile details, trackers, and research. Conversation scrollbacks are surface-specific, so the visible phone and desktop chat histories are not presented as one merged transcript."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed in to the same Aura account"], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": [],
+      "search_terms": ["sync", "same account", "phone and pc", "shared data", "conversation history", "chat history", "does buddy remember on desktop"],
+      "evidence": [
+        {"path": "architectures/chat-and-tools.md", "symbol": "cross-surface data ownership", "verified_at": "2026-08-25"},
+        {"path": "architectures/user-aura.md", "symbol": "users uid context", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "background.identity",
+      "kind": "product_background",
+      "status": "shipped",
+      "title": "What Aura and Buddy are",
+      "summary": "Aura is a beta companion available on Android and Windows; Buddy is the companion users talk to inside Aura.",
+      "answers": {
+        "voice": "Aura is the app, and Buddy is the companion you talk to inside it. Aura is currently in beta on Android and Windows, with no iOS app yet. The idea is one smart friend across supported devices that can remember useful context and help you act on it.",
+        "chat": "Aura is the cross-device companion application; Buddy is the conversational companion inside it. Aura is currently in **beta**, available on **Android and Windows**, and not available on iOS. The product is designed around one account-scoped Buddy with useful remembered context and tools appropriate to each supported surface."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": [],
+      "search_terms": ["what is aura", "who is buddy", "about the app", "product background", "difference between aura and buddy"],
+      "evidence": [
+        {"path": "CLAUDE.md", "symbol": "Aura system architecture", "verified_at": "2026-08-25"},
+        {"path": "architectures/buddy-everywhere.md", "symbol": "Buddy across surfaces", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "availability.product_release",
+      "kind": "availability",
+      "status": "beta",
+      "title": "Aura beta and supported platforms",
+      "summary": "Aura is in beta, with an Android mobile app and a Windows desktop app; there is no iOS release.",
+      "answers": {
+        "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS, and Aura Desktop is available on Windows.",
+        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": [],
+      "search_terms": ["beta", "early access", "supported platforms", "mobile availability", "android app", "play store", "ios app", "iphone app", "apple app store", "windows app", "desktop availability", "is aura released"],
+      "evidence": [
+        {"path": "ECOSYSTEM.md", "symbol": "System map release targets and product stage", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.settings",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Open Aura Settings",
+      "summary": "Settings is reached from the phone app side menu.",
+      "answers": {
+        "voice": "Open Aura’s side menu, then tap Settings.",
+        "chat": "Open Aura’s side menu and tap **Settings**. From there you can manage Buddy’s voice and responses, device linking, reminders, Android alarm controls, connectors, Your Aura, your plan, feedback, privacy, and terms."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open Aura", "Open the side menu", "Tap Settings"],
+      "action_tools": [],
+      "search_terms": ["settings", "preferences", "configuration", "where are settings", "open settings", "menu"],
+      "evidence": [
+        {"path": "lib/presentation/screens/home/home_screen.dart", "symbol": "Settings route from drawer", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "SettingsScreen", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.voice_preferences",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Change Buddy voice and response behavior",
+      "summary": "Buddy's voice and Voice Responses are separate Settings rows.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then choose Buddy’s voice to change how I sound or Voice Responses to change how voice replies behave.",
+        "chat": "Go to **side menu → Settings**. Choose **Buddy’s voice** to change the voice itself, or **Voice Responses** to control voice-response behavior."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Buddy's voice or Voice Responses"],
+      "action_tools": [],
+      "search_terms": ["change voice", "buddy voice", "voice responses", "speech settings", "how you sound", "talk aloud"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Buddy's voice and Voice Responses rows", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.home_widget",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Add Buddy to the Android home screen",
+      "summary": "Android Settings can request a one-tap Buddy voice widget from the launcher.",
+      "answers": {
+        "voice": "On Android, open the side menu, tap Settings, then Add to home screen. Confirm the launcher prompt to add the one-tap Buddy widget.",
+        "chat": "On Android, go to **side menu → Settings → Add to home screen**. Confirm the system launcher prompt to add the one-tap widget that opens Buddy. If your launcher does not support app-requested pinning, Aura falls back to manual guidance."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["Android launcher widget support"], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Add to home screen", "Confirm the Android launcher prompt"],
+      "action_tools": [],
+      "search_terms": ["home screen widget", "add buddy widget", "one tap voice", "android widget", "home shortcut", "open buddy quickly"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Add to home screen row", "verified_at": "2026-08-25"},
+        {"path": "lib/data/services/voice_launcher_bridge.dart", "symbol": "requestPinVoiceWidget", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.link_pc",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Link Aura on Windows",
+      "summary": "The phone Settings page exposes Link this PC.",
+      "answers": {
+        "voice": "On your phone, open the side menu, tap Settings, then tap Link this PC and follow the pairing steps shown there.",
+        "chat": "On the phone app, go to **side menu → Settings → Link this PC**, then follow the pairing flow shown in the app. Use the same Aura account so shared reminders, memories, profile details, trackers, and research stay associated with you."
+      },
+      "surfaces": ["app", "desktop"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed in Aura account"], "minimum_versions": {}},
+      "navigation": ["Open Aura on your phone", "Open the side menu", "Tap Settings", "Tap Link this PC"],
+      "action_tools": [],
+      "search_terms": ["link pc", "connect computer", "pair windows", "desktop pairing", "link laptop", "use aura on pc"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Link this PC row", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/settings/link_device_screen.dart", "symbol": "LinkDeviceScreen", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.alarm_settings",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Open alarm settings",
+      "summary": "The phone Settings page has a dedicated Alarm row under Alarms and reminders.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then tap Alarm under Alarms and reminders.",
+        "chat": "Go to **side menu → Settings → Alarm** under **Alarms & reminders**. That page controls the regular device alarm experience; a loud alarm you ask Buddy to create is a separate reminder tier."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Under Alarms & reminders, tap Alarm"],
+      "action_tools": [],
+      "search_terms": ["alarm setting", "alarm sound", "wake alarm", "regular alarm", "where is alarm", "alarms and reminders"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Alarm row", "verified_at": "2026-08-25"},
+        {"path": "architectures/alarm-tier.md", "symbol": "regular alarm versus reminder alarm tier", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.view_reminders",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "View existing reminders",
+      "summary": "View Reminders is a phone Settings row, and Buddy can also read them through the reminder tool.",
+      "answers": {
+        "voice": "You can ask me what reminders you have, or open the side menu, tap Settings, then View Reminders.",
+        "chat": "Either ask Buddy to list your reminders, or go to **side menu → Settings → View Reminders**. Reminders are account-scoped, so the same reminder data is available to Buddy on phone and Windows."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu in the phone app", "Tap Settings", "Tap View Reminders"],
+      "action_tools": ["list_reminders"],
+      "search_terms": ["view reminders", "find reminders", "reminder list", "what reminders do i have", "manage reminders"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "View Reminders row", "verified_at": "2026-08-25"},
+        {"path": "backend/src/shared/tools.py", "symbol": "list_reminders tool", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.connectors",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Manage connectors",
+      "summary": "External service connections are managed from the Connectors Settings row.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then Connectors to link or manage supported services.",
+        "chat": "Go to **side menu → Settings → Connectors** to link or manage supported external services. A capability that depends on a connector remains unavailable until that connector is linked."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Connectors"],
+      "action_tools": [],
+      "search_terms": ["connectors", "integrations", "link google", "connect calendar", "manage connections", "external service"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Connectors row", "verified_at": "2026-08-25"},
+        {"path": "backend/src/handlers/connectors.py", "symbol": "connector status handlers", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.your_aura",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Open Your Aura",
+      "summary": "Your Aura is the Settings destination for profile and remembered context controls.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then Your Aura.",
+        "chat": "Go to **side menu → Settings → Your Aura** to review the part of your account that helps Buddy understand you."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Your Aura"],
+      "action_tools": [],
+      "search_terms": ["your aura", "profile details", "personalization", "what buddy knows", "account profile"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Your Aura row", "verified_at": "2026-08-25"},
+        {"path": "architectures/user-aura.md", "symbol": "Your Aura data model", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.upgrade",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Open plan controls",
+      "summary": "Upgrade Plan is available from Settings.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then Upgrade Plan.",
+        "chat": "Go to **side menu → Settings → Upgrade Plan** to view the plan options available to your account."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Upgrade Plan"],
+      "action_tools": [],
+      "search_terms": ["upgrade", "plan", "subscription", "paid plan", "pricing screen", "change plan"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Upgrade Plan row", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.manage_account",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Manage or delete an Aura account",
+      "summary": "Signed-in users reach sign-out and account deletion from Manage account in Settings.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then Manage account. That opens the controls to sign out or delete your account.",
+        "chat": "Go to **side menu → Settings → Manage account**. From there, a signed-in user can sign out or start account deletion."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Manage account"],
+      "action_tools": [],
+      "search_terms": ["manage account", "sign out", "log out", "delete account", "close account", "account settings"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Manage account row", "verified_at": "2026-08-25"},
+        {"path": "backend/src/handlers/account.py", "symbol": "handle_delete_account", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.daily_briefing",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Open the Daily briefing",
+      "summary": "The Android drawer opens Aura's current daily briefing and its in-place follow-up chat.",
+      "answers": {
+        "voice": "On Android, open Aura's side menu and tap Daily briefing. You can read the current briefing, open its sources, and chat with me about it on the same screen.",
+        "chat": "On Android, open the **side menu → Daily briefing**. The screen shows the current personalized briefing with source links and lets you continue into a normal Buddy chat about it. If no scheduled briefing is ready, it can offer an on-demand world catch-up."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
+      "navigation": ["Open Aura on Android", "Open the side menu", "Tap Daily briefing"],
+      "action_tools": [],
+      "search_terms": ["daily briefing", "news briefing", "evening briefing", "catch me up", "world news", "today's briefing", "daily digest"],
+      "evidence": [
+        {"path": "lib/presentation/screens/home/home_screen.dart", "symbol": "Daily briefing drawer row", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/briefing/briefing_screen.dart", "symbol": "BriefingScreen", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.get_better",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Open Get Better",
+      "summary": "Get Better is the Android idea and story feed with a linked Buddy chat.",
+      "answers": {
+        "voice": "On Android, open Aura's side menu and tap Get Better. You can browse ideas and stories, save or complete them, and bring one into a Buddy chat.",
+        "chat": "On Android, open the **side menu → Get Better**. It provides an idea and story feed; you can open, save, complete, or share an item and bring it into a Buddy conversation."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
+      "navigation": ["Open Aura on Android", "Open the side menu", "Tap Get Better"],
+      "action_tools": [],
+      "search_terms": ["get better", "ideas", "stories", "self improvement", "idea feed", "pick a story", "saved ideas"],
+      "evidence": [
+        {"path": "lib/presentation/screens/home/home_screen.dart", "symbol": "Get Better drawer row", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/get_better/get_better_screen.dart", "symbol": "GetBetterScreen", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.desktop_dashboard",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Navigate Aura Desktop",
+      "summary": "The Windows dashboard sidebar exposes Aura Desktop's current product pages.",
+      "answers": {
+        "voice": "Open the Aura Desktop dashboard and use the left sidebar. It has Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, the Android app link, Help, and Settings.",
+        "chat": "Open the **Aura Desktop dashboard** and use the left sidebar. Current pages are **Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, Get the mobile app, Help**, and **Settings**. Meetings, Interview, and Research are visibly marked beta in the desktop navigation."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
+      "navigation": ["Open Aura Desktop", "Open the dashboard", "Choose a page from the left sidebar"],
+      "action_tools": [],
+      "search_terms": ["desktop navigation", "windows dashboard", "sidebar", "conversations page", "drafts page", "saved page", "meetings page", "research page", "insights page", "where is feature on desktop"],
+      "evidence": [
+        {"path": "../Aura-Desktop/src/dashboard/navConfig.ts", "symbol": "primaryNavItems and footerNavItems", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src/dashboard/DashboardApp.tsx", "symbol": "dashboardPages", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.desktop_settings",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Open Aura Desktop settings",
+      "summary": "Desktop Settings contains General, Voice, System, Account, Billing, and Data and Privacy sections.",
+      "answers": {
+        "voice": "Open Aura Desktop, choose Settings from the sidebar, then pick General, Voice, System, Account, Plans and Billing, or Data and Privacy.",
+        "chat": "In the Aura Desktop dashboard, select **Settings** in the sidebar. The settings dialog contains **General, Voice, System, Account, Plans and Billing**, and **Data and Privacy**, plus the installed version and update check."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
+      "navigation": ["Open the Aura Desktop dashboard", "Select Settings in the sidebar", "Choose the relevant settings section"],
+      "action_tools": [],
+      "search_terms": ["desktop settings", "windows settings", "general settings", "voice settings", "system settings", "billing", "privacy settings", "check for updates"],
+      "evidence": [
+        {"path": "../Aura-Desktop/src/dashboard/SettingsDialog.tsx", "symbol": "SETTINGS_ITEMS, ACCOUNT_ITEMS, and SETTINGS_PAGES", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.desktop_dictation",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Use Aura Desktop dictation",
+      "summary": "Aura Desktop provides hold-to-talk dictation with a dedicated HUD and settings page.",
+      "answers": {
+        "voice": "On Windows, hold Control plus the Windows key to dictate into the field that currently has focus, then release to transcribe and insert. Open the Desktop Dictation page to review its setup and options.",
+        "chat": "On Windows, use Aura Desktop's hold-to-talk dictation chord, **Ctrl+Win**, while the target text field has focus; release to transcribe and insert. Open **Dashboard → Dictation** for setup and options. Dictation is separate from a Buddy voice conversation."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["microphone access", "a focused editable field"], "minimum_versions": {}},
+      "navigation": ["Open Aura Desktop", "Select Dictation in the dashboard sidebar", "Use Ctrl+Win in a focused text field"],
+      "action_tools": [],
+      "search_terms": ["desktop dictation", "voice typing", "speech to text", "hold to talk", "ctrl win", "dictation shortcut", "type with voice"],
+      "evidence": [
+        {"path": "ECOSYSTEM.md", "symbol": "Desktop dictation transcription credential", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src/dashboard/pages/DictationPage.tsx", "symbol": "DictationPage", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.desktop_interview",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Use Interview Companion on Windows",
+      "summary": "Interview Companion is a desktop-only beta workflow prepared from user-provided source material and started during a supported call.",
+      "answers": {
+        "voice": "Open the Aura Desktop dashboard, choose Interview Companion, add and review your preparation material, then explicitly start it during a supported Zoom, Teams, or Google Meet call.",
+        "chat": "Open **Aura Desktop → Interview Companion**, add and review the preparation material, and build the brief. During a supported Zoom, Teams, or Google Meet call, explicitly start the companion. It is desktop-only, marked beta, and separate from the voice-based Mock Interview feature."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["explicit user start", "supported active video call", "microphone access"], "minimum_versions": {}},
+      "navigation": ["Open the Aura Desktop dashboard", "Select Interview Companion", "Prepare and review the brief", "Start during a supported call"],
+      "action_tools": [],
+      "search_terms": ["interview companion", "interview copilot", "zoom interview", "teams interview", "google meet interview", "prepare interview", "live interview answers"],
+      "evidence": [
+        {"path": "ECOSYSTEM.md", "symbol": "Interview Companion preparation and answers", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src/dashboard/pages/InterviewPage.tsx", "symbol": "InterviewPage", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.desktop_meetings",
+      "kind": "how_to",
+      "status": "beta",
+      "title": "Use Meeting Notes on Windows",
+      "summary": "Meeting Notes is an explicitly armed desktop beta feature with its own dashboard page.",
+      "answers": {
+        "voice": "On Windows, open the Meetings page and explicitly arm notes for an eligible meeting. Meeting Notes is off by default and only starts from its own meeting capture flow.",
+        "chat": "Open **Aura Desktop → Meetings**. Meeting Notes is a beta feature that must be explicitly armed; auto meeting notes is off by default. It has a separate capture and retention lifecycle from Interview Companion. Current product rules only allow eligible meetings up to 60 minutes."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": ["google_calendar"], "permissions": ["explicit meeting-note arming", "microphone and system-audio access"], "minimum_versions": {}},
+      "navigation": ["Open the Aura Desktop dashboard", "Select Meetings", "Choose an eligible meeting", "Arm Meeting Notes"],
+      "action_tools": [],
+      "search_terms": ["meeting notes", "record meeting", "meeting transcript", "meeting summary", "auto meeting notes", "meetings page", "zoom notes", "teams notes"],
+      "evidence": [
+        {"path": "ECOSYSTEM.md", "symbol": "Meeting Notes lifecycle", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src/dashboard/pages/MeetingsPage.tsx", "symbol": "MeetingsPage", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.feedback",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Send app feedback",
+      "summary": "Users can open Send Feedback from Settings or tell Buddy directly.",
+      "answers": {
+        "voice": "You can tell me your feedback directly, or open the side menu, tap Settings, then Send Feedback.",
+        "chat": "Tell Buddy the feedback directly, or go to **side menu → Settings → Send Feedback**. Feedback should describe what happened and what you expected without including secrets or sensitive personal data."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu in the phone app", "Tap Settings", "Tap Send Feedback"],
+      "action_tools": ["report_feedback"],
+      "search_terms": ["feedback", "report bug", "send suggestion", "complain", "issue with aura", "contact team"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Send Feedback row", "verified_at": "2026-08-25"},
+        {"path": "backend/src/shared/tools.py", "symbol": "report_feedback tool", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.legal",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Open privacy policy or terms",
+      "summary": "Privacy Policy and Terms of Service are available in Settings.",
+      "answers": {
+        "voice": "Open the side menu, tap Settings, then choose Privacy Policy or Terms of Service near the bottom.",
+        "chat": "Go to **side menu → Settings**, then select **Privacy Policy** or **Terms of Service** near the bottom of the page."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open the side menu", "Tap Settings", "Tap Privacy Policy or Terms of Service"],
+      "action_tools": [],
+      "search_terms": ["privacy policy", "terms", "terms of service", "legal", "data policy", "conditions"],
+      "evidence": [
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Privacy Policy and Terms of Service rows", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "availability.reminders",
+      "kind": "availability",
+      "status": "shipped",
+      "title": "Reminder and alarm availability",
+      "summary": "Ordinary reminders are cross-device account data; loud alarm delivery is platform-specific.",
+      "answers": {
+        "voice": "Regular reminders are available to Buddy on the Android app and Windows. Loud Buddy-created alarm reminders ring through the Android alarm path. Aura has no iOS app, and Windows uses notifications rather than ringing like Android.",
+        "chat": "Regular reminders are account-scoped and available to Buddy on Android and Windows. The loud `alarm` reminder tier uses Android's alarm-volume and wake-screen delivery path. Aura has no iOS app, and Windows does not currently ring the Android-style alarm experience."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["Android notification and alarm permissions for loud delivery"], "minimum_versions": {}},
+      "navigation": ["Phone side menu", "Settings", "View Reminders or Alarm"],
+      "action_tools": ["set_reminder", "list_reminders"],
+      "search_terms": ["reminders on devices", "alarm android windows", "does alarm ring", "loud reminder", "wake me", "notification support", "iphone alarm", "ios reminder"],
+      "evidence": [
+        {"path": "architectures/alarm-tier.md", "symbol": "platform behavior", "verified_at": "2026-08-25"},
+        {"path": "backend/src/shared/tools.py", "symbol": "set_reminder tier contract", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "availability.gmail",
+      "kind": "availability",
+      "status": "beta",
+      "title": "Gmail availability",
+      "summary": "Gmail tools require a linked and enabled Gmail connector; sending requires explicit confirmation.",
+      "answers": {
+        "voice": "Link and enable Gmail in Connectors first. Then I can find and read messages on request, draft email, and send only after your explicit confirmation.",
+        "chat": "Gmail must be linked and enabled through **Settings → Connectors** on Android or **Dashboard → Connectors** on Windows. Buddy can list and read messages on demand and send email through the connected account. Sending is a side effect and requires explicit user confirmation before execution."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": ["gmail"], "permissions": ["Google Gmail authorization", "explicit confirmation before sending"], "minimum_versions": {}},
+      "navigation": ["Open Connectors", "Link and enable Gmail"],
+      "action_tools": ["list_emails", "read_email", "send_email"],
+      "search_terms": ["gmail", "email", "inbox", "read email", "find email", "send email", "connect gmail", "email support"],
+      "evidence": [
+        {"path": "backend/src/shared/tools.py", "symbol": "list_emails, read_email, and send_email", "verified_at": "2026-08-25"},
+        {"path": "backend/src/services/gmail_connector.py", "symbol": "GmailConnector", "verified_at": "2026-08-25"},
+        {"path": "backend/src/services/chat_completion/approval_store.py", "symbol": "send_email confirmation", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "availability.proactive_help",
+      "kind": "availability",
+      "status": "beta",
+      "title": "Proactive notifications and briefings",
+      "summary": "Aura can reach out with bounded notifications, follow-up questions, and a daily briefing when account and device conditions allow.",
+      "answers": {
+        "voice": "Aura can reach out with useful notifications, curiosity follow-ups, and a daily briefing. Delivery depends on your notification permission, account settings, relevance, and the app's notification limits, so not every possible update becomes a push.",
+        "chat": "Aura's beta proactive layer can send useful notifications, curiosity-driven follow-up questions, life-aware openers, tracked-topic updates, and a daily briefing. Delivery is bounded by consent, notification permissions, relevance and fatigue policies, quiet-time rules, deduplication, and device delivery state; it is not an unrestricted promise that every candidate will be sent."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account", "notifications enabled", "relevant consent and product settings"], "minimum_versions": {}},
+      "navigation": ["Android side menu", "Daily briefing", "Android Settings for notification permission", "Windows Settings", "General", "Notifications"],
+      "action_tools": ["track_topic"],
+      "search_terms": ["proactive", "reach out first", "notifications", "follow up question", "daily briefing", "evening briefing", "tracked topic update", "why didn't buddy notify me"],
+      "evidence": [
+        {"path": "README.md", "symbol": "Reach out first", "verified_at": "2026-08-25"},
+        {"path": "architectures/notification-delivery.md", "symbol": "notification policy and delivery", "verified_at": "2026-08-25"},
+        {"path": "backend/src/services/briefing/briefing_engine.py", "symbol": "run_briefing_tick", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "availability.calendar",
+      "kind": "availability",
+      "status": "shipped",
+      "title": "Google Calendar availability",
+      "summary": "Calendar tools require a linked Google Calendar and a paid plan.",
+      "answers": {
+        "voice": "Calendar access needs Google Calendar linked in Connectors and is part of Aura’s paid plan. Once linked and entitled, I can read upcoming events and create or update events.",
+        "chat": "Google Calendar requires the connector to be linked through **Settings → Connectors** and is gated to Aura’s paid plan. When eligible, Buddy can read upcoming events and create or update calendar events."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["pro"], "connectors": ["google_calendar"], "permissions": ["Google Calendar authorization"], "minimum_versions": {}},
+      "navigation": ["Phone side menu", "Settings", "Connectors", "Link Google Calendar"],
+      "action_tools": ["get_upcoming_events", "create_calendar_event", "update_calendar_event"],
+      "search_terms": ["calendar support", "google calendar", "calendar paid", "link calendar", "schedule events", "calendar connector"],
+      "evidence": [
+        {"path": "backend/src/services/tool_executor.py", "symbol": "TIER_GATED_TOOLS enforcement", "verified_at": "2026-08-25"},
+        {"path": "backend/src/agent/voice/capabilities.py", "symbol": "calendar connector prerequisites", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "availability.desktop_screen",
+      "kind": "availability",
+      "status": "shipped",
+      "title": "Screen understanding and Guide Mode availability",
+      "summary": "Screen tools are Windows-only and depend on current user-granted screen context.",
+      "answers": {
+        "voice": "Screen understanding, Screen Saves, and Guide Mode are Windows features. I use screen context when you ask, and actions that depend on what’s visible require a current desktop frame or the desktop’s explicit Guide Mode handoff.",
+        "chat": "Screen understanding, Screen Saves, reusable visual artifacts, and Guide Mode are Windows-only capabilities. Aura uses screen context when you ask; screen-dependent actions require current desktop-provided context, and Guide Mode must be explicitly armed by the desktop."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["user-provided screen context or explicit Guide Mode activation"], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": ["save_screen_item", "set_guide_mode", "present_visible_artifact"],
+      "search_terms": ["see my screen", "screen understanding", "screen share", "guide mode availability", "windows only", "screen saves"],
+      "evidence": [
+        {"path": "backend/src/agent/voice/capabilities.py", "symbol": "desktop-only screen capabilities", "verified_at": "2026-08-25"},
+        {"path": "architectures/guide-mode.md", "symbol": "desktop arming and frame flow", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "privacy.screen_context",
+      "kind": "privacy",
+      "status": "shipped",
+      "title": "How screen context is used",
+      "summary": "Screen understanding is request-driven and structurally gated by desktop-provided context.",
+      "answers": {
+        "voice": "I use your screen when you ask for screen-aware help. Screen actions depend on context the Windows app provides for that task; I don’t treat unrelated conversation as permission to start a screen action.",
+        "chat": "Aura’s screen understanding is request-driven. Screen-dependent tools require desktop-provided screen context or an explicit Guide Mode handoff; unrelated conversation is not treated as authorization for screen capture, saving, or guided control."
+      },
+      "surfaces": ["desktop", "all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["user-provided screen context"], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": ["save_screen_item", "set_guide_mode"],
+      "search_terms": ["privacy screen", "can you see my screen", "when do you look", "screen capture permission", "screen data", "monitor"],
+      "evidence": [
+        {"path": "backend/src/agent/voice/capabilities.py", "symbol": "FRESH_DESKTOP_FRAME prerequisite", "verified_at": "2026-08-25"},
+        {"path": "architectures/guide-mode.md", "symbol": "explicit Guide Mode ownership", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "privacy.account_data",
+      "kind": "privacy",
+      "status": "shipped",
+      "title": "Account data ownership",
+      "summary": "Durable personal context is stored under the authenticated Aura account and can be reviewed or deleted through product controls.",
+      "answers": {
+        "voice": "The useful things I keep, such as memories, reminders, and profile context, are tied to your authenticated Aura account. You can review relevant controls in Your Aura and Settings, and you can ask me to read or forget stored memories.",
+        "chat": "Durable personal context—such as memories, reminders, and profile data—is scoped to the authenticated Aura account. Product controls live in **Settings** and **Your Aura**, and Buddy has explicit read and delete operations for stored memories rather than silently treating conversation text as permanent."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["authenticated Aura account"], "minimum_versions": {}},
+      "navigation": ["Phone side menu", "Settings", "Your Aura"],
+      "action_tools": ["query_memory", "delete_memory"],
+      "search_terms": ["my data", "privacy memories", "delete memory", "what do you store", "account data", "personal information"],
+      "evidence": [
+        {"path": "architectures/user-aura.md", "symbol": "authenticated user data ownership", "verified_at": "2026-08-25"},
+        {"path": "backend/src/shared/tools.py", "symbol": "query_memory and delete_memory tools", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "troubleshooting.calendar_not_linked",
+      "kind": "troubleshooting",
+      "status": "shipped",
+      "title": "Calendar is not available",
+      "summary": "Calendar failure commonly reflects connector or entitlement state, both structurally checked at execution.",
+      "answers": {
+        "voice": "Open Settings, then Connectors, and make sure Google Calendar is linked. Calendar is also part of the paid plan, so check Upgrade Plan if the connector is linked but calendar actions are still unavailable.",
+        "chat": "Check **Settings → Connectors** and confirm Google Calendar is linked. Calendar execution also requires the paid plan, so if the connection is healthy, open **Settings → Upgrade Plan** to verify entitlement. Buddy checks both conditions at execution time."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Phone side menu", "Settings", "Connectors", "Check Google Calendar", "Open Upgrade Plan if needed"],
+      "action_tools": [],
+      "search_terms": ["calendar not working", "calendar unavailable", "not linked", "upgrade required", "cannot create event", "calendar error"],
+      "evidence": [
+        {"path": "backend/src/services/tool_executor.py", "symbol": "tier gate and connector-backed calendar handlers", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Connectors and Upgrade Plan rows", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "troubleshooting.device_sync",
+      "kind": "troubleshooting",
+      "status": "shipped",
+      "title": "Aura data differs across devices",
+      "summary": "Shared state requires the same authenticated account; chat scrollbacks are intentionally separate.",
+      "answers": {
+        "voice": "First check that both devices are signed into the same Aura account. Reminders, memories, profile details, trackers, and research should be shared, but the visible chat scrollback on phone and Windows is intentionally separate.",
+        "chat": "Confirm that both devices use the same authenticated Aura account. Durable state—reminders, memories, profile details, trackers, and research—is account-scoped. Phone and Windows conversation scrollbacks are separate by design, so different visible chat history alone is not a sync failure."
+      },
+      "surfaces": ["all"],
+      "platforms": ["android", "windows"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["same authenticated Aura account"], "minimum_versions": {}},
+      "navigation": ["Check the signed-in account on each device", "Use Link this PC again if the Windows device is not paired"],
+      "action_tools": [],
+      "search_terms": ["not syncing", "different on phone and pc", "missing reminders desktop", "chat history missing", "same account", "device mismatch"],
+      "evidence": [
+        {"path": "architectures/chat-and-tools.md", "symbol": "surface transcript and shared account state", "verified_at": "2026-08-25"},
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Link this PC row", "verified_at": "2026-08-25"}
+      ]
+    }
+  ]
+}

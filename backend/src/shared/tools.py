@@ -126,9 +126,10 @@ TIER_GATED_TOOLS: frozenset[str] = frozenset({
 # these while it is structurally eligible. Checked at startup (main.py) so a regression
 # is loud instead of silent.
 #
-# Deliberately one write and three reads. Every additional write in the floor is a real
+# Deliberately one write and four reads. Every additional write in the floor is a real
 # risk of an unprompted call, and set_reminder is the one with evidence behind it.
 CORE_TOOLS: frozenset[str] = frozenset({
+    "get_aura_product_info",
     "set_reminder",
     "list_reminders",
     "get_upcoming_events",
@@ -136,6 +137,67 @@ CORE_TOOLS: frozenset[str] = frozenset({
 })
 
 # Canonical tool specs
+
+GET_AURA_PRODUCT_INFO_TOOL_DEFINITION: dict[str, Any] = {
+    "name": "get_aura_product_info",
+    "description": (
+        "Read Aura's verified product guide. Use when the user asks what Aura or Buddy "
+        "can do, how to find or configure something in Aura, whether a feature is "
+        "available on a device or plan, how Aura handles product data or privacy, "
+        "what Aura is, or how to troubleshoot an Aura feature. This is Aura product "
+        "knowledge only: do not use it for general facts, personal memories, calendar "
+        "or reminder contents, or to perform an action. Understand the user's meaning "
+        "in any language, dialect, spelling, or regional phrasing, then put a short "
+        "English semantic retrieval query in query while preserving exact Aura feature "
+        "names. Choose target_surface and target_platform from conversation context; "
+        "current means the surface or platform they are using now. If they name a "
+        "different device, select it explicitly so unavailable clients are never given "
+        "instructions for another platform. The tool returns final source-evidenced wording, "
+        "so do not call another knowledge or web tool for the same question."
+    ),
+    "strict": True,
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "capabilities",
+                    "how_to",
+                    "availability",
+                    "privacy",
+                    "product_background",
+                    "troubleshooting",
+                ],
+                "description": "The product-information category that best fits the request.",
+            },
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "description": (
+                    "A concise English semantic query for local retrieval. Translate or "
+                    "normalize regional wording, but preserve named Aura features."
+                ),
+            },
+            "target_surface": {
+                "type": "string",
+                "enum": ["current", "app", "keyboard", "desktop", "all"],
+                "description": "Which Aura surface the answer is about.",
+            },
+            "target_platform": {
+                "type": "string",
+                "enum": ["current", "android", "ios", "windows", "all"],
+                "description": (
+                    "Which operating-system platform the answer is about. Use current "
+                    "unless the user explicitly names another platform."
+                ),
+            },
+        },
+        "required": ["kind", "query", "target_surface", "target_platform"],
+        "additionalProperties": False,
+    },
+}
 
 SET_REMINDER_TOOL_DEFINITION: dict[str, Any] = {
     "name": "set_reminder",
@@ -335,6 +397,7 @@ UPDATE_CALENDAR_EVENT_TOOL_DEFINITION: dict[str, Any] = {
 }
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    GET_AURA_PRODUCT_INFO_TOOL_DEFINITION,
     SET_REMINDER_TOOL_DEFINITION,
     {
         "name": "draft_writing",

@@ -354,6 +354,7 @@ def test_calendar_execution_gate_accepts_empty_optional_content_values():
 
 def test_every_current_voice_tool_has_registry_metadata():
     assert set(VOICE_TOOL_REGISTRY) == {
+        "get_aura_product_info",
         "set_reminder",
         "list_reminders",
         "cancel_reminder",

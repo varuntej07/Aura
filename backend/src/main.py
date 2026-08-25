@@ -337,6 +337,8 @@ async def health() -> dict[str, object]:
 _VOICE_SURFACES = frozenset({"app", "keyboard", "desktop"})
 _VOICE_MODES = frozenset({"standard", "guide", "onboarding"})
 _VOICE_OUTPUT_MODES = frozenset({"voice", "text"})
+_CLIENT_PLATFORMS = frozenset({"android", "ios", "windows"})
+_APP_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}$")
 _ARTIFACT_ACK_CAPABILITY = "displayed-v1"
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
@@ -379,6 +381,12 @@ async def voice_token(request: Request) -> JSONResponse:
         "voice_request_id": uuid.uuid4().hex,
         "voice_requested_at_ms": int(time.time() * 1000),
     }
+    client_platform = request.headers.get("X-Aura-Platform", "").strip().casefold()
+    if client_platform in _CLIENT_PLATFORMS:
+        participant_metadata["platform"] = client_platform
+    app_version = request.headers.get("X-Aura-App-Version", "").strip()
+    if _APP_VERSION_RE.fullmatch(app_version):
+        participant_metadata["app_version"] = app_version
     if (
         surface == "desktop"
         and request.query_params.get("artifact_ack") == _ARTIFACT_ACK_CAPABILITY

@@ -40,6 +40,7 @@ import time
 from collections.abc import AsyncIterable, Callable
 from copy import deepcopy
 from dataclasses import replace
+from typing import cast
 from xml.sax.saxutils import escape as xml_escape
 
 from livekit import agents
@@ -57,8 +58,20 @@ from ..config.settings import settings
 from ..lib.logger import logger
 from ..prompts import voice_system_prompt
 from ..services.analytics.llm_telemetry import start_tool_span
+from ..services.product_knowledge import (
+    CurrentProductSurface,
+    ProductInfoKind,
+    ProductTargetPlatform,
+    ProductTargetSurface,
+    lookup_product_knowledge,
+)
 from ..shared.capability_claims import log_false_capability_claims
-from ..shared.tools import assert_strict_tool_schema, resolve_set_reminder_tier
+from ..shared.tools import (
+    GET_AURA_PRODUCT_INFO_TOOL_DEFINITION,
+    assert_strict_tool_schema,
+    resolve_set_reminder_tier,
+    validate_and_coerce_tool_input,
+)
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import (
     VOICE_FEEDBACK_TOOL_DEFINITION,
@@ -251,11 +264,19 @@ _DRAFT_OUTBOUND_MESSAGE_TOOL_DEFINITION = {
     "strict": True,
 }
 
-# Every raw schema this module hands to @function_tool, checked at import. These two
+_VOICE_PRODUCT_INFO_TOOL_DEFINITION = {
+    "name": GET_AURA_PRODUCT_INFO_TOOL_DEFINITION["name"],
+    "description": GET_AURA_PRODUCT_INFO_TOOL_DEFINITION["description"],
+    "parameters": deepcopy(GET_AURA_PRODUCT_INFO_TOOL_DEFINITION["inputSchema"]),
+    "strict": True,
+}
+
+# Every raw schema this module hands to @function_tool, checked at import.
 # live outside TOOL_DEFINITIONS, so the sweep in shared/tools.py cannot see them, and
 # a strict schema missing a property from `required` 400s every voice turn rather than
 # only the turn that wanted the tool. That is what took set_reminder down once already.
 for _raw_tool_definition in (
+    _VOICE_PRODUCT_INFO_TOOL_DEFINITION,
     VOICE_FEEDBACK_TOOL_DEFINITION,
     _DRAFT_OUTBOUND_MESSAGE_TOOL_DEFINITION,
 ):
@@ -287,6 +308,8 @@ class BuddyAgent(agents.Agent):
         user_tier: str = "free",
         display_name: str = "",
         launch_surface: str = "app",
+        client_platform: str = "",
+        app_version: str = "",
         voice_mode: str = "standard",
         connector_states: dict[str, bool] | None = None,
         bridged: bool = False,
@@ -324,6 +347,12 @@ class BuddyAgent(agents.Agent):
         self._screen_context = screen_context
         self._session_id = session_id
         self._launch_surface = voice_surface
+        self._client_platform = (
+            client_platform.casefold()
+            if client_platform.casefold() in {"android", "ios", "windows"}
+            else ""
+        )
+        self._app_version = app_version.strip()[:24]
         self._connector_states = dict(connector_states or {})
         self._enabled_feature_rollouts: frozenset[str] = frozenset()
         # Realtime-bridge mode: the desktop already opened an instant OpenAI Realtime
@@ -1583,6 +1612,54 @@ class BuddyAgent(agents.Agent):
                 else "Speak only `say` and do not imply a card is visible."
             ),
         )
+
+    @function_tool(raw_schema=_VOICE_PRODUCT_INFO_TOOL_DEFINITION)
+    async def get_aura_product_info(
+        self,
+        raw_arguments: dict[str, object],
+    ) -> None:
+        """Speak one verified Aura product-guide answer and end the turn."""
+        if not isinstance(raw_arguments, dict):
+            raise lk_llm.ToolError("get_aura_product_info input must be an object.")
+        arguments = dict(raw_arguments)
+        try:
+            validate_and_coerce_tool_input("get_aura_product_info", arguments)
+            result = lookup_product_knowledge(
+                kind=cast(ProductInfoKind, arguments["kind"]),
+                query=str(arguments["query"]),
+                target_surface=cast(ProductTargetSurface, arguments["target_surface"]),
+                target_platform=cast(
+                    ProductTargetPlatform, arguments["target_platform"]
+                ),
+                current_surface=cast(CurrentProductSurface, self._launch_surface.value),
+                platform=self._client_platform,
+                app_version=self._app_version,
+                channel="voice",
+            )
+        except ValueError as exc:
+            raise lk_llm.ToolError(str(exc)) from exc
+
+        span = start_tool_span(
+            tool_name="get_aura_product_info", source="voice", uid=self._user_id
+        )
+        try:
+            self.session.say(result.answer)
+        except Exception as exc:
+            span.finish(success=False, error_type=type(exc).__name__)
+            raise lk_llm.ToolError("I couldn't open Aura's product guide right now.") from exc
+        span.finish()
+        logger.info(
+            "VoiceSession: product knowledge answered",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "surface": self._launch_surface.value,
+                "matched": result.matched,
+                "entry_ids": list(result.entry_ids),
+                "knowledge_version": result.knowledge_version,
+            },
+        )
+        raise StopResponse()
 
     @function_tool
     async def speak_only(self, ctx: RunContext, text: str) -> None:

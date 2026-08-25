@@ -455,6 +455,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         )
 
     surface = str(body.get("surface") or "app")
+    request_headers = {
+        str(key).casefold(): str(value)
+        for key, value in dict(event.get("headers") or {}).items()
+    }
     # Which SSE frame types this client can parse. Absent means 1, which is every
     # build shipped before per-tool activity frames existed. A client that cannot
     # parse a frame renders it as a visible error, so new frame types are opt-in
@@ -877,6 +881,9 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 allowed_tools=surface_allowed_tools,
                 blocked_write_reasons=blocked_write_reasons,
                 user_tier=effective_tier,
+                product_surface=surface,
+                product_platform=request_headers.get("x-aura-platform", ""),
+                app_version=request_headers.get("x-aura-app-version", ""),
             )
             claude = ClaudeClient(tool_executor)
             buffered_text_events: list[dict[str, Any]] = []
