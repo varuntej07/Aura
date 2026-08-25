@@ -38,6 +38,7 @@ import httpx
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from .firebase import admin_auth
 
 _DODO_TIMEOUT_S = 15.0
 
@@ -113,17 +114,53 @@ def _auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.DODO_API_KEY}"}
 
 
+async def _fetch_customer_identity(uid: str) -> tuple[str, str] | None:
+    """(email, display_name) for the signed-in Firebase account, or None.
+
+    The email is the account's, not something the buyer types: it is what pins
+    the Dodo customer, the receipt, and every later support or refund lookup to
+    the account that will actually be unlocked. Sign-in is Google or Apple only,
+    so an email always exists (an Apple private-relay address is a normal,
+    deliverable value and needs no special case).
+
+    Never raises: a failed lookup degrades to an unprefilled checkout rather
+    than blocking a purchase.
+    """
+    try:
+        record = await asyncio.to_thread(lambda: admin_auth().get_user(uid))
+        email = str(getattr(record, "email", "") or "").strip()
+        name = str(getattr(record, "display_name", "") or "").strip()
+    except Exception as exc:
+        logger.warn("billing: account email lookup failed, checkout unprefilled", {
+            "user_id": uid, "error": str(exc),
+        })
+        return None
+    if not email:
+        logger.warn("billing: account has no email, checkout unprefilled", {
+            "user_id": uid,
+        })
+        return None
+    return email, name
+
+
 async def create_checkout_session(
     uid: str, tier: str, period: str, customer_id: str | None = None
 ) -> str:
     """Creates a Dodo checkout session, returns the hosted checkout URL.
 
     metadata = {firebase_uid, tier, period} is the account handshake: the
-    payment webhook reads it back to know which uid to unlock. New customers
-    enter their own payment email, billing name, and address on Dodo's hosted
-    checkout. When the account already has a Dodo customer (customer_id), the
-    session is pinned to it so a re-purchase or plan change never mints a second
-    customer record.
+    payment webhook reads it back to know which uid to unlock.
+
+    The buyer's email is NOT free-form. It is prefilled from the signed-in
+    Firebase account and locked (allow_customer_editing_email=False), so the
+    payment can never land under an address the account does not own. Billing
+    name, address, tax id, and card stay the buyer's to fill in.
+
+    When the account already has a Dodo customer (customer_id), the session is
+    pinned to it so a re-purchase or plan change never mints a second customer
+    record, and the identity lookup is skipped entirely: the pinned record
+    already carries the email, and the lock keeps it from drifting.
+
     Raises DodoApiError on any failure (the handler maps it to 502).
     """
     product_id = settings.dodo_product_ids[(tier, period)]
@@ -131,9 +168,18 @@ async def create_checkout_session(
         "product_cart": [{"product_id": product_id, "quantity": 1}],
         "return_url": settings.DODO_CHECKOUT_RETURN_URL,
         "metadata": {"firebase_uid": uid, "tier": tier, "period": period},
+        "feature_flags": {"allow_customer_editing_email": False},
     }
     if customer_id:
         payload["customer"] = {"customer_id": customer_id}
+    else:
+        identity = await _fetch_customer_identity(uid)
+        if identity:
+            email, name = identity
+            customer: dict = {"email": email}
+            if name:
+                customer["name"] = name
+            payload["customer"] = customer
 
     url = f"{settings.DODO_API_BASE}/checkouts"
     try:

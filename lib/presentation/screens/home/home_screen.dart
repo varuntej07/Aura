@@ -5,9 +5,11 @@ import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/logging/app_logger.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
 import '../../../data/local/app_database.dart';
+import '../../../data/models/subscription_plan.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../../data/repositories/chat_repository.dart';
@@ -29,6 +31,7 @@ import '../../viewmodels/notification_chat_seed.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
 import '../settings/settings_screen.dart';
+import '../../widgets/flash_alert.dart';
 import '../../widgets/show_sign_in_pill.dart';
 import '../../widgets/voice_sphere.dart';
 
@@ -282,11 +285,57 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
     if (action == DeepLinkService.launchActionEntitlementRefresh) {
       // aura://checkout: the browser checkout just finished; pull the new plan
-      // now instead of waiting for the push or the next paywall visit. No
-      // navigation, the current screen simply reflects the unlock.
-      unawaited(context.read<SubscriptionService>().refreshEntitlement());
+      // now instead of waiting for the push or the next paywall visit.
+      unawaited(_confirmCheckoutUnlock());
     }
   }
+
+  /// Refetches entitlement after a web checkout and tells the buyer, once, that
+  /// the plan actually landed.
+  ///
+  /// The Dodo webhook is what writes the entitlement doc, and it races the
+  /// browser redirect: a single fetch can legitimately still return the
+  /// pre-purchase tier. So this polls a few times before giving up.
+  ///
+  /// The confirmation is shown ONLY when the tier really flipped to a paid
+  /// plan. Someone who just paid must never be told nothing happened, and must
+  /// never be congratulated on an unlock that did not land, so the give-up path
+  /// logs loudly instead of looking identical to success. The entitlement push
+  /// and the next paywall visit remain the backstop.
+  Future<void> _confirmCheckoutUnlock() async {
+    const attempts = 3;
+    const gap = Duration(seconds: 2);
+
+    final subscriptions = context.read<SubscriptionService>();
+    for (var attempt = 1; attempt <= attempts; attempt++) {
+      await subscriptions.refreshEntitlement();
+      if (!mounted) return;
+
+      final tier = subscriptions.currentTier;
+      if (tier != SubscriptionTier.free && !subscriptions.isTrialActive) {
+        showFlashAlert(context, "You're on ${_planLabel(tier)}. Let's go.");
+        return;
+      }
+      if (attempt < attempts) await Future<void>.delayed(gap);
+      if (!mounted) return;
+    }
+
+    AppLogger.warning(
+      'Checkout returned but entitlement never flipped to a paid tier',
+      tag: 'Home',
+      metadata: {
+        'attempts': attempts,
+        'tier': subscriptions.currentTier.name,
+        'trialing': subscriptions.isTrialActive,
+      },
+    );
+  }
+
+  String _planLabel(SubscriptionTier tier) => switch (tier) {
+    SubscriptionTier.pro => 'Pro',
+    SubscriptionTier.companion => 'Companion',
+    SubscriptionTier.free => 'Free',
+  };
 
   /// Opens a chat turn straight off an alarm the user answered with "I'm up".
   ///

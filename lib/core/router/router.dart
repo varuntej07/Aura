@@ -57,6 +57,18 @@ GoRouter buildRouter(
     initialLocation: '/home',
     observers: [rootRouteObserver],
     refreshListenable: authViewModel,
+    // An unroutable location must never surface go_router's raw
+    // "Page Not Found / GoException" screen to a user. It is always a defect
+    // upstream (a deep link, a notification payload, a shortcut), so it is
+    // logged loudly rather than swallowed, and the user lands somewhere real.
+    onException: (context, state, router) {
+      AppLogger.warning(
+        'Router: unroutable location, falling back to /home',
+        tag: 'Router',
+        metadata: {'location': state.uri.toString()},
+      );
+      router.go('/home');
+    },
     redirect: (context, state) {
       final auth = context.read<AuthViewModel>();
       final isReady =

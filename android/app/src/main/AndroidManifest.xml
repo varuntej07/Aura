@@ -23,6 +23,17 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- DeepLinkService (lib/data/services/deep_link_service.dart) is the
+                 SINGLE owner of the intent-filters below, via app_links. Off is
+                 Android's current default, but it is stated explicitly so a future
+                 Flutter default flip cannot make the engine ALSO push these URLs
+                 into GoRouter: aura://checkout has an empty path, which GoRouter
+                 reads as "/", and that shipped a raw "Page Not Found" screen to
+                 iOS buyers who had just paid. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"
+              />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
