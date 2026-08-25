@@ -283,6 +283,31 @@ async def stream_gemini_chat_fallback(
                 results.append(await _run_tool(function_call))
 
             # Clarification sentinel — same contract as the Anthropic loop.
+            terminal = next(
+                (
+                    result
+                    for name, result, exc in results
+                    if len(results) == 1
+                    and name == "get_aura_product_info"
+                    and exc is None
+                    and isinstance(result, dict)
+                    and isinstance(result.get("__terminal_response__"), str)
+                ),
+                None,
+            )
+            if terminal is not None:
+                yield {"type": "text_delta", "delta": terminal["__terminal_response__"]}
+                yield {
+                    "type": "done",
+                    "metadata": {
+                        "tool_names": [*names_used, "get_aura_product_info"],
+                        "termination_reason": "terminal_tool_response",
+                        "knowledge_version": terminal.get("knowledge_version"),
+                        "knowledge_entry_ids": terminal.get("entry_ids", []),
+                    },
+                }
+                return
+
             clarification = next(
                 (r for r in results if isinstance(r[1], dict) and r[1].get("__clarification__")),
                 None,

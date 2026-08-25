@@ -273,6 +273,7 @@ async def _regenerate(
         allowed_tools=surface_allowed_tools,
         blocked_write_reasons=blocked_write_reasons_for_text_turn(message),
         user_tier=tier,
+        product_surface=surface,
     )
     claude = ClaudeClient(tool_executor)
 

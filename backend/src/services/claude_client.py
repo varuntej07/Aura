@@ -660,6 +660,31 @@ class ClaudeClient:
                             "ok": not failed,
                         }
 
+                terminal = next(
+                    (
+                        result
+                        for _, name, result, exc in tool_results_raw
+                        if len(tool_results_raw) == 1
+                        and name == "get_aura_product_info"
+                        and exc is None
+                        and isinstance(result, dict)
+                        and isinstance(result.get("__terminal_response__"), str)
+                    ),
+                    None,
+                )
+                if terminal is not None:
+                    yield {"type": "text_delta", "delta": terminal["__terminal_response__"]}
+                    yield {
+                        "type": "done",
+                        "metadata": {
+                            "tool_names": tool_names_used,
+                            "termination_reason": "terminal_tool_response",
+                            "knowledge_version": terminal.get("knowledge_version"),
+                            "knowledge_entry_ids": terminal.get("entry_ids", []),
+                        },
+                    }
+                    return
+
                 # Check for clarification sentinel
                 clarification = next(
                     (r for r in tool_results_raw

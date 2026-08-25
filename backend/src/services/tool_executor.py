@@ -11,7 +11,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from google.cloud import firestore as fs
@@ -40,6 +40,13 @@ from .gmail_connector import GmailConnector
 from .google_calendar_connector import GoogleCalendarConnector
 from .model_provider import _strip_fences, get_model_provider
 from .outbound_draft.drafter import REASON_OK, draft_outbound, writing_voice_lines
+from .product_knowledge import (
+    CurrentProductSurface,
+    ProductInfoKind,
+    ProductTargetPlatform,
+    ProductTargetSurface,
+    lookup_product_knowledge,
+)
 from .reminder_time import parse_reminder_when
 
 ToolResult = dict[str, Any]
@@ -313,6 +320,9 @@ class ToolExecutor:
         allowed_tools: frozenset[str] | None = None,
         blocked_write_reasons: dict[str, str] | None = None,
         user_tier: str = "pro",
+        product_surface: str = "app",
+        product_platform: str = "",
+        app_version: str = "",
     ) -> None:
         self._user_id = user_id
         self._created_via = created_via     # How reminders created in this session are tagged
@@ -323,6 +333,15 @@ class ToolExecutor:
         # model; only the call is refused, with an envelope Buddy can speak truthfully.
         self._blocked_write_reasons = dict(blocked_write_reasons or {})
         self._user_tier = user_tier
+        self._product_surface = (
+            product_surface if product_surface in {"app", "keyboard", "desktop"} else "app"
+        )
+        self._product_platform = (
+            product_platform.casefold()
+            if product_platform.casefold() in {"android", "ios", "windows"}
+            else ""
+        )
+        self._app_version = app_version.strip()[:24]
 
     @property
     def user_id(self) -> str:
@@ -428,11 +447,14 @@ class ToolExecutor:
                 # and starts recommending other apps. The detail stays in `debug`,
                 # which is for logs and evals, not for the reply.
                 "user_message": (
-                    "I couldn't set that one up. Say it once more and I'll get it."
+                    "I couldn't read Aura's product guide for that. Ask me once more."
+                    if tool_name == "get_aura_product_info"
+                    else "I couldn't set that one up. Say it once more and I'll get it."
                 ),
                 "debug": str(exc),
             }
         dispatch: dict[str, Any] = {
+            "get_aura_product_info": self._get_aura_product_info,
             "draft_writing": self._draft_writing,
             "set_reminder": self._set_reminder,
             "list_reminders": self._list_reminders,
@@ -1477,6 +1499,39 @@ class ToolExecutor:
 
     # Web surf — fast Brave search exposed to chat + voice (Gemini grounding stays on
     # the background sports ingest; the real-time path uses Brave for low latency).
+    async def _get_aura_product_info(self, inp: dict[str, Any]) -> ToolResult:
+        result = lookup_product_knowledge(
+            kind=cast(ProductInfoKind, inp["kind"]),
+            query=str(inp["query"]),
+            target_surface=cast(ProductTargetSurface, inp["target_surface"]),
+            target_platform=cast(ProductTargetPlatform, inp["target_platform"]),
+            current_surface=cast(CurrentProductSurface, self._product_surface),
+            platform=self._product_platform,
+            app_version=self._app_version,
+            channel="chat",
+        )
+        logger.info(
+            "Product knowledge: lookup completed",
+            {
+                "kind": inp["kind"],
+                "target_platform": inp["target_platform"],
+                "surface": self._product_surface,
+                "platform": self._product_platform,
+                "matched": result.matched,
+                "entry_ids": list(result.entry_ids),
+                "knowledge_version": result.knowledge_version,
+                "confidence": result.confidence,
+            },
+        )
+        return {
+            "ok": True,
+            "__terminal_response__": result.answer,
+            "matched": result.matched,
+            "entry_ids": list(result.entry_ids),
+            "knowledge_version": result.knowledge_version,
+            "confidence": result.confidence,
+        }
+
     async def _web_surf(self, inp: dict[str, Any]) -> ToolResult:
         from ..agents.data_fetchers.brave_search import brave_search, peek_cache
         from .entitlement import (
