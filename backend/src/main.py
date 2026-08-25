@@ -126,6 +126,13 @@ from .handlers.history import (
     handle_get_session_detail,
     handle_list_sessions,
 )
+from .handlers.interview_companion import (
+    handle_answer_stream as handle_interview_companion_answer_stream,
+    handle_build_brief as handle_interview_companion_build_brief,
+    handle_company_research as handle_interview_companion_company_research,
+    handle_mint_stt_token as handle_interview_companion_mint_stt_token,
+    handle_reflection as handle_interview_companion_reflection,
+)
 from .handlers.keyboard import handle_keyboard_draft, handle_keyboard_vocab
 from .handlers.mcp import register_mcp
 from .handlers.meetings import (
@@ -1088,6 +1095,33 @@ async def desktop_notification_acknowledge_endpoint(
 @app.post("/dictation/stt-token")
 async def dictation_stt_token_endpoint(request: Request) -> JSONResponse:
     return await handle_dictation_mint_stt_token(request)
+
+
+@app.post("/interview-companion/stt-token")
+async def interview_companion_stt_token_endpoint(request: Request) -> JSONResponse:
+    return await handle_interview_companion_mint_stt_token(request)
+
+
+@app.post("/interview-companion/brief")
+async def interview_companion_brief_endpoint(request: Request) -> JSONResponse:
+    return await handle_interview_companion_build_brief(request)
+
+
+@app.post("/interview-companion/company-research")
+async def interview_companion_company_research_endpoint(request: Request) -> JSONResponse:
+    return await handle_interview_companion_company_research(request)
+
+
+@app.post("/interview-companion/answer", response_model=None)
+async def interview_companion_answer_endpoint(
+    request: Request,
+) -> JSONResponse | StreamingResponse:
+    return await handle_interview_companion_answer_stream(request)
+
+
+@app.post("/interview-companion/reflection")
+async def interview_companion_reflection_endpoint(request: Request) -> JSONResponse:
+    return await handle_interview_companion_reflection(request)
 
 
 # Opt-in desktop dictation training traces. Metadata is written before audio so

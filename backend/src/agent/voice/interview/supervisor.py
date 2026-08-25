@@ -27,6 +27,7 @@ from livekit.agents import Agent, RunContext, function_tool
 from livekit.agents import llm as lk_llm
 
 from ....lib.logger import logger
+from ....services.interview_preparation import prepare_mock_interview_brief
 from .contracts import InterviewIntakeResult
 from .intake_task import InterviewIntakeTask, retry_instructions
 from .interviewer import InterviewerAgent
@@ -176,6 +177,14 @@ class InterviewSupervisorAgent(Agent):
             interview.note_cancelled()
             await self._hand_back_to_buddy("intake_cancelled")
             return
+
+        dossier.brief = prepare_mock_interview_brief(
+            company=dossier.company,
+            role=dossier.target_role,
+            experience=dossier.experience,
+            job_description=dossier.job_description,
+        )
+        interview.dossier = dossier
 
         if not interview.note_setup_captured():
             return

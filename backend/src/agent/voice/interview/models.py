@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ....lib.logger import logger
+from ....services.interview_preparation import InterviewBrief
 from ..guide_session_state import GuideSessionState
 from .contracts import START_CLAIM_TTL_S, BuddyFactory
 
@@ -137,6 +138,7 @@ class InterviewDossier(BaseModel):
     experience: str = ""
     # Raw pasted text, never parsed here. Empty on the conversational branch.
     job_description: str = ""
+    brief: InterviewBrief | None = None
     source: Literal["conversation", "jd"] = "conversation"
     # Explicit branch decision: True means the user asserted they had a JD to share.
     job_description_requested: bool = False

@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
     OPENAI_TEXT_CHAT_MODEL: str = "gpt-5.6-luna"
+    INTERVIEW_COMPANY_RESEARCH_MODEL: str = "gpt-5.6-terra"
 
     # OpenAI Realtime bridge: the instant speech-to-speech leg the desktop opens
     # while the LiveKit cascade worker cold-starts. The desktop connects direct to

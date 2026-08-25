@@ -174,14 +174,19 @@ def _clean_questions(candidates: list[_PlannedQuestion]) -> list[InterviewQuesti
 
 
 def _planning_prompt(dossier: InterviewDossier) -> str:
+    source_text = {
+        source.kind: source.text
+        for source in dossier.brief.sources
+    } if dossier.brief else {}
     lines = [
-        f"Company: {dossier.company.strip() or 'not given'}",
-        f"Role: {dossier.target_role.strip() or 'not given'}",
+        f"Company: {source_text.get('company', dossier.company).strip() or 'not given'}",
+        f"Role: {source_text.get('role', dossier.target_role).strip() or 'not given'}",
         f"Interview focus: {dossier.interview_focus.strip() or 'not given'}",
-        f"Their background, in their words: {dossier.experience.strip() or 'not given'}",
+        "Their background, in their words: "
+        f"{source_text.get('verified_fact', dossier.experience).strip() or 'not given'}",
     ]
     prompt = "\n".join(lines)
-    job_description = dossier.job_description.strip()
+    job_description = source_text.get("job_description", dossier.job_description).strip()
     if job_description:
         prompt = "\n\n".join(
             (
