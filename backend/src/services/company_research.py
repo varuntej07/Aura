@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -41,6 +42,13 @@ ResearchCategory = Literal[
     "role_relevance",
 ]
 ResearchFactStatus = Literal["confirmed", "estimated", "conflicting"]
+ResearchStage = Literal[
+    "started",
+    "search_started",
+    "search_done",
+    "reading",
+    "writing",
+]
 
 
 class CompanyResearchRequest(BaseModel):
@@ -128,6 +136,22 @@ class CompanyResearchResult(BaseModel):
     facts: list[CompanyResearchFact]
     likely_interviewer_questions: list[LikelyInterviewerQuestion]
     unknowns: list[str]
+
+
+class ResearchProgress(BaseModel):
+    """One real hosted-search event, on its way to the waiting client.
+
+    Every field here is copied from a provider event. Nothing in this model is
+    inferred, estimated, or driven by a timer, so a client can render it as a
+    factual account of what the research call is doing right now.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: ResearchStage
+    call_id: str = ""
+    query: str = ""
+    urls: list[str] = Field(default_factory=list)
 
 
 _client: Any = None
@@ -335,46 +359,45 @@ def _assemble(response: Any, payload: CompanyResearchRequest) -> CompanyResearch
     )
 
 
-async def _research_company_once(
-    payload: CompanyResearchRequest, *, uid: str
-) -> CompanyResearchResult:
-    """Run one bounded hosted-search response and return only source-backed output."""
-    client = _get_client()
+def _resolve_model() -> str:
     model = settings.INTERVIEW_COMPANY_RESEARCH_MODEL.strip()
     if not model:
         raise ValueError("INTERVIEW_COMPANY_RESEARCH_MODEL is not set")
-    recording = start_llm_generation(
-        model=model,
-        provider="openai",
-        caller="interview_company_research",
-        uid=uid,
-    )
-    try:
-        response = await client.responses.parse(
-            model=model,
-            reasoning={"effort": "medium"},
-            tools=[{"type": "web_search", "search_context_size": "high"}],
-            tool_choice="required",
-            include=["web_search_call.action.sources"],
-            max_tool_calls=_MAX_TOOL_CALLS,
-            max_output_tokens=_MAX_OUTPUT_TOKENS,
-            store=False,
-            safety_identifier=hashlib.sha256(uid.encode("utf-8")).hexdigest()[:32],
-            instructions=(
-                "You create concise, current, evidence-bound company dossiers for interview "
-                "preparation. Return the requested structure only. Never turn target-company "
-                "facts into claims about the candidate. Never manufacture a URL or fill an "
-                "unknown with an inference."
-            ),
-            input=_research_prompt(payload),
-            text_format=_CompanyResearchDraft,
-            timeout=90.0,
-        )
-    except BaseException as exc:
-        recording.finish(success=False, error_type=type(exc).__name__)
-        raise
-    recording.finish(tokens=_usage_tokens(getattr(response, "usage", None)))
-    result = _assemble(response, payload)
+    return model
+
+
+def _research_kwargs(
+    payload: CompanyResearchRequest, *, uid: str, model: str
+) -> dict[str, Any]:
+    """The single definition of the hosted-search request.
+
+    The one-shot and the streamed path both build their call from this, so the
+    two can never drift apart in tools, limits, instructions, or timeout. Change
+    the research contract here or nowhere.
+    """
+    return {
+        "model": model,
+        "reasoning": {"effort": "medium"},
+        "tools": [{"type": "web_search", "search_context_size": "high"}],
+        "tool_choice": "required",
+        "include": ["web_search_call.action.sources"],
+        "max_tool_calls": _MAX_TOOL_CALLS,
+        "max_output_tokens": _MAX_OUTPUT_TOKENS,
+        "store": False,
+        "safety_identifier": hashlib.sha256(uid.encode("utf-8")).hexdigest()[:32],
+        "instructions": (
+            "You create concise, current, evidence-bound company dossiers for interview "
+            "preparation. Return the requested structure only. Never turn target-company "
+            "facts into claims about the candidate. Never manufacture a URL or fill an "
+            "unknown with an inference."
+        ),
+        "input": _research_prompt(payload),
+        "text_format": _CompanyResearchDraft,
+        "timeout": 90.0,
+    }
+
+
+def _log_complete(result: CompanyResearchResult) -> None:
     logger.info(
         "interview company research: complete",
         {
@@ -384,6 +407,30 @@ async def _research_company_once(
             "unknown_count": len(result.unknowns),
         },
     )
+
+
+async def _research_company_once(
+    payload: CompanyResearchRequest, *, uid: str
+) -> CompanyResearchResult:
+    """Run one bounded hosted-search response and return only source-backed output."""
+    client = _get_client()
+    model = _resolve_model()
+    recording = start_llm_generation(
+        model=model,
+        provider="openai",
+        caller="interview_company_research",
+        uid=uid,
+    )
+    try:
+        response = await client.responses.parse(
+            **_research_kwargs(payload, uid=uid, model=model)
+        )
+    except BaseException as exc:
+        recording.finish(success=False, error_type=type(exc).__name__)
+        raise
+    recording.finish(tokens=_usage_tokens(getattr(response, "usage", None)))
+    result = _assemble(response, payload)
+    _log_complete(result)
     return result
 
 
@@ -432,3 +479,135 @@ async def research_company(
             _inflight[key] = task
     result = await asyncio.shield(task)
     return result.model_copy(deep=True)
+
+
+async def _cached_result(key: str) -> CompanyResearchResult | None:
+    """Return a live cache entry, sweeping expired ones on the way past."""
+    now = time.monotonic()
+    async with _request_lock:
+        expired = [
+            cache_key
+            for cache_key, (created_at, _) in _result_cache.items()
+            if now - created_at > _CACHE_TTL_S
+        ]
+        for cache_key in expired:
+            _result_cache.pop(cache_key, None)
+        cached = _result_cache.get(key)
+        return cached[1].model_copy(deep=True) if cached is not None else None
+
+
+async def _store_result(key: str, result: CompanyResearchResult) -> None:
+    async with _request_lock:
+        if len(_result_cache) >= _CACHE_LIMIT:
+            oldest_key = min(_result_cache, key=lambda item: _result_cache[item][0])
+            _result_cache.pop(oldest_key, None)
+        _result_cache[key] = (time.monotonic(), result.model_copy(deep=True))
+
+
+def _search_action(item: Any) -> tuple[str, list[str]]:
+    """Pull the real query and the real consulted URLs off one web_search_call."""
+    action = getattr(item, "action", None)
+    query = str(getattr(action, "query", "") or "").strip()
+    urls: list[str] = []
+    action_url = _canonical_url(str(getattr(action, "url", "") or ""))
+    if action_url:
+        urls.append(action_url)
+    for source in getattr(action, "sources", ()) or ():
+        source_url = _canonical_url(str(getattr(source, "url", "") or ""))
+        if source_url and source_url not in urls:
+            urls.append(source_url)
+    return query[:300], urls[:6]
+
+
+async def research_company_streaming(
+    payload: CompanyResearchRequest, *, uid: str
+) -> AsyncGenerator[ResearchProgress | CompanyResearchResult, None]:
+    """Yield real hosted-search progress, then the finished dossier.
+
+    Progress is caused by provider events only, so a client can render each row
+    as a factual account rather than a guess. This path deliberately does not
+    join the `_inflight` coalescing that `research_company` uses, because one
+    generator cannot fan out to two consumers, but it does read and write
+    `_result_cache`, so a repeat of the same request still returns immediately.
+    """
+    key = _request_key(payload, uid)
+    cached = await _cached_result(key)
+    if cached is not None:
+        yield cached
+        return
+
+    client = _get_client()
+    model = _resolve_model()
+    recording = start_llm_generation(
+        model=model,
+        provider="openai",
+        caller="interview_company_research",
+        uid=uid,
+    )
+    yield ResearchProgress(stage="started")
+
+    response: Any = None
+    announced_writing = False
+    try:
+        async with client.responses.stream(
+            **_research_kwargs(payload, uid=uid, model=model)
+        ) as stream:
+            async for event in stream:
+                event_type = str(getattr(event, "type", "") or "")
+                if event_type == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    if getattr(item, "type", "") != "web_search_call":
+                        continue
+                    query, _ = _search_action(item)
+                    yield ResearchProgress(
+                        stage="search_started",
+                        call_id=str(getattr(item, "id", "") or ""),
+                        query=query,
+                    )
+                elif event_type == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if getattr(item, "type", "") != "web_search_call":
+                        continue
+                    query, urls = _search_action(item)
+                    action_type = str(
+                        getattr(getattr(item, "action", None), "type", "") or ""
+                    )
+                    yield ResearchProgress(
+                        stage="reading"
+                        if action_type in ("open_page", "find_in_page")
+                        else "search_done",
+                        call_id=str(getattr(item, "id", "") or ""),
+                        query=query,
+                        urls=urls,
+                    )
+                elif event_type == "response.output_text.delta" and not announced_writing:
+                    announced_writing = True
+                    yield ResearchProgress(stage="writing")
+            try:
+                response = await stream.get_final_response()
+            except Exception as exc:
+                # openai-python auto-parses `text_format` before the terminal
+                # status is known, so a late `response.incomplete` surfaces here
+                # as a validation error rather than as a usable response. One
+                # non-streaming retry is cheaper than losing the whole request.
+                logger.warn(
+                    "interview company research: streamed parse unusable",
+                    {"error_type": type(exc).__name__},
+                )
+                response = None
+    except BaseException as exc:
+        recording.finish(success=False, error_type=type(exc).__name__)
+        raise
+
+    if response is None:
+        recording.finish(success=False, error_type="StreamedParseUnusable")
+        result = await _research_company_once(payload, uid=uid)
+        await _store_result(key, result)
+        yield result
+        return
+
+    recording.finish(tokens=_usage_tokens(getattr(response, "usage", None)))
+    result = _assemble(response, payload)
+    await _store_result(key, result)
+    _log_complete(result)
+    yield result

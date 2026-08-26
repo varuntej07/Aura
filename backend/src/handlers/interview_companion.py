@@ -22,7 +22,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..services.company_research import CompanyResearchRequest, research_company
+from ..services.company_research import (
+    CompanyResearchRequest,
+    CompanyResearchResult,
+    ResearchProgress,
+    research_company,
+    research_company_streaming,
+)
 from ..services.interview_preparation import (
     BriefClaim,
     InterviewBriefBuildRequest,
@@ -37,6 +43,7 @@ from ..services.request_auth import resolve_user_id_from_request
 _DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
 _TOKEN_MINT_TIMEOUT_S = 6.0
 _GATE_CONFIDENCE = 0.78
+_RESEARCH_HEARTBEAT_S = 10.0
 _PROVIDER_CIRCUITS: dict[str, tuple[float, str]] = {}
 _PROVIDER_SLOW_STARTS: dict[str, int] = {}
 _SSE_HEADERS = {
@@ -452,6 +459,91 @@ async def handle_company_research(request: Request) -> JSONResponse:
     response = JSONResponse(result.model_dump())
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+async def _company_research_stream(
+    payload: CompanyResearchRequest, uid: str
+) -> AsyncGenerator[str, None]:
+    """Relay real hosted-search progress as SSE, with a heartbeat across gaps.
+
+    Reasoning between searches routinely runs past twenty seconds, and an idle
+    proxy drops a silent connection long before the dossier is ready, so the
+    queue read is bounded and a comment frame fills the quiet.
+    """
+    queue: asyncio.Queue[
+        ResearchProgress | CompanyResearchResult | BaseException | None
+    ] = asyncio.Queue()
+
+    async def consume() -> None:
+        try:
+            async for item in research_company_streaming(payload, uid=uid):
+                await queue.put(item)
+        except BaseException as exc:  # noqa: BLE001 - relayed to the client below
+            await queue.put(exc)
+        finally:
+            await queue.put(None)
+
+    worker = asyncio.create_task(consume())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(
+                    queue.get(), timeout=_RESEARCH_HEARTBEAT_S
+                )
+            except TimeoutError:
+                yield ": ping\n\n"
+                continue
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                logger.warn(
+                    "interview_companion: company research stream failed",
+                    {"error_type": type(item).__name__},
+                )
+                yield _frame(
+                    "error",
+                    {
+                        "type": "error",
+                        "code": "research_failed",
+                        "message": "Company research failed.",
+                    },
+                )
+                break
+            if isinstance(item, ResearchProgress):
+                yield _frame(
+                    "research_progress",
+                    {"type": "research_progress", **item.model_dump()},
+                )
+                continue
+            yield _frame(
+                "research_done",
+                {"type": "research_done", "result": item.model_dump()},
+            )
+        yield _terminal()
+    finally:
+        # A disconnected client closes this generator; drop the provider call
+        # with it rather than leaving it to finish into nothing.
+        worker.cancel()
+
+
+async def handle_company_research_stream(
+    request: Request,
+) -> JSONResponse | StreamingResponse:
+    uid = resolve_user_id_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
+        return JSONResponse({"error": "Content-Type must be application/json."}, status_code=400)
+    try:
+        payload = CompanyResearchRequest.model_validate(await request.json())
+    except (ValidationError, ValueError):
+        return JSONResponse({"error": "Invalid company research request."}, status_code=422)
+
+    return StreamingResponse(
+        _company_research_stream(payload, uid),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 def _gate_prompt(payload: InterviewAnswerRequest) -> str:

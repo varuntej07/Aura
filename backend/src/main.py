@@ -130,6 +130,7 @@ from .handlers.interview_companion import (
     handle_answer_stream as handle_interview_companion_answer_stream,
     handle_build_brief as handle_interview_companion_build_brief,
     handle_company_research as handle_interview_companion_company_research,
+    handle_company_research_stream as handle_interview_companion_company_research_stream,
     handle_mint_stt_token as handle_interview_companion_mint_stt_token,
     handle_reflection as handle_interview_companion_reflection,
 )
@@ -1118,6 +1119,13 @@ async def interview_companion_brief_endpoint(request: Request) -> JSONResponse:
 @app.post("/interview-companion/company-research")
 async def interview_companion_company_research_endpoint(request: Request) -> JSONResponse:
     return await handle_interview_companion_company_research(request)
+
+
+@app.post("/interview-companion/company-research/stream", response_model=None)
+async def interview_companion_company_research_stream_endpoint(
+    request: Request,
+) -> JSONResponse | StreamingResponse:
+    return await handle_interview_companion_company_research_stream(request)
 
 
 @app.post("/interview-companion/answer", response_model=None)
