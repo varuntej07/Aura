@@ -37,12 +37,11 @@ from ..services.interview_preparation import (
     assemble_interview_brief,
     interview_brief_prompt,
 )
-from ..services.model_provider import attempt_budget, get_model_provider, is_quota_exhausted
+from ..services.model_provider import get_model_provider, is_quota_exhausted
 from ..services.request_auth import resolve_user_id_from_request
 
 _DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
 _TOKEN_MINT_TIMEOUT_S = 6.0
-_GATE_CONFIDENCE = 0.78
 _RESEARCH_HEARTBEAT_S = 10.0
 _PROVIDER_CIRCUITS: dict[str, tuple[float, str]] = {}
 _PROVIDER_SLOW_STARTS: dict[str, int] = {}
@@ -130,15 +129,6 @@ class TranscriptTurn(BaseModel):
     final_word_at_ms: int | None = Field(default=None, ge=0)
 
 
-class InterviewContext(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    company: str = Field(default="", max_length=300)
-    role: str = Field(default="", max_length=300)
-    resume: str = Field(default="", max_length=12_000)
-    job_description: str = Field(default="", max_length=12_000)
-
-
 class InterviewScreenSightFrame(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -174,26 +164,21 @@ AnswerAction = Literal[
 class InterviewAnswerRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    contract_version: Literal[1, 2, 3] = 1
     turn: TranscriptTurn
     recent_turns: list[TranscriptTurn] = Field(default_factory=list, max_length=12)
-    context: InterviewContext = Field(default_factory=InterviewContext)
     brief: InterviewBriefSlice | None = None
+    # The candidate's own resume, sent by the desktop only when the ranked brief
+    # slice carries no candidate evidence. Reference material for this call, not
+    # verified evidence: it never enters _brief_context or the evidence-id gate.
+    resume: str = Field(default="", max_length=12_000)
     action: AnswerAction = "automatic"
+    # Resolved on the desktop from the round picked in preflight.
+    answer_shape: Literal["hook_bullets", "star_bullets", "concept_steps", "prose"]
     current_answer: str = Field(default="", max_length=4_000)
     screen_sight: InterviewScreenSightFrame | None = None
 
     @model_validator(mode="after")
-    def validate_contract(self) -> InterviewAnswerRequest:
-        if self.contract_version == 1 and (
-            self.brief is not None
-            or self.action != "automatic"
-            or self.current_answer
-            or self.screen_sight is not None
-        ):
-            raise ValueError("phase 3 fields require contract version 2")
-        if self.contract_version < 3 and self.screen_sight is not None:
-            raise ValueError("screen sight requires contract version 3")
+    def validate_request(self) -> InterviewAnswerRequest:
         if self.action == "screen_sight" and self.screen_sight is None:
             raise ValueError("screen sight action requires an image")
         if self.action != "screen_sight" and self.screen_sight is not None:
@@ -202,47 +187,6 @@ class InterviewAnswerRequest(BaseModel):
             if not self.current_answer.strip():
                 raise ValueError("answer transformation requires a current answer")
         return self
-
-
-class GateDecision(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    target: Literal[
-        "candidate",
-        "another_interviewer",
-        "self",
-        "crosstalk",
-        "media_playback",
-        "uncertain",
-    ]
-    intent: Literal["question", "request", "statement", "rhetorical", "incomplete"]
-    requires_response: bool
-    confidence: float = Field(ge=0.0, le=1.0)
-    normalized_question: str = Field(default="", max_length=2_000)
-    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
-    likely_follow_up: bool = False
-
-
-class GroundedSentence(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    text: str = Field(min_length=1, max_length=1_000)
-    kind: Literal["candidate_fact", "target_fact", "general"]
-    source_ids: list[str] = Field(default_factory=list, max_length=8)
-
-    @model_validator(mode="after")
-    def validate_grounding(self) -> GroundedSentence:
-        if self.kind in ("candidate_fact", "target_fact") and not self.source_ids:
-            raise ValueError("factual sentences require evidence")
-        if self.kind == "general" and self.source_ids:
-            raise ValueError("general sentences cannot claim evidence")
-        return self
-
-
-class GroundedAnswer(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    sentences: list[GroundedSentence] = Field(min_length=1, max_length=10)
 
 
 class InterviewReflectionRequest(BaseModel):
@@ -546,44 +490,6 @@ async def handle_company_research_stream(
     )
 
 
-def _gate_prompt(payload: InterviewAnswerRequest) -> str:
-    recent = [
-        {
-            "source": turn.source,
-            "text": turn.text,
-            "remote_speaker_id": turn.remote_speaker_id,
-            "speaker_overlap": turn.speaker_overlap,
-        }
-        for turn in payload.recent_turns[-8:]
-    ]
-    prompt = {
-        "remote_turn": {
-            "text": payload.turn.text,
-            "remote_speaker_id": payload.turn.remote_speaker_id,
-            "speaker_overlap": payload.turn.speaker_overlap,
-        },
-        "recent_turns": recent,
-        "task": (
-            "Decide whether this completed remote video-call turn is addressed to the "
-            "candidate and requires an answer now. Fail closed for uncertainty, "
-            "crosstalk, panel-to-panel speech, rhetorical questions, self-answered "
-            "questions, media playback, statements, and incomplete turns. Speaker labels "
-            "are supporting context only and never establish who a question targets."
-        ),
-    }
-    if payload.contract_version >= 2:
-        prompt["available_evidence"] = _brief_context(payload.brief)
-        prompt["task"] = (
-                "Decide whether this completed remote video-call turn is addressed to the "
-                "candidate and requires an answer now. Fail closed for uncertainty, "
-                "crosstalk, panel-to-panel speech, rhetorical questions, self-answered "
-                "questions, media playback, statements, and incomplete turns. Speaker labels "
-                "are supporting context only and never establish who a question targets. "
-                "Evidence IDs must be source IDs from available_evidence."
-        )
-    return json.dumps(prompt, separators=(",", ":"))
-
-
 def _brief_context(brief: InterviewBriefSlice | None) -> dict | None:
     if not brief:
         return None
@@ -621,29 +527,6 @@ def _brief_context(brief: InterviewBriefSlice | None) -> dict | None:
     }
 
 
-def _allowed_evidence_ids(brief: InterviewBriefSlice | None) -> set[str]:
-    if not brief:
-        return set()
-    claims = [*brief.target_facts, *brief.jd_requirements]
-    claims.extend(brief.candidate_facts)
-    claims.extend(brief.projects)
-    claims.extend(brief.metrics)
-    if brief.company:
-        claims.append(brief.company)
-    if brief.role:
-        claims.append(brief.role)
-    for story in brief.star_stories:
-        story_claims = [story.situation, story.task, story.action, story.result]
-        if all(claim.verification_state == "verified" for claim in story_claims):
-            claims.extend(story_claims)
-    return {
-        source_id
-        for claim in claims
-        if claim.scope == "target" or claim.verification_state == "verified"
-        for source_id in claim.source_ids
-    }
-
-
 def _evidence_ids_by_scope(brief: InterviewBriefSlice | None) -> tuple[set[str], set[str]]:
     if not brief:
         return set(), set()
@@ -671,32 +554,87 @@ def _evidence_ids_by_scope(brief: InterviewBriefSlice | None) -> tuple[set[str],
     return candidate_ids, target_ids
 
 
-def _answer_prompt(payload: InterviewAnswerRequest, decision: GateDecision) -> str:
+# Every bullet and step below is the candidate's OWN words, phrased so it can be
+# read off and spoken. The distinction that matters: "Rewrote the Flutter app in
+# Tauri" is a talking point, "Mention your Tauri experience" is an instruction
+# about a talking point, and only the first is any use mid-sentence.
+_SHAPE_INSTRUCTION = {
+    "hook_bullets": (
+        "Open with ONE short spoken sentence. Then three or four bullet lines, each "
+        "starting with the character · and a space, five to nine words each. Every "
+        "bullet is a phrase the candidate speaks, not a note about what to mention."
+    ),
+    "star_bullets": (
+        "Open with ONE short spoken sentence naming the situation. Then exactly four "
+        "bullet lines, each starting with the character · and a space, covering "
+        "Situation, Task, Action, Result in that order, five to nine words each. Every "
+        "bullet is a phrase the candidate speaks, not a note about what to mention."
+    ),
+    "concept_steps": (
+        "Name the concept in ONE short spoken line. Then three or four numbered steps, "
+        "each on its own line starting with '1. ', '2. ' and so on, five to nine words "
+        "each, phrased as the candidate would say them. When there is a real tradeoff "
+        "add a final line starting 'Tradeoff: '."
+    ),
+    "prose": (
+        "Use three to five short spoken sentences of connected prose. Do not use "
+        "bullets: the exact phrasing is the answer here."
+    ),
+}
+
+_DECISION_INSTRUCTION = (
+    "Your FIRST line decides whether this turn needs an answer at all. Write exactly "
+    "ANSWER when the remote speaker asked the candidate something that needs a reply "
+    "now. Otherwise write SKIP| followed by one of another_interviewer, self, crosstalk, "
+    "media_playback, uncertain. Skip statements, rhetorical questions, questions the "
+    "speaker answers themselves, panel-to-panel talk, media playback, and incomplete "
+    "turns. When unsure, skip. Put nothing else on that line."
+)
+
+# The single hardest constraint, and the one the model breaks first. Anything
+# that reads as advice ABOUT the answer is useless in a live call: the candidate
+# cannot say it out loud, and they have no time to translate it while the
+# interviewer is waiting. Stated once here so both modes carry it identically.
+_VOICE_RULE = (
+    "You are the candidate, speaking. Write ONLY the words they say out loud, in first "
+    "person, addressed to the interviewer, continuing the conversation that is already "
+    "happening. Never write about the answer. Never explain, introduce, coach, or "
+    "describe what a good answer would contain. Never open with phrasing such as "
+    "Here's how, You could say, A strong answer, I would suggest, Try, Consider, or "
+    "Start by. Never address the candidate as you. Read every line back in your head: "
+    "if it would sound strange said aloud in a real interview, it is wrong."
+)
+
+_GROUNDED_SYSTEM = (
+    _VOICE_RULE
+    + " Every claim about your experience, employers, projects, skills, or metrics must "
+    "come from the supplied evidence, and every claim about the target company must come "
+    "from the supplied target context. Never state a target-company fact as your own "
+    "experience. Treat the constraints as hard boundaries."
+)
+
+_UNVERIFIED_SYSTEM = (
+    _VOICE_RULE
+    + " Your prepared background is not available right now. Answer anyway, with the real "
+    "substance of a good answer rather than a description of one. Never invent an "
+    "employer, job title, date, metric, project name, or technology that has not already "
+    "been said in this conversation. Where you need a specific from your own history, "
+    "leave a square-bracket slot such as [your most recent project] inside the sentence "
+    "and keep talking around it, so the line stays something you can read out and fill in "
+    "as you go."
+)
+
+
+def _answer_system(grounded: bool) -> str:
+    return _GROUNDED_SYSTEM if grounded else _UNVERIFIED_SYSTEM
+
+
+def _answer_prompt(payload: InterviewAnswerRequest) -> str:
     recent = [
         {"source": turn.source, "text": turn.text}
         for turn in payload.recent_turns[-8:]
     ]
-    if payload.contract_version == 1:
-        return json.dumps(
-            {
-                "question": decision.normalized_question or payload.turn.text,
-                "recent_turns": recent,
-                "context": payload.context.model_dump(),
-                "task": (
-                    "Draft a concise answer the candidate can say aloud. Use two to four short "
-                    "sentences. Use only facts in the supplied context or recent candidate turns. "
-                    "When facts are missing, give a truthful approach instead of inventing "
-                    "experience."
-                ),
-            },
-            separators=(",", ":"),
-        )
-    length = payload.brief.answer_length if payload.brief else "balanced"
-    length_instruction = {
-        "brief": "Use one or two short sentences.",
-        "balanced": "Use two to four short sentences.",
-        "detailed": "Use four to six concise sentences.",
-    }[length]
+    shape = _SHAPE_INSTRUCTION[payload.answer_shape]
     action_instruction = {
         "automatic": "Draft the answer now.",
         "suggest": "Draft an answer because the candidate explicitly requested a suggestion.",
@@ -708,66 +646,122 @@ def _answer_prompt(payload: InterviewAnswerRequest, decision: GateDecision) -> s
             "this answer only. Do not imply the screenshot proves candidate experience."
         ),
     }[payload.action]
-    task = f"{action_instruction} {length_instruction}"
+    resume = payload.resume.strip()
+    resume_instruction = (
+        " candidate_resume is the candidate's own resume, supplied as reference for this "
+        "call. Treat it as their real history and answer with specifics from it."
+        if resume
+        else ""
+    )
     return json.dumps(
         {
-            "question": decision.normalized_question or payload.turn.text,
+            "question": payload.turn.text,
             "recent_turns": recent,
-            "legacy_context": (
-                payload.context.model_dump() if payload.contract_version == 1 else None
-            ),
             "brief": _brief_context(payload.brief),
+            "candidate_resume": resume or None,
             "current_answer": payload.current_answer or None,
             "action": payload.action,
             "task": (
-                f"{task} Draft text the candidate can say aloud. Candidate experience may come "
-                "only from verified candidate_evidence. Target-company facts may come only from "
-                "target_context and must never be phrased as candidate experience. Recent "
-                "candidate turns provide conversational continuity, not new factual evidence. "
-                "Treat constraints as hard boundaries. When candidate evidence is missing, give "
-                "a truthful approach instead of inventing experience. Each factual sentence must "
-                "identify whether it is a candidate_fact or target_fact and list its source IDs."
+                f"{action_instruction} {shape} Recent candidate turns provide conversational "
+                f"continuity, not new factual evidence.{resume_instruction}"
             ),
         },
         separators=(",", ":"),
     )
 
 
-async def _grounded_answer_deltas(
+def _read_decision(buffer: str, *, final: bool = False) -> tuple[str, str, str] | None:
+    """Classify the opening of an answer stream, or None while it is still
+    ambiguous and more input could settle it.
+
+    Deliberately biased toward "answer". Anything not recognisably one of the two
+    keywords comes back as answer text, whitespace and all, so a model that just
+    starts answering loses nothing.
+    """
+    stripped = buffer.lstrip()
+    upper = stripped.upper()
+    if upper.startswith("SKIP"):
+        newline = stripped.find("\n")
+        if newline < 0:
+            if not final and len(stripped) < 40:
+                return None
+            line = stripped
+        else:
+            line = stripped[:newline]
+        _, _, target = line.partition("|")
+        return ("skip", target.strip().lower() or "uncertain", "")
+    if upper.startswith("ANSWER"):
+        rest = stripped[len("ANSWER") :]
+        newline = rest.find("\n")
+        if newline >= 0:
+            return ("answer", "candidate", rest[newline + 1 :])
+        if rest.strip():
+            # "ANSWERING the question..." is a word, not the marker. Keep it all.
+            return ("answer", "candidate", buffer)
+        return ("answer", "candidate", "") if final else None
+    if not final:
+        for keyword in ("ANSWER", "SKIP"):
+            if keyword.startswith(upper) and len(upper) < len(keyword):
+                return None
+    return ("answer", "candidate", buffer)
+
+
+async def _answer_deltas(
     payload: InterviewAnswerRequest,
-    decision: GateDecision,
-    evidence_ids: list[str],
+    decision: dict,
     model_id: str,
 ) -> AsyncGenerator[str, None]:
+    """Stream one answer, treating everything the model writes as answer text
+    unless it opened with an explicit skip.
+
+    Fail-open on purpose. An earlier version required a decision line AND a
+    trailing evidence line, and raised when either was missing or misplaced. On a
+    live interview that turned ordinary formatting drift into one of two
+    failures: a lost provider leg with a slow fallback behind it, or an answer
+    silently truncated at the sentinel. Metadata is now dropped when it is absent
+    or malformed. The text never is.
+    """
     candidate_evidence, target_evidence = _evidence_ids_by_scope(payload.brief)
-    source_sets = {
-        "candidate_fact": candidate_evidence,
-        "target_fact": target_evidence,
-        "general": set(),
-    }
-    system = (
-        "You write truthful, speakable interview answers. Return one to ten lines and "
-        "nothing else. Every line must be KIND|SOURCE_IDS|SENTENCE. KIND is exactly "
-        "candidate_fact, target_fact, or general. Put comma-separated verified source IDs "
-        "in SOURCE_IDS for factual lines, and put - for general lines. Put the kind and "
-        "source IDs before writing the sentence so Aura can validate them before showing "
-        "text. Never use line breaks inside a sentence. Never claim experience, metrics, "
-        "employers, projects, or skills without verified candidate evidence. Company and "
-        "role statements use target evidence and cannot describe candidate experience."
+    # Keyed on the resolved evidence, NOT on `payload.brief is None`: the desktop
+    # ranks the brief against the question, so a well-prepared user asking
+    # something off-axis arrives with an empty slice and must still get a real
+    # answer rather than the grounded path with nothing to ground against.
+    # A resume counts as grounding. Without this an answer with a resume and no
+    # brief would run the unverified path, which tells the model its background
+    # is unavailable and to leave [bracket] slots - the exact opposite of what
+    # the supplied resume is for.
+    system = _answer_system(
+        bool(candidate_evidence or target_evidence or payload.resume.strip())
     )
+    awaiting_decision = payload.action == "automatic"
+    if awaiting_decision:
+        system = f"{_DECISION_INSTRUCTION} {system}"
+    else:
+        # Manual actions are accepted by definition, so the model is never asked
+        # for a decision line and those paths save its tokens entirely.
+        decision["accepted"] = True
+        decision["target"] = "candidate"
+
     images = (
         [{"media_type": "image/jpeg", "data": payload.screen_sight.data}]
         if payload.screen_sight
         else None
     )
     buffer = ""
-    active_kind: str | None = None
-    active_length = 0
-    sentence_count = 0
-    separate_next_sentence = False
+    body_started = False
+
+    def settle(verdict: tuple[str, str, str]) -> str | None:
+        kind, target, rest = verdict
+        if kind == "skip":
+            decision["accepted"] = False
+            decision["target"] = target
+            return None
+        decision["accepted"] = True
+        decision["target"] = "candidate"
+        return rest
 
     async for chunk in get_model_provider().stream_text(
-        _answer_prompt(payload, decision),
+        _answer_prompt(payload),
         model_id=model_id,
         system=system,
         images=images,
@@ -776,123 +770,47 @@ async def _grounded_answer_deltas(
         caller="interview_companion_answer",
     ):
         buffer += chunk.replace("\r", "")
-        while True:
-            if active_kind is None:
-                first_separator = buffer.find("|")
-                second_separator = buffer.find("|", first_separator + 1)
-                first_newline = buffer.find("\n")
-                if first_newline >= 0 and (
-                    first_separator < 0
-                    or second_separator < 0
-                    or first_newline < second_separator
-                ):
-                    raise ValueError("streamed answer line had no grounding header")
-                if first_separator < 0 or second_separator < 0:
-                    break
-                kind = buffer[:first_separator].strip()
-                raw_source_ids = buffer[first_separator + 1 : second_separator].strip()
-                buffer = buffer[second_separator + 1 :]
-                if kind not in source_sets:
-                    raise ValueError("streamed answer used an unsupported sentence kind")
-                line_source_ids = [] if raw_source_ids == "-" else [
-                    source_id.strip()
-                    for source_id in raw_source_ids.split(",")
-                    if source_id.strip()
-                ]
-                if kind == "general":
-                    if line_source_ids:
-                        raise ValueError("general streamed answer sentence claimed evidence")
-                elif not line_source_ids or any(
-                    source_id not in source_sets[kind] for source_id in line_source_ids
-                ):
-                    raise ValueError("streamed answer referenced evidence from the wrong scope")
-                for source_id in line_source_ids:
-                    if source_id not in evidence_ids:
-                        evidence_ids.append(source_id)
-                sentence_count += 1
-                if sentence_count > 10:
-                    raise ValueError("streamed answer returned too many sentences")
-                active_kind = kind
-                active_length = 0
-                if separate_next_sentence:
-                    yield " "
-                    separate_next_sentence = False
-
-            newline = buffer.find("\n")
-            if newline >= 0:
-                delta = buffer[:newline]
-                buffer = buffer[newline + 1 :]
-                if delta:
-                    active_length += len(delta)
-                    if active_length > 1_000:
-                        raise ValueError("streamed answer sentence was too long")
-                    yield delta
-                if active_length == 0:
-                    raise ValueError("streamed answer sentence was empty")
-                active_kind = None
-                separate_next_sentence = True
+        if awaiting_decision:
+            verdict = _read_decision(buffer)
+            if verdict is None:
                 continue
-            if buffer:
-                active_length += len(buffer)
-                if active_length > 1_000:
-                    raise ValueError("streamed answer sentence was too long")
-                yield buffer
-                buffer = ""
-            break
-
-    if active_kind is None:
-        if buffer.strip():
-            raise ValueError("streamed answer ended with an incomplete grounding header")
-    else:
+            awaiting_decision = False
+            rest = settle(verdict)
+            if rest is None:
+                return
+            buffer = rest
+        if not body_started:
+            buffer = buffer.lstrip("\n")
+            if not buffer:
+                continue
+            body_started = True
         if buffer:
-            active_length += len(buffer)
-            if active_length > 1_000:
-                raise ValueError("streamed answer sentence was too long")
             yield buffer
-        if active_length == 0:
-            raise ValueError("streamed answer sentence was empty")
-    if sentence_count == 0:
+            buffer = ""
+
+    if awaiting_decision:
+        # final=True always resolves, but the signature cannot express that, and
+        # the fallback is the same fail-open choice made everywhere else here.
+        verdict = _read_decision(buffer, final=True) or ("answer", "candidate", buffer)
+        rest = settle(verdict)
+        if rest is None:
+            return
+        buffer = rest
+    if buffer:
+        tail = buffer if body_started else buffer.lstrip("\n")
+        if tail:
+            body_started = True
+            yield tail
+    if decision.get("accepted") and not body_started:
         raise ValueError("streamed answer was empty")
-
-
-async def _provider_answer_deltas(
-    payload: InterviewAnswerRequest,
-    decision: GateDecision,
-    evidence_ids: list[str],
-    model_id: str,
-) -> AsyncGenerator[str, None]:
-    if payload.contract_version == 1:
-        async for chunk in get_model_provider().stream_text(
-            _answer_prompt(payload, decision),
-            model_id=model_id,
-            system=(
-                "You write truthful, speakable interview answers for the candidate. "
-                "Never claim experience, metrics, employers, projects, or skills that are "
-                "not present in the supplied context. Return answer text only."
-            ),
-            temperature=0.35,
-            max_output_tokens=450,
-            caller="interview_companion_answer",
-        ):
-            yield chunk
-        return
-
-    async for delta in _grounded_answer_deltas(
-        payload,
-        decision,
-        evidence_ids,
-        model_id,
-    ):
-        yield delta
 
 
 async def _timed_answer_deltas(
     payload: InterviewAnswerRequest,
-    decision: GateDecision,
-    evidence_ids: list[str],
+    decision: dict,
     model_id: str,
 ) -> AsyncGenerator[str, None]:
-    stream = _provider_answer_deltas(payload, decision, evidence_ids, model_id)
+    stream = _answer_deltas(payload, decision, model_id)
     started = time.monotonic()
     first_deadline = started + settings.INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S
     first_delta = True
@@ -935,121 +853,57 @@ async def _timed_answer_deltas(
 
 
 async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str, None]:
-    provider = get_model_provider()
+    """One streamed model call carries both the decision and the answer.
+
+    There used to be a separate awaited classifier call in front of this, which
+    cost 400-900ms during which nothing reached the screen. The decision is now
+    the first line the answer model writes, so a turn worth answering starts
+    streaming its answer immediately and a turn worth skipping costs only the
+    prefill plus four tokens.
+    """
     identity = {
         "session_id": payload.turn.session_id,
         "epoch": payload.turn.epoch,
         "turn_id": payload.turn.turn_id,
     }
-    gate_started = time.perf_counter()
-    if payload.action == "automatic" and payload.turn.speaker_overlap:
-        yield _frame(
-            "decision",
-            {
-                "type": "decision",
-                **identity,
-                "target": "crosstalk",
-                "intent": "incomplete",
-                "requires_response": False,
-                "confidence": 1.0,
-                "normalized_question": "",
-                "evidence_ids": [],
-                "likely_follow_up": False,
-                "accepted": False,
-                "gate_ms": 0,
-            },
-        )
-        yield _frame(
-            "answer_done",
-            {
-                "type": "answer_done",
-                **identity,
-                "generated": False,
-                "evidence_ids": [],
-                "evidence": [],
-                "answer_ms": 0,
-            },
-        )
-        yield _terminal()
-        return
-    try:
-        with attempt_budget(1):
-            decision = await asyncio.wait_for(
-                provider.cheap(
-                    _gate_prompt(payload),
-                    system=(
-                        "You are a strict interview turn classifier. Return only the requested "
-                        "structured decision. Physical source is already verified as remote; do "
-                        "not infer that remote automatically means addressed to the candidate."
-                    ),
-                    response_model=GateDecision,
-                    temperature=0.0,
-                    model=settings.TIER_CHEAP_FALLBACK,
-                    max_output_tokens=350,
-                ),
-                timeout=2.0,
-            )
-        if not isinstance(decision, GateDecision):
-            raise TypeError("gate returned the wrong response type")
-    except Exception as exc:
-        logger.warn(
-            "interview_companion: gate failed",
-            {"error_type": type(exc).__name__},
-        )
-        yield _frame(
-            "error",
-            {
-                "type": "error",
-                **identity,
-                "code": "gate_failed",
-                "message": "Question check failed.",
-            },
-        )
-        yield _terminal()
-        return
 
-    automatic_accepted = (
-        decision.target == "candidate"
-        and decision.intent in ("question", "request")
-        and decision.requires_response
-        and decision.confidence >= _GATE_CONFIDENCE
-    )
-    allowed_evidence = _allowed_evidence_ids(payload.brief)
-    decision.evidence_ids = [
-        evidence_id
-        for evidence_id in decision.evidence_ids
-        if evidence_id in allowed_evidence
-    ]
-    accepted = automatic_accepted if payload.action == "automatic" else True
-    yield _frame(
-        "decision",
-        {
-            "type": "decision",
-            **identity,
-            **decision.model_dump(),
-            "accepted": accepted,
-            "gate_ms": round((time.perf_counter() - gate_started) * 1_000),
-        },
-    )
-    if not accepted:
-        yield _frame(
-            "answer_done",
-            {
-                "type": "answer_done",
-                **identity,
-                "generated": False,
-                "evidence_ids": [],
-                "evidence": [],
-                "answer_ms": 0,
-            },
-        )
-        yield _terminal()
+    def skip_frames(target: str, gate_ms: int) -> list[str]:
+        return [
+            _frame(
+                "decision",
+                {
+                    "type": "decision",
+                    **identity,
+                    "target": target,
+                    "accepted": False,
+                    "gate_ms": gate_ms,
+                },
+            ),
+            _frame(
+                "answer_done",
+                {
+                    "type": "answer_done",
+                    **identity,
+                    "generated": False,
+                    "answer_ms": 0,
+                },
+            ),
+            _terminal(),
+        ]
+
+    # Overlapping speech is decided here rather than paid for at the provider:
+    # the turn is known to be unusable before any prompt is built.
+    if payload.action == "automatic" and payload.turn.speaker_overlap:
+        for frame in skip_frames("crosstalk", 0):
+            yield frame
         return
 
     answer_started = time.perf_counter()
     answer_streamed = False
     answer_model = ""
     answer_ttft_ms: int | None = None
+    answer = ""
+    decision: dict = {}
     try:
         models = tuple(dict.fromkeys((
             settings.INTERVIEW_ANSWER_PRIMARY_MODEL,
@@ -1065,13 +919,12 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
                 )
                 continue
             leg_started = time.perf_counter()
-            leg_evidence_ids: list[str] = []
+            leg_decision: dict = {}
             answer_parts: list[str] = []
             try:
                 async for delta in _timed_answer_deltas(
                     payload,
-                    decision,
-                    leg_evidence_ids,
+                    leg_decision,
                     model_id,
                 ):
                     if not answer_streamed:
@@ -1083,6 +936,18 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
                             "interview_companion: answer stream visible",
                             {"model": model_id, "ttft_ms": answer_ttft_ms},
                         )
+                        # The decision is known the moment text starts, because
+                        # text only starts after the model committed to ANSWER.
+                        yield _frame(
+                            "decision",
+                            {
+                                "type": "decision",
+                                **identity,
+                                "target": "candidate",
+                                "accepted": True,
+                                "gate_ms": answer_ttft_ms,
+                            },
+                        )
                     answer_parts.append(delta)
                     yield _frame(
                         "answer_delta",
@@ -1092,10 +957,15 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
                             "delta": delta,
                         },
                     )
+                decision = leg_decision
+                # A skip is a completed call, not a failed one, so it must not
+                # fall through to the next provider.
+                if decision.get("accepted") is False:
+                    _record_provider_success(model_id)
+                    break
                 answer = "".join(answer_parts).strip()
                 if not answer:
                     raise ValueError("answer was empty")
-                evidence_ids = list(dict.fromkeys(leg_evidence_ids))
                 break
             except Exception as stream_exc:
                 if answer_streamed:
@@ -1130,27 +1000,20 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
         yield _terminal()
         return
 
-    if not answer_streamed:
-        for offset in range(0, len(answer), 64):
-            yield _frame(
-                "answer_delta",
-                {
-                    "type": "answer_delta",
-                    **identity,
-                    "delta": answer[offset : offset + 64],
-                },
-            )
+    if decision.get("accepted") is False:
+        for frame in skip_frames(
+            decision.get("target") or "uncertain",
+            round((time.perf_counter() - answer_started) * 1_000),
+        ):
+            yield frame
+        return
+
     yield _frame(
         "answer_done",
         {
             "type": "answer_done",
             **identity,
             "generated": True,
-            "evidence_ids": evidence_ids,
-            "evidence": [
-                {"source_id": source_id, "verification_state": "verified"}
-                for source_id in evidence_ids
-            ],
             "answer_ms": round((time.perf_counter() - answer_started) * 1_000),
             "answer_model": answer_model,
             "answer_ttft_ms": answer_ttft_ms,
