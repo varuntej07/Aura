@@ -117,7 +117,9 @@ class Settings(BaseSettings):
     INTERVIEW_ANSWER_PRIMARY_MODEL: str = "claude-haiku-4-5-20251001"
     INTERVIEW_ANSWER_FALLBACK_MODEL: str = "gpt-5.6-luna"
     INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S: float = 3.0
-    INTERVIEW_ANSWER_STREAM_IDLE_TIMEOUT_S: float = 3.0
+    # Sized for full spoken-script answers, which are longer than the keyword
+    # bullets this replaced and so have more room to stall inside the window.
+    INTERVIEW_ANSWER_STREAM_IDLE_TIMEOUT_S: float = 4.0
     INTERVIEW_ANSWER_MAX_STREAM_S: float = 20.0
 
     # OpenAI Realtime bridge: the instant speech-to-speech leg the desktop opens

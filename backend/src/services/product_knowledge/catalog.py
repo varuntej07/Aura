@@ -2,6 +2,13 @@
 
 The model decides whether to call the product-information tool. This module only
 ranks entries after that structural decision, so it never acts as an intent gate.
+
+``kind`` is a model guess, so it is a ranking prior and never a filter. It used to
+select the candidate pool, which meant one miscategorization could hide the correct
+entry entirely: ``kind="capabilities"`` returned the surface brochure without ever
+reading ``query``, so "can you change your voice" was answered with the full feature
+list instead of how to change it. Retrieval now ranks the whole eligible catalog and
+the prior only breaks ties, so a strong match outvotes a wrong category.
 """
 
 from __future__ import annotations
@@ -36,15 +43,21 @@ _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 # they never decide user intent or authorize an action.
 _RETRIEVAL_STOP_WORDS = frozenset(
     {
-        "a", "an", "are", "can", "could", "did", "do", "does", "for", "how",
-        "i", "in", "is", "me", "my", "of", "on", "please", "the", "to",
-        "what", "where", "would",
+        "a", "an", "are", "can", "could", "did", "do", "does", "for", "here",
+        "how", "i", "in", "is", "it", "me", "my", "of", "on", "please", "the",
+        "to", "what", "where", "who", "would", "you", "your",
     }
 )
 _VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}$")
 _MAX_QUERY_CHARS = 500
 _MAX_RESULTS = 3
 _MIN_RETRIEVAL_SCORE = 3.0
+# The model's ``kind`` guess is evidence, not a fact, so it reorders results but is
+# deliberately kept out of the fail-closed floor: a wrong-kind entry must never become
+# answerable on the bonus alone. Measured against the live catalog, correct answers
+# survive anywhere in 0.0-2.0 and start breaking at 3.0, where the prior inverts a
+# genuine 2-point retrieval gap ("how do I upgrade" under kind="troubleshooting").
+_KIND_PRIOR_BONUS = 1.0
 _SURFACE_QUERY_NOISE: dict[ProductSurface, frozenset[str]] = {
     "app": frozenset({"app", "mobile", "phone"}),
     "keyboard": frozenset({"keyboard"}),
@@ -58,7 +71,12 @@ class _StrictModel(BaseModel):
 
 
 class ProductAnswers(_StrictModel):
-    voice: str = Field(min_length=1, max_length=800)
+    # Voice answers are spoken verbatim, so length is latency the user sits through.
+    # The 800 cap let three capability entries grow into ~600-character brochures that
+    # took roughly 45 seconds to read out, including as the reply to a follow-up
+    # "what else". 320 is comfortably above the longest real answer and far below a
+    # brochure, and catalog validation runs at import so a regression fails startup.
+    voice: str = Field(min_length=1, max_length=320)
     chat: str = Field(min_length=1, max_length=2400)
 
 
@@ -244,7 +262,14 @@ def _rank(
     entries: list[ProductEntry],
     *,
     ignored_query_tokens: frozenset[str] = frozenset(),
-) -> list[tuple[ProductEntry, float]]:
+    preferred_kind: ProductInfoKind | None = None,
+) -> list[tuple[ProductEntry, float, float]]:
+    """Rank entries as ``(entry, base_score, ordered_score)``, best ordering first.
+
+    ``base_score`` is retrieval evidence alone and is what callers must test against
+    ``_MIN_RETRIEVAL_SCORE``. ``ordered_score`` adds the ``preferred_kind`` prior and
+    is only for ordering.
+    """
     if not entries:
         return []
     query_tokens = [
@@ -307,8 +332,11 @@ def _rank(
             + (3.0 * named_field_precision)
             + (1.5 * character_similarity)
         )
-        ranked.append((entry, score))
-    return sorted(ranked, key=lambda item: (-item[1], item[0].id))
+        ordered_score = score + (
+            _KIND_PRIOR_BONUS if preferred_kind and entry.kind == preferred_kind else 0.0
+        )
+        ranked.append((entry, score, ordered_score))
+    return sorted(ranked, key=lambda item: (-item[2], item[0].id))
 
 
 def _capability_entry(entries: list[ProductEntry], surface: ProductSurface) -> ProductEntry | None:
@@ -355,26 +383,17 @@ def lookup_product_knowledge(
             knowledge_version=PRODUCT_KNOWLEDGE.knowledge_version,
             confidence=1.0,
         )
-    candidates = [
+    # Surface, platform and version stay hard filters: those are structural facts the
+    # caller supplies about the client, not model judgement. kind is model judgement,
+    # so it does not narrow the pool.
+    eligible = [
         entry
         for entry in PRODUCT_KNOWLEDGE.entries
         if entry.status != "deprecated"
-        and entry.kind == kind
         and _surface_is_eligible(entry, surface)
         and _platform_is_eligible(entry, filter_platform)
         and _version_is_eligible(entry, filter_platform, app_version)
     ]
-
-    if kind == "capabilities":
-        overview = _capability_entry(candidates, surface)
-        if overview is not None:
-            return ProductKnowledgeResult(
-                answer=getattr(overview.answers, channel),
-                matched=True,
-                entry_ids=(overview.id,),
-                knowledge_version=PRODUCT_KNOWLEDGE.knowledge_version,
-                confidence=1.0,
-            )
 
     # Surface is already a typed retrieval filter. Removing its generic nouns from
     # non-availability ranking prevents "app settings" from favoring every entry
@@ -389,10 +408,29 @@ def lookup_product_knowledge(
         )
     ranked = _rank(
         bounded_query,
-        candidates,
+        eligible,
         ignored_query_tokens=ignored_query_tokens,
+        preferred_kind=kind,
     )
-    if not ranked or ranked[0][1] < _MIN_RETRIEVAL_SCORE:
+    # Fail closed on retrieval evidence alone. The kind prior reorders what survives
+    # this cut; it can never lift an entry over the floor.
+    answerable = [item for item in ranked if item[1] >= _MIN_RETRIEVAL_SCORE]
+
+    if not answerable:
+        if kind == "capabilities":
+            # A broad question naming no feature. The overview is the answer, which
+            # keeps the pre-existing guarantee that Buddy always has one.
+            overview = _capability_entry(
+                [entry for entry in eligible if entry.kind == kind], surface
+            )
+            if overview is not None:
+                return ProductKnowledgeResult(
+                    answer=getattr(overview.answers, channel),
+                    matched=True,
+                    entry_ids=(overview.id,),
+                    knowledge_version=PRODUCT_KNOWLEDGE.knowledge_version,
+                    confidence=1.0,
+                )
         fallback = (
             "I don't have a verified answer for that in Aura's product guide yet."
             if channel == "voice"
@@ -406,19 +444,21 @@ def lookup_product_knowledge(
             confidence=0.0,
         )
 
-    top_score = ranked[0][1]
+    # Voice speaks the answer verbatim and every entry answer is authored to stand
+    # alone, so stacking near-ties there only lengthens the spoken reply. Chat can
+    # afford the extra context.
+    result_limit = 1 if channel == "voice" else _MAX_RESULTS
+    top_ordered = answerable[0][2]
     selected = [
-        item
-        for item in ranked[:_MAX_RESULTS]
-        if item[1] >= max(_MIN_RETRIEVAL_SCORE, top_score * 0.90)
+        item for item in answerable[:result_limit] if item[2] >= top_ordered * 0.90
     ]
-    answers = [getattr(entry.answers, channel).strip() for entry, _ in selected]
+    answers = [getattr(entry.answers, channel).strip() for entry, _, _ in selected]
     separator = " " if channel == "voice" else "\n\n"
-    confidence = min(1.0, top_score / 6.0)
+    confidence = min(1.0, answerable[0][1] / 6.0)
     return ProductKnowledgeResult(
         answer=separator.join(dict.fromkeys(answers)),
         matched=True,
-        entry_ids=tuple(entry.id for entry, _ in selected),
+        entry_ids=tuple(entry.id for entry, _, _ in selected),
         knowledge_version=PRODUCT_KNOWLEDGE.knowledge_version,
         confidence=confidence,
     )

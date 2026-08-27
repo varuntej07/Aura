@@ -216,7 +216,7 @@ def _gemini_json_schema(node: Any) -> Any:
 _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0           # Anthropic backoff: 1s, 2s, 4s
 _GEMINI_BASE_DELAY_S = 5.0    # Gemini backoff: 5s, 10s, 20s — background tasks, 503s need time to clear
-_TIMEOUT_S = 30.0             # per-call budget for background LLM work
+_TIMEOUT_S = 90.0             # per-call budget for background LLM work
 _GROUNDED_TIMEOUT_S = 45.0    # grounded search+synthesis runs longer (server-side search) than a plain call
 _REASON_TIMEOUT_S = 90.0      # deep reasoning (Opus + adaptive thinking) runs long; streamed
 
@@ -435,6 +435,7 @@ class ModelProvider:
         temperature: float = 0.5,
         max_output_tokens: int | None = None,
         caller: str = "text_stream",
+        cache_prefix: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Stream one latency-sensitive text response without buffering it.
 
@@ -470,7 +471,25 @@ class ModelProvider:
                 "messages": messages,
                 "temperature": temperature,
             }
-            if system:
+            if cache_prefix:
+                # Stable content goes in its own system block with a cache
+                # breakpoint, so repeat calls read it instead of re-prefilling it.
+                # A 1h TTL rather than the 5m default: a long candidate answer can
+                # exceed 5 minutes between turns, and a mid-round cache miss is the
+                # one we can least afford. Below the model's minimum cacheable
+                # prefix this simply does not cache (no error, no write premium).
+                blocks: list[dict] = []
+                if system:
+                    blocks.append({"type": "text", "text": system})
+                blocks.append(
+                    {
+                        "type": "text",
+                        "text": cache_prefix,
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    }
+                )
+                kwargs["system"] = blocks
+            elif system:
                 kwargs["system"] = system
             try:
                 async with self._get_anthropic_client().messages.stream(**kwargs) as stream:
@@ -503,9 +522,15 @@ class ModelProvider:
                     for image in images
                 ]
                 user_content.append({"type": "text", "text": prompt})
+            # OpenAI caches long prompt prefixes automatically server-side, so
+            # the stable prefix just folds into the system message here - no
+            # cache_control marker, unlike the Anthropic leg.
+            effective_system = system
+            if cache_prefix:
+                effective_system = f"{system}\n\n{cache_prefix}" if system else cache_prefix
             messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
+            if effective_system:
+                messages.append({"role": "system", "content": effective_system})
             messages.append({"role": "user", "content": user_content})
             raw_usage: Any = None
             try:

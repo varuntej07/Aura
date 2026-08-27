@@ -22,7 +22,7 @@
       "title": "What Aura can do across devices",
       "summary": "Aura is a beta companion available as an Android mobile app and Windows desktop app, with account-scoped state and surface-specific tools.",
       "answers": {
-        "voice": "Aura is currently in beta, with the mobile app on Android, not iOS, and Aura Desktop on Windows. I can chat or talk with you, remember useful things, manage reminders, work with your calendar and Gmail when linked, research the web, track topics, send useful follow-ups, provide a daily briefing, and help you write. Android adds Buddy Keyboard, a voice widget, and loud alarm reminders. Windows adds dictation, screen help when you ask, Screen Saves, Guide Mode, Buddy Drafts, meeting notes, Interview Companion, mock interviews, research, and a dashboard for conversations, drafts, and saved items.",
+        "voice": "I can talk or chat with you, remember what matters, handle reminders, work with your calendar and Gmail, look things up, and help you write. There's more on Android and on Windows. Want me to go deeper on any of it?",
         "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS, and Aura Desktop is available on **Windows**. Across supported devices, Buddy provides chat and voice, account-scoped memory and Your Aura context, reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive follow-ups, a daily briefing, feedback, and writing help. Android adds Buddy Keyboard, a one-tap voice widget, notifications, loud alarm reminders, and the Get Better idea feed. Windows adds text and voice shortcuts, dictation, screen understanding when you ask, Screen Saves, Guide Mode, Buddy Drafts and visible artifacts, meeting notes, Interview Companion, mock interviews, background research, insights, notifications, and dashboard pages for conversations, drafts, saved items, meetings, research, and connectors. Durable account data is shared, while each surface keeps its own visible conversation scrollback."
       },
       "surfaces": ["all"],
@@ -44,7 +44,7 @@
       "title": "Aura phone app capabilities",
       "summary": "The beta Android app provides Buddy chat and voice plus Android keyboard, widget, alarm, notification, memory, connector, and profile experiences.",
       "answers": {
-        "voice": "Aura's mobile app is currently in beta on Android; there is no iOS app yet. On Android I can chat or talk with you, remember useful details, manage regular or loud alarm reminders, work with Google Calendar and Gmail when linked, search the web, track topics, send useful follow-ups, show a daily briefing, and help with writing. Android also includes Buddy Keyboard, a one-tap voice widget, notifications, and Get Better ideas. Settings covers voice, responses, reminders, connectors, Your Aura, PC linking, your plan, account controls, feedback, and legal pages.",
+        "voice": "On your phone I can talk or chat, remember what matters, set reminders and loud alarms, use your calendar and Gmail, search the web, and help you write. There's also Buddy Keyboard and a one-tap voice widget. Want more on any of those?",
         "chat": "Aura's mobile app is currently in **beta on Android**; it is **not available on iOS**. The Android app includes Buddy chat and voice, useful memory and Your Aura, regular reminders and loud alarm reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive notifications and follow-up questions, a daily briefing, the Get Better idea feed and chat, writing help, Buddy Keyboard, and a one-tap voice widget. Settings contains voice and response controls, reminders and alarms, connectors, Your Aura, PC linking, plan and account controls, feedback, privacy, and terms."
       },
       "surfaces": ["app"],
@@ -67,7 +67,7 @@
       "title": "Aura Windows capabilities",
       "summary": "The beta Windows client provides chat, voice, dictation, screen-aware help, dashboard workflows, meetings, interviews, research, and settings.",
       "answers": {
-        "voice": "Aura Desktop is currently in beta on Windows. I can chat or talk with you, use your shared reminders, memory, Google Calendar, connectors, trackers, and research, and help through global text, voice, and dictation shortcuts. When you ask, I can understand your screen, save screen items, create Buddy Drafts and reusable cards, point things out, guide you through tasks, and run mock interviews. The dashboard also includes conversations, drafts, saved items, meeting notes, Interview Companion, research, insights, connectors, notifications, and settings.",
+        "voice": "On Windows I can chat or talk, take dictation, and when you ask, understand what's on your screen, save things from it, draft for you, guide you through a task, or run a mock interview. Want me to dig into any of those?",
         "chat": "Aura Desktop is currently in **beta on Windows**. It uses the same account-scoped reminders, memories, Your Aura profile, Google Calendar tools, Calendar and Gmail connections, trackers, and research as Android. Its companion overlay supports text and voice shortcuts, hold-to-talk dictation, screen understanding when you ask, Screen Saves, pointing, Guide Mode, Buddy Drafts, visible artifacts, and mock interviews. Its dashboard provides Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, notifications, General/Voice/System settings, account, billing, privacy, updates, and a link to the Android app."
       },
       "surfaces": ["desktop"],
@@ -676,7 +676,7 @@
       "title": "How screen context is used",
       "summary": "Screen understanding is request-driven and structurally gated by desktop-provided context.",
       "answers": {
-        "voice": "I use your screen when you ask for screen-aware help. Screen actions depend on context the Windows app provides for that task; I don’t treat unrelated conversation as permission to start a screen action.",
+        "voice": "I only use your screen when you ask for screen-aware help, and those features need Aura Desktop to hand me that context. Ordinary conversation is never treated as permission to start a screen action.",
         "chat": "Aura’s screen understanding is request-driven. Screen-dependent tools require desktop-provided screen context or an explicit Guide Mode handoff; unrelated conversation is not treated as authorization for screen capture, saving, or guided control."
       },
       "surfaces": ["desktop", "all"],

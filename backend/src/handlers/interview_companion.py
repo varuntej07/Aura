@@ -173,7 +173,9 @@ class InterviewAnswerRequest(BaseModel):
     resume: str = Field(default="", max_length=12_000)
     action: AnswerAction = "automatic"
     # Resolved on the desktop from the round picked in preflight.
-    answer_shape: Literal["hook_bullets", "star_bullets", "concept_steps", "prose"]
+    answer_shape: Literal[
+        "script_conversational", "script_star", "script_technical", "script_structured"
+    ]
     current_answer: str = Field(default="", max_length=4_000)
     screen_sight: InterviewScreenSightFrame | None = None
 
@@ -358,9 +360,9 @@ async def handle_build_brief(request: Request) -> JSONResponse:
                 ),
                 response_model=InterviewBriefDraft,
                 temperature=0.1,
-                max_output_tokens=2_400,
+                max_output_tokens=8_000,
             ),
-            timeout=25.0,
+            timeout=90.0,
         )
         if not isinstance(draft, InterviewBriefDraft):
             raise TypeError("brief builder returned the wrong response type")
@@ -554,31 +556,46 @@ def _evidence_ids_by_scope(brief: InterviewBriefSlice | None) -> tuple[set[str],
     return candidate_ids, target_ids
 
 
-# Every bullet and step below is the candidate's OWN words, phrased so it can be
-# read off and spoken. The distinction that matters: "Rewrote the Flutter app in
-# Tauri" is a talking point, "Mention your Tauri experience" is an instruction
-# about a talking point, and only the first is any use mid-sentence.
+# Applies to every shape: the difference between prose a person wrote and prose a
+# person says out loud. The bullet formats these replaced glanced well but read
+# like notes; a live answer is spoken, so it has to sound spoken.
+_SPOKEN_RULE = (
+    "Write it the way people actually talk, not the way people write. Use "
+    "contractions. It is fine to start a sentence with And, So, or But when that "
+    "is how it would land out loud. Vary the sentence lengths - a short sentence "
+    "after a long one is what real speech sounds like. Never use bullet points, "
+    "headings, numbered lists, a colon that introduces a list, or any formatting a "
+    "person cannot say aloud. Avoid words nobody says out loud in an interview, "
+    "such as leverage, utilize, furthermore, moreover, delve, robust, or seamless. "
+    "The FIRST sentence must be short and able to stand on its own, because the "
+    "candidate starts speaking on it while the rest is still arriving. Allow at "
+    "most one brief lead-in of no more than three words, such as 'Yeah, so' or "
+    "'Right, so', and never more than one."
+)
+
+# Per-round register on top of _SPOKEN_RULE. These set length and shape of the
+# spoken answer; the register instruction, not a bullet character, is what
+# differs between rounds now.
 _SHAPE_INSTRUCTION = {
-    "hook_bullets": (
-        "Open with ONE short spoken sentence. Then three or four bullet lines, each "
-        "starting with the character · and a space, five to nine words each. Every "
-        "bullet is a phrase the candidate speaks, not a note about what to mention."
+    "script_conversational": (
+        "Four to six sentences of connected speech. Open by answering the question "
+        "directly in one short sentence, then give the substance. Use one concrete "
+        "specific, not three."
     ),
-    "star_bullets": (
-        "Open with ONE short spoken sentence naming the situation. Then exactly four "
-        "bullet lines, each starting with the character · and a space, covering "
-        "Situation, Task, Action, Result in that order, five to nine words each. Every "
-        "bullet is a phrase the candidate speaks, not a note about what to mention."
+    "script_star": (
+        "Five to seven sentences of connected speech that move through the "
+        "situation, what the candidate owned, what they did, and what came of it, "
+        "in that order and never labelled. The sentence about the result carries "
+        "the number or the outcome."
     ),
-    "concept_steps": (
-        "Name the concept in ONE short spoken line. Then three or four numbered steps, "
-        "each on its own line starting with '1. ', '2. ' and so on, five to nine words "
-        "each, phrased as the candidate would say them. When there is a real tradeoff "
-        "add a final line starting 'Tradeoff: '."
+    "script_technical": (
+        "Four to six sentences of connected speech. Name the approach in the first "
+        "sentence, then how it works, then the one tradeoff that matters most."
     ),
-    "prose": (
-        "Use three to five short spoken sentences of connected prose. Do not use "
-        "bullets: the exact phrasing is the answer here."
+    "script_structured": (
+        "Six to eight sentences of connected speech. Precise wording matters most "
+        "here, so this is the one round where slight formality is correct. Do not "
+        "use the brief lead-in; open directly."
     ),
 }
 
@@ -629,12 +646,34 @@ def _answer_system(grounded: bool) -> str:
     return _GROUNDED_SYSTEM if grounded else _UNVERIFIED_SYSTEM
 
 
+def _answer_cache_prefix(payload: InterviewAnswerRequest) -> str:
+    """The stable-per-session half of the prompt: how to speak, the brief, and the
+    resume. Sent as a cache_control'd system block so turns after the first read
+    it at cache-read rates instead of re-prefilling it every turn.
+
+    It must be byte-identical across a session's automatic turns for the cache to
+    hit, so it carries only what is frozen at Start. The desktop already sends a
+    question-independent brief slice (stableInterviewBriefSlice), which is what
+    makes this stable; nothing here may depend on the current question.
+    """
+    resume = payload.resume.strip()
+    return json.dumps(
+        {
+            "answer_style": f"{_SPOKEN_RULE} {_SHAPE_INSTRUCTION[payload.answer_shape]}",
+            "brief": _brief_context(payload.brief),
+            "candidate_resume": resume or None,
+        },
+        separators=(",", ":"),
+    )
+
+
 def _answer_prompt(payload: InterviewAnswerRequest) -> str:
+    """The volatile half of the prompt: only what changes per turn. The brief,
+    resume, and answer style live in the cached prefix (_answer_cache_prefix)."""
     recent = [
         {"source": turn.source, "text": turn.text}
         for turn in payload.recent_turns[-8:]
     ]
-    shape = _SHAPE_INSTRUCTION[payload.answer_shape]
     action_instruction = {
         "automatic": "Draft the answer now.",
         "suggest": "Draft an answer because the candidate explicitly requested a suggestion.",
@@ -646,24 +685,21 @@ def _answer_prompt(payload: InterviewAnswerRequest) -> str:
             "this answer only. Do not imply the screenshot proves candidate experience."
         ),
     }[payload.action]
-    resume = payload.resume.strip()
-    resume_instruction = (
-        " candidate_resume is the candidate's own resume, supplied as reference for this "
-        "call. Treat it as their real history and answer with specifics from it."
-        if resume
+    resume_note = (
+        " candidate_resume in the reference material is the candidate's own resume; treat it "
+        "as their real history and answer with specifics from it."
+        if payload.resume.strip()
         else ""
     )
     return json.dumps(
         {
             "question": payload.turn.text,
             "recent_turns": recent,
-            "brief": _brief_context(payload.brief),
-            "candidate_resume": resume or None,
             "current_answer": payload.current_answer or None,
             "action": payload.action,
             "task": (
-                f"{action_instruction} {shape} Recent candidate turns provide conversational "
-                f"continuity, not new factual evidence.{resume_instruction}"
+                f"{action_instruction} Recent candidate turns provide conversational "
+                f"continuity, not new factual evidence.{resume_note}"
             ),
         },
         separators=(",", ":"),
@@ -764,6 +800,7 @@ async def _answer_deltas(
         _answer_prompt(payload),
         model_id=model_id,
         system=system,
+        cache_prefix=_answer_cache_prefix(payload),
         images=images,
         temperature=0.25,
         max_output_tokens=650,
