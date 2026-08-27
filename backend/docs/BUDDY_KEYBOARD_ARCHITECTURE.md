@@ -18,7 +18,7 @@ or equivalent result bundle proving p99 latency or the execution provider select
   and declared as an `InputMethodService` in
   [`AndroidManifest.xml`](../../android/app/src/main/AndroidManifest.xml). Android documents this
   as the system-wide keyboard integration point in
-  [Create an input method](https://developer.android.com/develop/ui/views/touch-and-input/creating-input-method).proceed 
+  [Create an input method](https://developer.android.com/develop/ui/views/touch-and-input/creating-input-method).
 - Ordinary typing, lexical prediction, ONNX reranking, and personalization use local data only.
 - A key does not wait for dictionary search, correction search, ONNX inference, persistence,
   Firestore, or an HTTP response.
@@ -176,7 +176,9 @@ its output.
 The checked-in base dictionary is
 [`en_us.pdict`](../../android/app/src/main/assets/dictionaries/en_us.pdict), built deterministically
 by [`build_packed_dictionary.py`](../../android/tools/keyboard_dictionary/build_packed_dictionary.py)
-from [`en_wordlist.txt`](../../android/app/src/main/assets/dictionaries/en_wordlist.txt).
+from the hermitdave/FrequencyWords corpus, compiled ahead of time into
+[`en_us.pdict`](../../android/app/src/main/assets/dictionaries/en_us.pdict); the raw word list
+is not shipped in the app.
 
 | Property | Measured value |
 |---|---:|

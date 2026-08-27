@@ -85,9 +85,14 @@ internal class LexicalPredictionEngine(
         ) {
             return null
         }
-        return deterministic.copy(
-            suggestions = NeuralRerankPolicy.apply(deterministic.suggestions, scores),
+        // Counted here rather than inside the policy so NeuralRerankPolicy stays pure and its
+        // existing unit tests keep meaning what they say.
+        val reranked = NeuralRerankPolicy.apply(deterministic.suggestions, scores)
+        NeuralRerankMetrics.record(
+            scoresAvailable = scores != null,
+            topOneChanged = reranked.firstOrNull()?.word != deterministic.suggestions.firstOrNull()?.word,
         )
+        return deterministic.copy(suggestions = reranked)
     }
 
     private fun nextWord(

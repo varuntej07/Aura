@@ -156,6 +156,21 @@ class KeyboardSettingsActivity : Activity() {
             R.string.keyboard_settings_ai_title,
             R.string.keyboard_settings_ai_summary,
         )
+        // A consent you cannot withdraw is not consent. These mirror the in-keyboard
+        // disclosures: turning one off here means Buddy asks again next time it would send.
+        val consent = KeyboardConsentStore.read(this)
+        addSwitch(
+            R.string.keyboard_settings_ai_consent,
+            R.string.keyboard_settings_ai_consent_summary,
+            consent.aiText.isGranted,
+            KeyboardConsentStore::setAiTextConsent,
+        )
+        addSwitch(
+            R.string.keyboard_settings_voice_consent,
+            R.string.keyboard_settings_voice_consent_summary,
+            consent.voice.isGranted,
+            KeyboardConsentStore::setVoiceConsent,
+        )
         addClearControl()
         addAction(R.string.keyboard_settings_privacy_link) { openPrivacyPage() }
 
@@ -417,6 +432,9 @@ class KeyboardSettingsActivity : Activity() {
         addDiagnostic(R.string.keyboard_settings_provider, snapshot.provider)
         addDiagnostic(R.string.keyboard_settings_model_version, snapshot.modelVersion)
         addDiagnostic(R.string.keyboard_settings_inference_count, snapshot.inferenceCount.toString())
+        addDiagnostic(R.string.keyboard_settings_rerank_attempts, snapshot.rerankAttempts.toString())
+        addDiagnostic(R.string.keyboard_settings_rerank_changes, snapshot.rerankTopOneChanges)
+        addDiagnostic(R.string.keyboard_settings_rerank_fallbacks, snapshot.rerankLexicalFallbacks.toString())
         addDiagnostic(R.string.keyboard_settings_last_error, snapshot.lastErrorCategory)
         addToSection(TextView(this).apply {
             text = getString(R.string.keyboard_settings_diagnostics_note)
@@ -503,7 +521,9 @@ class KeyboardSettingsActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        const val PRIVACY_URL = "https://auravoiceapp.com/privacy-policy"
+        // Anchored at the keyboard section, not the policy root: "Read the keyboard privacy
+        // explanation" has to land on keyboard content, not on paragraph one of the app policy.
+        const val PRIVACY_URL = "https://auravoiceapp.com/privacy-policy#aura-keyboard"
         const val CLEAR_STATUS_STATE = "keyboard_clear_status"
         const val DIVIDER_TAG = "keyboard_settings_divider"
     }

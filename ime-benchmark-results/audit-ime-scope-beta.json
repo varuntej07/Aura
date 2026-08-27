@@ -1,0 +1,83 @@
+{
+  "base": "98b5bc9",
+  "buddy_voice_lines_equal": false,
+  "key_path": {
+    "automatic_vocab_hints_reference": false,
+    "ordinary_letter_banned_tokens": [],
+    "prediction_publication_banned_tokens": [],
+    "separator_traversal_tokens": []
+  },
+  "passed": false,
+  "protected_manifest_and_drafting_files": {
+    "android/app/src/main/AndroidManifest.xml": {
+      "base_sha256": "c66185781d7ed5352841257b10a3bd0187de7fc659d297d848c5cfa503f74234",
+      "current_sha256": "c66185781d7ed5352841257b10a3bd0187de7fc659d297d848c5cfa503f74234",
+      "equal": true
+    },
+    "android/app/src/main/kotlin/dev/varuntej/aura/keyboard/KeyboardDraftClient.kt": {
+      "base_sha256": "52a3793dd394fa0504f1dd63feec95806327929849baae3bc295ab27e9204f64",
+      "current_sha256": "52a3793dd394fa0504f1dd63feec95806327929849baae3bc295ab27e9204f64",
+      "equal": true
+    },
+    "android/app/src/main/res/xml/method.xml": {
+      "base_sha256": "05a7647da5b5ac6d4b2a9fb8318080debcf6fd47e8ba642dbd6077d44feaa5d1",
+      "current_sha256": "05a7647da5b5ac6d4b2a9fb8318080debcf6fd47e8ba642dbd6077d44feaa5d1",
+      "equal": true
+    }
+  },
+  "protected_voice_methods": {
+    "buildVoiceStage": {
+      "base_sha256": "ddd9557196a442a3826b502ed62c2284d23d5b64c29ea022b3932de22b047975",
+      "current_sha256": "ddd9557196a442a3826b502ed62c2284d23d5b64c29ea022b3932de22b047975",
+      "equal": true
+    },
+    "ensureVoiceStage": {
+      "base_sha256": "2108b6492087b4f451e838c403110d0bdc9aba9ec174e60e660ec748b09e0084",
+      "current_sha256": "2108b6492087b4f451e838c403110d0bdc9aba9ec174e60e660ec748b09e0084",
+      "equal": true
+    },
+    "handoffToAppVoice": {
+      "base_sha256": "16a65a63b5d5ab779b60b94f6f4bb18d9ac7bc5cfda5db5db319022488a2febd",
+      "current_sha256": "16a65a63b5d5ab779b60b94f6f4bb18d9ac7bc5cfda5db5db319022488a2febd",
+      "equal": true
+    },
+    "launchAppVoice": {
+      "base_sha256": "2d0c7f466425e3efde7c92c56c36a31135078464ed1070b82e3f0670107d4d8b",
+      "current_sha256": "2d0c7f466425e3efde7c92c56c36a31135078464ed1070b82e3f0670107d4d8b",
+      "equal": true
+    },
+    "onVoiceTranscript": {
+      "base_sha256": "2f1a555af27718bed63fee9c62654e4892f04cc87fc93c82edd21928b21c08d4",
+      "current_sha256": "2f1a555af27718bed63fee9c62654e4892f04cc87fc93c82edd21928b21c08d4",
+      "equal": true
+    },
+    "openVoice": {
+      "base_sha256": "ca64a3f702cc1a4a540ecb030ca7144a7637658061f4846c2ec833b9753a109f",
+      "current_sha256": "ca64a3f702cc1a4a540ecb030ca7144a7637658061f4846c2ec833b9753a109f",
+      "equal": true
+    },
+    "renderVoice": {
+      "base_sha256": "9a927116074c10922d08677e3e768c426074a11d9fd89cca6386a5ac7e7d796a",
+      "current_sha256": "9a927116074c10922d08677e3e768c426074a11d9fd89cca6386a5ac7e7d796a",
+      "equal": true
+    },
+    "startVoiceSession": {
+      "base_sha256": "784b9249ff97727b6657473fcce8e1c562c2d995664b460865cfc4df28ad2a34",
+      "current_sha256": "784b9249ff97727b6657473fcce8e1c562c2d995664b460865cfc4df28ad2a34",
+      "equal": true
+    },
+    "stopVoice": {
+      "base_sha256": "d0a9efa1f68a41913f19c60253a3ca3a2d51d0cae2be93c2e014fdafbc6a42d7",
+      "current_sha256": "d0a9efa1f68a41913f19c60253a3ca3a2d51d0cae2be93c2e014fdafbc6a42d7",
+      "equal": true
+    },
+    "teardownVoiceStage": {
+      "base_sha256": "fe7053e7a9368989c518ce58cd0a628c0153ebe0a4ec6a273b42b4ddd5877e7a",
+      "current_sha256": "fe7053e7a9368989c518ce58cd0a628c0153ebe0a4ec6a273b42b4ddd5877e7a",
+      "equal": true
+    }
+  },
+  "voice_dependency_lines_equal": true,
+  "voice_excluded_path_changes": [],
+  "voice_named_path_changes": []
+}

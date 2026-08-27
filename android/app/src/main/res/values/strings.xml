@@ -39,9 +39,13 @@
     <string name="keyboard_settings_memory_summary">Your Aura account memory is managed in the Aura app and is not this keyboard’s local learned data.</string>
     <string name="keyboard_settings_ai_title">AI writing and voice are explicit actions</string>
     <string name="keyboard_settings_ai_summary">Ordinary typing stays local. Text or audio is sent only when you tap an Aura AI or voice action.</string>
+    <string name="keyboard_settings_ai_consent">Aura AI writing</string>
+    <string name="keyboard_settings_ai_consent_summary">Allow writing actions to send the text in the field you are typing in. Buddy asks before the first time.</string>
+    <string name="keyboard_settings_voice_consent">Talk to Buddy</string>
+    <string name="keyboard_settings_voice_consent_summary">Allow the mic to stream your voice, and the field you are typing in, to Aura. Buddy asks before the first time.</string>
     <string name="keyboard_settings_clear">Clear learned words and personalization</string>
     <string name="keyboard_settings_clear_confirm_title">Clear keyboard personalization?</string>
-    <string name="keyboard_settings_clear_confirm_message">This permanently removes Aura Keyboard’s locally learned words, corrections, and personalization from this device. Aura account memory is not affected.</string>
+    <string name="keyboard_settings_clear_confirm_message">This permanently removes Aura Keyboard’s locally learned words, corrections, personalization, saved vocabulary hints, and recently used emoji from this device. Aura account memory is not affected.</string>
     <string name="keyboard_settings_cancel">Cancel</string>
     <string name="keyboard_settings_clear_action">Clear</string>
     <string name="keyboard_settings_clear_working">Clearing local personalization…</string>
@@ -58,6 +62,9 @@
     <string name="keyboard_settings_provider">Execution provider (configured)</string>
     <string name="keyboard_settings_model_version">Model version</string>
     <string name="keyboard_settings_inference_count">Inference count this session</string>
+    <string name="keyboard_settings_rerank_attempts">Reranks attempted this session</string>
+    <string name="keyboard_settings_rerank_changes">Reranks that changed the top suggestion</string>
+    <string name="keyboard_settings_rerank_fallbacks">Reranks that fell back to lexical</string>
     <string name="keyboard_settings_last_error">Last initialization error category</string>
     <string name="keyboard_settings_diagnostics_note">These diagnostics contain status and counters only—never typed text.</string>
     <string name="keyboard_settings_refresh_diagnostics">Refresh diagnostics</string>

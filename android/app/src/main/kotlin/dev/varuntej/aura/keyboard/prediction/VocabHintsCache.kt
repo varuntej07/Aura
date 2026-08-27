@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object VocabHintsCache {
 
-    private const val PREFS = "buddy_keyboard_vocab"
+    private const val PREFS = dev.varuntej.aura.keyboard.KeyboardOwnedStores.VOCAB_HINTS_PREFS
     private const val KEY_TOKENS = "tokens"
     private const val KEY_FETCHED_AT = "fetched_at"
     private const val REFRESH_INTERVAL_MS = 24L * 60 * 60 * 1000

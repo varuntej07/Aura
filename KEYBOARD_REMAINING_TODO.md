@@ -30,6 +30,29 @@
 
 ## TODO 4 — Decide whether ONNX stays in the keyboard
 
+**Status (2026-08-27): DEFERRED for the first beta, deliberately, with the evidence named.**
+
+Keeping ONNX Runtime for the beta is a decision to measure, not a decision to skip. Two inputs
+are now required before the keep/remove call is made, and both only exist once a beta bundle is
+live:
+
+1. **Real download delta.** Play Console → App bundle explorer → Download size, per ABI. The
+   `.aab` on disk is not the user download: Play strips the R8 mapping and native symbols and
+   delivers one ABI per device. `libonnxruntime.so` is ~28 MB uncompressed for `arm64-v8a` and
+   ~20 MB for `armeabi-v7a`, so the delivered number is the only one that settles this.
+2. **Whether it changes anything a user sees.** `NeuralRerankMetrics` now counts reranks
+   attempted, reranks that changed the top suggestion, and reranks that fell back to lexical.
+   They surface in keyboard settings → Advanced → Developer diagnostics. A 121-parameter model
+   whose top-1 change rate is near zero is 28 MB buying nothing.
+
+If the change rate does not justify the delivered size, the fallback is unchanged: reproduce the
+121 parameters in Kotlin, verify numerical parity against the ONNX outputs, and delete the
+runtime dependency and `keyboard_reranker_int8.onnx`.
+
+Until then the model's only quality evidence remains `validation_top1 0.861` against its own
+1,024-example synthetic holdout, which says nothing about a real person's suggestion strip.
+
+
 - [ ] Confirm the model reaches READY on the user’s phone and that inference calls actually occur.
 - [ ] Compare lexical-only ranking against ONNX ranking on the same evaluation set.
 - [ ] Require a meaningful top-1, MRR, or correction-acceptance improvement with no noticeable typing-latency regression.

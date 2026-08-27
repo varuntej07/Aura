@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
+import dev.varuntej.aura.keyboard.KeyboardOwnedStores
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -77,13 +78,25 @@ internal class EncryptedPersonalizationStore(context: Context) {
         }
     }
 
+    /**
+     * Remove every store the keyboard owns, then prove each one is gone.
+     *
+     * The proof is the point. Any failed `check` throws, and the caller
+     * ([PersonalDictionary.process]) turns that into `success = false`, which is what stops the
+     * settings screen from claiming "cleared" over data that is still on disk.
+     */
     fun clearAll() {
         destroyEncryptedArtifacts()
         deleteLegacyArtifacts()
+        KeyboardOwnedStores.clearAll(appContext)
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
         check(!keyStore.containsAlias(KEY_ALIAS)) { "personalization key deletion failed" }
         check(encryptedArtifacts().none(File::exists)) { "encrypted personalization deletion failed" }
         check(legacyArtifacts().none(File::exists)) { "legacy personalization deletion failed" }
+        val remaining = KeyboardOwnedStores.remainingFiles(appContext)
+        check(remaining.isEmpty()) {
+            "keyboard preference deletion failed: " + remaining.joinToString { it.name }
+        }
     }
 
     fun encryptedSizeBytes(): Long = baseFile.takeIf(File::isFile)?.length() ?: 0

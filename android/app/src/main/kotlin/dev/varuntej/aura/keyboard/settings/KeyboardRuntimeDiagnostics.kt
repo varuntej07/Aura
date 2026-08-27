@@ -1,5 +1,6 @@
 package dev.varuntej.aura.keyboard.settings
 
+import dev.varuntej.aura.keyboard.prediction.NeuralRerankMetrics
 import dev.varuntej.aura.keyboard.prediction.NeuralRuntimeDiagnostics
 import dev.varuntej.aura.keyboard.prediction.NeuralRuntimeState
 
@@ -9,6 +10,10 @@ internal data class KeyboardModelDiagnosticsSnapshot(
     val modelVersion: String,
     val inferenceCount: Long,
     val lastErrorCategory: String,
+    // Whether the ONNX tier is earning its ~28 MB. See NeuralRerankMetrics.
+    val rerankAttempts: Long,
+    val rerankTopOneChanges: String,
+    val rerankLexicalFallbacks: Long,
 )
 
 /**
@@ -46,12 +51,21 @@ internal object KeyboardRuntimeDiagnostics {
             NeuralRuntimeState.CLOSED -> "Fallback — runtime closed"
             NeuralRuntimeState.UNINITIALIZED, null -> "Fallback — not initialized this session"
         }
+        val rerank = NeuralRerankMetrics.snapshot()
+        val changeRate = rerank.topOneChangeRate
         return KeyboardModelDiagnosticsSnapshot(
             status = status,
             provider = diagnostics?.providerRequested?.name ?: "CPU",
             modelVersion = MODEL_VERSION,
             inferenceCount = diagnostics?.inferenceCount ?: 0L,
             lastErrorCategory = diagnostics?.failureKind ?: "None",
+            rerankAttempts = rerank.attempts,
+            rerankTopOneChanges = if (changeRate == null) {
+                rerank.topOneChanges.toString()
+            } else {
+                "%d (%.1f%%)".format(rerank.topOneChanges, changeRate)
+            },
+            rerankLexicalFallbacks = rerank.lexicalFallbacks,
         )
     }
 

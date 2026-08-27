@@ -136,13 +136,18 @@ object KeyboardCredentialStore {
     fun cachedCredential(): Credential? = cached
 
     /** Load the credential into [cachedCredential] off the main thread so the next hot-path read is
-     *  instant. Coalesces concurrent calls (rapid field focuses) into at most one in-flight decrypt. */
-    fun warmCache(context: Context) {
+     *  instant. Coalesces concurrent calls (rapid field focuses) into at most one in-flight decrypt.
+     *
+     *  [onLoaded] runs on the IO thread once the decrypt finishes, carrying the credential that was
+     *  just read (null when signed out). It is how the keyboard notices the signed-in account has
+     *  changed; a coalesced call is skipped, so the check simply happens on the next focus. */
+    fun warmCache(context: Context, onLoaded: ((Credential?) -> Unit)? = null) {
         val appContext = context.applicationContext
         if (!priming.compareAndSet(false, true)) return
         ioExecutor.execute {
             try {
-                read(appContext)
+                val credential = read(appContext)
+                onLoaded?.invoke(credential)
             } finally {
                 priming.set(false)
             }

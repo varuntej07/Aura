@@ -63,6 +63,7 @@ import dev.varuntej.aura.keyboard.prediction.SuggestionCommitPolicy
 import dev.varuntej.aura.keyboard.prediction.SuggestionSource
 import dev.varuntej.aura.keyboard.prediction.SystemUserDictionary
 import dev.varuntej.aura.keyboard.prediction.WordComposer
+import dev.varuntej.aura.keyboard.settings.KeyboardConsentStore
 import dev.varuntej.aura.keyboard.settings.KeyboardRuntimeDiagnostics
 import dev.varuntej.aura.keyboard.settings.KeyboardSettingsActivity
 import dev.varuntej.aura.keyboard.settings.KeyboardSettingsSnapshot
@@ -109,7 +110,8 @@ private const val CLIPBOARD_PREVIEW_CHARS = 30
 // How many recently-used emojis the emoji panel remembers.
 private const val EMOJI_RECENTS_MAX = 32
 // Prefs (non-secure) for the emoji recents row.
-private const val EMOJI_PREFS = "buddy_kb_emoji"
+// Canonical name lives with the deletion path so a new store cannot outlive clear-all.
+private const val EMOJI_PREFS = KeyboardOwnedStores.EMOJI_PREFS
 private const val EMOJI_RECENTS_KEY = "recents"
 
 /**
@@ -247,7 +249,11 @@ class BuddyImeService : InputMethodService() {
     private val suggestionChips = mutableListOf<TextView>()
     private val suggestionChipVisuals = mutableListOf<SuggestionChipVisual?>()
     private var currentSuggestions: List<Suggestion> = emptyList()
-    private enum class SuggestionStripMode { EMPTY, SUGGESTIONS, UNDO, CLIPBOARD }
+    private enum class SuggestionStripMode { EMPTY, SUGGESTIONS, UNDO, CLIPBOARD, INTRO }
+
+    // Once the first-use line has been seen or has run out of showings, stop touching the
+    // consent prefs on every field focus. Typing must never wait on a disk read.
+    private var introBannerRetired = false
     private var suggestionStripMode = SuggestionStripMode.EMPTY
     private var renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
     private data class SuggestionChipVisual(val text: String, val visibility: Int, val accent: Boolean)
@@ -401,7 +407,9 @@ class BuddyImeService : InputMethodService() {
         // Warm the credential cache off the main thread so a later draft/voice tap reads the API
         // base URL instantly instead of decrypting EncryptedSharedPreferences on the input thread.
         // Done for every field, since the mic (voice) is available in all of them.
-        KeyboardCredentialStore.warmCache(applicationContext)
+        KeyboardCredentialStore.warmCache(applicationContext) { credential ->
+            mainHandler.post { applyAccountBoundary(credential?.uid.orEmpty()) }
+        }
         resetToTyping()
         if (suggestionsAllowed && keyboardSettings.personalizedSuggestions) {
             // Initialize and warm the optional ONNX session on the conflated prediction worker.
@@ -427,6 +435,9 @@ class BuddyImeService : InputMethodService() {
         rebuildKeys()
         // Auto-capitalize the first letter from the field's existing content (empty field -> caps).
         updateAutoCap()
+        // AFTER buildCollapsedBar: that call replaces idleToolbar with a fresh instance, so a
+        // banner shown before it would have its visibility change thrown away on every focus.
+        maybeShowIntroChip()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -1280,7 +1291,7 @@ class BuddyImeService : InputMethodService() {
         when {
             fieldProfile.memoryActionsAllowed -> openWhiteboard()
             fieldProfile.passwordGenerate -> generateAndCommitPassword()
-            else -> openVoice()
+            else -> withVoiceConsent { openVoice() }
         }
     }
 
@@ -1333,7 +1344,9 @@ class BuddyImeService : InputMethodService() {
         addView(makeToolbarIcon(R.drawable.ic_kb_settings, "Keyboard settings") {
             openKeyboardSettings()
         })
-        addView(makeToolbarIcon(R.drawable.ic_widget_mic, "Talk to Buddy") { openVoice() })
+        addView(makeToolbarIcon(R.drawable.ic_widget_mic, "Talk to Buddy") {
+            withVoiceConsent { openVoice() }
+        })
     }
 
     /** The collapsed-bar clipboard affordance: one tap reads the clipboard and offers it as a
@@ -1367,6 +1380,115 @@ class BuddyImeService : InputMethodService() {
                 updateSuggestionChip(i, "", View.INVISIBLE, accent = false)
             }
         }
+    }
+
+    /**
+     * The first-use line: one quiet chip in the suggestion strip saying where typing goes.
+     *
+     * Deliberately NOT a blocking sheet. Someone who just tapped a text field wants to type,
+     * and a keyboard that refuses to work until it is read is a keyboard people replace. It
+     * offers itself a few times, then stops.
+     */
+    /** Cheap in-process gate first, so the common case never reads prefs on a field focus. */
+    private fun maybeShowIntroChip() {
+        if (introBannerRetired) return
+        val consent = KeyboardConsentStore.read(this)
+        if (consent.localIntroSeen || consent.introPromptsShown >= KeyboardConsentStore.MAX_INTRO_PROMPTS) {
+            introBannerRetired = true
+            return
+        }
+        showIntroChip()
+    }
+
+    /**
+     * A different Aura account is now signed in on this phone.
+     *
+     * The encrypted personalization snapshot is one device-local file with no account in it,
+     * so without this the second person inherits the first person's learned words, n-grams and
+     * corrections in their suggestion strip. Clear rather than namespace: it leaves nothing of
+     * theirs on disk at all.
+     *
+     * Network consent goes with it. The person now holding the phone has agreed to nothing.
+     * Signing OUT alone clears nothing: it is still your phone and still your data.
+     */
+    private fun applyAccountBoundary(uid: String) {
+        if (uid.isBlank()) return
+        val previous = KeyboardConsentStore.lastUid(this)
+        KeyboardConsentStore.setLastUid(this, uid)
+        if (previous.isBlank() || previous == uid) return
+        KeyboardConsentStore.resetNetworkConsent(this)
+        KeyboardPersonalizationRepository.dictionary(applicationContext).clearAll { }
+    }
+
+    private fun showIntroChip() {
+        if (!::suggestionStrip.isInitialized || !::idleToolbar.isInitialized) return
+        if (!fieldProfile.predictionsAllowed) return
+        renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
+        suggestionStripMode = SuggestionStripMode.INTRO
+        idleToolbar.visibility = View.GONE
+        suggestionStrip.visibility = View.VISIBLE
+        for (i in suggestionChips.indices) {
+            if (i == 0) {
+                updateSuggestionChip(i, "Your typing stays on this phone. Tap to see how", View.VISIBLE, accent = false)
+            } else {
+                // GONE, not INVISIBLE: every chip carries weight=1f, so leaving the other two
+                // laid out would squeeze this one into a third of the strip and ellipsize it to
+                // nothing. renderSuggestions() sets all three visibilities on the next render,
+                // so this is fully recoverable.
+                updateSuggestionChip(i, "", View.GONE, accent = false)
+            }
+        }
+        KeyboardConsentStore.recordIntroPromptShown(this)
+    }
+
+    /**
+     * What the first-use line opens: the local story, plus the one choice that actually
+     * changes behaviour. Learning stays on unless the user turns it off here or in settings.
+     */
+    private fun openIntroPanel() {
+        finishComposing()
+        mode = Mode.WHITEBOARD
+        selectedTool = null
+        lastAction = null
+        wbActions.removeAllViews()
+        hideSubRow()
+        setUseThisVisible(false)
+        wbContext.text = ""
+        showWhiteboardPanel()
+
+        cancelAnimators()
+        wbCanvas.removeAllViews()
+        wbCanvas.addView(makeConsentTitle("Buddy types with you, on this phone"))
+        wbCanvas.addView(
+            makeCanvasLine(
+                "Every key you press, every word Buddy learns, and every correction it picks " +
+                    "up stays encrypted on this device. Text leaves only when you tap an Aura " +
+                    "writing action or the mic, and Buddy asks first each time.",
+            ),
+        )
+        wbCanvas.addView(
+            LinearLayout(keyboardUiContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(0, dp(6), 0, 0)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
+                addView(makeChip("Don't learn my words", accent = false) {
+                    KeyboardSettingsStore.setLearnNewWords(this@BuddyImeService, false)
+                    finishIntro()
+                })
+                addView(makeChip("Sounds good", accent = true) { finishIntro() })
+            },
+        )
+    }
+
+    private fun finishIntro() {
+        KeyboardConsentStore.markLocalIntroSeen(this)
+        introBannerRetired = true
+        keyboardSettings = KeyboardSettingsStore.read(this)
+        backToKeys()
     }
 
     private fun pasteClipboardChip() {
@@ -1414,6 +1536,7 @@ class BuddyImeService : InputMethodService() {
     private fun onSuggestionChipClicked(index: Int) {
         when (suggestionStripMode) {
             SuggestionStripMode.CLIPBOARD -> if (index == 0) pasteClipboardChip()
+            SuggestionStripMode.INTRO -> if (index == 0) openIntroPanel()
             SuggestionStripMode.UNDO -> if (index == 0) performUndo()
             SuggestionStripMode.SUGGESTIONS -> if (!discardStaleRenderedSuggestions()) {
                 currentSuggestions.getOrNull(index)?.let { onSuggestionTapped(it.word) }
@@ -2138,6 +2261,134 @@ class BuddyImeService : InputMethodService() {
         wbCanvas.addView(makeChip("Sign in to Aura", accent = true) { launchAppForSignIn() })
     }
 
+    // --- Just-in-time disclosure ---------------------------------------------------
+    //
+    // Ordinary typing, autocorrect, suggestions and the emoji panel never reach this code:
+    // they never leave the phone, so there is nothing to disclose and nothing to accept.
+    // Only the two paths that transmit are gated, each the first time it would send.
+
+    /** Which transmitting feature a disclosure panel is asking about. */
+    private enum class ConsentAsk { AI_TEXT, VOICE }
+
+    /**
+     * Open the takeover purely to ask. Used for the voice disclosure, which is reachable from
+     * the collapsed bar where no panel is showing yet.
+     */
+    private fun openConsentPanel(ask: ConsentAsk, onAccept: () -> Unit) {
+        finishComposing()
+        mode = Mode.WHITEBOARD
+        selectedTool = null
+        lastAction = null
+        wbActions.removeAllViews()
+        hideSubRow()
+        setUseThisVisible(false)
+        wbContext.text = ""
+        showWhiteboardPanel()
+        renderConsentAsk(ask, action = null, onAccept = onAccept)
+    }
+
+    /**
+     * The disclosure itself: what leaves this phone, stated concretely, with a real decline.
+     *
+     * The copy is field- and action-aware because a vague promise is worse than none. Reply
+     * reads the clipboard rather than the field, and in a password or OTP field the voice
+     * session sends no text at all ([FieldProfile.memoryActionsAllowed] already enforces
+     * that), so the panel must not claim otherwise in either direction.
+     *
+     * Declining is remembered, returns to the keys, and leaves every local feature working.
+     * It is not permanent: tapping the action again re-offers this panel.
+     */
+    private fun renderConsentAsk(ask: ConsentAsk, action: BuddyAction?, onAccept: () -> Unit) {
+        cancelAnimators()
+        setUseThisVisible(false)
+        hideSubRow()
+        wbCanvas.removeAllViews()
+
+        val title: String
+        val body: String
+        val acceptLabel: String
+        when (ask) {
+            ConsentAsk.AI_TEXT -> {
+                title = "This one sends your text"
+                body = if (action == BuddyAction.REPLY) {
+                    "To write a reply, Buddy sends the message you copied to Aura's servers. " +
+                        "Your typing stays on this phone."
+                } else {
+                    "To do this, Buddy sends what you've typed in this field (up to 2000 " +
+                        "characters) to Aura's servers. Your typing stays on this phone."
+                }
+                acceptLabel = "Send it"
+            }
+            ConsentAsk.VOICE -> {
+                title = "This one turns on your mic"
+                body = if (fieldProfile.memoryActionsAllowed) {
+                    "Buddy streams your microphone to Aura while the mic is on, plus the text " +
+                        "in this field so it knows what you're working on."
+                } else {
+                    "Buddy streams your microphone to Aura while the mic is on. This field is " +
+                        "private, so nothing you've typed here is sent."
+                }
+                acceptLabel = "Start talking"
+            }
+        }
+
+        wbCanvas.addView(makeConsentTitle(title))
+        wbCanvas.addView(makeCanvasLine(body))
+        wbCanvas.addView(makeConsentButtons(acceptLabel, ask, onAccept))
+    }
+
+    private fun makeConsentTitle(text: String): TextView = TextView(keyboardUiContext).apply {
+        this.text = text
+        textSize = 16f
+        gravity = Gravity.CENTER
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(color(R.color.buddy_kb_key_text))
+        setPadding(dp(12), dp(10), dp(12), dp(2))
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+    }
+
+    /** Decline and accept side by side, with decline first so it is never the accidental tap. */
+    private fun makeConsentButtons(
+        acceptLabel: String,
+        ask: ConsentAsk,
+        onAccept: () -> Unit,
+    ): View = LinearLayout(keyboardUiContext).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        setPadding(0, dp(6), 0, 0)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+        )
+        addView(makeChip("Not now", accent = false) {
+            recordConsent(ask, granted = false)
+            backToKeys()
+        })
+        addView(makeChip(acceptLabel, accent = true) {
+            recordConsent(ask, granted = true)
+            onAccept()
+        })
+    }
+
+    private fun recordConsent(ask: ConsentAsk, granted: Boolean) {
+        when (ask) {
+            ConsentAsk.AI_TEXT -> KeyboardConsentStore.setAiTextConsent(this, granted)
+            ConsentAsk.VOICE -> KeyboardConsentStore.setVoiceConsent(this, granted)
+        }
+    }
+
+    /**
+     * Run [start] only once the user has agreed to the microphone disclosure, otherwise show
+     * it. Deliberately wraps the CALL SITES rather than living inside the voice methods, so the
+     * hard voice boundary those methods define stays as small as it already is.
+     */
+    private fun withVoiceConsent(start: () -> Unit) {
+        if (KeyboardConsentStore.voiceGranted(this)) start() else openConsentPanel(ConsentAsk.VOICE, start)
+    }
+
     private fun launchAppForSignIn() {
         val launch = packageManager.getLaunchIntentForPackage(packageName)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -2434,6 +2685,14 @@ class BuddyImeService : InputMethodService() {
     }
 
     private fun runDraft(action: BuddyAction, tone: String?, targetLang: String?) {
+        // The single choke point for text leaving this device: tool taps, the Translate
+        // language sub-row, Regenerate and the "Try again" chip all arrive here. Nothing is
+        // read or sent until the user has seen the disclosure and accepted it. Re-entrant on
+        // accept, with the same arguments, so the tap they made still happens.
+        if (!KeyboardConsentStore.aiTextGranted(this)) {
+            renderConsentAsk(ConsentAsk.AI_TEXT, action) { runDraft(action, tone, targetLang) }
+            return
+        }
         // Commit the in-progress word so getTextBeforeCursor below sees the final field text.
         finishComposing()
         lastAction = action
