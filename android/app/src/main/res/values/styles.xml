@@ -15,4 +15,11 @@
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <item name="android:windowBackground">?android:colorBackground</item>
     </style>
+    <style name="AuraKeyboardSettingsTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/buddy_kb_background</item>
+        <item name="android:colorAccent">@color/buddy_kb_accent</item>
+        <item name="android:navigationBarColor">@color/buddy_kb_background</item>
+        <item name="android:statusBarColor">@color/buddy_kb_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
 </resources>

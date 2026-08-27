@@ -1,163 +1,329 @@
 package dev.varuntej.aura.keyboard.prediction
 
-import android.content.ContentValues
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
-import android.os.Handler
-import android.os.Looper
-import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.LockSupport
 
-/**
- * The user's locally-learned words. The keyboard reads [completions]/[contains] on the hot
- * typing path and calls [learn] when a word is committed in a learning-allowed field. 100%
- * on-device; nothing here is ever uploaded.
- *
- * An interface so the storage choice stays swappable (a future Room/AOSP-binary-dict backend
- * would drop in behind it with no IME change).
- */
 interface PersonalDictionary {
+    val generation: Long get() = 0L
     fun completions(prefix: String, limit: Int): List<WordCandidate>
     fun contains(word: String): Boolean
-    /** Record a use of a committed word (new -> count 1, existing -> count + 1). */
-    fun learn(word: String)
-    /** Explicitly pin a word as known (the long-press "add" action). */
-    fun add(word: String)
-    /** Forget a word (the long-press "remove" action). */
-    fun remove(word: String)
-    /** Release the backing storage (DB connection + I/O thread). Called when the IME is destroyed
-     *  so a recreated keyboard does not accumulate a leaked thread + SQLite connection each time. */
+    fun nextWords(history: List<String>, limit: Int): List<String> = emptyList()
+    fun matureCorrectionFor(rawWord: String): String? = null
+    fun record(event: PersonalizationEvent)
+    fun clearAll(onComplete: (Boolean) -> Unit = {})
+
+    fun learn(word: String) = record(
+        PersonalizationEvent.ManualWordCommitted(word, null, null, System.currentTimeMillis()),
+    )
+
+    fun add(word: String) = record(PersonalizationEvent.ExplicitAdd(word, System.currentTimeMillis()))
+    fun remove(word: String) = record(PersonalizationEvent.ExplicitRemove(word, System.currentTimeMillis()))
     fun close()
 }
 
 /**
- * SQLite-backed [PersonalDictionary]: a single tiny table fronted by an in-memory
- * [PersonalDictionaryCache]. Reads always hit the cache (synchronous, allocation-light); writes
- * update the cache immediately and are mirrored to disk on a background thread, so disk never
- * blocks typing. The cache is the source of truth at runtime; on the next process start it is
- * rehydrated from the table.
- *
- * Deliberately NOT Room: there is no KSP/codegen in this build, and one table does not justify
- * introducing it. Hand-rolled SQLite via [SQLiteOpenHelper] is the framework-native equivalent.
- * The DB holds only ordinary dictionary words from non-secure fields (the IME never calls
- * [learn] from a secure/email/url field), so it is stored plainly, not encrypted.
- *
- * Threading: writes (learn / add / remove) come from the IME main thread, and the startup load
- * publishes via the main-thread Handler; reads (completions / contains) may also come from the
- * IME's background prediction thread. [PersonalDictionaryCache] uses a ConcurrentHashMap so those
- * concurrent reads are safe. All DB I/O runs on a single background executor.
+ * One process-local owner shared by the IME and its settings activity. Sharing prevents a settings
+ * clear from racing an older dictionary instance that could otherwise persist learned state again.
  */
-class SqlitePersonalDictionary(context: Context) : PersonalDictionary {
+object KeyboardPersonalizationRepository {
+    private val generationListeners = CopyOnWriteArraySet<(Long) -> Unit>()
 
-    private val helper = Helper(context.applicationContext)
-    private val cache = PersonalDictionaryCache()
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor = Executors.newSingleThreadExecutor()
+    @Volatile
+    private var instance: LocalPersonalizationDictionary? = null
 
-    init {
-        // Rehydrate the cache from disk once, off the UI thread, then publish on the main thread.
-        ioExecutor.execute {
-            val loaded = try {
-                readAll()
-            } catch (t: Throwable) {
-                emptyList()
+    fun dictionary(context: Context): LocalPersonalizationDictionary =
+        instance ?: synchronized(this) {
+            instance ?: LocalPersonalizationDictionary(
+                context.applicationContext,
+                ::notifyGenerationChanged,
+            ).also { instance = it }
+        }
+
+    fun addGenerationListener(listener: (Long) -> Unit) {
+        generationListeners.add(listener)
+    }
+
+    fun removeGenerationListener(listener: (Long) -> Unit) {
+        generationListeners.remove(listener)
+    }
+
+    private fun notifyGenerationChanged(generation: Long) {
+        generationListeners.forEach { listener ->
+            try {
+                listener(generation)
+            } catch (_: Throwable) {
+                // A dead UI observer cannot break the shared personalization worker.
             }
-            mainHandler.post { cache.load(loaded) }
         }
     }
+}
+
+/**
+ * Bounded, encrypted, provenance-aware local personalization.
+ *
+ * The IME thread only reads the current immutable snapshot and offers commands into a lock-free,
+ * logically bounded mailbox. One parked worker owns mutation, maturation timing, snapshot builds,
+ * migration, and coalesced encrypted persistence. Queue overflow or any storage/Keystore failure
+ * drops learning, never input. Clear-all advances an epoch before publication so stale commands
+ * and writes cannot resurrect deleted data.
+ */
+class LocalPersonalizationDictionary(
+    context: Context,
+    private val onGenerationChanged: (Long) -> Unit = {},
+) : PersonalDictionary {
+    private sealed interface Command {
+        data class Record(val epoch: Long, val event: PersonalizationEvent) : Command
+        data class Clear(
+            val epoch: Long,
+            val generation: Long,
+            val onComplete: (Boolean) -> Unit,
+        ) : Command
+        data object Close : Command
+    }
+
+    @Volatile
+    private var snapshot = PersonalizationSnapshot.EMPTY
+
+    @Volatile
+    internal var storeStatus: PersonalizationStoreStatus = PersonalizationStoreStatus.EMPTY
+        private set
+
+    @Volatile
+    internal var encryptedSizeBytes: Long = 0
+        private set
+
+    private val store = EncryptedPersonalizationStore(context.applicationContext)
+    private val commands = ConcurrentLinkedQueue<Command>()
+    private val queuedRecords = AtomicInteger(0)
+    private val clearEpoch = AtomicLong(0)
+    private val accepting = AtomicBoolean(true)
+    private val publicationLock = Any()
+    private val generationClock = AtomicLong(0)
+
+    // Worker-owned below this line.
+    private var state = PersonalizationState()
+    private var persistDueAtNanos = Long.MAX_VALUE
+    private var appliedEpoch = 0L
+    private val worker = Thread(::workerLoop, "AuraImePersonalization").apply {
+        isDaemon = true
+        start()
+    }
+
+    override val generation: Long
+        get() = snapshot.generation
 
     override fun completions(prefix: String, limit: Int): List<WordCandidate> =
-        cache.completions(prefix, limit, System.currentTimeMillis())
+        snapshot.prefixIndex.completions(prefix, limit)
 
-    override fun contains(word: String): Boolean = cache.contains(word)
+    override fun contains(word: String): Boolean =
+        PersonalizationPolicy.normalizeLearnableToken(word)?.let(snapshot.lexemeKeys::contains) == true
 
-    override fun learn(word: String) {
-        persist(cache.learn(word, System.currentTimeMillis()))
+    override fun nextWords(history: List<String>, limit: Int): List<String> =
+        snapshot.nextWords(history, limit)
+
+    override fun matureCorrectionFor(rawWord: String): String? {
+        val key = PersonalizationPolicy.normalizeLearnableToken(rawWord) ?: return null
+        return snapshot.matureCorrections[key]?.finalWord
     }
 
-    override fun add(word: String) {
-        persist(cache.add(word, System.currentTimeMillis()))
-    }
-
-    override fun remove(word: String) {
-        cache.remove(word)
-        val key = word.lowercase()
-        ioExecutor.execute {
-            try {
-                helper.writableDatabase.delete(TABLE, "$COL_WORD = ?", arrayOf(key))
-            } catch (_: Throwable) {
-                // Persistence is best-effort; the cache already reflects the change this session.
-            }
+    override fun record(event: PersonalizationEvent) {
+        if (!accepting.get()) return
+        while (true) {
+            val size = queuedRecords.get()
+            if (size >= PersonalizationPolicy.MAX_EVENT_QUEUE) return
+            if (queuedRecords.compareAndSet(size, size + 1)) break
         }
+        commands.offer(Command.Record(clearEpoch.get(), event))
+        LockSupport.unpark(worker)
     }
 
-    private fun persist(entry: PersonalWord) {
-        val key = entry.word.lowercase()
-        ioExecutor.execute {
-            try {
-                val values = ContentValues().apply {
-                    put(COL_WORD, key)
-                    put(COL_DISPLAY, entry.word)
-                    put(COL_COUNT, entry.count)
-                    put(COL_LAST_USED, entry.lastUsed)
-                }
-                helper.writableDatabase.insertWithOnConflict(
-                    TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE,
-                )
-            } catch (_: Throwable) {
-            }
+    override fun clearAll(onComplete: (Boolean) -> Unit) {
+        if (!accepting.get()) {
+            onComplete(false)
+            return
         }
+        val (epoch, generation) = synchronized(publicationLock) {
+            val nextEpoch = clearEpoch.incrementAndGet()
+            val nextGeneration = generationClock.incrementAndGet()
+            snapshot = PersonalizationSnapshot.EMPTY.copy(generation = nextGeneration)
+            nextEpoch to nextGeneration
+        }
+        notifyGenerationChanged(generation)
+        commands.offer(Command.Clear(epoch, generation, onComplete))
+        LockSupport.unpark(worker)
     }
 
     override fun close() {
-        // Drain on the I/O thread so any queued write finishes before the connection closes, then
-        // shut the executor down. No DB work touches the main thread; the cache stays the runtime
-        // source of truth and is rehydrated from disk on the next process start.
-        ioExecutor.execute {
-            try {
-                helper.close()
-            } catch (_: Throwable) {
+        if (!accepting.compareAndSet(true, false)) return
+        commands.offer(Command.Close)
+        LockSupport.unpark(worker)
+    }
+
+    private fun workerLoop() {
+        val startupEpoch = appliedEpoch
+        val loaded = store.loadOrMigrate()
+        state = loaded.state
+        storeStatus = loaded.status
+        encryptedSizeBytes = store.encryptedSizeBytes()
+        generationClock.accumulateAndGet(state.generation) { current, stored ->
+            maxOf(current, stored)
+        }
+        publishSnapshot(System.currentTimeMillis(), startupEpoch)
+
+        while (true) {
+            var closeRequested = false
+            while (true) {
+                when (val command = commands.poll() ?: break) {
+                    is Command.Record -> {
+                        queuedRecords.decrementAndGet()
+                        if (command.epoch == clearEpoch.get() && command.epoch == appliedEpoch) {
+                            process(command)
+                        }
+                    }
+                    is Command.Clear -> {
+                        if (command.epoch == clearEpoch.get()) process(command)
+                        else notifyClearComplete(command, success = false)
+                    }
+                    Command.Close -> closeRequested = true
+                }
+            }
+
+            val nowMillis = System.currentTimeMillis()
+            val maturationEpoch = appliedEpoch
+            if (maturationEpoch == clearEpoch.get()) {
+                val dueIds = state.pending.values.asSequence()
+                    .filter { it.dueAtMillis <= nowMillis }
+                    .map(PendingPositive::id)
+                    .toList()
+                var matured = false
+                for (id in dueIds) {
+                    matured = PersonalizationReducer.mature(state, id, nowMillis) || matured
+                }
+                if (matured && publishSnapshot(nowMillis, maturationEpoch)) schedulePersist()
+            }
+
+            if (System.nanoTime() >= persistDueAtNanos) persistNow()
+            if (closeRequested) {
+                persistNow()
+                return
+            }
+
+            val waitNanos = nextWaitNanos(nowMillis)
+            if (commands.isEmpty()) {
+                if (waitNanos == Long.MAX_VALUE) LockSupport.park(this)
+                else LockSupport.parkNanos(this, waitNanos.coerceAtLeast(1))
             }
         }
-        ioExecutor.shutdown()
     }
 
-    private fun readAll(): List<PersonalWord> {
-        val out = ArrayList<PersonalWord>()
-        helper.readableDatabase.query(
-            TABLE, arrayOf(COL_DISPLAY, COL_COUNT, COL_LAST_USED), null, null, null, null, null,
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                out.add(PersonalWord(cursor.getString(0), cursor.getInt(1), cursor.getLong(2)))
+    private fun process(command: Command.Record) {
+        val mutation = PersonalizationReducer.record(state, command.event)
+        if (command.event !is PersonalizationEvent.ManualWordCommitted &&
+            command.event !is PersonalizationEvent.SuggestionAccepted &&
+            command.event !is PersonalizationEvent.AutomaticCorrection
+        ) {
+            publishSnapshot(command.event.atMillis, command.epoch)
+        }
+        if (mutation.changed) schedulePersist()
+    }
+
+    private fun process(command: Command.Clear) {
+        persistDueAtNanos = Long.MAX_VALUE
+        val nextGeneration = synchronized(publicationLock) {
+            if (command.epoch != clearEpoch.get()) return notifyClearComplete(command, success = false)
+            val generation = generationClock.updateAndGet { current ->
+                if (current <= command.generation) command.generation else current + 1
+            }
+            state = PersonalizationState(generation = generation)
+            appliedEpoch = command.epoch
+            snapshot = PersonalizationSnapshot.EMPTY.copy(generation = generation)
+            generation
+        }
+        if (nextGeneration != command.generation) notifyGenerationChanged(nextGeneration)
+        val success = try {
+            store.clearAll()
+            storeStatus = PersonalizationStoreStatus.EMPTY
+            encryptedSizeBytes = 0
+            true
+        } catch (_: Throwable) {
+            storeStatus = PersonalizationStoreStatus.MEMORY_ONLY
+            false
+        }
+        notifyClearComplete(command, success)
+    }
+
+    private fun notifyClearComplete(command: Command.Clear, success: Boolean) {
+        try {
+            command.onComplete(success)
+        } catch (_: Throwable) {
+            // A UI/test observer must never terminate the personalization storage worker.
+        }
+    }
+
+    private fun schedulePersist() {
+        persistDueAtNanos = System.nanoTime() +
+            TimeUnit.MILLISECONDS.toNanos(PersonalizationPolicy.PERSIST_IDLE_MS)
+    }
+
+    private fun persistNow() {
+        if (appliedEpoch != clearEpoch.get()) return
+        if (persistDueAtNanos == Long.MAX_VALUE && storeStatus != PersonalizationStoreStatus.MEMORY_ONLY) {
+            return
+        }
+        persistDueAtNanos = Long.MAX_VALUE
+        try {
+            store.save(state)
+            encryptedSizeBytes = store.encryptedSizeBytes()
+            if (storeStatus == PersonalizationStoreStatus.MEMORY_ONLY ||
+                storeStatus == PersonalizationStoreStatus.EMPTY
+            ) {
+                storeStatus = PersonalizationStoreStatus.LOADED
+            }
+        } catch (_: Throwable) {
+            storeStatus = PersonalizationStoreStatus.MEMORY_ONLY
+        }
+    }
+
+    private fun nextWaitNanos(nowMillis: Long): Long {
+        val nextPendingMillis = state.pending.values.minOfOrNull(PendingPositive::dueAtMillis)
+        val pendingWait = nextPendingMillis?.let {
+            TimeUnit.MILLISECONDS.toNanos((it - nowMillis).coerceAtLeast(0))
+        } ?: Long.MAX_VALUE
+        val persistWait = if (persistDueAtNanos == Long.MAX_VALUE) {
+            Long.MAX_VALUE
+        } else {
+            (persistDueAtNanos - System.nanoTime()).coerceAtLeast(0)
+        }
+        return minOf(pendingWait, persistWait)
+    }
+
+    private fun publishSnapshot(nowMillis: Long, expectedEpoch: Long): Boolean {
+        val nextGeneration = generationClock.incrementAndGet()
+        state.generation = nextGeneration
+        val nextSnapshot = state.snapshot(nowMillis)
+        val published = synchronized(publicationLock) {
+            if (expectedEpoch != clearEpoch.get() || expectedEpoch != appliedEpoch) {
+                false
+            } else {
+                snapshot = nextSnapshot
+                true
             }
         }
-        return out
+        if (published) notifyGenerationChanged(nextGeneration)
+        return published
     }
 
-    private class Helper(context: Context) :
-        SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
-        override fun onCreate(db: SQLiteDatabase) {
-            db.execSQL(
-                "CREATE TABLE $TABLE (" +
-                    "$COL_WORD TEXT PRIMARY KEY, " +
-                    "$COL_DISPLAY TEXT NOT NULL, " +
-                    "$COL_COUNT INTEGER NOT NULL, " +
-                    "$COL_LAST_USED INTEGER NOT NULL)",
-            )
+    private fun notifyGenerationChanged(generation: Long) {
+        try {
+            onGenerationChanged(generation)
+        } catch (_: Throwable) {
+            // An observer must never break typing or terminate the personalization worker.
         }
-
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // v1 schema only; future migrations go here.
-        }
-    }
-
-    companion object {
-        private const val DB_NAME = "buddy_personal_dictionary.db"
-        private const val DB_VERSION = 1
-        private const val TABLE = "personal_words"
-        private const val COL_WORD = "word"
-        private const val COL_DISPLAY = "display"
-        private const val COL_COUNT = "count"
-        private const val COL_LAST_USED = "last_used"
     }
 }

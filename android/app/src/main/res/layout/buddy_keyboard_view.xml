@@ -20,26 +20,32 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingLeft="3dp"
-        android:paddingRight="3dp"
-        android:paddingBottom="22dp">
+        android:paddingLeft="8dp"
+        android:paddingRight="8dp">
 
         <LinearLayout
             android:id="@+id/collapsed_bar"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="52dp"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingTop="9dp"
-            android:paddingBottom="9dp"
-            android:paddingLeft="8dp"
-            android:paddingRight="10dp" />
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:paddingLeft="4dp"
+            android:paddingRight="4dp" />
 
         <LinearLayout
             android:id="@+id/keys_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical" />
+
+        <!-- A real footer instead of anonymous bottom padding. This keeps the Gboard-style gap
+             visible without adding controls that belong to Android's system navigation area. -->
+        <FrameLayout
+            android:id="@+id/keyboard_footer"
+            android:layout_width="match_parent"
+            android:layout_height="44dp" />
     </LinearLayout>
 
     <LinearLayout
@@ -52,7 +58,7 @@
         android:paddingLeft="8dp"
         android:paddingRight="8dp"
         android:paddingTop="6dp"
-        android:paddingBottom="22dp" />
+        android:paddingBottom="44dp" />
 
     <!-- Emoji panel: a full-takeover sibling at the same height as the typing stack, GONE until
          the bottom-row emoji key is tapped. Built programmatically by BuddyImeService. -->

@@ -47,7 +47,7 @@ These documents describe the current code, not a target design. Every architectu
 | User memory and Aura | [user-aura.md](user-aura.md) |
 | Live voice and prompt rules | [voice-agent.md](voice-agent.md) |
 | Desktop meeting recording and notes | [meeting-recording-v2.md](meeting-recording-v2.md) |
-| Buddy keyboard | [buddy-keyboard.md](buddy-keyboard.md) |
+| Buddy keyboard | [buddy-keyboard.md](buddy-keyboard.md) (pointer; canonical doc is `backend/docs/BUDDY_KEYBOARD_ARCHITECTURE.md`) |
 | Buddy Everywhere overview | [buddy-everywhere.md](buddy-everywhere.md) |
 | Dictation training data | [dictation-training-data.md](dictation-training-data.md) |
 | Research Phase 3 infrastructure | [research-phase3-infrastructure.md](research-phase3-infrastructure.md) |

@@ -5,6 +5,70 @@
     <string name="buddy_keyboard_label">Buddy Keyboard</string>
     <string name="buddy_keyboard_subtype_en">English</string>
 
+    <!-- Dedicated native IME settings. These controls are intentionally separate from Aura
+         account memory, which is managed by the Flutter app. -->
+    <string name="aura_keyboard_settings_title">Aura Keyboard</string>
+    <string name="keyboard_settings_subtitle">Private controls for typing on this device</string>
+    <string name="keyboard_settings_back">Back</string>
+    <string name="keyboard_settings_typing">Typing</string>
+    <string name="keyboard_settings_suggestions">Suggestions</string>
+    <string name="keyboard_settings_suggestions_summary">Show word and next-word suggestions while you type.</string>
+    <string name="keyboard_settings_autocorrect">Autocorrect</string>
+    <string name="keyboard_settings_autocorrect_summary">Correct likely typing mistakes when you enter a separator.</string>
+    <string name="keyboard_settings_learn_words">Learn new words</string>
+    <string name="keyboard_settings_learn_words_summary">Learn eligible words from ordinary prose fields on this device.</string>
+    <string name="keyboard_settings_personalized">Personalized suggestions</string>
+    <string name="keyboard_settings_personalized_summary">Use locally learned words, corrections, and context when ranking suggestions.</string>
+    <string name="keyboard_settings_haptic">Haptic feedback</string>
+    <string name="keyboard_settings_haptic_summary">Vibrate briefly when a key is pressed.</string>
+    <string name="keyboard_settings_sound">Keypress sound</string>
+    <string name="keyboard_settings_sound_summary">Play Android’s keyboard click sound.</string>
+    <string name="keyboard_settings_key_preview">Key preview</string>
+    <string name="keyboard_settings_key_preview_summary">Show a small preview above character keys.</string>
+
+    <string name="keyboard_settings_appearance">Appearance</string>
+    <string name="keyboard_settings_theme">Theme</string>
+    <string name="keyboard_settings_theme_system">System</string>
+    <string name="keyboard_settings_theme_light">Light</string>
+    <string name="keyboard_settings_theme_dark">Dark</string>
+
+    <string name="keyboard_settings_privacy">Privacy and learned data</string>
+    <string name="keyboard_settings_local_title">Aura Keyboard personalization</string>
+    <string name="keyboard_settings_local_summary">Learned words, corrections, and personalization are encrypted on this device.</string>
+    <string name="keyboard_settings_memory_title">Aura account memory is separate</string>
+    <string name="keyboard_settings_memory_summary">Your Aura account memory is managed in the Aura app and is not this keyboard’s local learned data.</string>
+    <string name="keyboard_settings_ai_title">AI writing and voice are explicit actions</string>
+    <string name="keyboard_settings_ai_summary">Ordinary typing stays local. Text or audio is sent only when you tap an Aura AI or voice action.</string>
+    <string name="keyboard_settings_ai_consent">Aura AI writing</string>
+    <string name="keyboard_settings_ai_consent_summary">Allow writing actions to send the text in the field you are typing in. Buddy asks before the first time.</string>
+    <string name="keyboard_settings_voice_consent">Talk to Buddy</string>
+    <string name="keyboard_settings_voice_consent_summary">Allow the mic to stream your voice, and the field you are typing in, to Aura. Buddy asks before the first time.</string>
+    <string name="keyboard_settings_clear">Clear learned words and personalization</string>
+    <string name="keyboard_settings_clear_confirm_title">Clear keyboard personalization?</string>
+    <string name="keyboard_settings_clear_confirm_message">This permanently removes Aura Keyboard’s locally learned words, corrections, personalization, saved vocabulary hints, and recently used emoji from this device. Aura account memory is not affected.</string>
+    <string name="keyboard_settings_cancel">Cancel</string>
+    <string name="keyboard_settings_clear_action">Clear</string>
+    <string name="keyboard_settings_clear_working">Clearing local personalization…</string>
+    <string name="keyboard_settings_clear_success">Learned words and personalization cleared.</string>
+    <string name="keyboard_settings_clear_failure">Aura reset the current keyboard state, but Android could not verify removal from encrypted storage. Try again.</string>
+    <string name="keyboard_settings_privacy_link">Read the keyboard privacy explanation</string>
+    <string name="keyboard_settings_privacy_link_error">Could not open the privacy page.</string>
+
+    <string name="keyboard_settings_advanced">Advanced</string>
+    <string name="keyboard_settings_advanced_diagnostics">Developer diagnostics</string>
+    <string name="keyboard_settings_advanced_diagnostics_summary">Show content-free local model status. Typed text is never displayed or logged.</string>
+    <string name="keyboard_settings_diagnostics">Diagnostics</string>
+    <string name="keyboard_settings_model_status">Local model</string>
+    <string name="keyboard_settings_provider">Execution provider (configured)</string>
+    <string name="keyboard_settings_model_version">Model version</string>
+    <string name="keyboard_settings_inference_count">Inference count this session</string>
+    <string name="keyboard_settings_rerank_attempts">Reranks attempted this session</string>
+    <string name="keyboard_settings_rerank_changes">Reranks that changed the top suggestion</string>
+    <string name="keyboard_settings_rerank_fallbacks">Reranks that fell back to lexical</string>
+    <string name="keyboard_settings_last_error">Last initialization error category</string>
+    <string name="keyboard_settings_diagnostics_note">These diagnostics contain status and counters only—never typed text.</string>
+    <string name="keyboard_settings_refresh_diagnostics">Refresh diagnostics</string>
+
     <!-- Aura voice home-screen widget (one tap -> open the app with mic on). -->
     <string name="voice_widget_label">Talk to Buddy</string>
     <string name="voice_widget_description">One tap to start talking to Buddy.</string>

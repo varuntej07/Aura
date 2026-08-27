@@ -4,4 +4,7 @@
          wrapping key makes their Tink keysets undecryptable. -->
     <exclude domain="sharedpref" path="buddy_keyboard_credential.xml" />
     <exclude domain="sharedpref" path="buddy_keyboard_voice_handoff.xml" />
+    <!-- v2 lives in noBackupFilesDir (excluded by Android). Keep the legacy plaintext DB out of
+         backup during its one-time encrypted migration window too. -->
+    <exclude domain="database" path="buddy_personal_dictionary.db" />
 </full-backup-content>

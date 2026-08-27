@@ -65,6 +65,14 @@
             </intent-filter>
         </activity>
 
+        <!-- Native IME settings: Android opens this directly from the keyboard selector, without
+             booting Flutter or mixing keyboard controls into Aura account memory. -->
+        <activity
+            android:name=".keyboard.settings.KeyboardSettingsActivity"
+            android:exported="true"
+            android:label="@string/aura_keyboard_settings_title"
+            android:theme="@style/AuraKeyboardSettingsTheme" />
+
         <!-- Buddy Keyboard: the in-app IME (a separate OS-managed input method).
              BIND_INPUT_METHOD is granted to the system so it can bind this service;
              method.xml declares the keyboard subtype. -->

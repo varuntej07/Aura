@@ -1,4 +1,5 @@
-The base word-frequency data in en_wordlist.txt is derived from hermitdave/FrequencyWords
+The base word-frequency data compiled into en_us.pdict (and the en_top100.txt warm list) is
+derived from hermitdave/FrequencyWords
 (https://github.com/hermitdave/FrequencyWords), which is distributed under the MIT License:
 
 MIT License

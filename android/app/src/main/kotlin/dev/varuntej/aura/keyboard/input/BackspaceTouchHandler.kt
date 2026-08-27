@@ -6,6 +6,7 @@ import android.os.Looper
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import dev.varuntej.aura.keyboard.performance.KeyboardPerformanceTrace
 
 /**
  * Touch handling for the backspace key: a tap deletes one character, holding auto-repeats with
@@ -18,6 +19,8 @@ class BackspaceTouchHandler(
     private val backspaceView: View,
     private val onDeleteChar: () -> Unit,
     private val onDeleteWord: () -> Unit,
+    private val hapticFeedbackEnabled: Boolean = true,
+    private val onPressFeedback: () -> Unit = {},
 ) : View.OnTouchListener {
 
     private val handler = Handler(Looper.getMainLooper())
@@ -53,12 +56,16 @@ class BackspaceTouchHandler(
     }
 
     private fun onDown(rawX: Float) {
+        KeyboardPerformanceTrace.markActionDown(KeyboardPerformanceTrace.KEY_KIND_BACKSPACE)
         startX = rawX
         swiping = false
         wordsDeleted = 0
         tick = 0
         backspaceView.animate().scaleX(0.92f).scaleY(0.92f).setDuration(40).start()
-        backspaceView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        if (hapticFeedbackEnabled) {
+            backspaceView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        }
+        onPressFeedback()
         onDeleteChar() // immediate one-character delete (the tap)
         scheduleRepeat(BackspaceRepeat.INITIAL_DELAY_MS)
     }

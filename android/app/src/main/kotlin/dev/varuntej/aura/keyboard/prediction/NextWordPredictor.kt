@@ -1,7 +1,6 @@
 package dev.varuntej.aura.keyboard.prediction
 
 import android.content.Context
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -29,7 +28,6 @@ object NextWordPredictor {
     private var bigrams: Map<String, List<String>> = emptyMap()
 
     private val loadStarted = AtomicBoolean(false)
-    private val executor = Executors.newSingleThreadExecutor()
 
     val isLoaded: Boolean get() = unigrams.isNotEmpty()
 
@@ -38,12 +36,15 @@ object NextWordPredictor {
     fun ensureLoaded(context: Context) {
         if (unigrams.isNotEmpty() || !loadStarted.compareAndSet(false, true)) return
         val appContext = context.applicationContext
-        executor.execute {
+        Thread({
             try {
                 unigrams = loadUnigrams(appContext)
             } catch (t: Throwable) {
                 loadStarted.set(false) // allow a later focus to retry
             }
+        }, "AuraImeNextWordLoad").apply {
+            isDaemon = true
+            start()
         }
     }
 

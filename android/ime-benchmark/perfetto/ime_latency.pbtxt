@@ -1,0 +1,70 @@
+buffers: { size_kb: 131072 fill_policy: RING_BUFFER }
+duration_ms: 180000
+
+data_sources: {
+  config {
+    name: "linux.ftrace"
+    target_buffer: 0
+    ftrace_config {
+      atrace_apps: "dev.varuntej.aura.imebenchmarktarget"
+      atrace_apps: "dev.varuntej.aura.imebenchmark"
+      atrace_categories: "am"
+      atrace_categories: "binder_driver"
+      atrace_categories: "dalvik"
+      atrace_categories: "freq"
+      atrace_categories: "gfx"
+      atrace_categories: "idle"
+      atrace_categories: "input"
+      atrace_categories: "sched"
+      atrace_categories: "view"
+      atrace_categories: "wm"
+      ftrace_events: "binder/binder_transaction"
+      ftrace_events: "binder/binder_transaction_received"
+      ftrace_events: "block/block_rq_issue"
+      ftrace_events: "block/block_rq_complete"
+      ftrace_events: "ext4/ext4_da_write_begin"
+      ftrace_events: "f2fs/f2fs_write_begin"
+      ftrace_events: "net/net_dev_queue"
+      ftrace_events: "net/netif_receive_skb"
+      ftrace_events: "power/cpu_frequency"
+      ftrace_events: "power/suspend_resume"
+      ftrace_events: "sched/sched_switch"
+      ftrace_events: "sched/sched_wakeup"
+      ftrace_events: "thermal/thermal_temperature"
+    }
+  }
+}
+
+data_sources: {
+  config {
+    name: "android.surfaceflinger.frametimeline"
+    target_buffer: 0
+  }
+}
+
+data_sources: {
+  config {
+    name: "linux.process_stats"
+    target_buffer: 0
+    process_stats_config { scan_all_processes_on_start: true proc_stats_poll_ms: 1000 }
+  }
+}
+
+data_sources: {
+  config {
+    name: "linux.sys_stats"
+    target_buffer: 0
+    sys_stats_config {
+      stat_period_ms: 250
+      meminfo_period_ms: 1000
+      vmstat_period_ms: 1000
+      cpufreq_period_ms: 250
+      diskstat_period_ms: 1000
+    }
+  }
+}
+
+data_sources: { config { name: "android.packages_list" target_buffer: 0 } }
+write_into_file: true
+file_write_period_ms: 2500
+max_file_size_bytes: 536870912
