@@ -43,7 +43,6 @@ object AlarmBridge {
                 "capabilities" -> result.success(
                     mapOf(
                         "can_schedule_exact" to AlarmPermissions.canScheduleExact(app),
-                        "can_use_full_screen_intent" to AlarmPermissions.canUseFullScreenIntent(app),
                         "can_ring" to AlarmPermissions.canRing(app),
                         // Alarms currently armed inexactly because the permission
                         // was refused. Non-empty means the app is showing someone
@@ -76,9 +75,6 @@ object AlarmBridge {
 
                 "requestExactAlarmAccess" ->
                     result.success(AlarmPermissions.requestExactAlarmAccess(app))
-
-                "requestFullScreenIntentAccess" ->
-                    result.success(AlarmPermissions.requestFullScreenIntentAccess(app))
 
                 // Replace the armed set with the server's complete answer. See
                 // AlarmScheduler.reconcile for why this replaces rather than merges.

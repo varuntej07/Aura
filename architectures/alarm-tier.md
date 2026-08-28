@@ -32,7 +32,7 @@ set_reminder(tier="alarm")
                     v
         AlarmManager.setAlarmClock   (survives app kill, doze, and no network)
                     |
-        AlarmReceiver -> AlarmService -> AlarmActivity
+        AlarmReceiver -> AlarmService -> notification -> (user tap) -> AlarmActivity
                     |
         Dismiss / Snooze 9m / I'm up  -> queued ack -> POST /reminders/{id}/ack
                                                     -> "I'm up" opens a chat turn
@@ -94,13 +94,24 @@ full-screen Activity is paused.
 ## Rules that are load-bearing
 
 - **Never confirm a wake-up the device cannot deliver.** Android 14 denies
-  `SCHEDULE_EXACT_ALARM` and `USE_FULL_SCREEN_INTENT` by default, and denies them
-  silently. See "The permission" below for how this is enforced end to end.
-  Confirming anyway is the original bug wearing a new coat.
+  `SCHEDULE_EXACT_ALARM` by default, and denies it silently. See "The permission"
+  below for how this is enforced end to end. Confirming anyway is the original
+  bug wearing a new coat.
 - **`SCHEDULE_EXACT_ALARM`, never `USE_EXACT_ALARM`.** The latter is granted
   automatically but Play policy restricts it to apps whose core function is an
   alarm clock or calendar. Aura is a companion app; declaring it invites a
   takedown of the whole listing.
+- **No `USE_FULL_SCREEN_INTENT`, ever.** It was declared, and on 2026-08-28 Play
+  rejected the submission under the Full-Screen Intent Permission policy: the
+  permission is reserved for apps whose core purpose is calling or alarms, and a
+  companion app does not qualify. The same reasoning as `USE_EXACT_ALARM`, learnt
+  the expensive way. Removing it costs only the automatic lock-screen takeover:
+  the alarm still rings at alarm volume, vibrates, bypasses DND, and holds the
+  wake lock, and the user taps the notification to reach `AlarmActivity`, which
+  still displays over the lock screen through its own `showWhenLocked` /
+  `turnScreenOn` attributes. Do not restore it, and do not simulate it by
+  launching the Activity directly from `AlarmService`: that reads as evading the
+  policy finding and risks the listing.
 - **Snooze keeps `status = "pending"`.** `fetch_due_reminders` selects on
   `status == "pending"` and nothing else, so a `snoozed` status would drop the row
   out of the backstop scan permanently and the 3 AM snooze would quietly end the

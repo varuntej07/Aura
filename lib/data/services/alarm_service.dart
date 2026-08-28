@@ -141,9 +141,6 @@ class AlarmService {
   Future<bool> requestExactAlarmAccess() =>
       _invokeBool('requestExactAlarmAccess');
 
-  Future<bool> requestFullScreenIntentAccess() =>
-      _invokeBool('requestFullScreenIntentAccess');
-
   /// The Settings-owned regular wake-up alarm.
   ///
   /// The definition and every occurrence live in native SharedPreferences and
@@ -413,7 +410,6 @@ class AlarmService {
             priority: Priority.max,
             category: AndroidNotificationCategory.alarm,
             audioAttributesUsage: AudioAttributesUsage.alarm,
-            fullScreenIntent: true,
             ongoing: true,
             autoCancel: false,
           ),
@@ -763,32 +759,28 @@ class RegularAlarmSaveResult {
 class AlarmCapabilities {
   const AlarmCapabilities({
     required this.canScheduleExact,
-    required this.canUseFullScreenIntent,
     this.degradedAlarmCount = 0,
   });
 
   const AlarmCapabilities.unsupported()
     : canScheduleExact = false,
-      canUseFullScreenIntent = false,
       degradedAlarmCount = 0;
 
   final bool canScheduleExact;
-  final bool canUseFullScreenIntent;
 
   /// Alarms currently armed inexactly because the permission was refused. These
   /// still fire, but can be several minutes late under Doze, so any UI showing
   /// them has to say so rather than presenting them as alarms.
   final int degradedAlarmCount;
 
-  /// The one that decides whether Buddy may promise a wake-up. Full-screen
-  /// intent is an upgrade: without it the alarm still rings at alarm volume and
-  /// vibrates, it just does not take over the lock screen.
+  /// The one that decides whether Buddy may promise a wake-up. Exact alarms are
+  /// the whole gate: the alarm rings at alarm volume and vibrates off the
+  /// foreground service, and reaches its UI through the notification.
   bool get canRing => canScheduleExact;
 
   factory AlarmCapabilities.fromMap(Map<String, dynamic> map) =>
       AlarmCapabilities(
         canScheduleExact: map['can_schedule_exact'] == true,
-        canUseFullScreenIntent: map['can_use_full_screen_intent'] == true,
         degradedAlarmCount: (map['degraded_alarm_count'] as int?) ?? 0,
       );
 }

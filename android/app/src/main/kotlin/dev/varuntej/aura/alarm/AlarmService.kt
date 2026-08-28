@@ -407,12 +407,15 @@ class AlarmService : Service() {
             .setCategory(Notification.CATEGORY_ALARM)
             .setOngoing(true)
             .setAutoCancel(false)
+            // The ONLY route to AlarmActivity. There is deliberately no
+            // setFullScreenIntent here: USE_FULL_SCREEN_INTENT was removed after
+            // Play ruled it is reserved for apps whose core purpose is calling or
+            // alarms. Do not re-add it, and do not work around it by launching the
+            // Activity from here. The wake-up still lands because this service
+            // holds the wake lock and plays at alarm volume on its own; the user
+            // taps this notification to reach the alarm UI, which still shows over
+            // the lock screen via AlarmActivity's showWhenLocked/turnScreenOn.
             .setContentIntent(full)
-            // The full-screen intent is the upgrade, not the mechanism. On
-            // Android 14+ it may be denied, in which case this degrades to a
-            // heads-up notification, and the service is still holding a wake
-            // lock and playing at alarm volume, so the user is still woken.
-            .setFullScreenIntent(full, true)
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             @Suppress("DEPRECATION")
             builder.setPriority(Notification.PRIORITY_MAX)
