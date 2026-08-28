@@ -28,9 +28,11 @@ or equivalent result bundle proving p99 latency or the execution provider select
   [`KeyboardVoiceController`](../../android/app/src/main/kotlin/dev/varuntej/aura/keyboard/KeyboardVoiceController.kt),
   [`KeyboardVoiceHandoff`](../../android/app/src/main/kotlin/dev/varuntej/aura/keyboard/KeyboardVoiceHandoff.kt),
   and audio code remain a separate, user-invoked path and are not modified by this design.
-- The explicit Buddy draft action is also separate. It may use
+- The explicit Buddy draft action is separate from prediction: it may use
   [`KeyboardDraftClient`](../../android/app/src/main/kotlin/dev/varuntej/aura/keyboard/KeyboardDraftClient.kt);
-  automatic suggestions do not.
+  automatic suggestions do not. Its **editor mutation** is not separate, because a writing tool
+  deletes text the user already has in another app's field. That contract is
+  [Writing tools: span selection and replacement](#writing-tools-span-selection-and-replacement).
 - The IME runs in the application's default Android process and UID. The APK declares Internet
   permission for other Aura capabilities, so "local prediction" is an application data-flow
   property, not an OS-enforced no-network sandbox.
@@ -328,6 +330,58 @@ the IME rebuilds for the next focused field.
 Developer diagnostics are hidden behind an Advanced switch. They read the live process-memory ONNX
 state, configured provider, model version, inference count, and error category. No typed text is
 accepted, persisted, displayed, or logged by this diagnostics path.
+
+## Writing tools: span selection and replacement
+
+A writing tool (Proofread, Rephrase, Professional, Friendly, Translate) transforms text the user
+already has in the host field and puts the result back **in place of it**. The rule that makes that
+safe is one sentence: *the span sent to the model and the span deleted from the field are the same
+object.* `BuddyImeService.DraftTarget` is that object; `buildDraftTarget` is the only thing that
+creates one, and `insertDraft` is the only thing that acts on one.
+
+Reply is the exception and always appends: its source is the clipboard, because an IME cannot read
+the chat bubble being answered, so there is nothing on screen to replace. `buildDraftTarget`
+returns null for it.
+
+### Choosing the span
+
+| Order | Condition | Span |
+|---|---|---|
+| 1 | Action is Reply | None. Append at the cursor. |
+| 2 | The host has a selection | The selection. The user stated the blast radius. Over `DRAFT_MAX_CHARS` the keyboard refuses and asks for a smaller selection, rather than transforming a prefix and deleting the whole thing. |
+| 3 | No selection, whole field under `DRAFT_AUTO_WINDOW_MAX`, neither read truncated | The whole field, before and after the cursor. |
+| 4 | Otherwise | A boundary-snapped window around the cursor: paragraph break, else sentence end, else word gap. The text outside it is sent as `context_before` / `context_after` and is never replaced. |
+
+Two different ceilings, on purpose:
+
+- `DRAFT_MAX_CHARS` (2000) mirrors `CONTEXT_MAX_CHARS` in
+  [`drafter.py`](../src/services/keyboard/drafter.py). Past it the server truncates silently, so the
+  model would never see the tail while the keyboard deleted it.
+- `DRAFT_AUTO_WINDOW_MAX` (1200) bounds a span the keyboard picks *by itself*. The draft runs on the
+  lite tier under `KEYBOARD_DRAFT_TIMEOUT_SECONDS`, and a grammar pass emits about as many tokens as
+  it consumes, so a 2000-character rewrite nobody asked for is a timeout risk. An explicit selection
+  is the user's own call and gets the full 2000.
+
+`getTextBeforeCursor` / `getTextAfterCursor` are best-effort: a host may return less than asked, and
+they return null once the connection is stale. A read that comes back at exactly the requested
+length is therefore treated as possibly truncated, and its outer edge is never used as a span
+boundary — the window snaps inward to the first real one instead.
+
+### Applying it
+
+`insertDraft` re-reads the span and compares it to what was sent **before deleting anything**. If
+the user typed while the request was in flight, the host edited the field, or focus moved to a
+different field (`inputSession` stamp), it deletes nothing, inserts nothing, and says the text
+changed. Appending on a mismatch is the exact duplicate-text failure this path exists to prevent.
+
+The delete uses `deleteSurroundingTextInCodePoints`, not `deleteSurroundingText`: the latter counts
+UTF-16 units and will split a surrogate pair sitting on a span edge into a replacement glyph. Delete
+and commit are wrapped in `beginBatchEdit` / `endBatchEdit` so the host sees one edit, then
+`markResync()` re-seeds the cursor from the next `onUpdateSelection`.
+
+The wire fields `selected_text` and `context_after` already existed in `DraftRequest` and are
+already validated server-side; the client simply began sending them. Older installed keyboards that
+send only `context_before` continue to work unchanged, so this is not a cross-repo contract change.
 
 ## Failure, retry, and recovery flow
 
