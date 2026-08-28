@@ -192,6 +192,26 @@ The `.aab` on disk is NOT the user download. Play strips the R8 mapping and
 native symbols and delivers one ABI per device. Check the real number in Play
 Console -> App bundle explorer -> Download size.
 
+### Release notes live in CHANGELOG.md
+
+**A version bump in `pubspec.yaml` is incomplete without a `CHANGELOG.md`
+entry in the same commit.** The entry carries the exact text pasted into the
+Play Console release notes field, in a fenced block, plus the user-facing
+Added/Changed/Fixed summary. Also update the "current release version" line at
+the top of the file. Play Console is not a store: nothing typed only into that
+web form survives, so a rejected build cannot be resubmitted with the same
+notes unless they are in the repo. Two shipped versions were already lost this
+way. If a build is rejected, keep the notes and bump only the build number.
+
+**Play notes describe the phone only.** This repo holds the backend for every surface, so a commit range always mixes mobile work with Aura-Desktop work.
+Interview Companion, Interview Mode, Meeting Notes, Guide Mode, screen-sight, drafts, and dictation are desktop-only (`ECOSYSTEM.md` contracts 5 through 5d).
+Advertising any of them to Play users promises a feature the phone does not
+have. Before a line goes in the notes, name the Flutter or Android code that
+ships it. A backend route is not a mobile feature.
+
+Also check what the release *removes*. Build 16 dropped the full-screen alarm
+intent, so alarms were the wrong thing to headline.
+
 ## Deploy
 
 **YOU MUST** verify the backend imports cleanly before deploying. This catches

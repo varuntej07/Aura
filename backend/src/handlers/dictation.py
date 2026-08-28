@@ -321,6 +321,202 @@ async def handle_mint_stt_token(request: Request) -> JSONResponse:
     return response
 
 
+_GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+# The desktop types the raw transcript after 2.5s total, so anything slower
+# than this is wasted work for a reply nobody will use. Bounded anyway so a
+# hung provider must not hold a Cloud Run worker.
+_POLISH_TIMEOUT_S = 2.0
+_POLISH_MAX_CHARS = 4000
+_POLISH_MAX_BODY_BYTES = 64 * 1024
+_POLISH_APP_MAX_CHARS = 64
+
+# Process stems whose Enter key SENDS the message instead of starting a new
+# line. The desktop's insert.rs types a newline character as a real VK_RETURN
+# press, so an INFERRED line break in one of these posts a half-written
+# message before the speaker can stop it. An explicitly spoken "new line" is
+# still honoured there, because the speaker asked for it; only the inferred
+# list is withheld.
+_SEND_ON_ENTER_APPS = frozenset(
+    {
+        "slack",
+        "discord",
+        "teams",
+        "ms-teams",
+        "msteams",
+        "whatsapp",
+        "telegram",
+        "signal",
+        "messenger",
+        "skype",
+        "zoom",
+    }
+)
+
+# Short and exemplar-led on purpose: gpt-oss-20b degrades on long,
+# formatting-dense prompts, and this call has a 2.0s budget. One worked
+# example pins numerals, filler removal, and "two sentences are not a list"
+# more reliably than a page of rules would.
+_POLISH_LIST_RULE_ALLOWED = """Two or more spoken ordinals that each open a separate point become a numbered
+            list, one item per line, the ordinal word deleted:
+            in: first fix the login bug second update the docs third ship it
+            out: 1. Fix the login bug
+            2. Update the docs
+            3. Ship it
+            An ordinal inside ordinary prose is not a list: "the first time I ran it"
+            stays as it is.
+        """
+
+_POLISH_LIST_RULE_BLOCKED = """Never add a line break the speaker did not ask for: Enter sends the message
+            in {app}. Spoken ordinals stay inline, like: First, fix the login bug.
+            Second, update the docs.
+        """
+
+_POLISH_SYSTEM_PROMPT = """Format a dictated transcript. Output only the formatted text, no preamble or
+            surrounding quotation marks.
+
+            Keep the speaker's words and meaning. Never add content or reorder it.
+            Fix punctuation, capitalization, and sentence breaks. Remove fillers: um, uh,
+            er, "you know", and "like" or "so" used as filler.
+            Self-corrections: drop an abandoned attempt only when the speaker signals it,
+            with a cue (I mean, sorry, no wait) or by restarting the same phrase almost
+            word for word. Keep what they settled on; drop the cue too. Repeated words and
+            cut-off fragments collapse the same way.
+            in: why don't you upload why don't you update the file
+            out: Why don't you update the file
+            in: set the timeout to fifty, sorry, fifteen seconds
+            out: Set the timeout to 15 seconds
+            No cue and no near-verbatim restart means change nothing: two clauses are two
+            clauses. Contrast and emphasis are meaning: "make it red, not blue" and "no
+            no, don't ship it" stay whole. Never invent a word.
+            Write quantities as numerals: ten cards -> 10 cards, five thousand -> 5,000,
+            twenty percent -> 20%. Leave number words that are not quantities: one of
+            them, no one, at one point.
+            Spoken commands: "new line" or "new paragraph" -> line break, "bullet point"
+            -> "- ", "all caps that" -> uppercase it, "quote X end quote" -> "X".
+            {list_rule}
+            Target app is {app}. Match its register through punctuation and casing only.
+
+            in: the recent activity cards are displayed like ten cards at a time i don't
+            want to see more than five cards
+            out: The recent activity cards are displayed 10 cards at a time. I don't want
+            to see more than 5 cards.
+        """
+
+
+async def handle_polish(request: Request) -> JSONResponse:
+    """POST /dictation/polish - AI cleanup of a finished dictation transcript.
+
+    The desktop sends {"text": ..., "app": ...} and types whatever comes back
+    in {"text": ...}; on any non-200 it types the raw transcript instead, so
+    every error here degrades to unformatted dictation, never to lost words.
+
+    Security: GROQ_API_KEY never leaves this process, same posture as
+    DEEPGRAM_DICTATION_API_KEY above. Unlike transcription there is no
+    provider-side ephemeral token to mint, so the whole call is proxied.
+
+    Privacy: the transcript is speech. It is never logged here at any level
+    (the same rule the desktop's dictation module enforces), never stored,
+    and never echoed in an error body.
+
+    Latency: this IS on the keyup-to-keystroke path. The desktop gives up at
+    2.5s total, so the provider timeout is 2.0s and everything else here is
+    arithmetic.
+    """
+    uid = resolve_user_id_from_request(request)
+    if not uid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not settings.GROQ_API_KEY:
+        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+
+    raw = await request.body()
+    if not raw or len(raw) > _POLISH_MAX_BODY_BYTES:
+        return JSONResponse({"error": "Invalid request body."}, status_code=400)
+    try:
+        decoded = json.loads(raw)
+        text = decoded["text"]
+        app_name = decoded.get("app")
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, KeyError):
+        # Never echo validation input: the body contains speech.
+        return JSONResponse({"error": "Invalid request body."}, status_code=400)
+    if not isinstance(text, str) or not text.strip():
+        return JSONResponse({"error": "Invalid request body."}, status_code=400)
+    if len(text) > _POLISH_MAX_CHARS:
+        return JSONResponse({"error": "Transcript too long."}, status_code=413)
+    if not isinstance(app_name, str) or not app_name.strip():
+        app_name = None
+
+    target = (app_name or "a text field")[:_POLISH_APP_MAX_CHARS]
+    # Deterministic, not left to the model: whether an inferred line break is
+    # safe here is a property of the destination app, and a wrong guess sends
+    # the message early.
+    list_rule = (
+        _POLISH_LIST_RULE_BLOCKED
+        if target.lower() in _SEND_ON_ENTER_APPS
+        else _POLISH_LIST_RULE_ALLOWED
+    )
+    system = _POLISH_SYSTEM_PROMPT.replace("{list_rule}", list_rule).replace(
+        "{app}", target
+    )
+    # gpt-oss is a reasoning model and its reasoning tokens count against this
+    # cap, so the headroom is bigger than the visible output needs.
+    max_tokens = min(len(text) // 3 + 640, 1536)
+
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=_POLISH_TIMEOUT_S) as client:
+            completion = await client.post(
+                _GROQ_CHAT_URL,
+                headers={
+                    # .strip() is mandatory: a mounted secret carries a trailing
+                    # newline, and httpx rejects a header value containing
+                    # CR/LF. Same fix as the Deepgram grant above.
+                    "Authorization": f"Bearer {settings.GROQ_API_KEY.strip()}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.GROQ_POLISH_MODEL,
+                    "temperature": 0,
+                    "max_tokens": max_tokens,
+                    # Keep the reasoning burst short: this is mechanical text
+                    # cleanup on a 2.0s budget, not a problem to think about.
+                    "reasoning_effort": "low",
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": text},
+                    ],
+                },
+            )
+    except Exception as exc:
+        # Type only, never the message: a protocol error can echo the request,
+        # which carries both the key header and the transcript.
+        logger.warn("dictation: polish call failed", {"error_type": type(exc).__name__})
+        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+
+    if completion.status_code != 200:
+        # Never echo the provider's body: it can quote the request. The status
+        # alone separates a bad key from an outage or a rate limit.
+        logger.warn("dictation: polish rejected", {"status": completion.status_code})
+        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+
+    try:
+        payload = completion.json()
+        formatted = payload["choices"][0]["message"]["content"]
+    except Exception as exc:
+        logger.warn(
+            "dictation: polish response unusable",
+            {"error_type": type(exc).__name__},
+        )
+        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+
+    if not isinstance(formatted, str) or not formatted.strip():
+        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+
+    response = JSONResponse({"text": formatted})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 async def handle_get_quota(request: Request) -> JSONResponse:
     uid = resolve_user_id_from_request(request)
     if not uid:

@@ -101,6 +101,7 @@ from .handlers.dictation import (
     handle_delete_trace as handle_dictation_delete_trace,
     handle_get_quota as handle_dictation_get_quota,
     handle_mint_stt_token as handle_dictation_mint_stt_token,
+    handle_polish as handle_dictation_polish,
     handle_put_audio as handle_dictation_put_audio,
     handle_put_trace as handle_dictation_put_trace,
 )
@@ -1104,6 +1105,14 @@ async def desktop_notification_acknowledge_endpoint(
 @app.post("/dictation/stt-token")
 async def dictation_stt_token_endpoint(request: Request) -> JSONResponse:
     return await handle_dictation_mint_stt_token(request)
+
+
+# AI cleanup of a finished dictation transcript, proxied so the provider key
+# stays on the server. On the desktop's keyup path; see the handler for the
+# latency and privacy rules.
+@app.post("/dictation/polish")
+async def dictation_polish_endpoint(request: Request) -> JSONResponse:
+    return await handle_dictation_polish(request)
 
 
 @app.post("/interview-companion/stt-token")

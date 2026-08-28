@@ -139,7 +139,14 @@ class Settings(BaseSettings):
     DEEPGRAM_DICTATION_API_KEY: str = ""
     DEEPGRAM_STT_TOKEN_TTL_S: int = 300
 
-    # Google Calendar (optional)
+    # AI cleanup of finished dictation transcripts (POST /dictation/polish).
+    # The key never leaves this process; the desktop only ever sends text and
+    # receives text. Empty key means the endpoint returns 503 and the desktop
+    # types the raw transcript.
+    GROQ_API_KEY: str = ""
+    GROQ_POLISH_MODEL: str = "openai/gpt-oss-20b"
+
+    # Google Calendar
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = ""
