@@ -1766,8 +1766,12 @@ class BuddyAgent(agents.Agent):
         Select this from the meaning of the request, just like
         start_mock_interview. Use it when the user wants Buddy to stay with them
         and guide a task one visible action at a time as their screen changes.
-        Do not use it for a one-off question about the current screen, ordinary
-        advice, or a capability question. There are no required trigger words.
+        A run of consecutive what-do-I-do-next questions about a changing screen
+        IS ongoing guidance: call this tool rather than continuing to answer
+        turn by turn, even though each question alone looks one-off.
+        Do not use it for a single one-off question about the current screen,
+        ordinary advice, or a capability question. There are no required
+        trigger words.
 
         Arming is owned natively by the desktop, so this call only requests the
         start and can fail after you ask. Active Guide Mode owns its own stop tool.
