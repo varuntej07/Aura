@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stop glyph for the voice stage's stop control: a rounded square, drawn as a vector so it
+     is centred by layout instead of by a text glyph's font metrics. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="14dp"
+    android:height="14dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="@color/buddy_kb_accent_text">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7,7m2,0l6,0a2,2 0,0 1,2 2l0,6a2,2 0,0 1,-2 2l-6,0a2,2 0,0 1,-2 -2l0,-6a2,2 0,0 1,2 -2z" />
+</vector>

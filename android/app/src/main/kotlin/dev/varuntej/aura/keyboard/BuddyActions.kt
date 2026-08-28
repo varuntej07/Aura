@@ -10,14 +10,13 @@ package dev.varuntej.aura.keyboard
  */
 enum class BuddyAction(val wire: String, val label: String) {
     REPLY("reply", "Reply as me"),
-    CONTINUE("continue", "Continue"),
     REWRITE("rewrite", "Rewrite"),
     GRAMMAR("grammar", "Grammar"),
     TRANSLATE("translate", "Translate");
 
     companion object {
         /** Left-to-right order the actions appear in on the Buddy bar. */
-        val barOrder: List<BuddyAction> = listOf(REPLY, CONTINUE, REWRITE, GRAMMAR, TRANSLATE)
+        val barOrder: List<BuddyAction> = listOf(REPLY, REWRITE, GRAMMAR, TRANSLATE)
     }
 }
 
@@ -25,9 +24,12 @@ enum class BuddyAction(val wire: String, val label: String) {
  * One tab in the Gboard-style writing-tools panel (single editable preview + "Use this"). Each tab
  * maps onto the existing /keyboard/draft contract: [action] is the wire action, [tone] is the
  * optional free-text tone passed alongside a `rewrite` (the backend accepts any tone string).
- * [needsLanguage] tabs (Translate) first ask for a target language. The Proofread/Rephrase/
- * Professional/Friendly/Emoji set matches the reference screenshot; Reply/Continue/Translate keep
- * Buddy's own superpowers ("reply as me" in your voice) on the same scrollable row.
+ * [needsLanguage] tabs (Translate) first ask for a target language. Proofread/Rephrase/
+ * Professional/Friendly are the everyday edits; Reply as me and Translate keep Buddy's own
+ * superpowers ("reply as me" in your voice) on the same scrollable row.
+ *
+ * The backend still accepts the `continue` action for keyboard builds already in the wild;
+ * this client simply no longer offers it.
  */
 data class WritingTool(
     val label: String,
@@ -41,9 +43,7 @@ data class WritingTool(
             WritingTool("Rephrase", BuddyAction.REWRITE, tone = null),
             WritingTool("Professional", BuddyAction.REWRITE, tone = "professional"),
             WritingTool("Friendly", BuddyAction.REWRITE, tone = "friendly"),
-            WritingTool("Emoji", BuddyAction.REWRITE, tone = "add relevant emojis"),
             WritingTool("Reply as me", BuddyAction.REPLY, tone = null),
-            WritingTool("Continue", BuddyAction.CONTINUE, tone = null),
             WritingTool("Translate", BuddyAction.TRANSLATE, tone = null, needsLanguage = true),
         )
     }

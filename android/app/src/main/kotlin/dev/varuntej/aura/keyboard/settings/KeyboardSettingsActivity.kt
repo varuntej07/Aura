@@ -2,18 +2,20 @@ package dev.varuntej.aura.keyboard.settings
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
@@ -195,12 +197,12 @@ class KeyboardSettingsActivity : Activity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             dp(76),
         )
-        addView(TextView(this@KeyboardSettingsActivity).apply {
-            text = "←"
+        // A vector centred by layout. The old "←" was a text glyph, which sits on its
+        // baseline and never looks centred inside a circle.
+        addView(ImageView(this@KeyboardSettingsActivity).apply {
+            setImageResource(R.drawable.ic_kb_arrow_back)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
             contentDescription = getString(R.string.keyboard_settings_back)
-            setTextColor(color(R.color.buddy_kb_key_text))
-            textSize = 25f
-            gravity = Gravity.CENTER
             setBackgroundResource(R.drawable.aura_keyboard_settings_back_bg)
             isClickable = true
             isFocusable = true
@@ -300,34 +302,99 @@ class KeyboardSettingsActivity : Activity() {
         addDivider()
     }
 
+    /**
+     * The theme picker, built from the same card drawables and colour tokens as the settings
+     * rows behind it. The framework AlertDialog this replaces rendered as the 2014 Material
+     * dialog (grey title, divider rule, all-caps button) and, because this activity's theme is
+     * pinned to Theme.Material.LIGHT, stayed light even with the keyboard in dark mode.
+     */
     private fun showThemeDialog(current: KeyboardThemeMode) {
-        val labels = arrayOf(
-            getString(R.string.keyboard_settings_theme_system),
-            getString(R.string.keyboard_settings_theme_light),
-            getString(R.string.keyboard_settings_theme_dark),
-        )
-        val modes = KeyboardThemeMode.entries
-        val group = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            setPadding(dp(20), dp(8), dp(20), dp(8))
+        val dialog = Dialog(this)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundResource(R.drawable.aura_keyboard_settings_card_bg)
+            setPadding(0, dp(20), 0, dp(12))
         }
-        modes.forEachIndexed { index, mode ->
-            group.addView(RadioButton(this).apply {
-                id = View.generateViewId()
-                text = labels[index]
-                setTextColor(color(R.color.buddy_kb_key_text))
-                isChecked = mode == current
-                setOnClickListener {
-                    KeyboardSettingsStore.setThemeMode(this@KeyboardSettingsActivity, mode)
-                    recreate()
-                }
+        card.addView(TextView(this).apply {
+            text = getString(R.string.keyboard_settings_theme)
+            setTextColor(color(R.color.buddy_kb_key_text))
+            setTypeface(typeface, Typeface.BOLD)
+            textSize = 19f
+            setPadding(dp(22), 0, dp(22), dp(8))
+        })
+        for (mode in KeyboardThemeMode.entries) {
+            card.addView(themeOptionRow(mode, selected = mode == current) {
+                KeyboardSettingsStore.setThemeMode(this@KeyboardSettingsActivity, mode)
+                dialog.dismiss()
+                recreate()
             })
         }
-        AlertDialog.Builder(this)
-            .setTitle(R.string.keyboard_settings_theme)
-            .setView(group)
-            .setNegativeButton(R.string.keyboard_settings_cancel, null)
-            .show()
+        card.addView(TextView(this).apply {
+            text = getString(R.string.keyboard_settings_cancel)
+            setAllCaps(false)
+            gravity = Gravity.CENTER
+            textSize = 15f
+            setTextColor(color(R.color.buddy_kb_accent))
+            setTypeface(typeface, Typeface.BOLD)
+            setBackgroundResource(R.drawable.aura_keyboard_settings_action_bg)
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { dialog.dismiss() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins(dp(16), dp(12), dp(16), 0) }
+        })
+        dialog.setContentView(
+            card,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
+        dialog.window?.apply {
+            // Transparent behind the card so its rounded corners are real, rather than drawn on
+            // top of a square dialog background.
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout(
+                (resources.displayMetrics.widthPixels - dp(48)).coerceAtMost(dp(360)),
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        dialog.show()
+    }
+
+    /** One selectable theme in the picker: label left, an accent check on the current mode. */
+    private fun themeOptionRow(
+        mode: KeyboardThemeMode,
+        selected: Boolean,
+        onPick: () -> Unit,
+    ): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(22), dp(14), dp(22), dp(14))
+        minimumHeight = dp(56)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onPick() }
+        addView(TextView(this@KeyboardSettingsActivity).apply {
+            text = getString(
+                when (mode) {
+                    KeyboardThemeMode.SYSTEM -> R.string.keyboard_settings_theme_system
+                    KeyboardThemeMode.LIGHT -> R.string.keyboard_settings_theme_light
+                    KeyboardThemeMode.DARK -> R.string.keyboard_settings_theme_dark
+                },
+            )
+            setTextColor(color(R.color.buddy_kb_key_text))
+            textSize = 16f
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        addView(TextView(this@KeyboardSettingsActivity).apply {
+            text = if (selected) "✓" else ""
+            setTextColor(color(R.color.buddy_kb_accent))
+            setTypeface(typeface, Typeface.BOLD)
+            textSize = 17f
+        })
     }
 
     private fun addInfo(titleRes: Int, summaryRes: Int) {

@@ -58,6 +58,11 @@ object KeyboardDraftClient {
         tone: String? = null,
         targetLang: String? = null,
         fieldType: String? = null,
+        // The exact span the keyboard will replace once the user taps "Use this". The backend
+        // transforms this in preference to contextBefore (drafter.draft: selected_text or
+        // context_before), so what the model rewrites and what we delete are the same text.
+        selectedText: String = "",
+        contextAfter: String = "",
         onResult: (Result) -> Unit,
     ) {
         if (credential == null) {
@@ -79,7 +84,10 @@ object KeyboardDraftClient {
         mainHandler.postDelayed(deadlineRunnable, OVERALL_DEADLINE_MS)
         executor.execute {
             val result = try {
-                request(credential, action, contextBefore, hostApp, n, tone, targetLang, fieldType)
+                request(
+                    credential, action, contextBefore, hostApp, n, tone, targetLang, fieldType,
+                    selectedText, contextAfter,
+                )
             } catch (t: Throwable) {
                 Result.Failure("network_error")
             }
@@ -99,6 +107,8 @@ object KeyboardDraftClient {
         tone: String?,
         targetLang: String?,
         fieldType: String?,
+        selectedText: String,
+        contextAfter: String,
     ): Result {
         val endpoint = credential.apiBaseUrl.trimEnd('/') + "/keyboard/draft"
         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -119,6 +129,8 @@ object KeyboardDraftClient {
             if (!tone.isNullOrBlank()) put("tone", tone)
             if (!targetLang.isNullOrBlank()) put("target_lang", targetLang)
             if (!fieldType.isNullOrBlank()) put("field_type", fieldType)
+            if (selectedText.isNotBlank()) put("selected_text", selectedText)
+            if (contextAfter.isNotBlank()) put("context_after", contextAfter)
         }
 
         try {

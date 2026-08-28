@@ -26,7 +26,7 @@
         <LinearLayout
             android:id="@+id/collapsed_bar"
             android:layout_width="match_parent"
-            android:layout_height="52dp"
+            android:layout_height="55dp"
             android:orientation="horizontal"
             android:gravity="center_vertical"
             android:paddingTop="2dp"
@@ -69,8 +69,8 @@
         android:orientation="vertical"
         android:visibility="gone"
         android:background="@color/buddy_kb_background"
-        android:paddingLeft="4dp"
-        android:paddingRight="4dp"
-        android:paddingTop="4dp"
+        android:paddingLeft="10dp"
+        android:paddingRight="10dp"
+        android:paddingTop="6dp"
         android:paddingBottom="22dp" />
 </FrameLayout>

@@ -34,9 +34,11 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.core.widget.TextViewCompat
 import dev.varuntej.aura.R
 import dev.varuntej.aura.keyboard.input.BackspaceTouchHandler
 import dev.varuntej.aura.keyboard.input.DoubleSpacePeriod
+import dev.varuntej.aura.keyboard.input.HorizontalSwipeScrollView
 import dev.varuntej.aura.keyboard.input.KeyPopupOptions
 import dev.varuntej.aura.keyboard.input.KeyPreview
 import dev.varuntej.aura.keyboard.input.KeyTouchHandler
@@ -109,6 +111,45 @@ private const val CLIPBOARD_PREVIEW_CHARS = 30
 
 // How many recently-used emojis the emoji panel remembers.
 private const val EMOJI_RECENTS_MAX = 32
+
+/** How many writing-tool tiles fit across the panel before the row starts scrolling. */
+private const val WRITING_TOOLS_VISIBLE = 4
+
+// --- Writing-tool span limits ------------------------------------------------
+// Hard ceiling on the text a draft may transform, matching CONTEXT_MAX_CHARS in
+// backend/src/services/keyboard/drafter.py. Past this the server truncates silently, so the
+// model would never see the tail while the keyboard happily deleted it.
+private const val DRAFT_MAX_CHARS = 2000
+
+// The ceiling on a span the keyboard picks BY ITSELF, with nothing selected. Lower than
+// DRAFT_MAX_CHARS on purpose: the draft runs on the lite tier under a 6s server deadline and a
+// grammar pass emits about as many tokens as it eats, so a 2000-char rewrite nobody asked for is
+// a timeout risk. An explicit selection is the user's own call and gets the full ceiling.
+private const val DRAFT_AUTO_WINDOW_MAX = 1200
+
+// How much text is read on each side of the cursor. A read that comes back at exactly this
+// length may have been truncated by the host, so its far edge is never trusted as a boundary.
+private const val DRAFT_READ_CHARS = 2000
+
+// Surrounding text sent for register but never replaced. Mirrors the server's
+// CONTEXT_MAX_CHARS / CONTEXT_AFTER_MAX_CHARS.
+private const val DRAFT_CONTEXT_BEFORE_MAX = 2000
+private const val DRAFT_CONTEXT_AFTER_MAX = 500
+
+// Panel header titles. Every takeover entry point sets one, so a panel never wears the
+// title of whatever was opened before it.
+private const val WHITEBOARD_TITLE = "Writing Tools"
+private const val INTRO_PANEL_TITLE = "Your privacy"
+private const val VOICE_PANEL_TITLE = "Talk to Buddy"
+private const val CONSENT_PANEL_TITLE = "Heads up"
+
+// The first-use privacy panel opens a little taller than the keyboard: it is a page of prose
+// plus a choice, and at exact key-grid height it read as a sliver. Kept modest on purpose --
+// the card is vertically centred, so every extra pixel here becomes dead space above the
+// heading and below the buttons. Every other takeover stays at 1f. Capped at a fraction of
+// the screen so a tall scale can never swallow the display.
+private const val INTRO_PANEL_HEIGHT_SCALE = 1.08f
+private const val MAX_PANEL_SCREEN_FRACTION = 0.72f
 // Prefs (non-secure) for the emoji recents row.
 // Canonical name lives with the deletion path so a new store cannot outlive clear-all.
 private const val EMOJI_PREFS = KeyboardOwnedStores.EMOJI_PREFS
@@ -173,6 +214,10 @@ class BuddyImeService : InputMethodService() {
     private lateinit var emojiContainer: LinearLayout
     private lateinit var emojiTabs: LinearLayout
     private lateinit var emojiGrid: LinearLayout
+    // The tab strip's scroller and the grid's scroller. Held so a category swipe can pull the
+    // selected tab into view and reset the grid to the top.
+    private lateinit var emojiTabsScroll: HorizontalScrollView
+    private lateinit var emojiGridScroll: HorizontalSwipeScrollView
     // The selected emoji category: -1 is the dynamic "recently used" tab, else an index into
     // EmojiData.categories.
     private var selectedEmojiCategory = -1
@@ -186,11 +231,22 @@ class BuddyImeService : InputMethodService() {
     private lateinit var wbCanvas: LinearLayout
     // The Regenerate + green "Use this" row, shown only while a draft fills the preview box.
     private lateinit var useThisRow: LinearLayout
+    // The action-tile strip. Held so panels that show no tools can hide its fixed height
+    // instead of leaving it as a dead band under the card.
+    private lateinit var wbActionsScroll: HorizontalScrollView
+    // The panel header title. Every entry point sets it, so no panel inherits another's.
+    private lateinit var wbTitle: TextView
 
     // The writing tool (tone tab) currently selected in the panel.
     private var selectedTool: WritingTool? = null
     // The draft currently shown in the preview box, inserted on "Use this".
     private var previewText: String? = null
+    // The exact span the pending draft transforms, resolved when the request goes out and
+    // verified again before anything is deleted. Null means "append at the cursor" (Reply).
+    private var draftTarget: DraftTarget? = null
+    // Bumped on every field focus. A target stamped with an older value belongs to a field that
+    // is no longer on screen and must never be written to.
+    private var inputSession: Long = 0L
     // The last draft args, so "Regenerate" / "Try again" can repeat it.
     private var lastAction: BuddyAction? = null
     private var lastTone: String? = null
@@ -249,7 +305,7 @@ class BuddyImeService : InputMethodService() {
     private val suggestionChips = mutableListOf<TextView>()
     private val suggestionChipVisuals = mutableListOf<SuggestionChipVisual?>()
     private var currentSuggestions: List<Suggestion> = emptyList()
-    private enum class SuggestionStripMode { EMPTY, SUGGESTIONS, UNDO, CLIPBOARD, INTRO }
+    private enum class SuggestionStripMode { EMPTY, SUGGESTIONS, UNDO, CLIPBOARD, INTRO, NOTICE }
 
     // Once the first-use line has been seen or has run out of showings, stop touching the
     // consent prefs on every field focus. Typing must never wait on a disk read.
@@ -380,6 +436,8 @@ class BuddyImeService : InputMethodService() {
         // Fresh field: back to typing, letters page, capitalized. Recompute the field
         // profile so the layout, the Buddy bar, and the enter label all fit this field.
         symbolsPage = false
+        inputSession++
+        draftTarget = null
         fieldProfile = FieldProfile.fromEditorInfo(info)
         enterKeyLabel = enterLabelFor(info)
         val latestSettings = KeyboardSettingsStore.read(this)
@@ -572,13 +630,17 @@ class BuddyImeService : InputMethodService() {
         shiftKeyView = null
         lastShiftKeyMode = null
         val rows = currentRows()
-        // The half-key home-row stagger only applies to the QWERTY letters page (a-l row
-        // at index 1); the numeric/phone/pin pads and the symbols page are full width.
-        val isLettersPage = !symbolsPage && fieldProfile.layout in QWERTY_FAMILY
+        // Two separate things, deliberately not one flag. The row-height ladder follows the
+        // four-row QWERTY SHAPE, which the symbols page shares exactly (row 2 ends in
+        // backspace, row 3 is the same bottom bar), so both pages render at the same total
+        // height and the space bar is the same size on each. The half-key home-row stagger is
+        // letters-only: the symbols page's top row is a full ten keys and must stay flush.
+        val isQwertyShapedPage = fieldProfile.layout in QWERTY_FAMILY
+        val isLettersPage = !symbolsPage && isQwertyShapedPage
         rows.forEachIndexed { index, row ->
             val heightScale = when {
-                isLettersPage && index == 2 -> 0.86f
-                isLettersPage && index == 3 -> 0.80f
+                isQwertyShapedPage && index == 2 -> 0.86f
+                isQwertyShapedPage && index == 3 -> 0.80f
                 else -> 1f
             }
             keysContainer.addView(
@@ -669,8 +731,10 @@ class BuddyImeService : InputMethodService() {
             rowKeyHeight
         }
         val lp = LinearLayout.LayoutParams(0, viewHeight, keyWeight(key))
-        val verticalMargin = if (heightScale < 1f) dp(2) else dp(3)
-        lp.setMargins(dp(1), verticalMargin, dp(1), verticalMargin)
+        // One margin for every row. Scaling this down on the shrunken rows made the gap above
+        // the bottom row (two shrunken rows meeting) 4dp against 6dp everywhere else, which
+        // read as the bottom row being glued to zxcvbnm.
+        lp.setMargins(dp(1), dp(3), dp(1), dp(3))
         view.layoutParams = lp
 
         if (key is Key.Char && key.output.length == 1 && key.output[0].isLetter()) {
@@ -804,12 +868,12 @@ class BuddyImeService : InputMethodService() {
     }
 
     private fun keyTextSize(key: Key): Float = when (key) {
-        is Key.Char -> if (key.output.length == 1 && key.output[0].isLetter()) 24f else 20f
+        is Key.Char -> if (key.output.length == 1 && key.output[0].isLetter()) 25f else 21f
         is Key.Func -> when (key.type) {
-            FuncType.SPACE -> 14f
-            FuncType.ENTER -> if (enterKeyLabel.length > 2) 14f else 22f
-            FuncType.SYMBOLS, FuncType.LETTERS -> 14f
-            else -> 21f
+            FuncType.SPACE -> 14.5f
+            FuncType.ENTER -> if (enterKeyLabel.length > 2) 14.5f else 23f
+            FuncType.SYMBOLS, FuncType.LETTERS -> 14.5f
+            else -> 22f
         }
     }
 
@@ -1335,9 +1399,9 @@ class BuddyImeService : InputMethodService() {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         addView(makeAuraToolbarButton { triggerBarAction() })
-        // These two controls intentionally remain visual-only until their product behavior is
-        // specified. Their themed surfaces keep the toolbar layout stable for that future work.
-        addView(makeToolbarLabel("GIF", "GIF"))
+        // GIF has no picker yet. It says so in the bar rather than doing nothing, which reads
+        // as broken; the themed slot keeps the toolbar layout stable for the real feature.
+        addView(makeToolbarLabel("GIF", "GIF") { showNoticeChip("GIFs are coming soon") })
         addView(makeToolbarIcon(R.drawable.ic_kb_sparkle, "Buddy writing tools") {
             triggerBarAction()
         })
@@ -1441,6 +1505,21 @@ class BuddyImeService : InputMethodService() {
         KeyboardConsentStore.recordIntroPromptShown(this)
     }
 
+    /** A one-off message in the suggestion strip, borrowing the intro chip's shape: slot 0
+     *  carries the text and the other two go GONE, because every chip carries weight=1f and
+     *  leaving them laid out would squeeze this into a third of the strip and ellipsize it to
+     *  nothing. Tapping it, or the next keystroke, returns to the toolbar. */
+    private fun showNoticeChip(message: String) {
+        if (!::suggestionStrip.isInitialized || !::idleToolbar.isInitialized) return
+        renderedSuggestionPersonalizationGeneration = NO_PERSONALIZATION_GENERATION
+        suggestionStripMode = SuggestionStripMode.NOTICE
+        idleToolbar.visibility = View.GONE
+        suggestionStrip.visibility = View.VISIBLE
+        for (i in suggestionChips.indices) {
+            updateSuggestionChip(i, if (i == 0) message else "", if (i == 0) View.VISIBLE else View.GONE, accent = false)
+        }
+    }
+
     /**
      * What the first-use line opens: the local story, plus the one choice that actually
      * changes behaviour. Learning stays on unless the user turns it off here or in settings.
@@ -1451,10 +1530,12 @@ class BuddyImeService : InputMethodService() {
         selectedTool = null
         lastAction = null
         wbActions.removeAllViews()
+        setActionsVisible(false)
+        setPanelTitle(INTRO_PANEL_TITLE)
         hideSubRow()
         setUseThisVisible(false)
         wbContext.text = ""
-        showWhiteboardPanel()
+        showWhiteboardPanel(heightScale = INTRO_PANEL_HEIGHT_SCALE)
 
         cancelAnimators()
         wbCanvas.removeAllViews()
@@ -1537,6 +1618,7 @@ class BuddyImeService : InputMethodService() {
         when (suggestionStripMode) {
             SuggestionStripMode.CLIPBOARD -> if (index == 0) pasteClipboardChip()
             SuggestionStripMode.INTRO -> if (index == 0) openIntroPanel()
+            SuggestionStripMode.NOTICE -> if (index == 0) clearSuggestions()
             SuggestionStripMode.UNDO -> if (index == 0) performUndo()
             SuggestionStripMode.SUGGESTIONS -> if (!discardStaleRenderedSuggestions()) {
                 currentSuggestions.getOrNull(index)?.let { onSuggestionTapped(it.word) }
@@ -1867,28 +1949,40 @@ class BuddyImeService : InputMethodService() {
     private fun buildWhiteboard() {
         whiteboard.removeAllViews()
 
-        // Reference-style header: a circular back control followed by the title.
-        val header = LinearLayout(keyboardUiContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        // Standard app-bar header: a circular back control pinned to the left, with the title
+        // centred against the full panel width rather than against the leftover space.
+        val header = FrameLayout(keyboardUiContext).apply {
             layoutParams = rowParams(bottom = dp(8))
         }
-        header.addView(TextView(keyboardUiContext).apply {
-            text = "←"
-            textSize = 25f
+        wbTitle = TextView(keyboardUiContext).apply {
+            text = WHITEBOARD_TITLE
+            textSize = 20f
             gravity = Gravity.CENTER
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            // Reserve the back button's footprint on both sides so a long title stays optically
+            // centred and can never slide under the arrow.
+            setPadding(dp(56), 0, dp(56), 0)
+            setTypeface(typeface, Typeface.BOLD)
             setTextColor(color(R.color.buddy_kb_key_text))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44),
+            ).apply { gravity = Gravity.CENTER }
+        }
+        header.addView(wbTitle)
+        // A real vector arrow, centred inside the circle. The old "←" glyph was baseline-
+        // positioned text, which is what made it sit off-centre.
+        header.addView(ImageView(keyboardUiContext).apply {
+            setImageResource(R.drawable.ic_kb_arrow_back)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
             setBackgroundResource(R.drawable.buddy_kb_writing_back_bg)
             contentDescription = "Back to keyboard"
             isClickable = true
             isFocusable = true
             setOnClickListener { backToKeys() }
-        }, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginEnd = dp(12) })
-        header.addView(TextView(keyboardUiContext).apply {
-            text = "Writing Tools"
-            textSize = 20f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(color(R.color.buddy_kb_key_text))
+        }, FrameLayout.LayoutParams(dp(44), dp(44)).apply {
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
         })
         whiteboard.addView(header)
 
@@ -1902,7 +1996,7 @@ class BuddyImeService : InputMethodService() {
         wbCanvas = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(14), dp(18), dp(14))
+            setPadding(dp(18), dp(8), dp(18), dp(8))
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1949,16 +2043,30 @@ class BuddyImeService : InputMethodService() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        whiteboard.addView(HorizontalScrollView(keyboardUiContext).apply {
+        wbActionsScroll = HorizontalScrollView(keyboardUiContext).apply {
             isHorizontalScrollBarEnabled = false
             clipToPadding = false
             setPadding(0, 0, dp(8), 0)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(94),
-            ).apply { setMargins(0, dp(8), 0, 0) }
+                dp(70),
+            ).apply { setMargins(0, dp(6), 0, 0) }
             addView(wbActions)
-        })
+        }
+        whiteboard.addView(wbActionsScroll)
+    }
+
+    /** The header title for the panel being opened. */
+    private fun setPanelTitle(title: String) {
+        if (::wbTitle.isInitialized) wbTitle.text = title
+    }
+
+    /** Show or hide the action-tile strip. Its height is fixed at 94dp, so a panel with no
+     *  tiles must hide it or that height is dead space the card can never use. */
+    private fun setActionsVisible(visible: Boolean) {
+        if (::wbActionsScroll.isInitialized) {
+            wbActionsScroll.visibility = if (visible) View.VISIBLE else View.GONE
+        }
     }
 
     /** The green "Use this" confirm button from the reference: commits the previewed draft. */
@@ -2011,6 +2119,8 @@ class BuddyImeService : InputMethodService() {
         selectedTool = null
         lastAction = null
         wbActions.removeAllViews()
+        setActionsVisible(false)
+        setPanelTitle(VOICE_PANEL_TITLE)
         hideSubRow()
         setUseThisVisible(false)
         wbContext.text = ""
@@ -2021,10 +2131,19 @@ class BuddyImeService : InputMethodService() {
     /** Pin a full-takeover panel (emoji / whiteboard) to the live typing keyboard's height, so
      *  opening it never resizes the IME window. Both panels are `match_parent` with a `weight=1`
      *  child, which otherwise expands to fill the whole available area (up to ~3/4 of the screen).
-     *  Falls back to the XML `match_parent` if the typing layer hasn't been laid out yet. */
-    private fun pinPanelHeightToTyping(panel: View) {
-        val target = typingStack.height
-        if (target <= 0) return
+     *  Falls back to the XML `match_parent` if the typing layer hasn't been laid out yet.
+     *
+     *  [scale] above 1f is the one deliberate exception to "never resizes the IME window":
+     *  `buddy_root` is `wrap_content`, so a panel taller than the (INVISIBLE but still measured)
+     *  typing stack raises the input view, and the window with it. Only the first-use privacy
+     *  panel passes it; it is opened once, never mid-typing, and the window shrinks back when
+     *  [backToKeys] sets the panel GONE. Since the height is reassigned on every open, the
+     *  default 1f from the other entry points also resets a container the intro panel grew. */
+    private fun pinPanelHeight(panel: View, scale: Float = 1f) {
+        val measured = typingStack.height
+        if (measured <= 0) return
+        val ceiling = (resources.displayMetrics.heightPixels * MAX_PANEL_SCREEN_FRACTION).toInt()
+        val target = (measured * scale).toInt().coerceIn(measured, maxOf(measured, ceiling))
         val lp = panel.layoutParams
         if (lp.height != target) {
             lp.height = target
@@ -2032,11 +2151,11 @@ class BuddyImeService : InputMethodService() {
         }
     }
 
-    private fun showWhiteboardPanel() {
+    private fun showWhiteboardPanel(heightScale: Float = 1f) {
         // The typing layer drives the IME height, so flip its visibility SYNCHRONOUSLY (never from
         // an animation end-callback): a late callback from a previous toggle could otherwise land
         // us with typing INVISIBLE and the panel GONE, i.e. a blank "disappeared" keyboard.
-        pinPanelHeightToTyping(whiteboard)
+        pinPanelHeight(whiteboard, heightScale)
         typingStack.animate().cancel()
         typingStack.visibility = View.INVISIBLE
         typingStack.alpha = 1f
@@ -2113,6 +2232,8 @@ class BuddyImeService : InputMethodService() {
     }
 
     private fun populateWritingTools() {
+        setPanelTitle(WHITEBOARD_TITLE)
+        setActionsVisible(true)
         wbActions.removeAllViews()
         for (tool in WritingTool.tabs) {
             wbActions.addView(
@@ -2138,13 +2259,13 @@ class BuddyImeService : InputMethodService() {
             },
         )
         layoutParams = LinearLayout.LayoutParams(
-            dp(112),
-            dp(86),
-        ).apply { setMargins(dp(4), 0, dp(4), 0) }
+            writingToolTileWidth(),
+            dp(62),
+        ).apply { setMargins(dp(3), 0, dp(3), 0) }
         addView(TextView(keyboardUiContext).apply {
             text = writingToolGlyph(label)
             gravity = Gravity.CENTER
-            textSize = 24f
+            textSize = 20f
             setTextColor(
                 color(if (selected) R.color.buddy_kb_accent_text else R.color.buddy_kb_key_text),
             )
@@ -2154,12 +2275,12 @@ class BuddyImeService : InputMethodService() {
             gravity = Gravity.CENTER
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            textSize = 13f
+            textSize = 12f
             setTypeface(typeface, Typeface.BOLD)
             setTextColor(
                 color(if (selected) R.color.buddy_kb_accent_text else R.color.buddy_kb_key_text),
             )
-            setPadding(dp(5), dp(5), dp(5), 0)
+            setPadding(dp(4), dp(2), dp(4), 0)
         })
         contentDescription = label
         isClickable = true
@@ -2167,14 +2288,22 @@ class BuddyImeService : InputMethodService() {
         setOnClickListener { onClick() }
     }
 
+    /** Tile width derived from the real panel width so exactly [WRITING_TOOLS_VISIBLE] fit
+     *  across; the rest of the row is reached by scrolling. A fixed dp width fit ~2.7 tiles and
+     *  left the preview card, the thing the user actually reads, squeezed. */
+    private fun writingToolTileWidth(): Int {
+        // The whiteboard container's 8dp side padding (both edges) plus the action row's own
+        // 8dp trailing padding.
+        val usable = keyboardUiContext.resources.displayMetrics.widthPixels - dp(8) * 3
+        return (usable / WRITING_TOOLS_VISIBLE - dp(3) * 2).coerceAtLeast(dp(64))
+    }
+
     private fun writingToolGlyph(label: String): String = when (label) {
         "Proofread" -> "A✓"
         "Rephrase" -> "≡✎"
         "Professional" -> "▣"
         "Friendly" -> "⌁"
-        "Emoji" -> "☺"
         "Reply as me" -> "↩"
-        "Continue" -> "→"
         "Translate" -> "文"
         else -> "✦"
     }
@@ -2280,6 +2409,7 @@ class BuddyImeService : InputMethodService() {
         selectedTool = null
         lastAction = null
         wbActions.removeAllViews()
+        setActionsVisible(false)
         hideSubRow()
         setUseThisVisible(false)
         wbContext.text = ""
@@ -2300,6 +2430,7 @@ class BuddyImeService : InputMethodService() {
      */
     private fun renderConsentAsk(ask: ConsentAsk, action: BuddyAction?, onAccept: () -> Unit) {
         cancelAnimators()
+        setPanelTitle(CONSENT_PANEL_TITLE)
         setUseThisVisible(false)
         hideSubRow()
         wbCanvas.removeAllViews()
@@ -2320,13 +2451,15 @@ class BuddyImeService : InputMethodService() {
                 acceptLabel = "Send it"
             }
             ConsentAsk.VOICE -> {
-                title = "This one turns on your mic"
+                title = "This starts a live conversation"
                 body = if (fieldProfile.memoryActionsAllowed) {
-                    "Buddy streams your microphone to Aura while the mic is on, plus the text " +
-                        "in this field so it knows what you're working on."
+                    "This isn't dictation or read-aloud: Buddy talks back, in real time. Your " +
+                        "microphone streams to Aura while the mic is on, along with the text in " +
+                        "this field so Buddy knows what you're working on."
                 } else {
-                    "Buddy streams your microphone to Aura while the mic is on. This field is " +
-                        "private, so nothing you've typed here is sent."
+                    "This isn't dictation or read-aloud: Buddy talks back, in real time. Your " +
+                        "microphone streams to Aura while the mic is on. This field is private, " +
+                        "so nothing you've typed here is sent."
                 }
                 acceptLabel = "Start talking"
             }
@@ -2343,7 +2476,7 @@ class BuddyImeService : InputMethodService() {
         gravity = Gravity.CENTER
         setTypeface(typeface, Typeface.BOLD)
         setTextColor(color(R.color.buddy_kb_key_text))
-        setPadding(dp(12), dp(10), dp(12), dp(2))
+        setPadding(dp(12), dp(2), dp(12), dp(2))
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2450,14 +2583,30 @@ class BuddyImeService : InputMethodService() {
         wbCanvas.removeAllViews()
         val title: String
         val sub: String
+        val restartLabel: String
         if (state == KeyboardVoiceController.State.ENDED) {
-            title = "Voice ended"; sub = "Tap the mic to talk again."
+            title = "Voice ended"
+            sub = "Start another session whenever you're ready."
+            restartLabel = "Start again"
         } else {
             title = if (detail == "no_agent") "Buddy didn't pick up" else "Voice hit a snag"
-            sub = "Tap the mic to retry, or open Aura."
+            sub = "Give it another go, or open Aura."
+            restartLabel = "Try again"
         }
         wbCanvas.addView(makeCanvasLine(title))
         wbCanvas.addView(makeCanvasLine(sub))
+        // The old copy said "tap the mic", but this panel covers the collapsed bar the mic lives
+        // on, so there was no mic on screen to tap. Give the state a real control.
+        wbCanvas.addView(
+            makeChip(restartLabel, accent = true) { startVoiceSession() }.apply {
+                setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_widget_mic, 0, 0, 0)
+                compoundDrawablePadding = dp(8)
+                TextViewCompat.setCompoundDrawableTintList(
+                    this,
+                    ColorStateList.valueOf(color(R.color.buddy_kb_accent_text)),
+                )
+            },
+        )
     }
 
     /** Build the live voice stage once: a bottom-anchored caption column with a waveform meter
@@ -2537,19 +2686,16 @@ class BuddyImeService : InputMethodService() {
 
     /** The compact Stop control that sits under the waveform on the right rail: a small teal
      *  pill with a stop glyph. */
-    private fun makeStopButton(): View = TextView(keyboardUiContext).apply {
-        text = "■"
-        gravity = Gravity.CENTER
-        textSize = 13f
-        setTextColor(color(R.color.buddy_kb_accent_text))
+    private fun makeStopButton(): View = ImageView(keyboardUiContext).apply {
+        // A vector centred by layout, not a "■" text glyph centred by font metrics -- the glyph
+        // sat visibly off-centre in the pill.
+        setImageResource(R.drawable.ic_kb_stop)
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
         setBackgroundResource(R.drawable.buddy_kb_chip_bg)
-        val padH = dp(13)
-        val padV = dp(8)
-        setPadding(padH, padV, padH, padV)
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ).apply { topMargin = dp(8) }
+        contentDescription = "Stop talking"
+        layoutParams = LinearLayout.LayoutParams(dp(44), dp(36)).apply { topMargin = dp(8) }
         isClickable = true
+        isFocusable = true
         setOnClickListener { stopVoice() }
     }
 
@@ -2701,7 +2847,14 @@ class BuddyImeService : InputMethodService() {
         // Read the local context only at the moment of the action (privacy contract: nothing
         // leaves the keyboard except on an explicit tap). Reply answers a copied message; every
         // other action works on the field.
-        val sourceText = sourceTextFor(action)
+        val target = try {
+            buildDraftTarget(action)
+        } catch (e: SelectionTooLarge) {
+            renderMessage("That's a lot of text at once. Select a smaller piece.", retry = false)
+            return
+        }
+        draftTarget = target
+        val sourceText = sourceTextFor(action, target)
         if (sourceText.isEmpty()) {
             renderMessage(
                 if (action == BuddyAction.REPLY) "Copy the message you got, then tap Reply as me"
@@ -2726,11 +2879,15 @@ class BuddyImeService : InputMethodService() {
             KeyboardDraftClient.draft(
                 credential = credential,
                 action = action.wire,
-                contextBefore = sourceText,
+                // Reply has no on-screen span, so its clipboard source rides context_before as
+                // before; everything else sends the span the keyboard will actually replace.
+                contextBefore = if (target == null) sourceText else target.contextBefore,
                 hostApp = hostApp,
                 tone = tone,
                 targetLang = targetLang,
                 fieldType = fieldProfile.fieldTypeWire,
+                selectedText = if (target == null) "" else sourceText,
+                contextAfter = target?.contextAfter.orEmpty(),
             ) { result ->
                 // The user may have closed the panel before the draft returned.
                 if (mode != Mode.WHITEBOARD) return@draft
@@ -2750,16 +2907,155 @@ class BuddyImeService : InputMethodService() {
         }
     }
 
+    /**
+     * The span of the user's text a writing tool transforms, and therefore the exact span
+     * [insertDraft] is allowed to delete. Sending one range and deleting another destroys text in
+     * somebody else's app, so these two always come from the same object.
+     *
+     * [hostSelection] means the host already has the span selected, so `commitText` replaces it
+     * natively and no delete is needed. Otherwise the span straddles the cursor: [beforeText] is
+     * behind it, [afterText] ahead of it. [contextBefore] / [contextAfter] are sent so the model
+     * keeps the register of the surrounding writing, and are never replaced.
+     */
+    private data class DraftTarget(
+        val beforeText: String,
+        val afterText: String,
+        val hostSelection: Boolean,
+        val contextBefore: String,
+        val contextAfter: String,
+        val inputSession: Long,
+    ) {
+        val chunk: String get() = beforeText + afterText
+    }
+
+    /** Raised when the user's own selection is larger than the model will accept, so the honest
+     *  answer is to ask for less rather than transform a prefix and delete the whole thing. */
+    private class SelectionTooLarge : Exception()
+
+    /**
+     * Resolve what this action works on, in priority order:
+     *  1. Reply -> null. Its source is the clipboard, not the field: there is nothing on screen to
+     *     replace, so it appends at the cursor as it always has.
+     *  2. An explicit host selection wins. The user has stated the blast radius; do not second-
+     *     guess it. Over [DRAFT_MAX_CHARS] we refuse rather than silently transform a prefix.
+     *  3. Nothing selected and the whole field fits -> the whole field.
+     *  4. Otherwise a boundary-snapped window around the cursor, with the rest sent as context.
+     */
+    private fun buildDraftTarget(action: BuddyAction): DraftTarget? {
+        if (action == BuddyAction.REPLY) return null
+        val ic = currentInputConnection ?: return null
+
+        val selected = ic.getSelectedText(0)?.toString().orEmpty()
+        if (selected.isNotEmpty()) {
+            if (selected.length > DRAFT_MAX_CHARS) throw SelectionTooLarge()
+            return DraftTarget(
+                beforeText = selected,
+                afterText = "",
+                hostSelection = true,
+                contextBefore = ic.getTextBeforeCursor(DRAFT_CONTEXT_BEFORE_MAX, 0)
+                    ?.toString().orEmpty(),
+                contextAfter = ic.getTextAfterCursor(DRAFT_CONTEXT_AFTER_MAX, 0)
+                    ?.toString().orEmpty(),
+                inputSession = inputSession,
+            )
+        }
+
+        val before = ic.getTextBeforeCursor(DRAFT_READ_CHARS, 0)?.toString().orEmpty()
+        val after = ic.getTextAfterCursor(DRAFT_READ_CHARS, 0)?.toString().orEmpty()
+        if (before.isEmpty() && after.isEmpty()) return null
+
+        // A read that came back at exactly the requested length may have been cut off by the host
+        // (getTextBeforeCursor is documented as best-effort), so its outer edge is not a real
+        // boundary and must not be used as the start of the span.
+        val beforeTruncated = before.length >= DRAFT_READ_CHARS
+        val afterTruncated = after.length >= DRAFT_READ_CHARS
+
+        if (!beforeTruncated && !afterTruncated &&
+            before.length + after.length <= DRAFT_AUTO_WINDOW_MAX
+        ) {
+            return DraftTarget(
+                beforeText = before,
+                afterText = after,
+                hostSelection = false,
+                contextBefore = "",
+                contextAfter = "",
+                inputSession = inputSession,
+            )
+        }
+
+        // Split the window budget across the cursor, then snap each edge outward to a real
+        // boundary so neither end lands mid-sentence or mid-word.
+        val halfBudget = DRAFT_AUTO_WINDOW_MAX / 2
+        val beforeBudget = minOf(before.length, maxOf(halfBudget, DRAFT_AUTO_WINDOW_MAX - after.length))
+        val afterBudget = minOf(after.length, DRAFT_AUTO_WINDOW_MAX - beforeBudget)
+        val beforeStart = snapWindowStart(before, before.length - beforeBudget, beforeTruncated)
+        val afterEnd = snapWindowEnd(after, afterBudget, afterTruncated)
+
+        return DraftTarget(
+            beforeText = before.substring(beforeStart),
+            afterText = after.substring(0, afterEnd),
+            hostSelection = false,
+            contextBefore = before.substring(0, beforeStart).takeLast(DRAFT_CONTEXT_BEFORE_MAX),
+            contextAfter = after.substring(afterEnd).take(DRAFT_CONTEXT_AFTER_MAX),
+            inputSession = inputSession,
+        )
+    }
+
+    /**
+     * Move [from] forward to the first real boundary in [text] -- a paragraph break, else the end
+     * of a sentence, else a word gap -- so the span starts where a human would start reading.
+     * When the read was [truncated] the text's own index 0 is mid-sentence in writing we cannot
+     * see, so it is never accepted as a boundary and we fall forward to the first word gap.
+     */
+    private fun snapWindowStart(text: String, from: Int, truncated: Boolean): Int {
+        if (from <= 0) return if (truncated) firstWordStart(text) else 0
+        val paragraph = text.indexOf('\n', from)
+        if (paragraph in from until text.length) return paragraph + 1
+        var i = from
+        while (i < text.length - 1) {
+            if (text[i] in ".!?" && text[i + 1].isWhitespace()) return skipSpaces(text, i + 1)
+            i++
+        }
+        return firstWordStart(text.substring(from)).let { from + it }
+    }
+
+    /** Move [to] forward to the next boundary so the span ends on a finished sentence or word. */
+    private fun snapWindowEnd(text: String, to: Int, truncated: Boolean): Int {
+        if (to >= text.length) return text.length
+        var i = to
+        while (i < text.length) {
+            if (text[i] == '\n') return i
+            if (text[i] in ".!?" && (i + 1 >= text.length || text[i + 1].isWhitespace())) return i + 1
+            i++
+        }
+        // No sentence end ahead: stop on the last word gap rather than mid-word, unless the read
+        // ran to the host's limit, in which case the tail is not a real end of text.
+        if (!truncated) return text.length
+        val gap = text.lastIndexOf(' ', to)
+        return if (gap > 0) gap else to
+    }
+
+    private fun firstWordStart(text: String): Int {
+        val gap = text.indexOfFirst { it.isWhitespace() }
+        return if (gap < 0) 0 else skipSpaces(text, gap)
+    }
+
+    private fun skipSpaces(text: String, from: Int): Int {
+        var i = from
+        while (i < text.length && text[i].isWhitespace()) i++
+        return i
+    }
+
     /** The text the action operates on. Reply answers a copied message (it lives in another
      *  app's chat bubble, which an IME cannot read), so it reads the clipboard; every other
-     *  action works on what the user has typed. 2000 chars matches the backend CONTEXT_MAX_CHARS. */
-    private fun sourceTextFor(action: BuddyAction): String = when (action) {
+     *  action works on the resolved span. */
+    private fun sourceTextFor(action: BuddyAction, target: DraftTarget?): String = when (action) {
         // Reply works off the copied message. Skip it when the clipboard looks like a secret (an
         // OTP or a generated password/token), so a credential the user copied for some other app is
         // never uploaded as draft context. An empty result just prompts them to copy a message.
         BuddyAction.REPLY -> clipboardText().let { if (looksLikeSecret(it)) "" else it }
-        else -> currentInputConnection?.getTextBeforeCursor(2000, 0)?.toString().orEmpty()
-    }.trim().take(2000)
+        else -> target?.chunk.orEmpty()
+    }.trim().take(DRAFT_MAX_CHARS)
 
     /** A best-effort guard so a copied credential is never sent as REPLY context. A real message to
      *  reply to is prose (it has whitespace); a bare no-whitespace token that is a short all-digit
@@ -2779,12 +3075,77 @@ class BuddyImeService : InputMethodService() {
         return clip.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
     }
 
+    /**
+     * Put the draft into the field, REPLACING the span it was built from.
+     *
+     * The span is re-read and compared before a single character is deleted. If the field moved
+     * under us -- the user typed while the request was in flight, the host edited it, focus
+     * changed -- nothing is deleted and nothing is inserted, because appending on a mismatch is
+     * exactly the duplicate-text bug this path exists to fix. A null target (Reply) appends by
+     * design: its source is the clipboard, so there is nothing on screen to replace.
+     */
     private fun insertDraft(text: String) {
-        // The letters are already committed; drop the buffer, then append the draft.
         finishComposing()
-        currentInputConnection?.commitText(text, 1)
-        markResync() // variable-length insert: re-seed the cursor from the next update
+        val ic = currentInputConnection ?: return
+        val target = draftTarget
+        if (target != null && target.inputSession != inputSession) {
+            renderMessage("That was a different field, so nothing was replaced.", retry = false)
+            return
+        }
+        // One batch, so the host sees a single edit instead of a delete then an insert.
+        ic.beginBatchEdit()
+        try {
+            when {
+                target == null -> ic.commitText(text, 1)
+                target.hostSelection -> {
+                    if (ic.getSelectedText(0)?.toString() != target.beforeText) {
+                        return renderReplaceAborted()
+                    }
+                    ic.commitText(text, 1) // a live selection is replaced by the commit itself
+                }
+                else -> {
+                    // Never ask for zero characters: a host is free to answer null to that, which
+                    // would read as "the text changed" for the commonest case of all, a cursor
+                    // sitting at the very end of what the user typed.
+                    if (!spanStillIntact(ic, target)) return renderReplaceAborted()
+                    // Code points, not UTF-16 units: deleteSurroundingText would split a surrogate
+                    // pair sitting on either edge of the span and leave a replacement glyph.
+                    ic.deleteSurroundingTextInCodePoints(
+                        target.beforeText.codePointCount(0, target.beforeText.length),
+                        target.afterText.codePointCount(0, target.afterText.length),
+                    )
+                    ic.commitText(text, 1)
+                }
+            }
+        } finally {
+            ic.endBatchEdit()
+        }
+        draftTarget = null
+        markResync() // variable-length edit: re-seed the cursor from the next update
         backToKeys()
+    }
+
+    /** Is the field still holding exactly the span the draft was built from? An empty side is
+     *  skipped rather than queried, because a zero-length read is allowed to come back null and
+     *  would otherwise look like an edit. */
+    private fun spanStillIntact(ic: InputConnection, target: DraftTarget): Boolean {
+        if (target.beforeText.isNotEmpty() &&
+            ic.getTextBeforeCursor(target.beforeText.length, 0)?.toString() != target.beforeText
+        ) {
+            return false
+        }
+        if (target.afterText.isNotEmpty() &&
+            ic.getTextAfterCursor(target.afterText.length, 0)?.toString() != target.afterText
+        ) {
+            return false
+        }
+        return true
+    }
+
+    /** The field changed between sending the draft and applying it. Touch nothing and say so:
+     *  a silent append would put the old text and the new text in the field together. */
+    private fun renderReplaceAborted() {
+        renderMessage("Your text changed, so nothing was replaced.", retry = true)
     }
 
     // --- Whiteboard canvas states ------------------------------------------------
@@ -2793,11 +3154,13 @@ class BuddyImeService : InputMethodService() {
         cancelAnimators()
         setUseThisVisible(false)
         wbCanvas.removeAllViews()
-        val editorText = currentInputConnection
-            ?.getTextBeforeCursor(2000, 0)
-            ?.toString()
-            ?.trim()
-            .orEmpty()
+        // Preview the span a tool would actually act on, so the card shows the blast radius
+        // rather than an arbitrary 2000 characters behind the cursor.
+        val editorText = try {
+            buildDraftTarget(BuddyAction.GRAMMAR)?.chunk?.trim().orEmpty()
+        } catch (e: SelectionTooLarge) {
+            ""
+        }
         wbCanvas.addView(
             makePreviewText(
                 editorText.ifEmpty { "Type something, then choose a writing tool." },
@@ -2888,19 +3251,24 @@ class BuddyImeService : InputMethodService() {
 
         // Category tabs (Recent + each category's representative glyph), horizontally scrollable.
         emojiTabs = LinearLayout(keyboardUiContext).apply { orientation = LinearLayout.HORIZONTAL }
-        emojiContainer.addView(HorizontalScrollView(keyboardUiContext).apply {
+        emojiTabsScroll = HorizontalScrollView(keyboardUiContext).apply {
             isHorizontalScrollBarEnabled = false
             layoutParams = rowParams(bottom = dp(2))
             addView(emojiTabs)
-        })
+        }
+        emojiContainer.addView(emojiTabsScroll)
 
-        // The scrollable emoji grid, filling the available height.
+        // The scrollable emoji grid, filling the available height. Vertical drags scroll it as
+        // any ScrollView would; a clearly horizontal drag pages between categories.
         emojiGrid = LinearLayout(keyboardUiContext).apply { orientation = LinearLayout.VERTICAL }
-        emojiContainer.addView(ScrollView(keyboardUiContext).apply {
+        emojiGridScroll = HorizontalSwipeScrollView(keyboardUiContext).apply {
             isVerticalScrollBarEnabled = false
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            onSwipeLeft = { stepEmojiCategory(1) }
+            onSwipeRight = { stepEmojiCategory(-1) }
             addView(emojiGrid)
-        })
+        }
+        emojiContainer.addView(emojiGridScroll)
 
         // Bottom row: ABC (back to keys) on the left, backspace on the right.
         val bottom = LinearLayout(keyboardUiContext).apply {
@@ -2936,7 +3304,7 @@ class BuddyImeService : InputMethodService() {
     private fun showEmojiPanel() {
         // Pin to the typing keyboard's height so the panel never balloons to ~3/4 of the screen,
         // and flip the height-driving typing layer's visibility SYNCHRONOUSLY (see showWhiteboardPanel).
-        pinPanelHeightToTyping(emojiContainer)
+        pinPanelHeight(emojiContainer)
         typingStack.animate().cancel()
         typingStack.visibility = View.INVISIBLE
         typingStack.alpha = 1f
@@ -2999,6 +3367,29 @@ class BuddyImeService : InputMethodService() {
         selectedEmojiCategory = index
         renderEmojiTabs()
         renderEmojiGrid()
+        // A new category always starts at the top; keeping the old offset lands a swipe
+        // somewhere in the middle of a grid the user has not seen yet.
+        emojiGridScroll.scrollTo(0, 0)
+        revealSelectedEmojiTab()
+    }
+
+    /** Step one category along, clamped at both ends. Recents is index -1; wrapping from the
+     *  last category back to it reads as a glitch, so a swipe past the end simply stops. */
+    private fun stepEmojiCategory(delta: Int) {
+        val next = (selectedEmojiCategory + delta).coerceIn(-1, EmojiData.categories.lastIndex)
+        if (next != selectedEmojiCategory) selectEmojiCategory(next)
+    }
+
+    /** Scroll the tab strip so the active tab is on screen, otherwise swiping a few categories
+     *  along leaves the highlight off the left edge. */
+    private fun revealSelectedEmojiTab() {
+        val tab = emojiTabs.getChildAt(selectedEmojiCategory + 1) ?: return
+        emojiTabsScroll.post {
+            emojiTabsScroll.smoothScrollTo(
+                (tab.left - (emojiTabsScroll.width - tab.width) / 2).coerceAtLeast(0),
+                0,
+            )
+        }
     }
 
     /** Fill the grid with the selected category's emojis (or recents), chunked into fixed columns. */
@@ -3025,7 +3416,11 @@ class BuddyImeService : InputMethodService() {
             // Pad the last row so its cells stay the same width as the full rows above.
             repeat(cols - rowEmojis.size) {
                 row.addView(View(keyboardUiContext).apply {
-                    layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f)
+                    // Same margins as a real cell, or the last row's columns drift out of
+                    // alignment with the full rows above it.
+                    layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f).apply {
+                        setMargins(dp(2), dp(2), dp(2), dp(2))
+                    }
                 })
             }
             emojiGrid.addView(row)
@@ -3044,7 +3439,9 @@ class BuddyImeService : InputMethodService() {
             playKeySound()
             onEmojiTapped(emoji)
         }
-        layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
+        layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+            setMargins(dp(2), dp(2), dp(2), dp(2))
+        }
     }
 
     private fun onEmojiTapped(emoji: String) {
@@ -3291,8 +3688,10 @@ class BuddyImeService : InputMethodService() {
     private fun keyHeightPx(scale: Float): Int {
         val dm = keyboardUiContext.resources.displayMetrics
         val screenHeightDp = dm.heightPixels / dm.density
-        val baseKeyDp = (screenHeightDp * 0.058f).coerceIn(50f, 60f)
-        val keyDp = (baseKeyDp * scale).coerceAtLeast(44f)
+        // 0.061 rather than 0.058, with the clamps moved by the same ~5%: measured against
+        // Gboard the keys sat roughly a centimetre short, which costs typing accuracy.
+        val baseKeyDp = (screenHeightDp * 0.061f).coerceIn(52.5f, 63f)
+        val keyDp = (baseKeyDp * scale).coerceAtLeast(46f)
         return (keyDp * dm.density).toInt()
     }
 }
