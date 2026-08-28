@@ -158,7 +158,9 @@ async def test_outbound_draft_briefs_drafter_with_whole_turn_not_last_fragment(
     monkeypatch.setattr(buddy, "run_draft_tool", _draft)
     monkeypatch.setattr(buddy, "start_tool_span", lambda **_kwargs: _Span())
     agent = _card_agent(
-        _draft_outbound=SimpleNamespace(current=SimpleNamespace(text="Hi Kai,")),
+        _draft_outbound=SimpleNamespace(
+            current=SimpleNamespace(text="Hi Kai,", skill_id="general"),
+        ),
         _screen_frames=object(),
         _finalized_transcript="Voice applications.",
         _finalized_turn_instruction=(
@@ -172,7 +174,7 @@ async def test_outbound_draft_briefs_drafter_with_whole_turn_not_last_fragment(
         await buddy.BuddyAgent.draft_outbound_message.__wrapped__(
             agent,
             SimpleNamespace(session=session),
-            {"operation": "new"},
+            {"operation": "new", "skill_id": "general"},
         )
 
     assert captured["operation"] == "new"

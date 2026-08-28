@@ -14,7 +14,8 @@ sentence boundaries so synthesis stays incremental.
 Design rules:
 - Strip emphasis/bold/headers/bullets/fences/links, KEEP the inner words.
 - Convert identifiers and hyphenated written forms to ordinary spoken words.
-- Expand common technical initialisms rather than asking TTS to spell them.
+- Render known initialisms the way people actually say them: letter-spaced
+  ("A P I"), never expanded into a phrase nobody speaks.
 - Render dates, times, money, percentages, decimals, and ordinals in words.
 - Replace unhelpful technical notation with its conversational referent.
 - The literal WORD "asterisk" is letters, never a `*` character, so it always
@@ -90,32 +91,54 @@ _SPOKEN_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bU\.K\.(?=\s|$)", re.IGNORECASE), "United Kingdom"),
 )
 
-_INITIALISM_SPOKEN_FORMS: dict[str, str] = {
-    "ADHD": "attention deficit hyperactivity disorder",
-    "AI": "artificial intelligence",
-    "API": "application programming interface",
-    "CPU": "processor",
-    "ETA": "estimated arrival time",
-    "FAQ": "frequently asked questions",
-    "GPS": "location service",
-    "GPU": "graphics processor",
-    "HTML": "web page code",
-    "HTTP": "web connection",
-    "HTTPS": "secure web connection",
-    "ID": "identifier",
-    "IDs": "identifiers",
-    "JSON": "structured data",
-    "LLM": "language model",
-    "PDF": "document",
-    "SQL": "database query language",
-    "STT": "speech recognition",
-    "TTS": "text to speech",
-    "UI": "user interface",
-    "URL": "web address",
-    "URLs": "web addresses",
+# Initialisms people say as letters. Rendered letter-spaced ("A P I") so every
+# engine reads them as letters; single capitals never match _ALL_CAPS_WORD, so
+# the later lowercasing pass cannot mangle them. Only tokens that are
+# unambiguous as an all-caps word belong here: "IT", "PM", "OK", "PIN" and
+# similar are ordinary English in caps somewhere and must stay out. Pronounced
+# acronyms ("JSON", "NASA") also stay out; the lowercasing pass already yields
+# a speakable word for those.
+_SPELLED_INITIALISMS: frozenset[str] = frozenset(
+    {
+        "ADHD",
+        "AI",
+        "API",
+        "CPU",
+        "ETA",
+        "FAQ",
+        "GPS",
+        "GPU",
+        "HTML",
+        "HTTP",
+        "HTTPS",
+        "ID",
+        "LLM",
+        "PDF",
+        "SQL",
+        "STT",
+        "TTS",
+        "UI",
+        "URL",
+        "UX",
+    }
+)
+
+# The rare initialisms whose expansion IS how people say them.
+_INITIALISM_WORD_FORMS: dict[str, str] = {
     "US": "United States",
-    "UX": "user experience",
 }
+
+_INITIALISM_PATTERN = re.compile(
+    r"\b("
+    + "|".join(
+        sorted(
+            (re.escape(token) for token in _SPELLED_INITIALISMS | set(_INITIALISM_WORD_FORMS)),
+            key=len,
+            reverse=True,
+        )
+    )
+    + r")(s?)\b"
+)
 
 _ONES = (
     "zero",
@@ -293,8 +316,14 @@ def _replace_percent(match: re.Match[str]) -> str:
 
 
 def _replace_initialism(match: re.Match[str]) -> str:
-    token = match.group(0)
-    return _INITIALISM_SPOKEN_FORMS.get(token, token)
+    token, plural_s = match.group(1), match.group(2)
+    word_form = _INITIALISM_WORD_FORMS.get(token)
+    if word_form is not None:
+        # "United States" absorbs a stray plural s; nothing sensible pluralizes it.
+        return word_form
+    spelled = " ".join(token)
+    # "A P I's" reads as "ay pee eyes"; a bare trailing s would glue to the last letter.
+    return f"{spelled}'s" if plural_s else spelled
 
 
 def _replace_web_address(match: re.Match[str]) -> str:
@@ -332,13 +361,9 @@ def _normalize_written_forms(text: str) -> str:
         lambda m: f"version {_integer_words(int(m.group(1)))}",
         s,
     )
-    if _INITIALISM_SPOKEN_FORMS:
-        alternatives = "|".join(
-            sorted((re.escape(key) for key in _INITIALISM_SPOKEN_FORMS), key=len, reverse=True)
-        )
-        s = re.sub(rf"\b(?:{alternatives})\b", _replace_initialism, s)
+    s = _INITIALISM_PATTERN.sub(_replace_initialism, s)
     # All-caps emphasis makes some engines spell ordinary words letter by
-    # letter. Known initialisms were expanded above; lowercase any remainder.
+    # letter. Known initialisms were letter-spaced above; lowercase any remainder.
     s = _ALL_CAPS_WORD.sub(lambda m: m.group(0).lower(), s)
     s = _WORD_HYPHEN.sub(" ", s)
     s = re.sub(r"\band\s*/\s*or\b", "or", s, flags=re.IGNORECASE)

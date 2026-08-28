@@ -35,7 +35,7 @@ def test_strips_real_markdown_list_and_bold_sample():
     assert "**" not in out
     # The actual words survive, including the de-bolded labels.
     assert "Content: Start a blog" in out
-    assert "Communities: Engage with online attention deficit hyperactivity disorder groups" in out
+    assert "Communities: Engage with online A D H D groups" in out
     assert "website is absolutely key" in out
 
 

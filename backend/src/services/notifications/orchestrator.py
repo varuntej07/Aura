@@ -569,7 +569,14 @@ async def _user_local(user_id: str, now: datetime) -> tuple[datetime, str]:
         tz_name = await asyncio.to_thread(_fetch_tz)
     except Exception as exc:
         raise TimezoneResolutionError("timezone profile lookup failed") from exc
-    local = localize(now, tz_name)
+    try:
+        local = localize(now, tz_name)
+    except TimezoneResolutionError as exc:
+        logger.warn(
+            "orchestrator: user timezone missing/invalid, using UTC (wrong local clock)",
+            {"user_id": user_id, "reason": str(exc)},
+        )
+        local = now.astimezone(UTC)
     return local, local.date().isoformat()
 
 
