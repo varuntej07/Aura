@@ -648,6 +648,11 @@ class BuddyImeService : InputMethodService() {
                     row,
                     indentHalfKey = isLettersPage && index == 1,
                     heightScale = heightScale,
+                    // The last row is the action row (?123 / space / Send), not a fourth row of
+                    // letters, so it gets a 9dp gap above it against the 6dp between letter rows.
+                    // Keyed off lastIndex rather than a row number so it lands the same way on the
+                    // letters and symbols pages and on the numeric / phone / PIN pads.
+                    extraTopGap = if (index == rows.lastIndex) dp(3) else 0,
                 ),
             )
         }
@@ -677,6 +682,7 @@ class BuddyImeService : InputMethodService() {
         row: List<Key>,
         indentHalfKey: Boolean,
         heightScale: Float,
+        extraTopGap: Int = 0,
     ): LinearLayout {
         val rowLayout = LinearLayout(keyboardUiContext).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -687,7 +693,7 @@ class BuddyImeService : InputMethodService() {
             )
         }
         if (indentHalfKey) rowLayout.addView(keySpacer(0.5f))
-        for (key in row) rowLayout.addView(buildKey(key, heightScale))
+        for (key in row) rowLayout.addView(buildKey(key, heightScale, extraTopGap))
         if (indentHalfKey) rowLayout.addView(keySpacer(0.5f))
         return rowLayout
     }
@@ -697,7 +703,7 @@ class BuddyImeService : InputMethodService() {
         layoutParams = LinearLayout.LayoutParams(0, dp(1), weight)
     }
 
-    private fun buildKey(key: Key, heightScale: Float): View {
+    private fun buildKey(key: Key, heightScale: Float, extraTopGap: Int = 0): View {
         val view = TextView(keyboardUiContext).apply {
             gravity = Gravity.CENTER
             setBackgroundResource(keyBackground(key))
@@ -731,10 +737,11 @@ class BuddyImeService : InputMethodService() {
             rowKeyHeight
         }
         val lp = LinearLayout.LayoutParams(0, viewHeight, keyWeight(key))
-        // One margin for every row. Scaling this down on the shrunken rows made the gap above
-        // the bottom row (two shrunken rows meeting) 4dp against 6dp everywhere else, which
-        // read as the bottom row being glued to zxcvbnm.
-        lp.setMargins(dp(1), dp(3), dp(1), dp(3))
+        // One margin for every row, so the letter rows sit an equal 6dp apart. Scaling it down
+        // on the shrunken rows made the gap above the bottom row (two shrunken rows meeting)
+        // 4dp against 6dp elsewhere, which read as the bottom row being glued to zxcvbnm.
+        // [extraTopGap] then sets ONE row apart deliberately: see rebuildKeys.
+        lp.setMargins(dp(1), dp(3) + extraTopGap, dp(1), dp(3))
         view.layoutParams = lp
 
         if (key is Key.Char && key.output.length == 1 && key.output[0].isLetter()) {
