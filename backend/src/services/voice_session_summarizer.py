@@ -110,6 +110,7 @@ async def _write_session_doc(
     health: str,
     closed_by_idle_timeout: bool,
     llm_usage: dict[str, dict],
+    llm_fallback_events: list[dict],
 ) -> None:
     def _write() -> None:
         ref = (
@@ -149,19 +150,23 @@ async def _write_session_doc(
             # The model that actually served the most output this session, from the
             # provider-reported usage totals. This field used to be hardcoded to
             # ANTHROPIC_VOICE_MODEL, which made every session read as fallback-served
-            # and hid real provider degradation. Empty usage (zero-turn session)
-            # keeps the configured fallback name so the field is never blank.
+            # and hid real provider degradation. Empty usage stays None: "nothing
+            # served" is information, and a plausible model name there is the same
+            # lie this replaced.
             "model_used": (
                 max(
                     llm_usage,
                     key=lambda m: int(llm_usage[m].get("output_tokens", 0) or 0),
                 )
                 if llm_usage
-                else settings.ANTHROPIC_VOICE_MODEL
+                else None
             ),
             # Per-model cumulative token totals (input/cached/output + provider),
             # the per-session ground truth for conversation cost accounting.
             "llm_usage": llm_usage,
+            # Timestamped FallbackAdapter availability transitions: when a leg
+            # failed and when it recovered, observed rather than inferred.
+            "llm_fallback_events": llm_fallback_events,
             # Legacy readers keep using summary. For schema v2 it is the friendly
             # recap, while future voice context reads MEMORY_CONTEXT below.
             "summary": memory.recap,
@@ -378,6 +383,7 @@ async def run_post_session_pipeline(
     audio_track_seen: bool = True,
     closed_by_idle_timeout: bool = False,
     llm_usage: dict[str, dict] | None = None,
+    llm_fallback_events: list[dict] | None = None,
 ) -> None:
     logger.info("VoiceSession: post-session pipeline started", {
         "user_id": user_id, "session_id": session_id,
@@ -472,6 +478,7 @@ async def run_post_session_pipeline(
             health=health,
             closed_by_idle_timeout=closed_by_idle_timeout,
             llm_usage=llm_usage or {},
+            llm_fallback_events=llm_fallback_events or [],
         ),
         _write_latest_summary(
             user_id, memory, session_id, len(turns), duration_ms,

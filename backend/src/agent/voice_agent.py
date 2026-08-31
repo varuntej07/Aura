@@ -820,6 +820,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         buddy.bind_direct_action_recorder(recorder.record_direct_action)
         recorder.attach()
+        recorder.watch_llm_fallback(llm_pipeline)
 
         session_start_iso = datetime.now(UTC).isoformat()
         session_start_mono = time.monotonic()
@@ -1136,6 +1137,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     audio_track_seen=liveness.audio_track_seen,
                     closed_by_idle_timeout=recorder.closed_by_idle_timeout,
                     llm_usage=recorder.llm_usage_totals,
+                    llm_fallback_events=recorder.llm_fallback_events,
                 )
             except Exception as exc:
                 logger.error(

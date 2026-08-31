@@ -157,6 +157,10 @@ class VoiceSessionRecorder:
         # running totals every turn); flushed to Langfuse once at session close
         # as one per-session generation per model.
         self._model_usage_totals: dict[str, dict] = {}
+        # Explicit FallbackAdapter availability transitions, timestamped. Usage
+        # totals say WHAT served; these say WHEN a leg failed and recovered,
+        # which is the difference between inferring degradation and observing it.
+        self.llm_fallback_events: list[dict[str, Any]] = []
 
     def attach(self) -> None:
         """Register every handler on the session. Call once, after construction."""
@@ -655,6 +659,44 @@ class VoiceSessionRecorder:
         if callable(close_context):
             close_context()
         self.done.set()
+
+    def watch_llm_fallback(self, adapter: Any) -> None:
+        """Record every LLM availability transition from the FallbackAdapter.
+
+        A leg going unavailable is a provider failure, not a preference — say it
+        at error the moment it happens, in a form that names the leg, so a
+        degraded session is visible while it is still live instead of being
+        reconstructed from usage totals afterwards.
+        """
+
+        def _on_availability_changed(ev: Any) -> None:
+            leg = getattr(ev, "llm", None)
+            available = bool(getattr(ev, "available", False))
+            event = {
+                "at": datetime.now(UTC).isoformat(),
+                "model": str(getattr(leg, "model", "") or type(leg).__name__),
+                "provider": str(getattr(leg, "provider", "") or ""),
+                "available": available,
+            }
+            self.llm_fallback_events.append(event)
+            log = logger.info if available else logger.error
+            log(
+                "voice_llm_availability_changed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    **event,
+                },
+            )
+
+        try:
+            adapter.on("llm_availability_changed", _on_availability_changed)
+        except Exception as exc:
+            # Observability must never take down the pipeline it observes.
+            logger.warn("VoiceSession: fallback watch unavailable", {
+                "session_id": self._session_id,
+                "error_type": type(exc).__name__,
+            })
 
     @property
     def llm_usage_totals(self) -> dict[str, dict]:

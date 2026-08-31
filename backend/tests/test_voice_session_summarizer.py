@@ -208,6 +208,7 @@ async def test_schema_v2_writer_reader_round_trip_uses_shared_field_contract():
                     "output_tokens": 20,
                 }
             },
+            llm_fallback_events=[],
         )
 
     payload = session_ref.set.call_args.args[0]

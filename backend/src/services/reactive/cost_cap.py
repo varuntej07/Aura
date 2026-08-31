@@ -7,23 +7,36 @@ it) and FAILS OPEN: a read error never blocks a genuine notification. It is a
 circuit-breaker against cost blow-ups, consistent with the project's "generous caps,
 no feature flags" stance.
 
-Counter doc: ``users/{uid}/cost/{YYYY-MM-DD}.llm_calls`` (atomic Increment).
+Counter doc: ``users/{uid}/cost/{YYYY-MM-DD}.llm_calls`` (atomic Increment),
+stamped with ``expires_at`` so native Firestore TTL reaps it.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from google.cloud import firestore as fs  # type: ignore
 
 from ...lib.logger import logger
 from ..firebase import admin_firestore
-from .fields import COST_SUBCOLLECTION, FIELD_LLM_CALLS, USERS_COLLECTION
+from .fields import (
+    COST_SUBCOLLECTION,
+    FIELD_EXPIRES_AT,
+    FIELD_LLM_CALLS,
+    USERS_COLLECTION,
+)
 
 # Generous: ~one LLM-bearing orchestrate pass every few minutes, all day, before the
 # breaker trips. A real user's reactive load is a tiny fraction of this.
 DAILY_LLM_CALL_CAP = 100
+
+# A counter doc is only meaningful for the UTC day it names, but it is kept a little
+# longer than that so native TTL can never reap the doc that is still today's live
+# counter (TTL fires within ~24h of expiry, not at it). Without this field the
+# counters accumulated forever: the sibling reactive subcollections all stamp an
+# expiry and this one did not.
+COST_DOC_TTL = timedelta(days=3)
 
 
 def _cost_ref(uid: str, day: str):
@@ -76,7 +89,11 @@ async def record_llm_call(uid: str, *, n: int = 1, now: datetime | None = None) 
 
     def _bump() -> None:
         _cost_ref(uid, _day(when)).set(
-            {FIELD_LLM_CALLS: fs.Increment(n), "updated_at": when},
+            {
+                FIELD_LLM_CALLS: fs.Increment(n),
+                "updated_at": when,
+                FIELD_EXPIRES_AT: when + COST_DOC_TTL,
+            },
             merge=True,
         )
 
