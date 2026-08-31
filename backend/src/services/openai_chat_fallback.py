@@ -336,31 +336,9 @@ async def stream_openai_chat_fallback(
             for ordered_call in ordered_calls:
                 results.append(await _run_tool(ordered_call))
 
-            # Clarification sentinel — same contract as the Anthropic/Gemini loops.
-            terminal = next(
-                (
-                    result
-                    for _, name, result, exc in results
-                    if len(results) == 1
-                    and name == "get_aura_product_info"
-                    and exc is None
-                    and isinstance(result, dict)
-                    and isinstance(result.get("__terminal_response__"), str)
-                ),
-                None,
-            )
-            if terminal is not None:
-                yield {"type": "text_delta", "delta": terminal["__terminal_response__"]}
-                yield {
-                    "type": "done",
-                    "metadata": {
-                        "tool_names": [*names_used, "get_aura_product_info"],
-                        "termination_reason": "terminal_tool_response",
-                        "knowledge_version": terminal.get("knowledge_version"),
-                        "knowledge_entry_ids": terminal.get("entry_ids", []),
-                    },
-                }
-                return
+            # Product-guide results have no terminal shortcut — same contract as
+            # the Anthropic/Gemini loops: the model judges relevance and phrases
+            # the reply.
 
             clarification = next(
                 (r for r in results if isinstance(r[2], dict) and r[2].get("__clarification__")),

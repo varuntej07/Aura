@@ -353,6 +353,10 @@ class BuddyAgent(agents.Agent):
             else ""
         )
         self._app_version = app_version.strip()[:24]
+        # Product-guide entries already delivered this session. A lookup that
+        # resolves to only already-delivered entries means the guide did not
+        # satisfy the user; the tool result says so instead of repeating it.
+        self._product_entries_delivered: set[str] = set()
         self._connector_states = dict(connector_states or {})
         self._enabled_feature_rollouts: frozenset[str] = frozenset()
         # Realtime-bridge mode: the desktop already opened an instant OpenAI Realtime
@@ -1617,8 +1621,17 @@ class BuddyAgent(agents.Agent):
     async def get_aura_product_info(
         self,
         raw_arguments: dict[str, object],
-    ) -> None:
-        """Speak one verified Aura product-guide answer and end the turn."""
+    ) -> dict[str, object]:
+        """Look up Aura's product guide and hand the result back for phrasing.
+
+        The retrieved entry is never spoken verbatim: retrieval ranks tokens, so
+        a question about third-party software can surface an Aura entry that does
+        not answer it. The model reads the result, judges relevance, and phrases
+        the reply — or says the guide has no answer and helps another way. That
+        session sess_57cb4c86 spoke `privacy.screen_context` five times to a user
+        asking about a third-party capture app is why this returns instead of
+        calling session.say().
+        """
         if not isinstance(raw_arguments, dict):
             raise lk_llm.ToolError("get_aura_product_info input must be an object.")
         arguments = dict(raw_arguments)
@@ -1642,11 +1655,9 @@ class BuddyAgent(agents.Agent):
         span = start_tool_span(
             tool_name="get_aura_product_info", source="voice", uid=self._user_id
         )
-        try:
-            self.session.say(result.answer)
-        except Exception as exc:
-            span.finish(success=False, error_type=type(exc).__name__)
-            raise lk_llm.ToolError("I couldn't open Aura's product guide right now.") from exc
+        entry_ids = set(result.entry_ids)
+        is_repeat = bool(entry_ids) and entry_ids <= self._product_entries_delivered
+        self._product_entries_delivered.update(entry_ids)
         span.finish()
         logger.info(
             "VoiceSession: product knowledge answered",
@@ -1655,11 +1666,49 @@ class BuddyAgent(agents.Agent):
                 "user_id": self._user_id,
                 "surface": self._launch_surface.value,
                 "matched": result.matched,
+                "repeat": is_repeat,
                 "entry_ids": list(result.entry_ids),
                 "knowledge_version": result.knowledge_version,
+                "confidence": result.confidence,
             },
         )
-        raise StopResponse()
+        if is_repeat:
+            return action_truth_envelope(
+                {
+                    "matched": result.matched,
+                    "entry_ids": list(result.entry_ids),
+                    "repeat": True,
+                },
+                ok=False,
+                then=(
+                    "You already gave the user this exact guide entry earlier in "
+                    "this session and it did not satisfy them. Do not repeat it. "
+                    "Answer from your own knowledge or use web search, and if the "
+                    "question is about software that is not Aura, say plainly that "
+                    "it is outside Aura's product guide and help directly."
+                ),
+            )
+        return action_truth_envelope(
+            {
+                "matched": result.matched,
+                "guide_answer": result.answer,
+                "entry_ids": list(result.entry_ids),
+                "knowledge_version": result.knowledge_version,
+                "confidence": result.confidence,
+            },
+            ok=result.matched,
+            then=(
+                "guide_answer is retrieved by keyword ranking, not by understanding "
+                "the question. First judge whether it actually answers what the user "
+                "asked; if it does, deliver it faithfully in your own voice. If it "
+                "does not — for example the user asked about software that is not "
+                "Aura — ignore it, say the product guide does not cover that, and "
+                "answer from your own knowledge or web search instead."
+                if result.matched
+                else "The product guide has no verified answer for this. Say so "
+                "briefly and help from your own knowledge or web search instead."
+            ),
+        )
 
     @function_tool
     async def speak_only(self, ctx: RunContext, text: str) -> None:

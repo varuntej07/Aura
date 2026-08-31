@@ -263,12 +263,15 @@ def _rank(
     *,
     ignored_query_tokens: frozenset[str] = frozenset(),
     preferred_kind: ProductInfoKind | None = None,
-) -> list[tuple[ProductEntry, float, float]]:
-    """Rank entries as ``(entry, base_score, ordered_score)``, best ordering first.
+) -> list[tuple[ProductEntry, float, float, float]]:
+    """Rank entries as ``(entry, base_score, ordered_score, named_field_coverage)``,
+    best ordering first.
 
     ``base_score`` is retrieval evidence alone and is what callers must test against
     ``_MIN_RETRIEVAL_SCORE``. ``ordered_score`` adds the ``preferred_kind`` prior and
-    is only for ordering.
+    is only for ordering. ``named_field_coverage`` is how much of the query an
+    editor-authored name actually covers; it feeds confidence so a hit carried by
+    generic tokens cannot report certainty.
     """
     if not entries:
         return []
@@ -284,7 +287,7 @@ def _rank(
         token for token in set(query_tokens) for document in documents if token in set(document)
     )
     query_ngrams = _character_ngrams(query)
-    ranked: list[tuple[ProductEntry, float]] = []
+    ranked: list[tuple[ProductEntry, float, float, float]] = []
     for entry, document in zip(entries, documents, strict=True):
         frequencies = Counter(document)
         bm25 = 0.0
@@ -335,7 +338,7 @@ def _rank(
         ordered_score = score + (
             _KIND_PRIOR_BONUS if preferred_kind and entry.kind == preferred_kind else 0.0
         )
-        ranked.append((entry, score, ordered_score))
+        ranked.append((entry, score, ordered_score, named_field_coverage))
     return sorted(ranked, key=lambda item: (-item[2], item[0].id))
 
 
@@ -452,13 +455,21 @@ def lookup_product_knowledge(
     selected = [
         item for item in answerable[:result_limit] if item[2] >= top_ordered * 0.90
     ]
-    answers = [getattr(entry.answers, channel).strip() for entry, _, _ in selected]
+    answers = [getattr(entry.answers, channel).strip() for entry, _, _, _ in selected]
     separator = " " if channel == "voice" else "\n\n"
-    confidence = min(1.0, answerable[0][1] / 6.0)
+    # Confidence must reflect whether an editor-authored name matched, not just
+    # accumulated generic-token score: "capture entire stream recording setup"
+    # used to report 1.0 for the screen-privacy entry. Retrieval score still
+    # scales the value, but without named-field evidence it can never claim
+    # certainty. This is advisory for the model's phrasing; the 3.0 floor above
+    # remains the only hard gate.
+    confidence = min(1.0, answerable[0][1] / 6.0) * (
+        0.25 + 0.75 * answerable[0][3]
+    )
     return ProductKnowledgeResult(
         answer=separator.join(dict.fromkeys(answers)),
         matched=True,
-        entry_ids=tuple(entry.id for entry, _, _ in selected),
+        entry_ids=tuple(entry.id for entry, _, _, _ in selected),
         knowledge_version=PRODUCT_KNOWLEDGE.knowledge_version,
         confidence=confidence,
     )

@@ -200,6 +200,14 @@ async def test_schema_v2_writer_reader_round_trip_uses_shared_field_contract():
             action_receipts=receipts,
             health="ok",
             closed_by_idle_timeout=False,
+            llm_usage={
+                "gpt-4.1-mini": {
+                    "provider": "openai",
+                    "input_tokens": 100,
+                    "cached_tokens": 50,
+                    "output_tokens": 20,
+                }
+            },
         )
 
     payload = session_ref.set.call_args.args[0]

@@ -127,6 +127,7 @@ from .handlers.history import (
     handle_get_session_detail,
     handle_list_sessions,
 )
+from .handlers.voice_profile import handle_get_voice_profile
 from .handlers.interview_companion import (
     handle_answer_stream as handle_interview_companion_answer_stream,
     handle_build_brief as handle_interview_companion_build_brief,
@@ -688,6 +689,11 @@ async def history_delete_conversation_endpoint(
     request: Request, conversation_id: str,
 ) -> JSONResponse:
     return await handle_delete_conversation(request, conversation_id)
+
+
+@app.get("/insights/voice-profile")
+async def insights_voice_profile_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_voice_profile(request)
 
 
 @app.get("/screen-saves")

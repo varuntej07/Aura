@@ -1523,13 +1523,27 @@ class ToolExecutor:
                 "confidence": result.confidence,
             },
         )
+        # guide_answer is retrieval output, not a verdict: ranking is keyword-based,
+        # so an off-topic question (e.g. about non-Aura software) can surface a real
+        # Aura entry that does not answer it. The model must judge relevance and
+        # phrase the reply; nothing downstream may deliver this text verbatim.
         return {
             "ok": True,
-            "__terminal_response__": result.answer,
+            "guide_answer": result.answer,
             "matched": result.matched,
             "entry_ids": list(result.entry_ids),
             "knowledge_version": result.knowledge_version,
             "confidence": result.confidence,
+            "then": (
+                "Judge whether guide_answer actually answers the user's question. "
+                "If it does, deliver it faithfully in your own words. If it does "
+                "not — for example the question is about software that is not "
+                "Aura — say the product guide does not cover that and answer from "
+                "your own knowledge or web search instead."
+                if result.matched
+                else "The product guide has no verified answer. Say so briefly and "
+                "help from your own knowledge or web search instead."
+            ),
         }
 
     async def _web_surf(self, inp: dict[str, Any]) -> ToolResult:

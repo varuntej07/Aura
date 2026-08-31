@@ -109,6 +109,7 @@ async def _write_session_doc(
     action_receipts: list[dict],
     health: str,
     closed_by_idle_timeout: bool,
+    llm_usage: dict[str, dict],
 ) -> None:
     def _write() -> None:
         ref = (
@@ -145,7 +146,22 @@ async def _write_session_doc(
             "num_of_assistant_turns": num_of_assistant_turns,
             "tool_calls_made": tool_calls,
             "num_of_tool_calls": len(tool_calls),
-            "model_used": settings.ANTHROPIC_VOICE_MODEL,
+            # The model that actually served the most output this session, from the
+            # provider-reported usage totals. This field used to be hardcoded to
+            # ANTHROPIC_VOICE_MODEL, which made every session read as fallback-served
+            # and hid real provider degradation. Empty usage (zero-turn session)
+            # keeps the configured fallback name so the field is never blank.
+            "model_used": (
+                max(
+                    llm_usage,
+                    key=lambda m: int(llm_usage[m].get("output_tokens", 0) or 0),
+                )
+                if llm_usage
+                else settings.ANTHROPIC_VOICE_MODEL
+            ),
+            # Per-model cumulative token totals (input/cached/output + provider),
+            # the per-session ground truth for conversation cost accounting.
+            "llm_usage": llm_usage,
             # Legacy readers keep using summary. For schema v2 it is the friendly
             # recap, while future voice context reads MEMORY_CONTEXT below.
             "summary": memory.recap,
@@ -361,6 +377,7 @@ async def run_post_session_pipeline(
     participant_linked: bool = True,
     audio_track_seen: bool = True,
     closed_by_idle_timeout: bool = False,
+    llm_usage: dict[str, dict] | None = None,
 ) -> None:
     logger.info("VoiceSession: post-session pipeline started", {
         "user_id": user_id, "session_id": session_id,
@@ -388,6 +405,25 @@ async def run_post_session_pipeline(
             "audio_track_seen": audio_track_seen,
             "closed_by_idle_timeout": closed_by_idle_timeout,
         })
+
+    # A session served by the Anthropic fallback leg means the OpenAI primary
+    # (both transport legs) failed or stalled for real turns. One line at error
+    # per session, with the totals, so provider degradation is a page-worthy
+    # signal instead of something reconstructed later from a user complaint.
+    if llm_usage and settings.OPENAI_API_KEY:
+        fallback_served = {
+            model: totals
+            for model, totals in llm_usage.items()
+            if settings.OPENAI_CHAT_MODEL not in model
+        }
+        if fallback_served:
+            logger.error("voice_session_served_by_fallback", {
+                "user_id": user_id,
+                "session_id": session_id,
+                "fallback_usage": fallback_served,
+                "primary_model": settings.OPENAI_CHAT_MODEL,
+                "turn_count": len(turns),
+            })
 
     # Step A: summary + count in parallel
     results_a = await asyncio.gather(
@@ -435,6 +471,7 @@ async def run_post_session_pipeline(
             action_receipts=action_receipts or [],
             health=health,
             closed_by_idle_timeout=closed_by_idle_timeout,
+            llm_usage=llm_usage or {},
         ),
         _write_latest_summary(
             user_id, memory, session_id, len(turns), duration_ms,

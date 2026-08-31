@@ -1135,6 +1135,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     participant_linked=liveness.participant_linked,
                     audio_track_seen=liveness.audio_track_seen,
                     closed_by_idle_timeout=recorder.closed_by_idle_timeout,
+                    llm_usage=recorder.llm_usage_totals,
                 )
             except Exception as exc:
                 logger.error(

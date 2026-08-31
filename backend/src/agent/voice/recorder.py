@@ -656,6 +656,16 @@ class VoiceSessionRecorder:
             close_context()
         self.done.set()
 
+    @property
+    def llm_usage_totals(self) -> dict[str, dict]:
+        """Final cumulative per-model token totals for this session.
+
+        Keys are model names as reported by the serving provider, so this is the
+        ground truth for which pipeline leg actually served — the session doc's
+        model_used used to be a hardcoded constant and lied during fallback.
+        """
+        return {model: dict(totals) for model, totals in self._model_usage_totals.items()}
+
     def _record_session_llm_usage(self) -> None:
         """Emit one Langfuse generation per model with the session's FINAL
         cumulative token totals (voice cost is tracked per session, not per
