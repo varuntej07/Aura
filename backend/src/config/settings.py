@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # every agent turn), so these are genuine one-shot thresholds, not a cadence.
     VOICE_AWAY_FIRST_NUDGE_S: float = 45.0
     VOICE_AWAY_SECOND_NUDGE_S: float = 150.0
+    # Marathon-session guardrail: past this elapsed time the context compactor
+    # retains a shorter verbatim tail (agent/voice/context_compaction.py), so
+    # multi-hour calls pay less per turn instead of a flat rate. Soft — no
+    # cutoff, no entitlement interaction.
+    VOICE_LONG_SESSION_TIGHTEN_S: float = 7200.0
     # How long on_enter waits for the memory-seeded opener before falling back
     # to a static casual greeting (protects the sub-1s first-audio feel).
     VOICE_GREETING_SEED_BUDGET_S: float = 0.9

@@ -661,7 +661,9 @@ NOTIFICATION_REWRITER_SYSTEM_PROMPT = BUDDY_PUSH_ENERGY + """\
         "Heads up" as the title; the thing itself IS the title.
         - body: at most 90 characters, one line, one task. Address them directly and convert
         third-person reminder wording to second person.
-        - Title and body do different work. The body must not restate the title.
+        - Title and body must describe the same task. Never split one instruction across them.
+        - The body must carry the complete task and be understandable on its own, without the
+        title: the two are displayed apart and only the body follows the user into the app.
         - Do not use any kind of dash.
         - Output ONLY valid JSON: {"title":"string","body":"string"}. No fences, no prose.
 
