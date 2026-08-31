@@ -178,6 +178,10 @@ class InterviewAnswerRequest(BaseModel):
     ]
     current_answer: str = Field(default="", max_length=4_000)
     screen_sight: InterviewScreenSightFrame | None = None
+    # Short captions of screens the candidate showed Aura earlier in this round.
+    # Carried so a later spoken turn ("so how would you fix that?") still knows
+    # what "that" was, without re-uploading the image or persisting it anywhere.
+    screen_notes: list[str] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def validate_request(self) -> InterviewAnswerRequest:
@@ -191,6 +195,19 @@ class InterviewAnswerRequest(BaseModel):
         return self
 
 
+class ReflectionExchange(BaseModel):
+    """One suggestion Aura put on screen, paired with the question it answered.
+
+    Sent so the coach can tell a point the candidate never had from one they
+    were handed and did not use. It is NOT the thing being graded.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=1, max_length=4_000)
+    answer: str = Field(min_length=1, max_length=4_000)
+
+
 class InterviewReflectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -199,6 +216,10 @@ class InterviewReflectionRequest(BaseModel):
     started_at_ms: int = Field(ge=0)
     ended_at_ms: int = Field(ge=0)
     turns: list[TranscriptTurn] = Field(min_length=1, max_length=120)
+    # Defaulted, so a desktop build that predates this field still validates.
+    # The reverse is not true: this model forbids extras, so a desktop that
+    # SENDS exchanges must not ship before this handler is deployed.
+    exchanges: list[ReflectionExchange] = Field(default_factory=list, max_length=60)
     brief: InterviewBriefSlice | None = None
 
     @model_validator(mode="after")
@@ -573,6 +594,30 @@ _SPOKEN_RULE = (
     "'Right, so', and never more than one."
 )
 
+# The refinement actions used to lose to the shape rule above, because the shape
+# rule lives in this cached system block and the action was one sentence in a
+# JSON field of the user message. Every pill then returned the same answer. This
+# line is byte-identical across the session, so it costs nothing in cache terms
+# and it hands the volatile action authority over the rule it sits beside.
+_ACTION_OVERRIDE_RULE = (
+    "If the task names an action other than drafting a fresh answer, that action "
+    "overrides the length and shape rules above. The new answer must differ "
+    "materially from current_answer. Never restate it and never return it "
+    "unchanged."
+)
+
+# Answers should acquire structure only where the question earns it, and never
+# announce that structure. Cached with the rest of the style, so free.
+_REASONING_FLOW_RULE = (
+    "When the question is really asking you to reason - a design, a tradeoff, a "
+    "'how would you' - let the answer move on its own from what the problem "
+    "actually is, to what you would do, to what that costs, to why it is still "
+    "the right call. Keep it flowing speech: never announce those as steps, never "
+    "label them, and never use the words problem, approach, tradeoff, or "
+    "rationale as headings. When the question does not call for that, just answer "
+    "it."
+)
+
 # Per-round register on top of _SPOKEN_RULE. These set length and shape of the
 # spoken answer; the register instruction, not a bullet character, is what
 # differs between rounds now.
@@ -595,9 +640,20 @@ _SHAPE_INSTRUCTION = {
     "script_structured": (
         "Six to eight sentences of connected speech. Precise wording matters most "
         "here, so this is the one round where slight formality is correct. Do not "
-        "use the brief lead-in; open directly."
+        "use the brief lead-in; open directly. Say what the system actually has to "
+        "do before saying how you would build it, name the one constraint that "
+        "drives the design, and close on what the design gives up to get it."
     ),
 }
+
+# Mirrors the decision line: one metadata line the parser strips before any of
+# it reaches the screen. Screen Sight is a manual action, so it never competes
+# with the decision line for the first line of the stream.
+_SCREEN_NOTE_INSTRUCTION = (
+    "Your FIRST line must be SCREEN| followed by a neutral description of what is "
+    "on the attached screen, at most 15 words. Put nothing else on that line. "
+    "Begin the spoken answer on the next line."
+)
 
 _DECISION_INSTRUCTION = (
     "Your FIRST line decides whether this turn needs an answer at all. Write exactly "
@@ -646,6 +702,19 @@ def _answer_system(grounded: bool) -> str:
     return _GROUNDED_SYSTEM if grounded else _UNVERIFIED_SYSTEM
 
 
+def _answer_temperature(action: AnswerAction) -> float:
+    """Re-rolls need variety; transformations need obedience.
+
+    `another_example` and `suggest` re-ask the SAME question with the same brief
+    and the same cached prefix, so at 0.25 they reproduce the previous answer
+    almost verbatim - which is exactly what "Another example gives me the same
+    thing" was. `shorter` and `more_technical` are transformations of a supplied
+    answer and stay low, because there the job is to follow the instruction
+    precisely rather than to wander.
+    """
+    return 0.7 if action in ("another_example", "suggest") else 0.25
+
+
 def _answer_cache_prefix(payload: InterviewAnswerRequest) -> str:
     """The stable-per-session half of the prompt: how to speak, the brief, and the
     resume. Sent as a cache_control'd system block so turns after the first read
@@ -659,7 +728,10 @@ def _answer_cache_prefix(payload: InterviewAnswerRequest) -> str:
     resume = payload.resume.strip()
     return json.dumps(
         {
-            "answer_style": f"{_SPOKEN_RULE} {_SHAPE_INSTRUCTION[payload.answer_shape]}",
+            "answer_style": (
+                f"{_SPOKEN_RULE} {_SHAPE_INSTRUCTION[payload.answer_shape]} "
+                f"{_REASONING_FLOW_RULE} {_ACTION_OVERRIDE_RULE}"
+            ),
             "brief": _brief_context(payload.brief),
             "candidate_resume": resume or None,
         },
@@ -674,15 +746,37 @@ def _answer_prompt(payload: InterviewAnswerRequest) -> str:
         {"source": turn.source, "text": turn.text}
         for turn in payload.recent_turns[-8:]
     ]
+    # Every refinement instruction has to work with NO reviewed brief, because
+    # that is the common case in a live round. The previous wording gated
+    # another_example on "a verified STAR story" and more_technical on "verified
+    # evidence"; with neither present the model correctly did nothing and the
+    # candidate saw the same answer come back.
     action_instruction = {
         "automatic": "Draft the answer now.",
         "suggest": "Draft an answer because the candidate explicitly requested a suggestion.",
-        "shorter": "Rewrite the current answer more briefly without adding facts.",
-        "another_example": "Answer with a different verified STAR story when one is available.",
-        "more_technical": "Make the answer more technically specific using only verified evidence.",
+        "shorter": (
+            "Cut the current answer to roughly half its length. Keep the single "
+            "strongest point and drop the rest. Add no new facts. It must be "
+            "visibly shorter than current_answer."
+        ),
+        "another_example": (
+            "Answer the same question from a different angle. Prefer a different "
+            "verified STAR story; if none is available, use a different part of the "
+            "resume, or a different framing of the same point. Never repeat the "
+            "angle current_answer already took."
+        ),
+        "more_technical": (
+            "Go one level deeper on mechanism: name the specific technique, data "
+            "structure, protocol, or failure mode. Claims about the candidate's own "
+            "history still need supplied evidence, but technical depth about the "
+            "domain itself is not a personal claim and needs none."
+        ),
         "screen_sight": (
-            "Use the one screenshot the candidate explicitly attached as visual context for "
-            "this answer only. Do not imply the screenshot proves candidate experience."
+            "A screenshot of the candidate's screen is attached. Treat what is on "
+            "that screen as the subject of this answer: if it shows a problem, a "
+            "diagram, code, or a document, answer that. Use the spoken turn only as "
+            "context for what is being asked about it. Do not imply the screenshot "
+            "proves candidate experience."
         ),
     }[payload.action]
     resume_note = (
@@ -697,6 +791,9 @@ def _answer_prompt(payload: InterviewAnswerRequest) -> str:
             "recent_turns": recent,
             "current_answer": payload.current_answer or None,
             "action": payload.action,
+            # Volatile half on purpose: putting these in _answer_cache_prefix
+            # would break the 1h cache every time a screen was shown.
+            "screen_context": payload.screen_notes or None,
             "task": (
                 f"{action_instruction} Recent candidate turns provide conversational "
                 f"continuity, not new factual evidence.{resume_note}"
@@ -704,6 +801,30 @@ def _answer_prompt(payload: InterviewAnswerRequest) -> str:
         },
         separators=(",", ":"),
     )
+
+
+def _read_screen_note(buffer: str, *, final: bool = False) -> tuple[str, str] | None:
+    """Split a leading ``SCREEN|<caption>`` line off an answer stream.
+
+    Returns ``(caption, rest)``, or None while more input could still settle it.
+    Fail-open like :func:`_read_decision`: a model that ignores the instruction
+    and simply starts answering keeps its whole answer, and the caption is just
+    absent. A missing caption must never eat the answer.
+    """
+    stripped = buffer.lstrip()
+    if not stripped.upper().startswith("SCREEN|"):
+        # Only wait while the prefix is still a possible match; a real answer
+        # must not be held hostage to a marker that is never coming.
+        if not final and len(stripped) < len("SCREEN|") and "SCREEN|".startswith(stripped.upper()):
+            return None
+        return ("", buffer)
+    rest = stripped[len("SCREEN|"):]
+    newline = rest.find("\n")
+    if newline < 0:
+        if not final:
+            return None
+        return (rest.strip()[:120], "")
+    return (rest[:newline].strip()[:120], rest[newline + 1:])
 
 
 def _read_decision(buffer: str, *, final: bool = False) -> tuple[str, str, str] | None:
@@ -766,17 +887,28 @@ async def _answer_deltas(
     # brief would run the unverified path, which tells the model its background
     # is unavailable and to leave [bracket] slots - the exact opposite of what
     # the supplied resume is for.
-    system = _answer_system(
+    # Split by VOLATILITY, not by topic. Everything frozen at Start - the voice
+    # rule, the grounding mode, the answer style, the brief, the resume - rides
+    # the cached block. Only the per-action first-line instructions vary, and
+    # they sit after the cache breakpoint where they invalidate nothing. Before
+    # this split every manual pill click re-prefilled the whole brief and resume
+    # at the write premium, because the decision instruction was in front of the
+    # breakpoint and changed with the action.
+    stable_system = _answer_system(
         bool(candidate_evidence or target_evidence or payload.resume.strip())
     )
     awaiting_decision = payload.action == "automatic"
+    volatile_system: list[str] = []
     if awaiting_decision:
-        system = f"{_DECISION_INSTRUCTION} {system}"
+        volatile_system.append(_DECISION_INSTRUCTION)
     else:
         # Manual actions are accepted by definition, so the model is never asked
         # for a decision line and those paths save its tokens entirely.
         decision["accepted"] = True
         decision["target"] = "candidate"
+    awaiting_screen_note = payload.action == "screen_sight"
+    if awaiting_screen_note:
+        volatile_system.append(_SCREEN_NOTE_INSTRUCTION)
 
     images = (
         [{"media_type": "image/jpeg", "data": payload.screen_sight.data}]
@@ -799,10 +931,10 @@ async def _answer_deltas(
     async for chunk in get_model_provider().stream_text(
         _answer_prompt(payload),
         model_id=model_id,
-        system=system,
-        cache_prefix=_answer_cache_prefix(payload),
+        system=" ".join(volatile_system) or None,
+        cache_prefix=f"{stable_system}\n\n{_answer_cache_prefix(payload)}",
         images=images,
-        temperature=0.25,
+        temperature=_answer_temperature(payload.action),
         max_output_tokens=650,
         caller="interview_companion_answer",
     ):
@@ -825,6 +957,11 @@ async def _answer_deltas(
             yield buffer
             buffer = ""
 
+    if awaiting_screen_note:
+        awaiting_screen_note = False
+        caption, buffer = _read_screen_note(buffer, final=True) or ("", buffer)
+        if caption:
+            decision["screen_note"] = caption
     if awaiting_decision:
         # final=True always resolves, but the signature cannot express that, and
         # the fallback is the same fail-open choice made everywhere else here.
@@ -985,6 +1122,19 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
                                 "gate_ms": answer_ttft_ms,
                             },
                         )
+                        # Emitted alongside the decision, not after the answer:
+                        # the caption is known the moment the marker line is
+                        # parsed, which is before the first body delta.
+                        screen_note = leg_decision.get("screen_note")
+                        if screen_note:
+                            yield _frame(
+                                "screen_note",
+                                {
+                                    "type": "screen_note",
+                                    **identity,
+                                    "note": screen_note,
+                                },
+                            )
                     answer_parts.append(delta)
                     yield _frame(
                         "answer_delta",
@@ -1095,12 +1245,26 @@ def _reflection_prompt(payload: InterviewReflectionRequest) -> str:
                 {"source": turn.source, "text": turn.text}
                 for turn in payload.turns
             ],
+            "suggestions_offered": [
+                {"question": item.question, "suggested": item.answer}
+                for item in payload.exchanges
+            ] or None,
             "task": (
-                "Reflect only on interview behavior visible in these turns. Summarize the "
-                "conversation, identify concrete strengths, identify specific improvements, "
-                "and suggest practical follow-up actions. Distinguish observed evidence from "
-                "uncertainty. Do not infer personality, health, protected traits, or facts not "
-                "present in the transcript and reviewed role context."
+                "Grade ONLY what the candidate actually said: the turns whose source is "
+                "candidate. suggestions_offered is what Aura put on the candidate's screen "
+                "during the round; it is context, never the thing being assessed, and a "
+                "strong suggestion the candidate never used is not a strength. "
+                "The candidate turns are live speech-to-text, so treat fragments, "
+                "restarts, and missing words as transcription artifacts unless the same "
+                "gap shows up across several turns; do not report transcription noise as a "
+                "communication weakness. Summarize the conversation, identify concrete "
+                "strengths, identify specific improvements, and suggest practical follow-up "
+                "actions. The standard for a strong technical answer here is that it moves "
+                "on its own from what the problem is, to what they would do, to what that "
+                "costs, to why it is still the right call, as flowing speech and never as "
+                "labelled sections. Distinguish observed evidence from uncertainty. Do not "
+                "infer personality, health, protected traits, or facts not present in the "
+                "transcript and reviewed role context."
             ),
         },
         separators=(",", ":"),
