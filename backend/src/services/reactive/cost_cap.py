@@ -31,12 +31,12 @@ from .fields import (
 # breaker trips. A real user's reactive load is a tiny fraction of this.
 DAILY_LLM_CALL_CAP = 100
 
-# A counter doc is only meaningful for the UTC day it names, but it is kept a little
-# longer than that so native TTL can never reap the doc that is still today's live
-# counter (TTL fires within ~24h of expiry, not at it). Without this field the
-# counters accumulated forever: the sibling reactive subcollections all stamp an
-# expiry and this one did not.
-COST_DOC_TTL = timedelta(days=3)
+# The cap only ever reads today's doc, but since 2026-08 the same daily doc also
+# carries the per-user LLM spend ledger (services/analytics/llm_cost_ledger.py):
+# tokens and estimated µUSD per day. Spend history is only useful if it survives,
+# so retention is 90 days rather than the original 3. Storage cost is one tiny
+# doc per active user per day; native TTL still reaps via expires_at.
+COST_DOC_TTL = timedelta(days=90)
 
 
 def _cost_ref(uid: str, day: str):

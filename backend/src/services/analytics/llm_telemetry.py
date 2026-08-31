@@ -124,10 +124,21 @@ _NOOP_RECORDING = _NoopRecording()
 class _Recording:
     """A live telemetry observation whose failures never reach the caller."""
 
-    def __init__(self, observation: Any | None, arize_span: Any | None = None) -> None:
+    def __init__(
+        self,
+        observation: Any | None,
+        arize_span: Any | None = None,
+        *,
+        uid: str = "",
+        model: str = "",
+    ) -> None:
         self._observation = observation
         self._arize_span = arize_span
         self._finished = False
+        # Carried so finish() can ledger per-user spend even when Langfuse is
+        # unconfigured and observation is None.
+        self._uid = uid
+        self._model = model
 
     def finish(
         self,
@@ -144,6 +155,16 @@ class _Recording:
         if self._finished:
             return
         self._finished = True
+        if self._uid and tokens:
+            # Per-user daily spend ledger — the one funnel every LLM call ends
+            # in. Import deferred to dodge a firebase import at module load in
+            # test contexts; the call itself is fire-and-forget and never raises.
+            try:
+                from .llm_cost_ledger import record_llm_usage
+
+                record_llm_usage(self._uid, self._model, tokens)
+            except Exception as exc:
+                logger.debug("llm_telemetry: cost ledger skipped", {"error": str(exc)})
         if self._observation is not None:
             try:
                 update_kwargs: dict[str, Any] = {
@@ -198,10 +219,11 @@ def start_llm_generation(
     """Open one generation for one provider API attempt. ``caller`` is the tier
     or path label the ops dashboard groups by (cheap / balanced / expert /
     grounded / reason_turn / chat / chat_gemini_fallback / chat_openai_fallback /
-    voice_session). Returns a no-op object when telemetry is unavailable."""
+    voice_session). Without Langfuse this still returns a live _Recording so
+    finish() can ledger per-user spend; only the observation half is absent."""
     client = _get_client()
     if client is None:
-        return _NOOP_RECORDING
+        return _Recording(None, uid=uid or "", model=model)
     try:
         metadata: dict[str, Any] = {
             "provider": provider,
@@ -217,10 +239,10 @@ def start_llm_generation(
             model=model,
             metadata=metadata,
         )
-        return _Recording(observation)
+        return _Recording(observation, uid=uid or "", model=model)
     except Exception as exc:
         logger.warn("llm_telemetry: start_llm_generation failed", {"error": str(exc)})
-        return _NOOP_RECORDING
+        return _Recording(None, uid=uid or "", model=model)
 
 
 def start_tool_span(

@@ -37,10 +37,14 @@ def blank_langfuse_keys(monkeypatch):
 
 class TestUnconfiguredNoop:
     def test_generation_is_noop_without_keys(self, blank_langfuse_keys):
+        # Since the cost ledger moved into finish(), an unconfigured Langfuse
+        # returns a live _Recording with no observation (so per-user spend still
+        # records) rather than the old _NoopRecording.
         recording = llm_telemetry.start_llm_generation(
             model="claude-sonnet-4-6", provider="anthropic", caller="expert"
         )
-        assert isinstance(recording, llm_telemetry._NoopRecording)
+        assert isinstance(recording, llm_telemetry._Recording)
+        assert recording._observation is None
         recording.finish(tokens={"input": 10, "output": 5})  # must not raise
 
     def test_tool_span_is_noop_without_keys(self, blank_langfuse_keys):
@@ -81,7 +85,10 @@ class TestPoisonedObservationNeverRaises:
         recording = llm_telemetry.start_llm_generation(
             model="gemini-2.5-flash", provider="gemini", caller="cheap"
         )
-        assert isinstance(recording, llm_telemetry._NoopRecording)
+        # A broken client degrades to an observation-less live _Recording so the
+        # cost ledger keeps working; tool spans carry no tokens and stay noop.
+        assert isinstance(recording, llm_telemetry._Recording)
+        assert recording._observation is None
         span = llm_telemetry.start_tool_span(tool_name="web_surf", source="text")
         assert isinstance(span, llm_telemetry._NoopRecording)
 
