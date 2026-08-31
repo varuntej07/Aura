@@ -79,9 +79,11 @@ from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
     build_mcp_server,
+    build_noise_cancellation,
     build_stt_pipeline,
     build_tts_pipeline,
     build_turn_detector,
+    cartesia_tts_legs,
     describe_llm_fallback_legs,
 )
 from .voice.recorder import VoiceSessionRecorder
@@ -95,6 +97,7 @@ from .voice.screen_context import (
     deliver_screen_context,
 )
 from .voice.screen_context_stream import SCREEN_CONTEXT_TOPIC, StructuredContextStore
+from .voice.spoken_language import SpokenLanguageFollower
 from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.telemetry import log_voice_failure, voice_session_logger
 from .voice.turn_metrics import VoiceTurnMetrics
@@ -804,6 +807,19 @@ async def entrypoint(ctx: JobContext) -> None:
         recorder.attach()
         recorder.watch_llm_fallback(llm_pipeline)
 
+        # Match Buddy's speaking language to the language the user is actually
+        # speaking. STT runs in Deepgram's `multi` code-switching mode, so the
+        # detected language arrives on the transcript event; without this the
+        # Cartesia legs keep the plugin's "en" default and a Spanish reply is
+        # pronounced as English. Registered as its own listener rather than folded
+        # into the recorder: the recorder records, and this retunes an output.
+        spoken_language = SpokenLanguageFollower(
+            cartesia_legs=cartesia_tts_legs(tts_pipeline),
+            session_id=session_id,
+            user_id=user_id,
+        )
+        session.on("user_input_transcribed", spoken_language.note_transcript)
+
         session_start_iso = datetime.now(UTC).isoformat()
         session_start_mono = time.monotonic()
 
@@ -1051,6 +1067,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     audio_input=room_io.AudioInputOptions(
                         sample_rate=16000,
                         frame_size_ms=20,
+                        # Inbound voice isolation. Passed as a SELECTOR so the model is
+                        # chosen per participant (agents skipped) rather than applied to
+                        # everyone; see build_noise_cancellation() for why that matters
+                        # both for quality and for the per-minute bill.
+                        noise_cancellation=build_noise_cancellation,
                     ),
                     audio_output=room_io.AudioOutputOptions(
                         sample_rate=24000,  # Cartesia output rate

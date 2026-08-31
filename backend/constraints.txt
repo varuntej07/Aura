@@ -91,6 +91,7 @@ livekit-agents==1.6.4
 livekit-api==1.1.0
 livekit-blingfire==1.1.0
 livekit-local-inference==0.2.6
+livekit-plugins-ai-coustics==0.3.1
 livekit-plugins-anthropic==1.6.4
 livekit-plugins-cartesia==1.6.4
 livekit-plugins-deepgram==1.6.4

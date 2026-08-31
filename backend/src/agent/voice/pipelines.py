@@ -9,12 +9,14 @@ pyproject extras in sync.
 
 from __future__ import annotations
 
+from livekit import rtc
 from livekit.agents import AgentSession, TurnHandlingOptions, inference, mcp
 from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
 from livekit.agents import vad as lk_vad
-from livekit.plugins import anthropic, cartesia, deepgram, openai
+from livekit.agents.voice import room_io
+from livekit.plugins import ai_coustics, anthropic, cartesia, deepgram, openai
 
 from ...config.settings import settings
 from ...shared.tools import openai_function_definition
@@ -26,11 +28,48 @@ VOICE_MAX_OUTPUT_TOKENS = 16_384
 
 
 def build_stt_pipeline() -> lk_stt.FallbackAdapter:
-    """Deepgram nova-3 with a nova-2 fallback."""
+    """Deepgram nova-3 with a nova-2 fallback, in multilingual code-switching mode.
+
+    `language="multi"` is NOT a one-time language guess. Deepgram detects language
+    per WORD and returns a tag on each one, so a speaker who switches mid-sentence
+    is transcribed correctly throughout ("No recuerdo mi bank password." comes back
+    with no/recuerdo/mi tagged es and bank/password tagged en). Nothing is stored
+    per user and nothing has to be configured, which is the point: a profile field
+    would be a static answer to a question that changes mid-call.
+
+    Without this the plugin default applies, which is language="en-US". That is
+    what shipped Spanish audio being hallucinated into English word-salad: a real
+    user's turns came back as "We have" and "Looks like", and the session summary
+    the LLM wrote for itself was "The user attempted to speak but their messages
+    were cut off multiple times."
+
+    Two limits worth knowing before touching this:
+
+    - `multi` on nova-3 covers TEN languages: English, Spanish, French, German,
+      Hindi, Russian, Portuguese, Japanese, Italian, Dutch. Nova-3 supports many
+      more (Telugu, Tamil, Bengali, Arabic, Persian, Chinese, ...) but ONLY as
+      explicit monolingual codes. There is no streaming auto-detect path to those
+      — Deepgram's own detect_language runs on the older `nova` model and excludes
+      them too. Reaching them needs a user-facing language setting, at which point
+      deepgram.STT.update_options(language=...) can switch this mid-session.
+    - The nova-2 leg is NOT at parity: nova-2's `multi` is Spanish + English only.
+      It is a provider-outage fallback, so a Hindi speaker degrades on that hop
+      rather than failing outright. Do not "fix" it by pinning a language there;
+      that would break every other language on the fallback path.
+
+    Deepgram recommends endpointing=100 for code-switching and this passes the
+    plugin default of 25ms. That is deliberate and separate from the LiveKit
+    endpointing knobs in build_agent_session(); revisit both together, with
+    measurements, not one in isolation.
+    """
     return lk_stt.FallbackAdapter(
         [
-            deepgram.STT(model="nova-3", api_key=settings.DEEPGRAM_API_KEY.strip()),
-            deepgram.STT(model="nova-2", api_key=settings.DEEPGRAM_API_KEY.strip()),
+            deepgram.STT(
+                model="nova-3", language="multi", api_key=settings.DEEPGRAM_API_KEY.strip()
+            ),
+            deepgram.STT(
+                model="nova-2", language="multi", api_key=settings.DEEPGRAM_API_KEY.strip()
+            ),
         ],
         attempt_timeout=10.0,
         max_retry_per_stt=0,
@@ -147,6 +186,22 @@ def build_tts_pipeline(
     )
 
 
+def cartesia_tts_legs(adapter: lk_tts.FallbackAdapter) -> list[cartesia.TTS]:
+    """The Cartesia legs of a TTS pipeline, for callers that need to retune them live.
+
+    Exists so voice/spoken_language.py can change the speaking language without
+    importing livekit.plugins itself: this module owns every plugin import the
+    worker makes at session-build time, and the deps-drift guard is written
+    against that arrangement.
+
+    Filters by type rather than by position. The third leg is a Deepgram Aura-2
+    model wrapped in SpeechMarkupStrippingTTS, and it is English-only by
+    construction, so language updates must not reach it. Indexing would silently
+    start retuning the wrong leg the day the fallback order changes.
+    """
+    return [leg for leg in adapter._tts_instances if isinstance(leg, cartesia.TTS)]
+
+
 class AuraMCPServerHTTP(mcp.MCPServerHTTP):
     """Preserve application-owned strict tool contracts in LiveKit's raw schema."""
 
@@ -192,6 +247,42 @@ def build_turn_detector() -> inference.TurnDetector:
     docs.livekit.io/agents/logic/turns/turn-detector
     """
     return inference.TurnDetector()
+
+
+def build_noise_cancellation(
+    params: room_io.NoiseCancellationParams,
+) -> rtc.NoiseCancellationOptions | rtc.FrameProcessor[rtc.AudioFrame] | None:
+    """Per-participant inbound voice isolation. Passed as the selector, not a fixed model.
+
+    Nothing cleaned the inbound audio before this. AudioInputOptions.noise_cancellation
+    was left at None, so Deepgram and the audio turn detector both read whatever the
+    room heard. LiveKit measures that path at 117.6% WER on a noisy sample transcribed
+    by nova-3 (our exact STT) against 7.1% with the model selected here, and the sample
+    shows the concrete failure: a television in the room contributed "Did you catch the
+    halftime show?" to a transcript in which nobody said it.
+
+    That matters more for turn-taking than for the words. The audio turn detector votes
+    on the user's audio, so noise between words reads as speech continuing and holds a
+    turn open, while a dip in the noise reads as a finished turn and cuts the speaker
+    off mid-sentence. Both failures were observed in production on the same sessions.
+
+    QUAIL_VF_S is voice ISOLATION, not background suppression: it suppresses competing
+    speech, which plain noise suppression leaves in the transcript. LiveKit's guidance
+    is that isolation suits a single speaker and suppression suits multi-speaker
+    diarization, and our surface is one person on a phone. It is documented as tuned
+    for near-field microphones and for improving STT accuracy and turn detection, which
+    is exactly the failure, and it is the lightweight variant of the two.
+
+    Why a selector instead of passing the model directly: a fixed model is applied to
+    EVERY participant. Guide Mode and the desktop bridge put a second agent in the room
+    whose audio is already synthetic TTS, and isolation is billed per minute
+    ($0.0012/min past the plan allotment). Denoising a TTS stream buys nothing and
+    costs real money, so agent participants are skipped. Returning None for a
+    participant means "no cancellation for this one", not "disabled".
+    """
+    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT:
+        return None
+    return ai_coustics.audio_enhancement(model=ai_coustics.EnhancerModel.QUAIL_VF_S)
 
 
 def build_agent_session(

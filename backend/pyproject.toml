@@ -33,6 +33,12 @@ dependencies = [
     "livekit-agents[deepgram,anthropic,cartesia,silero,google,openai]>=1.6.4",
     "livekit-api>=0.7",
 
+    # Inbound voice isolation (ai-coustics Voice Focus 2.1 S) for the voice worker,
+    # wired in voice/pipelines.py build_noise_cancellation(). NOT a livekit-agents
+    # extra — it ships as its own distribution, which is why the voice-worker deps
+    # guard has to look past the extras list to find it.
+    "livekit-plugins-ai-coustics>=0.3.1",
+
     # Anthropic Claude
     "anthropic>=0.52",
 

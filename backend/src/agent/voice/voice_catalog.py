@@ -13,6 +13,14 @@ Every entry also names a Deepgram Aura-2 model. That leg is only reached in a
 genuine Cartesia outage (see build_tts_pipeline), so the mapping is a coarse
 gender match, not a timbre match: the goal is that Buddy keeps talking and does
 not switch apparent gender mid-sentence.
+
+Every Aura-2 model here is English (`-en`) and stays that way ON PURPOSE. Buddy now
+speaks whatever language the user speaks: Cartesia sonic-3.5 covers 42 of them and
+voice/spoken_language.py retunes the live legs per utterance. Aura-2 has no
+counterpart in those languages, so on a Cartesia outage a Telugu speaker hears an
+English-sounding Buddy. That is the accepted trade, not an oversight. The
+alternative is dropping the leg for non-English sessions, which converts a rare
+degraded call into a rare dead one.
 """
 
 from __future__ import annotations
