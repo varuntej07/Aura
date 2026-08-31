@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from livekit.agents import llm as lk_llm
 
+from ...config.settings import settings
 from ...lib.logger import logger
 from ...prompts import VOICE_CONTEXT_COMPACTION_PROMPT
 from ...services.model_provider import get_model_provider
@@ -223,6 +225,33 @@ class VoiceContextCompactor:
         self._task: asyncio.Task[None] | None = None
         self._ready: CompactionResult | None = None
         self._failures = 0
+        # Session clock for the long-session guardrail: constructed once per
+        # voice session, so "compactor age" IS session age.
+        self._started_monotonic = time.monotonic()
+        self._long_session_logged = False
+
+    def _retain_turns(self) -> int:
+        """Verbatim tail size, tightened on marathon sessions.
+
+        Past VOICE_LONG_SESSION_TIGHTEN_S the summary carries more and the raw
+        tail shrinks — smaller prompts, lower latency and cost, no cutoff and
+        no behaviour change the user can perceive beyond a shorter verbatim
+        memory of the last few minutes.
+        """
+        elapsed = time.monotonic() - self._started_monotonic
+        if elapsed < settings.VOICE_LONG_SESSION_TIGHTEN_S:
+            return SOFT_RETAINED_RAW_TURNS
+        if not self._long_session_logged:
+            self._long_session_logged = True
+            logger.info(
+                "voice_long_session_tightened",
+                {
+                    "session_id": self._session_id,
+                    "elapsed_s": round(elapsed),
+                    "retain_turns": max(4, SOFT_RETAINED_RAW_TURNS // 2),
+                },
+            )
+        return max(4, SOFT_RETAINED_RAW_TURNS // 2)
 
     @property
     def running(self) -> bool:
@@ -231,7 +260,9 @@ class VoiceContextCompactor:
     def maybe_schedule(self, chat_ctx: lk_llm.ChatContext) -> bool:
         if self.running or self._ready is not None:
             return False
-        snapshot = build_compaction_snapshot(chat_ctx.copy())
+        snapshot = build_compaction_snapshot(
+            chat_ctx.copy(), retain_turns=self._retain_turns()
+        )
         if snapshot is None:
             return False
         self._task = asyncio.create_task(

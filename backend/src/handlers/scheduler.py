@@ -749,6 +749,12 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
                         body=body,
                         data={
                             "reminder_id": reminder_id,
+                            # The tap-through chat seed. Without this, the client
+                            # falls back to the rewritten push BODY alone, and the
+                            # rewriter may have moved half the instruction into the
+                            # title, which the tap path discards. The raw message is
+                            # the only fire-time text that is never LLM-generated.
+                            "opening_chat_message": f"Reminder: {raw_message}",
                             "created_via": str(data.get("created_via", "voice")),
                             "tier": alarm_sync.normalize_tier(data.get("tier")),
                             # For an alarm this push is a BACKSTOP, not the

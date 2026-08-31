@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..prompts import VOICE_ARCHIVE_SYNTHESIS_PROMPT, VOICE_SESSION_SUMMARY_PROMPT
+from ..services.analytics.llm_pricing import estimate_microusd
 from ..services.firebase import admin_firestore
 from ..services.model_provider import get_model_provider
 from . import voice_session_fields as vf
@@ -164,6 +165,23 @@ async def _write_session_doc(
             # Per-model cumulative token totals (input/cached/output + provider),
             # the per-session ground truth for conversation cost accounting.
             "llm_usage": llm_usage,
+            # Estimated LLM spend for this session in micro-USD, from the shared
+            # price table. An estimate for visibility, never billing truth.
+            "est_llm_microusd": sum(
+                estimate_microusd(
+                    model,
+                    {
+                        "input": max(
+                            0,
+                            int(totals.get("input_tokens", 0) or 0)
+                            - int(totals.get("cached_tokens", 0) or 0),
+                        ),
+                        "cache_read_input_tokens": int(totals.get("cached_tokens", 0) or 0),
+                        "output": int(totals.get("output_tokens", 0) or 0),
+                    },
+                )
+                for model, totals in llm_usage.items()
+            ),
             # Timestamped FallbackAdapter availability transitions: when a leg
             # failed and when it recovered, observed rather than inferred.
             "llm_fallback_events": llm_fallback_events,

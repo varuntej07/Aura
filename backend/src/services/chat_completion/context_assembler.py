@@ -179,8 +179,10 @@ async def assemble_desktop_context(
         for item in exchange
     ]
     unsummarized = [item for item in complete if int(item["seq"]) > watermark]
+    budget_override_applied = False
     if selected and unsummarized and int(unsummarized[0]["seq"]) < int(selected[0]["seq"]):
         selected = unsummarized
+        budget_override_applied = True
 
     oldest_available = int(complete[0]["seq"]) if complete else None
     gap = bool(
@@ -204,6 +206,30 @@ async def assemble_desktop_context(
     estimated_tokens = sum(
         _content_tokens(str(item.get("content") or "")) for item in history
     )
+    if budget_override_applied and estimated_tokens > 3 * RECENT_VERBATIM_TOKEN_BUDGET:
+        # The keep-verbatim override is correct (no missing middle), but a prompt
+        # 3x over budget means the background compactor has been stalling for many
+        # turns — the situation is self-inflicted growth, so heal it here instead
+        # of waiting for the post-turn task that has evidently not been landing.
+        # The compaction lease makes a concurrent attempt safe; deferred import
+        # because text_compaction imports select_recent_exchanges from this module.
+        logger.error(
+            "text_context: budget override runaway, forcing compaction",
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "estimated_recent_tokens": estimated_tokens,
+                "token_budget": RECENT_VERBATIM_TOKEN_BUDGET,
+                "summarized_through_seq": watermark,
+                "unsummarized_messages": len(unsummarized),
+            },
+        )
+        from . import text_compaction
+
+        asyncio.create_task(
+            text_compaction.maybe_compact(user_id, conversation_id),
+            name=f"chat-compact-runaway-{conversation_id[:8]}",
+        )
     logger.info(
         "text_context: assembled",
         {

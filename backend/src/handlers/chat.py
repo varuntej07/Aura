@@ -34,7 +34,13 @@ from ..lib.logger import logger
 from ..lib.query_logger import log_query
 from ..services import desktop_chat_store
 from ..services.analytics.llm_telemetry import bind_trace_context, reset_trace_context
-from ..services.chat_completion import context_assembler, handoff_store, text_compaction, turn_store
+from ..services.chat_completion import (
+    context_assembler,
+    handoff_store,
+    mobile_compaction,
+    text_compaction,
+    turn_store,
+)
 from ..services.chat_completion import prompt_builder as _prompt_builder
 from ..services.chat_completion.prompt_builder import build_turn_system_blocks, fetch_user_doc
 from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
@@ -674,6 +680,17 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         history = assembled_context.history
         conversation_summary = assembled_context.conversation_summary
         context_source = assembled_context.source
+    elif surface == "app" and session_id and len(history) >= settings.CHAT_HISTORY_WINDOW:
+        # Mobile with a full verbatim window: anything older fell off the
+        # 30-message slice, so the rolling summary (folded post-turn by
+        # mobile_compaction) is what remembers it. Same parallel-gather rule as
+        # desktop — one extra doc read, zero serial latency.
+        user_doc, conversation_summary = await asyncio.gather(
+            fetch_user_doc(user_id),
+            mobile_compaction.load_context_summary(user_id, session_id),
+        )
+        if conversation_summary:
+            context_source = "client_plus_summary"
     else:
         user_doc = await fetch_user_doc(user_id)
 
@@ -1023,6 +1040,15 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                             ),
                             name=f"chat-compact-{desktop_conversation_id[:8]}",
                         )
+            if surface == "app" and session_id:
+                # Mobile sibling of the desktop compaction task above: fold
+                # messages that aged past the client's verbatim window into the
+                # rolling summary. Same rules — fired, never awaited, no-op
+                # until enough history has aged out of the window.
+                asyncio.create_task(
+                    mobile_compaction.maybe_compact(user_id, session_id),
+                    name=f"chat-mobile-compact-{session_id[:8]}",
+                )
             if client_message_id and release_recovery:
                 await turn_store.mark_client_complete(user_id, client_message_id)
             if completion_task_name and release_recovery:

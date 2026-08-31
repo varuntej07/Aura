@@ -131,6 +131,25 @@ def render_unresolved_task_block(summary_json: str) -> str:
     )
 
 
+async def fold_summary(prior_summary: str, serialized_turns: str) -> str:
+    """Fold serialized turns into the prior summary via the cheap tier.
+
+    Shared by the desktop compactor and the mobile compactor
+    (``mobile_compaction.py``). Returns normalized summary JSON; callers must
+    reject an ``is_effectively_empty`` result before advancing any watermark.
+    """
+    prior = prior_summary or json.dumps(
+        empty_summary(), ensure_ascii=False, separators=(",", ":")
+    )
+    raw = await get_model_provider().cheap(
+        TEXT_CONTEXT_COMPACTION_PROMPT.format(
+            prior_summary=prior, turns=serialized_turns
+        ),
+        temperature=0.0,
+    )
+    return normalize_summary(raw)
+
+
 def serialize_messages(messages: list[dict[str, object]]) -> str:
     """Render stored message documents as the fold prompt's TURN block.
 
@@ -295,14 +314,9 @@ async def maybe_compact(user_id: str, conversation_id: str) -> bool:
             )
             return False
 
-        prior = state[desktop_chat_store.FIELD_CONTEXT_SUMMARY] or json.dumps(
-            empty_summary(), ensure_ascii=False, separators=(",", ":")
+        summary = await fold_summary(
+            state[desktop_chat_store.FIELD_CONTEXT_SUMMARY] or "", serialized
         )
-        raw = await get_model_provider().cheap(
-            TEXT_CONTEXT_COMPACTION_PROMPT.format(prior_summary=prior, turns=serialized),
-            temperature=0.0,
-        )
-        summary = normalize_summary(raw)
         if is_effectively_empty(summary):
             # normalize_summary is fail-soft, so a refusal, a truncated reply, or
             # any non-JSON output arrives here as a valid but empty summary.
