@@ -191,7 +191,7 @@ from .handlers.voice_preferences import (
 )
 from .handlers.web_auth import handle_web_auth_start, handle_web_auth_status
 from .lib.logger import logger
-from .services.meetings.observability import configure_sentry
+from .services.sentry import configure_sentry
 from .services.request_auth import decode_firebase_claims
 
 configure_sentry()
@@ -782,7 +782,8 @@ async def scheduler_tick_endpoint(
     _: None = Depends(_verify_scheduler_token),
 ) -> JSONResponse:
     result = await handle_scheduler_tick()
-    return _handler_response(result)
+    status_code = result.pop("status_code", 200)
+    return JSONResponse(content=result, status_code=status_code)
 
 
 # Engagement endpoints (internal — Cloud Tasks only)

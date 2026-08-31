@@ -136,7 +136,7 @@ omit = [
     "src/services/request_auth.py",
     "src/services/tool_executor.py",
     "src/shared/*",
-    "src/lib/query_logger.py",
+    "src/services/query_log.py",
 ]
 
 [tool.setuptools.packages.find]

@@ -10,41 +10,32 @@ All V2 writes use generation-match zero. An existing object is accepted only
 when its immutable identity, digest, and size match; mismatches are terminal
 split-brain evidence. Successful transcription and note publication never
 delete source audio. Explicit deletion targets the recorded object path and
-    generation, never a broad prefix.
+generation, never a broad prefix.
 
-Same module shape as services/gcs.py (lazy client singleton, every blocking
-call in ``asyncio.to_thread``). Audio and transcript bucket names come from
-``MEETINGS_AUDIO_BUCKET`` and ``MEETINGS_TRANSCRIPT_BUCKET``.
+Storage mechanics (client singleton, create-or-reconcile, generation-pinned
+reads and deletes, prefix cleanup) live in services/immutable_gcs.py; this
+module owns the V2 paths, metadata composition, result shape, and log lines.
+Audio and transcript bucket names come from ``MEETINGS_AUDIO_BUCKET`` and
+``MEETINGS_TRANSCRIPT_BUCKET``.
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
 from dataclasses import dataclass
 from typing import Any
 
+from ...config.settings import settings
 from ...lib.logger import logger
+from .. import immutable_gcs
 from .evidence import canonical_json_bytes, sha256_hex
-
-_client_singleton: Any = None
-
-
-def _client() -> Any:
-    global _client_singleton
-    if _client_singleton is None:
-        from google.cloud import storage  # type: ignore
-
-        _client_singleton = storage.Client()
-    return _client_singleton
 
 
 def bucket_name() -> str:
-    return os.getenv("MEETINGS_AUDIO_BUCKET", "juno-2ea45-meeting-audio")
+    return settings.MEETINGS_AUDIO_BUCKET
 
 
 def transcript_bucket_name() -> str:
-    return os.getenv("MEETINGS_TRANSCRIPT_BUCKET", bucket_name())
+    return settings.MEETINGS_TRANSCRIPT_BUCKET or bucket_name()
 
 
 @dataclass(frozen=True)
@@ -120,44 +111,25 @@ async def create_v2_segment(
         "schema_version": "2",
     }
 
-    def _snapshot(blob: Any, *, reconciled: bool) -> ImmutableObject:
-        actual = blob.metadata or {}
-        if int(blob.size or -1) != len(data) or any(
-            str(actual.get(key, "")) != value for key, value in required.items()
-        ):
-            raise ImmutableObjectConflict(path)
-        return ImmutableObject(
-            path=path,
-            generation=str(blob.generation),
-            size=int(blob.size),
-            sha256=content_sha256,
-            crc32c=getattr(blob, "crc32c", None),
-            etag=getattr(blob, "etag", None),
-            content_type=str(getattr(blob, "content_type", None) or "audio/flac"),
-            reconciled=reconciled,
-        )
-
-    def _create() -> ImmutableObject:
-        from google.api_core.exceptions import PreconditionFailed  # type: ignore
-
-        blob = _client().bucket(bucket_name()).blob(path)
-        blob.metadata = required
-        try:
-            blob.upload_from_string(
-                data,
-                content_type="audio/flac",
-                if_generation_match=0,
-                checksum="auto",
-            )
-            blob.reload()
-            return _snapshot(blob, reconciled=False)
-        except PreconditionFailed:
-            existing = _client().bucket(bucket_name()).get_blob(path)
-            if existing is None:
-                raise
-            return _snapshot(existing, reconciled=True)
-
-    result = await asyncio.to_thread(_create)
+    blob, reconciled = await immutable_gcs.create_or_reconcile(
+        bucket_name=bucket_name(),
+        path=path,
+        data=data,
+        content_type="audio/flac",
+        required_metadata=required,
+        verify_content_type=False,
+        make_conflict=lambda: ImmutableObjectConflict(path),
+    )
+    result = ImmutableObject(
+        path=path,
+        generation=str(blob.generation),
+        size=int(blob.size),
+        sha256=content_sha256,
+        crc32c=getattr(blob, "crc32c", None),
+        etag=getattr(blob, "etag", None),
+        content_type=str(getattr(blob, "content_type", None) or "audio/flac"),
+        reconciled=reconciled,
+    )
     logger.info(
         "meetings.gcs: immutable segment accepted",
         {
@@ -219,45 +191,25 @@ async def create_artifact(
         "byte_length": str(len(data)),
     }
 
-    def _snapshot(blob: Any, *, reconciled: bool) -> ImmutableObject:
-        actual = blob.metadata or {}
-        if int(blob.size or -1) != len(data) or any(
-            str(actual.get(key, "")) != value for key, value in required.items()
-        ):
-            raise ImmutableObjectConflict(path)
-        return ImmutableObject(
-            path=path,
-            generation=str(blob.generation),
-            size=int(blob.size),
-            sha256=digest,
-            crc32c=getattr(blob, "crc32c", None),
-            etag=getattr(blob, "etag", None),
-            content_type=content_type,
-            reconciled=reconciled,
-        )
-
-    def _create() -> ImmutableObject:
-        from google.api_core.exceptions import PreconditionFailed  # type: ignore
-
-        bucket = _client().bucket(transcript_bucket_name())
-        blob = bucket.blob(path)
-        blob.metadata = required
-        try:
-            blob.upload_from_string(
-                data,
-                content_type=content_type,
-                if_generation_match=0,
-                checksum="auto",
-            )
-            blob.reload()
-            return _snapshot(blob, reconciled=False)
-        except PreconditionFailed:
-            existing = bucket.get_blob(path)
-            if existing is None:
-                raise
-            return _snapshot(existing, reconciled=True)
-
-    return await asyncio.to_thread(_create)
+    blob, reconciled = await immutable_gcs.create_or_reconcile(
+        bucket_name=transcript_bucket_name(),
+        path=path,
+        data=data,
+        content_type=content_type,
+        required_metadata=required,
+        verify_content_type=False,
+        make_conflict=lambda: ImmutableObjectConflict(path),
+    )
+    return ImmutableObject(
+        path=path,
+        generation=str(blob.generation),
+        size=int(blob.size),
+        sha256=digest,
+        crc32c=getattr(blob, "crc32c", None),
+        etag=getattr(blob, "etag", None),
+        content_type=content_type,
+        reconciled=reconciled,
+    )
 
 
 async def delete_exact_object(
@@ -268,23 +220,12 @@ async def delete_exact_object(
 ) -> dict[str, Any]:
     """Delete exactly one recorded generation and return a durable receipt payload."""
     bucket = transcript_bucket_name() if transcript else bucket_name()
-
-    def _delete() -> dict[str, Any]:
-        from google.api_core.exceptions import NotFound  # type: ignore
-
-        blob = _client().bucket(bucket).blob(path, generation=int(generation))
-        try:
-            blob.delete(if_generation_match=int(generation))
-            outcome = "deleted"
-        except NotFound:
-            outcome = "already_absent"
-        return {
-            "object": path,
-            "generation": str(generation),
-            "outcome": outcome,
-        }
-
-    return await asyncio.to_thread(_delete)
+    deleted = await immutable_gcs.delete_exact(bucket, path, generation)
+    return {
+        "object": path,
+        "generation": str(generation),
+        "outcome": "deleted" if deleted else "already_absent",
+    }
 
 
 async def download_exact(
@@ -294,12 +235,7 @@ async def download_exact(
     transcript: bool = False,
 ) -> bytes:
     bucket = transcript_bucket_name() if transcript else bucket_name()
-
-    def _download() -> bytes:
-        blob = _client().bucket(bucket).blob(path, generation=int(generation))
-        return blob.download_as_bytes(if_generation_match=int(generation))
-
-    return await asyncio.to_thread(_download)
+    return await immutable_gcs.download_exact(bucket, path, generation)
 
 
 async def delete_user_audio(uid: str) -> int:
@@ -311,18 +247,7 @@ async def delete_user_audio(uid: str) -> int:
     remains. Partial deletion is safe because object deletes are idempotent and
     a retry lists only what remains.
     """
-    prefix = f"audio/v2/{uid}/"
-
-    def _delete() -> int:
-        bucket = _client().bucket(bucket_name())
-        blobs = list(_client().list_blobs(bucket_name(), prefix=prefix))
-        for blob in blobs:
-            bucket.blob(blob.name, generation=blob.generation).delete(
-                if_generation_match=int(blob.generation),
-            )
-        return len(blobs)
-
-    count = await asyncio.to_thread(_delete)
+    count = await immutable_gcs.delete_prefix(bucket_name(), f"audio/v2/{uid}/")
     logger.info(
         "meetings.gcs: user audio deleted",
         {
@@ -335,18 +260,7 @@ async def delete_user_audio(uid: str) -> int:
 
 async def delete_user_transcripts(uid: str) -> int:
     """Account deletion: enumerate, then delete each exact transcript generation."""
-    prefix = f"transcripts/v2/{uid}/"
-
-    def _delete() -> int:
-        bucket = _client().bucket(transcript_bucket_name())
-        blobs = list(_client().list_blobs(transcript_bucket_name(), prefix=prefix))
-        for blob in blobs:
-            bucket.blob(blob.name, generation=blob.generation).delete(
-                if_generation_match=int(blob.generation),
-            )
-        return len(blobs)
-
-    count = await asyncio.to_thread(_delete)
+    count = await immutable_gcs.delete_prefix(transcript_bucket_name(), f"transcripts/v2/{uid}/")
     logger.info(
         "meetings.gcs: user transcript artifacts deleted",
         {

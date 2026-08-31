@@ -1,5 +1,9 @@
 """
 Central query logger: Writes every user input to users/{uid}/queries/{id}.
+
+Side effect: each write also stamps engagement_guard/state.last_app_interaction_at,
+so the decision engine can tell the user is currently active and suppress
+proactive pings.
 """
 
 from __future__ import annotations
@@ -8,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from .logger import logger
+from ..lib.logger import logger
 
 QueryType = Literal["chat", "voice"]
 
@@ -22,7 +26,7 @@ async def log_query(
 ) -> None:
     """Idempotent write to users/{uid}/queries/{id}"""
     try:
-        from ..services.firebase import admin_firestore
+        from .firebase import admin_firestore
         db = admin_firestore()
         query_id = client_message_id or str(uuid.uuid4())
         doc: dict = {

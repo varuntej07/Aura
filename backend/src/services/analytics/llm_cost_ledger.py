@@ -17,9 +17,18 @@ from datetime import UTC, datetime
 from google.cloud import firestore as fs
 
 from ...lib.logger import logger
+from ..cost_doc import (
+    COST_DOC_TTL,
+    COST_SUBCOLLECTION,
+    FIELD_EST_LLM_MICROUSD,
+    FIELD_EXPIRES_AT,
+    FIELD_LLM_CACHED_INPUT_TOKENS,
+    FIELD_LLM_GENERATIONS,
+    FIELD_LLM_INPUT_TOKENS,
+    FIELD_LLM_OUTPUT_TOKENS,
+    USERS_COLLECTION,
+)
 from ..firebase import admin_firestore
-from ..reactive.cost_cap import COST_DOC_TTL
-from ..reactive.fields import COST_SUBCOLLECTION, FIELD_EXPIRES_AT, USERS_COLLECTION
 from .llm_pricing import estimate_microusd
 
 
@@ -33,13 +42,13 @@ def _write(uid: str, model: str, tokens: dict[str, int]) -> None:
         .document(when.strftime("%Y-%m-%d"))
         .set(
             {
-                "llm_generations": fs.Increment(1),
-                "llm_input_tokens": fs.Increment(int(tokens.get("input", 0) or 0)),
-                "llm_cached_input_tokens": fs.Increment(
+                FIELD_LLM_GENERATIONS: fs.Increment(1),
+                FIELD_LLM_INPUT_TOKENS: fs.Increment(int(tokens.get("input", 0) or 0)),
+                FIELD_LLM_CACHED_INPUT_TOKENS: fs.Increment(
                     int(tokens.get("cache_read_input_tokens", 0) or 0)
                 ),
-                "llm_output_tokens": fs.Increment(int(tokens.get("output", 0) or 0)),
-                "est_llm_microusd": fs.Increment(estimate_microusd(model, tokens)),
+                FIELD_LLM_OUTPUT_TOKENS: fs.Increment(int(tokens.get("output", 0) or 0)),
+                FIELD_EST_LLM_MICROUSD: fs.Increment(estimate_microusd(model, tokens)),
                 "updated_at": when,
                 FIELD_EXPIRES_AT: when + COST_DOC_TTL,
             },

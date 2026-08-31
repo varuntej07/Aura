@@ -239,17 +239,13 @@ def test_desktop_usage_reuses_daily_quota_counters(monkeypatch):
     async def entitlement(_uid):
         return {"tier": "free", "status": "expired"}
 
-    def usage(uid, doc_id):
+    async def usage(uid, doc_id, field):
         assert uid == "user-a"
-        return {
-            "date": datetime.now(UTC).strftime("%Y-%m-%d"),
-            ("seconds" if doc_id == "daily_voice" else "count"): 120
-            if doc_id == "daily_voice"
-            else 3,
-        }
+        assert field == ("seconds" if doc_id == "daily_voice" else "count")
+        return 120 if doc_id == "daily_voice" else 3
 
     monkeypatch.setattr(desktop_dashboard, "ensure_entitlement_doc", entitlement)
-    monkeypatch.setattr(desktop_dashboard, "_usage_doc", usage)
+    monkeypatch.setattr(desktop_dashboard, "read_usage_counter", usage)
     payload = _client().get("/desktop/usage").json()
     assert payload["voice_minutes_used"] == 2
     assert payload["voice_minutes_limit"] == 10

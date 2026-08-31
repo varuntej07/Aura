@@ -37,6 +37,35 @@ PAID_TIERS = ("companion", "pro", "starter")
 # land before treating the stored 'active' as expired.
 RENEWAL_GRACE = timedelta(days=3)
 
+# The single entitlement doc: users/{uid}/entitlement/current. Its backend
+# writers are the billing webhooks (services/billing.py), the first-contact
+# trial stamp below, and the trial notification markers
+# (services/entitlement_notifications.py).
+ENTITLEMENT_COLLECTION = "entitlement"
+ENTITLEMENT_DOC_ID = "current"
+
+FIELD_TIER = "tier"
+FIELD_TRIAL_END_DATE = "trial_end_date"
+FIELD_TRIAL_NOTIFIED_3D = "trial_notified_3d"
+FIELD_TRIAL_NOTIFIED_EXPIRED = "trial_notified_expired"
+
+
+def entitlement_doc_ref(uid: str, db=None):
+    """DocumentReference for users/{uid}/entitlement/current.
+
+    Pass db to reuse an existing client (e.g. alongside a transaction);
+    otherwise the shared admin client is used.
+    """
+    from ..services.firebase import admin_firestore
+
+    client = db if db is not None else admin_firestore()
+    return (
+        client.collection("users")
+        .document(uid)
+        .collection(ENTITLEMENT_COLLECTION)
+        .document(ENTITLEMENT_DOC_ID)
+    )
+
 
 class EntitlementUnavailableError(Exception):
     """Raised when the entitlement doc cannot be read (Firestore failure).
@@ -142,18 +171,10 @@ async def fetch_entitlement_doc(uid: str) -> dict:
 
     Raises EntitlementUnavailableError on a Firestore failure; never fails open.
     """
-    from ..services.firebase import admin_firestore
 
     def _fetch() -> dict:
         try:
-            db = admin_firestore()
-            snap = (
-                db.collection("users")
-                .document(uid)
-                .collection("entitlement")
-                .document("current")
-                .get()
-            )
+            snap = entitlement_doc_ref(uid).get()
             return snap.to_dict() or {}
         except Exception as exc:
             logger.warn("entitlement: Firestore read failed", {
@@ -174,8 +195,6 @@ def _stamp_trial_doc(uid: str) -> dict:
     """
     from google.api_core.exceptions import AlreadyExists
 
-    from ..services.firebase import admin_firestore
-
     now = datetime.now(UTC)
     doc = {
         "tier": "free",
@@ -186,13 +205,7 @@ def _stamp_trial_doc(uid: str) -> dict:
         "trial_notified_expired": False,
         "updated_at": now,
     }
-    ref = (
-        admin_firestore()
-        .collection("users")
-        .document(uid)
-        .collection("entitlement")
-        .document("current")
-    )
+    ref = entitlement_doc_ref(uid)
     try:
         ref.create(doc)
         logger.info("entitlement: trial stamped on first contact", {
@@ -244,15 +257,17 @@ async def get_user_effective_tier(uid: str) -> str:
     return resolve_effective_tier(data)
 
 
-async def check_and_increment_daily_chat_usage(uid: str) -> tuple[bool, int]:
-    """
-    Atomically checks then increments the UTC-day chat counter for a free-tier user.
+async def _check_and_increment_daily_usage(
+    uid: str, doc_id: str, limit: int, failure_log_message: str
+) -> tuple[bool, int]:
+    """Atomically checks then increments one users/{uid}/usage/{doc_id} counter
+    against its daily limit.
 
-    Returns (allowed, count_after_this_message).
+    Returns (allowed, count_after_this_call).
     The counter resets automatically each UTC calendar day.
 
-    Falls back to (True, 0) if Firestore is unavailable; 
-    infra failures should never block the user's chat. Log and allow.
+    Falls back to (True, 0) if Firestore is unavailable; infra failures should
+    never block the user's request. Log and allow.
     """
     from google.cloud import firestore as gcloud_firestore
 
@@ -266,7 +281,7 @@ async def check_and_increment_daily_chat_usage(uid: str) -> tuple[bool, int]:
             db.collection("users")
             .document(uid)
             .collection("usage")
-            .document("daily_chat")
+            .document(doc_id)
         )
         transaction = db.transaction()
 
@@ -280,7 +295,7 @@ async def check_and_increment_daily_chat_usage(uid: str) -> tuple[bool, int]:
                 return True, 1
 
             count: int = data.get("count", 0)
-            if count >= FREE_TIER_DAILY_CHAT_LIMIT:
+            if count >= limit:
                 return False, count
 
             new_count = count + 1
@@ -292,66 +307,40 @@ async def check_and_increment_daily_chat_usage(uid: str) -> tuple[bool, int]:
     try:
         return await asyncio.to_thread(_run)
     except Exception as exc:
-        logger.warn("entitlement: usage increment failed, allowing request", {
+        logger.warn(failure_log_message, {
             "user_id": uid,
             "error": str(exc),
         })
         return True, 0
+
+
+async def check_and_increment_daily_chat_usage(uid: str) -> tuple[bool, int]:
+    """
+    Atomically checks then increments the UTC-day chat counter for a free-tier
+    user. Returns (allowed, count_after_this_message); see
+    _check_and_increment_daily_usage for the rollover and fail-open contract.
+    """
+    return await _check_and_increment_daily_usage(
+        uid,
+        "daily_chat",
+        FREE_TIER_DAILY_CHAT_LIMIT,
+        "entitlement: usage increment failed, allowing request",
+    )
 
 
 async def check_and_increment_daily_web_surf_usage(uid: str) -> tuple[bool, int]:
     """
-    Atomically checks then increments the UTC-day web_surf counter for a free-tier user.
-
-    Returns (allowed, count_after_this_call).
-    Counter resets each UTC calendar day. Stored at users/{uid}/usage/daily_web_surf.
-
-    Falls back to (True, 0) if Firestore is unavailable; infra failures should not
-    block a user's request. Log and allow.
+    Atomically checks then increments the UTC-day web_surf counter for a
+    free-tier user. Returns (allowed, count_after_this_call). Stored at
+    users/{uid}/usage/daily_web_surf; see _check_and_increment_daily_usage for
+    the rollover and fail-open contract.
     """
-    from google.cloud import firestore as gcloud_firestore
-
-    from ..services.firebase import admin_firestore
-
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-
-    def _run() -> tuple[bool, int]:
-        db = admin_firestore()
-        usage_ref = (
-            db.collection("users")
-            .document(uid)
-            .collection("usage")
-            .document("daily_web_surf")
-        )
-        transaction = db.transaction()
-
-        @gcloud_firestore.transactional
-        def _execute(txn) -> tuple[bool, int]:
-            snap = usage_ref.get(transaction=txn)
-            data = snap.to_dict() or {}
-
-            if data.get("date") != today:
-                txn.set(usage_ref, {"date": today, "count": 1})
-                return True, 1
-
-            count: int = data.get("count", 0)
-            if count >= FREE_TIER_DAILY_WEB_SURF_LIMIT:
-                return False, count
-
-            new_count = count + 1
-            txn.update(usage_ref, {"count": new_count})
-            return True, new_count
-
-        return _execute(transaction)
-
-    try:
-        return await asyncio.to_thread(_run)
-    except Exception as exc:
-        logger.warn("entitlement: web_surf usage increment failed, allowing request", {
-            "user_id": uid,
-            "error": str(exc),
-        })
-        return True, 0
+    return await _check_and_increment_daily_usage(
+        uid,
+        "daily_web_surf",
+        FREE_TIER_DAILY_WEB_SURF_LIMIT,
+        "entitlement: web_surf usage increment failed, allowing request",
+    )
 
 
 async def check_and_increment_daily_outbound_draft_usage(uid: str) -> tuple[bool, int]:
@@ -360,55 +349,45 @@ async def check_and_increment_daily_outbound_draft_usage(uid: str) -> tuple[bool
     free-tier user. Charged once per NEW screen draft; refines of an existing
     draft never reach this counter.
 
-    Returns (allowed, count_after_this_call).
-    Counter resets each UTC calendar day. Stored at users/{uid}/usage/daily_outbound_draft.
-
-    Falls back to (True, 0) if Firestore is unavailable: infra failures should not
-    block a user's request. Log and allow.
+    Returns (allowed, count_after_this_call). Stored at
+    users/{uid}/usage/daily_outbound_draft; see _check_and_increment_daily_usage
+    for the rollover and fail-open contract.
     """
-    from google.cloud import firestore as gcloud_firestore
+    return await _check_and_increment_daily_usage(
+        uid,
+        "daily_outbound_draft",
+        FREE_TIER_DAILY_OUTBOUND_DRAFT_LIMIT,
+        "entitlement: outbound_draft usage increment failed, allowing request",
+    )
 
+
+async def read_usage_counter(uid: str, doc_id: str, field: str) -> int:
+    """Today's value of one users/{uid}/usage/{doc_id} counter.
+
+    A stored date other than today (UTC) means the counter has rolled over and
+    reads 0. Raises on a Firestore failure; callers choose their own
+    degradation (the /entitlement summary serves null for the broken counter,
+    the desktop usage endpoint serves 0).
+    """
     from ..services.firebase import admin_firestore
 
     today = datetime.now(UTC).strftime("%Y-%m-%d")
 
-    def _run() -> tuple[bool, int]:
-        db = admin_firestore()
-        usage_ref = (
-            db.collection("users")
+    def _fetch() -> int:
+        snap = (
+            admin_firestore()
+            .collection("users")
             .document(uid)
             .collection("usage")
-            .document("daily_outbound_draft")
+            .document(doc_id)
+            .get()
         )
-        transaction = db.transaction()
+        data = snap.to_dict() or {}
+        if data.get("date") != today:
+            return 0
+        return int(data.get(field, 0))
 
-        @gcloud_firestore.transactional
-        def _execute(txn) -> tuple[bool, int]:
-            snap = usage_ref.get(transaction=txn)
-            data = snap.to_dict() or {}
-
-            if data.get("date") != today:
-                txn.set(usage_ref, {"date": today, "count": 1})
-                return True, 1
-
-            count: int = data.get("count", 0)
-            if count >= FREE_TIER_DAILY_OUTBOUND_DRAFT_LIMIT:
-                return False, count
-
-            new_count = count + 1
-            txn.update(usage_ref, {"count": new_count})
-            return True, new_count
-
-        return _execute(transaction)
-
-    try:
-        return await asyncio.to_thread(_run)
-    except Exception as exc:
-        logger.warn("entitlement: outbound_draft usage increment failed, allowing request", {
-            "user_id": uid,
-            "error": str(exc),
-        })
-        return True, 0
+    return await asyncio.to_thread(_fetch)
 
 
 async def get_remaining_free_voice_seconds(uid: str) -> int | None:

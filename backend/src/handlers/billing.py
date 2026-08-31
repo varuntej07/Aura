@@ -20,15 +20,13 @@ from ..services.billing import (
     DodoApiError,
     create_checkout_session,
     create_portal_session,
-    parse_event_occurred_at,
-    process_webhook_event,
+    evaluate_checkout_eligibility,
+    process_webhook_envelope,
     verify_webhook_signature,
 )
 from ..services.entitlement import (
     EntitlementUnavailableError,
     fetch_entitlement_doc,
-    has_active_paid_subscription,
-    normalize_status,
 )
 from ..services.request_auth import resolve_user_id_from_request
 
@@ -67,28 +65,28 @@ async def handle_billing_checkout(request: Request) -> JSONResponse:
     except EntitlementUnavailableError:
         return JSONResponse({"error": "entitlement_unavailable"}, status_code=503)
 
-    # Every account gets the full 45-day trial before it can purchase. Keep
-    # this guard on the authenticated backend route as well as in the client so
-    # a stale or modified client cannot create an early checkout session.
-    if normalize_status(entitlement) == "trialing":
+    # The eligibility policy (trial-first, one live subscription per account,
+    # which Dodo customer to pin) lives in services/billing.py; this handler
+    # only maps the verdict to status codes and bodies.
+    eligibility = evaluate_checkout_eligibility(entitlement)
+
+    if eligibility.blocked_reason == "trial_active":
         return JSONResponse({"error": "trial_active"}, status_code=409)
 
-    if has_active_paid_subscription(entitlement):
+    if eligibility.blocked_reason == "already_subscribed":
         logger.info("billing: checkout blocked, subscription already live", {
-            "user_id": user_id, "tier": str(entitlement.get("tier", "")),
+            "user_id": user_id, "tier": eligibility.tier,
         })
         return JSONResponse({
             "error": "already_subscribed",
-            "tier": str(entitlement.get("tier", "")),
-            "status": normalize_status(entitlement),
-            "cancel_at_period_end": bool(entitlement.get("cancel_at_period_end", False)),
+            "tier": eligibility.tier,
+            "status": eligibility.status,
+            "cancel_at_period_end": eligibility.cancel_at_period_end,
         }, status_code=409)
-
-    customer_id = str(entitlement.get("dodo_customer_id", "")).strip() or None
 
     try:
         checkout_url = await create_checkout_session(
-            user_id, tier, period, customer_id=customer_id
+            user_id, tier, period, customer_id=eligibility.customer_id
         )
     except DodoApiError as exc:
         logger.error("billing: checkout creation failed", {
@@ -128,19 +126,13 @@ async def handle_billing_webhook(request: Request) -> JSONResponse:
     if not isinstance(envelope, dict):
         return JSONResponse({"error": "invalid_payload"}, status_code=400)
 
-    event_type = str(envelope.get("type", ""))
-    data = envelope.get("data")
-    if not isinstance(data, dict):
-        data = {}
-    occurred_at = parse_event_occurred_at(envelope.get("timestamp"), timestamp)
-
     try:
-        result = await process_webhook_event(msg_id, event_type, data, occurred_at)
+        result = await process_webhook_envelope(msg_id, envelope, timestamp)
     except Exception as exc:
         # 500 -> Dodo redelivers with backoff; the idempotency claim was rolled
         # back (or never made), so the retry actually reprocesses.
         logger.error("billing: webhook processing failed", {
-            "webhook_id": msg_id, "event_type": event_type, "error": str(exc),
+            "webhook_id": msg_id, "event_type": str(envelope.get("type", "")), "error": str(exc),
         })
         return JSONResponse({"error": "processing_failed"}, status_code=500)
 

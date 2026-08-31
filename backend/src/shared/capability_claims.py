@@ -26,12 +26,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# Sentence splitter shared with action_intent_policy, so both guards agree on what a
+# sentence is.
+from ..services.action_intent_policy import SENTENCE_SPLIT as _SENTENCE_SPLIT
+
 CONFIRMED_FALSE = "confirmed_false"
 SUSPECTED = "suspected"
-
-# Sentence splitter matching action_intent_policy's, so both guards agree on what a
-# sentence is.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 # "I don't have a set_reminder tool", "there's no reminder tool available to me",
 # "that tool isn't exposed to me right now", "I can't see a calendar tool".

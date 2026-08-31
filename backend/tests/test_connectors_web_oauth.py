@@ -12,6 +12,7 @@ from src.services.google_calendar_connector import (
     GoogleCalendarConnector,
     GoogleCalendarReauthorizationRequired,
 )
+from src.services.google_oauth import exchange_server_auth_code
 
 ALLOWED_ORIGIN = "https://auravoiceapp.com"
 
@@ -81,8 +82,8 @@ def test_token_exchange_uses_web_popup_origin(monkeypatch):
         captured["timeout"] = timeout
         return Response()
 
-    with patch("src.services.google_calendar_connector.urllib.request.urlopen", fake_urlopen):
-        GoogleCalendarConnector("user-1")._exchange_server_auth_code(
+    with patch("src.services.google_oauth.urllib.request.urlopen", fake_urlopen):
+        exchange_server_auth_code(
             "server-code",
             redirect_uri=ALLOWED_ORIGIN,
         )
@@ -189,7 +190,7 @@ def test_refreshing_saved_credentials_does_not_optimistically_enable(monkeypatch
         lambda **payload: persisted.append(payload),
     )
     monkeypatch.setattr(
-        "src.services.google_calendar_connector.build",
+        "src.services.google_connector_base.build",
         lambda *_args, **_kwargs: "calendar-client",
     )
 

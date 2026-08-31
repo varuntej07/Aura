@@ -10,61 +10,45 @@ Periodic work piggybacked here (avoids creating extra Cloud Scheduler jobs):
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..services import alarm_sync
-from ..services.notification_rewriter import rewrite_reminder_notification
-from ..services.notifications import orchestrator
-from ..services.notifications.proposal import (
-    SOURCE_REMINDER,
-    Disposition,
-    NotificationProposal,
-    ProposalKind,
-)
+from ..services.reminder_delivery import deliver_due_reminder
 from ..services.tool_executor import (
-    claim_reminder_for_processing,
     fetch_due_reminders,
-    mark_reminder_fired,
-    mark_reminder_expired,
-    reminder_delivery_deadline,
-    reminder_delivery_terminal_reason,
     requeue_stuck_reminders,
 )
 
 
-def _json(status: int, payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "statusCode": status,
-        "headers": {"content-type": "application/json"},
-        "body": json.dumps(payload),
-    }
+async def _run_isolated(
+    error_message: str,
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    extra_log_fields: Callable[[Exception], dict[str, Any]] | None = None,
+    on_error: Any = None,
+) -> Any:
+    """Run one piggybacked scheduler job with the standard error isolation.
 
-
-def _reminder_dedup_key(message: str, trigger_at_iso: str | None) -> str:
-    """Cross-send dedup key for a reminder: the same message firing in the same
-    minute is the same reminder.
-
-    This is the ledger backstop the create-time window cannot cover. A sub-second
-    CONCURRENT double-create mints two docs with near-identical fire times; they
-    collide on this key and the orchestrator drops the second (24h ledger
-    window). The sequential "minute apart" replay is handled upstream at creation
-    instead, since by definition those two land in different minute buckets.
+    Every job launched from handle_scheduler_tick must be unable to delay or fail
+    the reminder tick; this helper is the single place that swallows and logs the
+    failure. Each call site passes its exact current log message string, and
+    ``extra_log_fields`` (when given) builds the exact metadata dict for that
+    site, preserving field names and order. ``on_error`` is what the caller's
+    callers expect back when the job fails open.
     """
-    minute = "na"
-    if isinstance(trigger_at_iso, str):
-        try:
-            minute = (
-                datetime.fromisoformat(trigger_at_iso).astimezone(UTC).strftime("%Y%m%d%H%M")
-            )
-        except ValueError:
-            minute = "na"
-    digest = hashlib.sha1(message.strip().casefold().encode("utf-8")).hexdigest()[:12]
-    return f"reminder_{minute}_{digest}"
+    try:
+        return await factory()
+    except Exception as exc:
+        fields = (
+            extra_log_fields(exc)
+            if extra_log_fields is not None
+            else {"error": str(exc)}
+        )
+        logger.error(error_message, fields)
+        return on_error
 
 
 async def _fan_out_daily_plans() -> None:
@@ -159,10 +143,7 @@ async def _run_daily_briefing() -> None:
     """
     from ..services.briefing.briefing_engine import run_briefing_tick
 
-    try:
-        await run_briefing_tick()
-    except Exception as exc:
-        logger.error("scheduler: daily briefing tick failed", {"error": str(exc)})
+    await _run_isolated("scheduler: daily briefing tick failed", run_briefing_tick)
 
 
 async def _sweep_expired_candidates() -> None:
@@ -178,10 +159,9 @@ async def _sweep_expired_candidates() -> None:
     """
     from ..services.signal_engine.content_pool import delete_expired_candidates
 
-    try:
-        await delete_expired_candidates()
-    except Exception as exc:
-        logger.error("scheduler: expired-candidate sweep failed", {"error": str(exc)})
+    await _run_isolated(
+        "scheduler: expired-candidate sweep failed", delete_expired_candidates
+    )
 
 
 async def _requeue_stuck_reminders() -> None:
@@ -191,10 +171,10 @@ async def _requeue_stuck_reminders() -> None:
     a failure in recovery must never take down the delivery path it exists to
     protect. See requeue_stuck_reminders for why the stuck state happens at all.
     """
-    try:
-        await asyncio.to_thread(requeue_stuck_reminders)
-    except Exception as exc:
-        logger.error("scheduler: stuck-reminder requeue failed", {"error": str(exc)})
+    await _run_isolated(
+        "scheduler: stuck-reminder requeue failed",
+        lambda: asyncio.to_thread(requeue_stuck_reminders),
+    )
 
 
 async def _run_tracking_checkpoints() -> None:
@@ -205,10 +185,7 @@ async def _run_tracking_checkpoints() -> None:
     fail the reminder tick."""
     from ..services.tracking.tracking_engine import run_checkpoint_tick
 
-    try:
-        await run_checkpoint_tick()
-    except Exception as exc:
-        logger.error("scheduler: tracking checkpoint tick failed", {"error": str(exc)})
+    await _run_isolated("scheduler: tracking checkpoint tick failed", run_checkpoint_tick)
 
 
 async def _run_tracking_reconcile() -> None:
@@ -217,10 +194,7 @@ async def _run_tracking_reconcile() -> None:
     tick."""
     from ..services.tracking.tracking_engine import run_reconcile_tick
 
-    try:
-        await run_reconcile_tick()
-    except Exception as exc:
-        logger.error("scheduler: tracking reconcile tick failed", {"error": str(exc)})
+    await _run_isolated("scheduler: tracking reconcile tick failed", run_reconcile_tick)
 
 
 async def _run_proactive_drain() -> None:
@@ -284,56 +258,58 @@ async def _run_memory_graph_sweep(
     """Hourly Phase 4 source A/B sweep. Source C remains evidence only."""
     if not settings.NOTIF_GRAPH:
         return []
-    try:
+
+    async def factory() -> list[tuple[str, Any]]:
         from ..services.notifications.memory_graph_notifications import (
             run_memory_graph_sweep,
         )
 
         return await run_memory_graph_sweep(now=now, dry_run=dry_run)
-    except Exception as exc:
-        logger.error("scheduler: memory graph sweep failed open", {"error": str(exc)})
-        return []
+
+    return await _run_isolated(
+        "scheduler: memory graph sweep failed open", factory, on_error=[]
+    )
 
 
 async def _run_memory_graph_candidate_drain(*, now: datetime | None = None) -> int:
     """Process due graph candidates through revalidation and the shared funnel."""
     if not settings.NOTIF_GRAPH:
         return 0
-    try:
+
+    async def factory() -> int:
         from ..services.notifications.memory_graph_notifications import run_due_candidates
 
         return await run_due_candidates(now=now)
-    except Exception as exc:
-        logger.error("scheduler: memory graph candidate drain failed open", {
-            "error": str(exc),
-        })
-        return 0
+
+    return await _run_isolated(
+        "scheduler: memory graph candidate drain failed open", factory, on_error=0
+    )
 
 
 async def _run_session_followup_lifecycle_sweep(*, now: datetime | None = None) -> int:
     """Finalize due sessions through the sole lifecycle owner."""
-    try:
+
+    async def factory() -> int:
         from ..services.session_followup.lifecycle import session_lifecycle_service
 
         return await session_lifecycle_service.sweep_idle_sessions(now=now)
-    except Exception as exc:
-        logger.error("scheduler: session followup lifecycle sweep failed open", {
-            "error": str(exc),
-        })
-        return 0
+
+    return await _run_isolated(
+        "scheduler: session followup lifecycle sweep failed open", factory, on_error=0
+    )
 
 
 async def _run_session_followup_drain(*, now: datetime | None = None) -> int:
     """Revalidate due source-D candidates and submit the survivors."""
-    try:
+
+    async def factory() -> int:
         from ..services.session_followup.revalidator import run_due_followups
 
         return await run_due_followups(now=now)
-    except Exception as exc:
-        logger.error("scheduler: session followup drain failed open", {
-            "error": str(exc),
-        })
-        return 0
+
+    return await _run_isolated(
+        "scheduler: session followup drain failed open", factory, on_error=0
+    )
 
 
 async def _run_intent_sweep() -> None:
@@ -344,10 +320,7 @@ async def _run_intent_sweep() -> None:
     it can never delay or fail the reminder tick."""
     from ..services.reactive.intent_supervisor import run_intent_sweep
 
-    try:
-        await run_intent_sweep()
-    except Exception as exc:
-        logger.error("scheduler: intent sweep failed", {"error": str(exc)})
+    await _run_isolated("scheduler: intent sweep failed", run_intent_sweep)
 
 
 async def _run_outbox_sweep() -> None:
@@ -359,28 +332,29 @@ async def _run_outbox_sweep() -> None:
     reminder tick."""
     from ..services.reactive import event_bus
 
-    try:
-        await event_bus.dispatch_pending()
-    except Exception as exc:
-        logger.error("scheduler: outbox sweep failed", {"error": str(exc)})
+    await _run_isolated("scheduler: outbox sweep failed", event_bus.dispatch_pending)
 
 
 async def _run_meeting_job_sweep() -> None:
     """Rediscover durable meeting jobs whose Cloud Tasks delivery was missed."""
     from ..services.meetings import tasks as meeting_tasks
 
-    try:
+    async def factory() -> None:
         result = await meeting_tasks.dispatch_pending(limit=50)
         logger.info("scheduler: meeting durable-job sweep", {
             **result,
             "metric": "meeting_outbox_dispatch",
         })
-    except Exception as exc:
-        logger.error("scheduler: meeting durable-job sweep failed", {
+
+    await _run_isolated(
+        "scheduler: meeting durable-job sweep failed",
+        factory,
+        extra_log_fields=lambda exc: {
             "error_code": "meeting_outbox_sweep_failed",
             "error": str(exc),
             "alert": True,
-        })
+        },
+    )
 
 
 async def _run_research_sweep() -> None:
@@ -394,59 +368,66 @@ async def _run_research_sweep() -> None:
     """
     from ..services.research.engine import get_research_engine
 
-    try:
+    async def factory() -> None:
         result = await get_research_engine().sweep(limit=100)
         logger.info("scheduler: research sweep", {
             **result,
             "metric": "research_sweep",
         })
-    except Exception as exc:
-        logger.error("scheduler: research sweep failed", {
+
+    await _run_isolated(
+        "scheduler: research sweep failed",
+        factory,
+        extra_log_fields=lambda exc: {
             "error_code": "research_sweep_failed",
             "error": str(exc),
             "alert": True,
-        })
+        },
+    )
 
 
 async def _run_dictation_audio_reconciliation() -> None:
     """Confirm 180-day lifecycle deletions and retire stale export pointers."""
     from ..services.dictation import store as dictation_store
 
-    try:
+    async def factory() -> None:
         result = await dictation_store.reconcile_expired_audio()
         logger.info("scheduler: dictation audio reconciliation", result)
-    except Exception as exc:
-        logger.error(
-            "scheduler: dictation audio reconciliation failed",
-            {"error": str(exc), "error_type": type(exc).__name__},
-        )
+
+    await _run_isolated(
+        "scheduler: dictation audio reconciliation failed",
+        factory,
+        extra_log_fields=lambda exc: {"error": str(exc), "error_type": type(exc).__name__},
+    )
 
 
 async def _run_dictation_metadata_reconciliation() -> None:
     """Delete expired Firestore trace metadata when TTL is delayed or unavailable."""
     from ..services.dictation import store as dictation_store
 
-    try:
+    async def factory() -> None:
         result = await dictation_store.reconcile_expired_metadata()
         logger.info("scheduler: dictation metadata reconciliation", result)
-    except Exception as exc:
-        logger.error(
-            "scheduler: dictation metadata reconciliation failed",
-            {"error": str(exc), "error_type": type(exc).__name__},
-        )
+
+    await _run_isolated(
+        "scheduler: dictation metadata reconciliation failed",
+        factory,
+        extra_log_fields=lambda exc: {"error": str(exc), "error_type": type(exc).__name__},
+    )
 
 
 async def _run_meeting_reconciliation() -> None:
     from ..services.meetings.operations import reconciliation_snapshot
 
-    try:
-        await reconciliation_snapshot(limit=200)
-    except Exception as exc:
-        logger.error("scheduler: meeting reconciliation failed", {
+    await _run_isolated(
+        "scheduler: meeting reconciliation failed",
+        lambda: reconciliation_snapshot(limit=200),
+        extra_log_fields=lambda exc: {
             "error_code": "meeting_reconciliation_failed",
             "error": str(exc),
             "alert": True,
-        })
+        },
+    )
 
 
 async def _run_reengagement() -> None:
@@ -455,10 +436,7 @@ async def _run_reengagement() -> None:
     Fire-and-forget and internally isolated, so it can never delay or fail the tick."""
     from ..services.reengagement.reengagement_engine import run_reengagement_tick
 
-    try:
-        await run_reengagement_tick()
-    except Exception as exc:
-        logger.error("scheduler: reengagement tick failed", {"error": str(exc)})
+    await _run_isolated("scheduler: reengagement tick failed", run_reengagement_tick)
 
 
 async def _run_trial_lifecycle() -> None:
@@ -468,10 +446,7 @@ async def _run_trial_lifecycle() -> None:
     forget and internally isolated, so it can never delay or fail the tick."""
     from ..services.entitlement_notifications import run_trial_lifecycle_tick
 
-    try:
-        await run_trial_lifecycle_tick()
-    except Exception as exc:
-        logger.error("scheduler: trial lifecycle tick failed", {"error": str(exc)})
+    await _run_isolated("scheduler: trial lifecycle tick failed", run_trial_lifecycle_tick)
 
 
 async def _sweep_stuck_chat_turns() -> None:
@@ -508,7 +483,7 @@ async def _sweep_stuck_chat_turns() -> None:
     logger.info("scheduler: stuck chat-turn sweep complete", {"count": len(stuck)})
 
 
-async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str, Any]:
+async def handle_scheduler_tick() -> dict[str, Any]:
     """Run one scheduler tick.
 
     All Firestore / Firebase Admin SDK calls are synchronous (blocking I/O).
@@ -691,151 +666,11 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             reminder_id: str = item["reminderId"]
             data: dict[str, Any] = item["data"]
 
-            try:
-                terminal_reason = reminder_delivery_terminal_reason(data)
-                if terminal_reason is not None:
-                    did_expire = await asyncio.to_thread(
-                        mark_reminder_expired,
-                        user_id,
-                        reminder_id,
-                        terminal_reason,
-                    )
-                    expired += int(did_expire)
-                    logger.warn("Reminder delivery terminalized before send", {
-                        "user_id": user_id,
-                        "reminder_id": reminder_id,
-                        "reason": terminal_reason,
-                    })
-                    continue
-
-                # Atomically claim the reminder before any slow work (model call, FCM).
-                # If another scheduler tick already claimed it, skip — prevents duplicate fires.
-                claimed = await asyncio.to_thread(
-                    claim_reminder_for_processing,
-                    user_id,
-                    reminder_id,
-                )
-                if not claimed:
-                    logger.info("Reminder already claimed by concurrent tick, skipping", {
-                        "user_id": user_id,
-                        "reminder_id": reminder_id,
-                    })
-                    continue
-
-                raw_message = str(data.get("message", "Reminder due now"))
-                copy = await rewrite_reminder_notification(raw_message)
-                body = copy.body
-                is_alarm = alarm_sync.is_alarm(data)
-                # An alarm keeps a stable, unmistakable title: someone half asleep at
-                # 6am needs to recognise it instantly, not read a witty subject line.
-                # A plain reminder takes the framed title when there is one, so the
-                # bold line names the actual thing instead of the word "Reminder".
-                title = "Buddy Alarm" if is_alarm else (copy.title or "Buddy Reminder")
-
-                # Committed lane: the user asked for this, so the orchestrator sends
-                # it inline (freshness n/a, dedup handled by the atomic claim above).
-                # The orchestrator records the committed send to the shared budget
-                # itself, so a later proactive push is spaced away from it.
-                decision = await orchestrator.submit(
-                    NotificationProposal(
-                        user_id=user_id,
-                        source=SOURCE_REMINDER,
-                        kind=ProposalKind.COMMITTED,
-                        # Backstop the atomic claim for a concurrent double-create:
-                        # two same-minute same-message docs collide on this key and the
-                        # orchestrator drops the second within its 24h ledger window.
-                        dedup_key=_reminder_dedup_key(raw_message, data.get("trigger_at")),
-                        title=title,
-                        body=body,
-                        data={
-                            "reminder_id": reminder_id,
-                            # The tap-through chat seed. Without this, the client
-                            # falls back to the rewritten push BODY alone, and the
-                            # rewriter may have moved half the instruction into the
-                            # title, which the tap path discards. The raw message is
-                            # the only fire-time text that is never LLM-generated.
-                            "opening_chat_message": f"Reminder: {raw_message}",
-                            "created_via": str(data.get("created_via", "voice")),
-                            "tier": alarm_sync.normalize_tier(data.get("tier")),
-                            # For an alarm this push is a BACKSTOP, not the
-                            # delivery mechanism: the device should already have
-                            # rung off its own local schedule seconds ago. The
-                            # flag lets the client suppress this banner when its
-                            # native ledger says the alarm already fired, so a
-                            # half-asleep user is not woken a second time by the
-                            # safety net for the thing that worked.
-                            "alarm_fallback": "1" if is_alarm else "0",
-                            # The client dedupes one alarm OCCURRENCE, not the
-                            # reminder id. A snooze keeps the same id but must be
-                            # allowed to ring again at its new trigger time.
-                            **(
-                                {"alarm_trigger_at": str(data.get("trigger_at", ""))}
-                                if is_alarm
-                                else {}
-                            ),
-                            # data_only strips the display block, so the text has
-                            # to travel in the payload for the client to render
-                            # it. Only populated for alarms; a plain reminder is
-                            # still drawn by the OS from title/body above.
-                            **({"alarm_body": body} if is_alarm else {}),
-                        },
-                        notification_type="reminder",
-                        # Collapse prevents duplicate banners if overlapping scheduler
-                        # ticks fire before the user dismisses the first notification.
-                        collapse_key=f"reminder_{reminder_id}",
-                        apns_category="BUDDY_REMINDER",
-                        # An alarm's backstop is sent data-only so the CLIENT
-                        # decides whether to render it. Android draws a
-                        # notification block itself, with no chance to ask
-                        # whether the local alarm already rang, so a banner would
-                        # arrive seconds after the device stopped ringing and
-                        # wake a half-asleep user for the thing that worked.
-                        # Plain reminders keep the OS-rendered banner: there is
-                        # nothing local to duplicate.
-                        data_only=is_alarm,
-                        valid_until=reminder_delivery_deadline(data),
-                    )
-                )
-
-                if decision.disposition == Disposition.SEND and decision.transport_accepted:
-                    await asyncio.to_thread(mark_reminder_fired, user_id, reminder_id)
-                    accepted += 1
-                    mobile_accepted += decision.success_count or 0
-                    desktop_queued += decision.desktop_queued_count or 0
-                    logger.info("Reminder transport accepted", {
-                        "user_id": user_id,
-                        "reminder_id": reminder_id,
-                        "logical_accepted": 1,
-                        "mobile_accepted": decision.success_count or 0,
-                        "desktop_queued": decision.desktop_queued_count or 0,
-                    })
-                elif decision.disposition == Disposition.DROP:
-                    did_expire = await asyncio.to_thread(
-                        mark_reminder_expired,
-                        user_id,
-                        reminder_id,
-                        f"orchestrator_{decision.reason}",
-                    )
-                    expired += int(did_expire)
-                    logger.warn("Reminder terminally dropped", {
-                        "user_id": user_id,
-                        "reminder_id": reminder_id,
-                        "reason": decision.reason,
-                    })
-                else:
-                    logger.warn("Reminder transport not accepted", {
-                        "user_id": user_id,
-                        "reminder_id": reminder_id,
-                        "disposition": decision.disposition.value,
-                        "reason": decision.reason,
-                    })
-
-            except Exception as exc:
-                logger.error("Failed to deliver reminder", {
-                    "user_id": user_id,
-                    "reminder_id": reminder_id,
-                    "error": str(exc),
-                })
+            outcome = await deliver_due_reminder(user_id, reminder_id, data)
+            accepted += outcome.accepted
+            mobile_accepted += outcome.mobile_accepted
+            desktop_queued += outcome.desktop_queued
+            expired += outcome.expired
 
         periodic_synced = (
             (periodic_sync_result or {}).get("users_synced", 0)
@@ -853,7 +688,7 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             "renewed_calendar_channels": renewed_channels,
             "periodic_sync_users": periodic_synced,
         })
-        return _json(200, {
+        return {
             "scanned": len(due),
             "accepted": accepted,
             "mobile_accepted": mobile_accepted,
@@ -862,8 +697,8 @@ async def handle_scheduler_tick(event: dict[str, Any] | None = None) -> dict[str
             "calendar_syncs": synced_calendars,
             "renewed_calendar_channels": renewed_channels,
             "periodic_sync_users": periodic_synced,
-        })
+        }
 
     except Exception as exc:
         logger.error("Scheduler tick failed", {"error": str(exc)})
-        return _json(500, {"error": "Internal server error"})
+        return {"error": "Internal server error", "status_code": 500}

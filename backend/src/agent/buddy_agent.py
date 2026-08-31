@@ -2733,11 +2733,7 @@ class BuddyAgent(agents.Agent):
                         isinstance(reminder_arguments, dict)
                         and not reminder_arguments.get("tier")
                     ):
-                        reminder_arguments["tier"] = resolve_set_reminder_tier(
-                            str(reminder_arguments.get("message", "")),
-                            None,
-                            user_instruction=self._turn_instruction(chat_ctx),
-                        )
+                        reminder_arguments["tier"] = resolve_set_reminder_tier(None)
                         call.arguments = json.dumps(reminder_arguments)
                 registration = VOICE_TOOL_REGISTRY.get(getattr(call, "name", ""))
                 decision = evaluate_execution(

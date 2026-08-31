@@ -12,20 +12,14 @@ from pydantic import BaseModel, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..services.gmail_connector import GmailConnector, GmailReauthorizationRequired
-from ..services.google_calendar_connector import (
-    GoogleCalendarConnector,
-    GoogleCalendarReauthorizationRequired,
-)
+from ..services.connector_oauth import resolve_watch_url
+from ..services.gmail_connector import GmailConnector
+from ..services.google_calendar_connector import GoogleCalendarConnector
+from ..services.google_connector_base import ReauthorizationRequired
 from ..services.request_auth import resolve_user_id_from_request
 
 
-class GoogleCalendarConnectBody(BaseModel):
-    server_auth_code: str
-    redirect_uri: str | None = None
-
-
-class GmailConnectBody(BaseModel):
+class ConnectBody(BaseModel):
     server_auth_code: str
     redirect_uri: str | None = None
 
@@ -38,15 +32,10 @@ def _unauthorized() -> JSONResponse:
 
 
 def _resolve_watch_url(request: Request) -> str | None:
-    if settings.GOOGLE_CALENDAR_WEBHOOK_URL:
-        return settings.GOOGLE_CALENDAR_WEBHOOK_URL
-
-    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
-    if proto == "https" and host:
-        return f"https://{host}/integrations/google-calendar/webhook"
-
-    return None
+    return resolve_watch_url(
+        proto=request.headers.get("x-forwarded-proto") or request.url.scheme,
+        host=request.headers.get("x-forwarded-host") or request.headers.get("host"),
+    )
 
 
 def _validate_web_oauth_request(request: Request, redirect_uri: str | None) -> str | None:
@@ -89,7 +78,7 @@ async def connect_google_calendar(request: Request) -> JSONResponse:
         return _unauthorized()
 
     try:
-        body = GoogleCalendarConnectBody.model_validate(await request.json())
+        body = ConnectBody.model_validate(await request.json())
     except (ValidationError, ValueError):
         return JSONResponse(status_code=400, content={"error": "server_auth_code is required."})
 
@@ -150,7 +139,7 @@ async def enable_google_calendar(request: Request) -> JSONResponse:
     try:
         status = await asyncio.to_thread(_enable)
         return JSONResponse(status_code=200, content=status)
-    except GoogleCalendarReauthorizationRequired:
+    except ReauthorizationRequired:
         return JSONResponse(
             status_code=409,
             content={"error": "reauthorization_required"},
@@ -207,7 +196,7 @@ async def connect_gmail(request: Request) -> JSONResponse:
         return _unauthorized()
 
     try:
-        body = GmailConnectBody.model_validate(await request.json())
+        body = ConnectBody.model_validate(await request.json())
     except (ValidationError, ValueError):
         return JSONResponse(status_code=400, content={"error": "server_auth_code is required."})
 
@@ -260,7 +249,7 @@ async def enable_gmail(request: Request) -> JSONResponse:
     try:
         status = await asyncio.to_thread(GmailConnector(user_id).enable)
         return JSONResponse(status_code=200, content=status)
-    except GmailReauthorizationRequired:
+    except ReauthorizationRequired:
         return JSONResponse(
             status_code=409,
             content={"error": "reauthorization_required"},

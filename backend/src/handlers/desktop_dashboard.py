@@ -12,6 +12,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
+from ..lib.time_serialization import firestore_datetime_to_iso
 from ..services import voice_session_fields as vf
 from ..services.drafts import store as draft_store
 from ..services.entitlement import (
@@ -19,6 +20,7 @@ from ..services.entitlement import (
     FREE_TIER_DAILY_VOICE_SECONDS,
     EntitlementUnavailableError,
     ensure_entitlement_doc,
+    read_usage_counter,
     resolve_effective_tier,
 )
 from ..services.firebase import admin_firestore
@@ -27,8 +29,9 @@ from ..services.request_auth import resolve_user_id_from_request
 
 
 def _iso(value: Any) -> str | None:
-    if isinstance(value, datetime):
-        return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+    iso = firestore_datetime_to_iso(value)
+    if iso is not None:
+        return iso
     if isinstance(value, str) and value:
         return value
     return None
@@ -237,18 +240,6 @@ async def handle_desktop_saved(request: Request) -> JSONResponse:
     return JSONResponse({"items": items})
 
 
-def _usage_doc(uid: str, doc_id: str) -> dict[str, Any]:
-    snap = (
-        admin_firestore()
-        .collection("users")
-        .document(uid)
-        .collection("usage")
-        .document(doc_id)
-        .get()
-    )
-    return snap.to_dict() or {}
-
-
 async def handle_desktop_usage(request: Request) -> JSONResponse:
     uid = resolve_user_id_from_request(request)
     if not uid:
@@ -259,21 +250,12 @@ async def handle_desktop_usage(request: Request) -> JSONResponse:
         return JSONResponse({"error": "entitlement_unavailable"}, status_code=503)
 
     voice, drafts = await asyncio.gather(
-        asyncio.to_thread(_usage_doc, uid, "daily_voice"),
-        asyncio.to_thread(_usage_doc, uid, "daily_outbound_draft"),
+        read_usage_counter(uid, "daily_voice", "seconds"),
+        read_usage_counter(uid, "daily_outbound_draft", "count"),
         return_exceptions=True,
     )
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
-    voice_used = (
-        int(voice.get("seconds", 0))
-        if isinstance(voice, dict) and voice.get("date") == today
-        else 0
-    )
-    drafts_used = (
-        int(drafts.get("count", 0))
-        if isinstance(drafts, dict) and drafts.get("date") == today
-        else 0
-    )
+    voice_used = voice if isinstance(voice, int) else 0
+    drafts_used = drafts if isinstance(drafts, int) else 0
     start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     unlimited = resolve_effective_tier(entitlement) != "free"
     return JSONResponse(

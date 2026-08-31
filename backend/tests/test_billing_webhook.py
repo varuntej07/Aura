@@ -26,9 +26,9 @@ import src.services.billing as billing_service
 from src.config.settings import settings
 from src.services.billing import (
     WebhookPayloadError,
+    _parse_event_occurred_at,
     entitlement_write_for_event,
     extract_id_mappings,
-    parse_event_occurred_at,
     process_webhook_event,
     verify_webhook_signature,
 )
@@ -266,14 +266,14 @@ def test_is_stale_matrix(ent, event_type, occurred_at, sub_id, stale):
 
 
 def test_parse_event_occurred_at_prefers_envelope_iso():
-    parsed = parse_event_occurred_at("2026-07-09T12:00:00Z", "1767960000")
+    parsed = _parse_event_occurred_at("2026-07-09T12:00:00Z", "1767960000")
     assert parsed == datetime(2026, 7, 9, 12, tzinfo=UTC)
 
 
 def test_parse_event_occurred_at_falls_back_to_header_unix():
-    parsed = parse_event_occurred_at(None, "1767960000")
+    parsed = _parse_event_occurred_at(None, "1767960000")
     assert parsed == datetime.fromtimestamp(1767960000, UTC)
-    assert parse_event_occurred_at(None, "not-a-number") is None
+    assert _parse_event_occurred_at(None, "not-a-number") is None
 
 
 # --- processing: idempotency + doc writes + push ------------------------------------------------
@@ -608,7 +608,7 @@ def test_handler_bad_signature_401(monkeypatch):
         "webhook-signature": "v1," + base64.b64encode(b"z" * 32).decode(),
     })
     process = AsyncMock()
-    with patch.object(billing_handler, "process_webhook_event", process):
+    with patch.object(billing_handler, "process_webhook_envelope", process):
         resp = asyncio.run(billing_handler.handle_billing_webhook(req))
     assert resp.status_code == 401
     process.assert_not_awaited()
@@ -617,7 +617,9 @@ def test_handler_bad_signature_401(monkeypatch):
 def test_handler_valid_signature_processes(monkeypatch):
     monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", _SECRET)
     process = AsyncMock(return_value={"status": "processed"})
-    with patch.object(billing_handler, "process_webhook_event", process):
+    # The real process_webhook_envelope runs (envelope decomposition now lives
+    # in the service); only the inner event application is mocked.
+    with patch.object(billing_service, "process_webhook_event", process):
         resp = asyncio.run(billing_handler.handle_billing_webhook(
             _signed_request("subscription.active", _SUB_DATA)))
     assert resp.status_code == 200
@@ -632,7 +634,7 @@ def test_handler_valid_signature_processes(monkeypatch):
 def test_handler_processing_error_500_for_redelivery(monkeypatch):
     monkeypatch.setattr(settings, "DODO_WEBHOOK_SECRET", _SECRET)
     process = AsyncMock(side_effect=RuntimeError("firestore down"))
-    with patch.object(billing_handler, "process_webhook_event", process):
+    with patch.object(billing_handler, "process_webhook_envelope", process):
         resp = asyncio.run(billing_handler.handle_billing_webhook(
             _signed_request("subscription.active", _SUB_DATA)))
     assert resp.status_code == 500

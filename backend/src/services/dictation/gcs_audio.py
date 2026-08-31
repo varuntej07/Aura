@@ -1,28 +1,22 @@
-"""Create-only Cloud Storage for opt-in dictation training audio."""
+"""Create-only Cloud Storage for opt-in dictation training audio.
+
+Storage mechanics (client singleton, create-or-reconcile, generation-pinned
+reads and deletes) live in services/immutable_gcs.py; this module owns the
+dictation paths, metadata composition, result shape, and log lines.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
-from typing import Any
 
+from ...config.settings import settings
 from ...lib.logger import logger
-
-_client_singleton: Any = None
-
-
-def _client() -> Any:
-    global _client_singleton
-    if _client_singleton is None:
-        from google.cloud import storage  # type: ignore
-
-        _client_singleton = storage.Client()
-    return _client_singleton
+from .. import immutable_gcs
 
 
 def bucket_name() -> str:
-    return os.getenv("DICTATION_AUDIO_BUCKET", "juno-2ea45-dictation-audio")
+    return settings.DICTATION_AUDIO_BUCKET
 
 
 def object_path_for(uid: str, trace_id: str, content_sha256: str) -> str:
@@ -62,44 +56,22 @@ async def create_audio(
         "schema_version": "1",
     }
 
-    def _snapshot(blob: Any, *, reconciled: bool) -> ImmutableObject:
-        actual = blob.metadata or {}
-        if (
-            int(blob.size or -1) != len(data)
-            or str(getattr(blob, "content_type", "")) != "audio/flac"
-            or any(str(actual.get(key, "")) != value for key, value in required.items())
-        ):
-            raise ImmutableObjectConflict(path)
-        return ImmutableObject(
-            path=path,
-            generation=str(blob.generation),
-            size=int(blob.size),
-            sha256=content_sha256,
-            reconciled=reconciled,
-        )
-
-    def _create() -> ImmutableObject:
-        from google.api_core.exceptions import PreconditionFailed  # type: ignore
-
-        bucket = _client().bucket(bucket_name())
-        blob = bucket.blob(path)
-        blob.metadata = required
-        try:
-            blob.upload_from_string(
-                data,
-                content_type="audio/flac",
-                if_generation_match=0,
-                checksum="auto",
-            )
-            blob.reload()
-            return _snapshot(blob, reconciled=False)
-        except PreconditionFailed:
-            existing = bucket.get_blob(path)
-            if existing is None:
-                raise
-            return _snapshot(existing, reconciled=True)
-
-    result = await asyncio.to_thread(_create)
+    blob, reconciled = await immutable_gcs.create_or_reconcile(
+        bucket_name=bucket_name(),
+        path=path,
+        data=data,
+        content_type="audio/flac",
+        required_metadata=required,
+        verify_content_type=True,
+        make_conflict=lambda: ImmutableObjectConflict(path),
+    )
+    result = ImmutableObject(
+        path=path,
+        generation=str(blob.generation),
+        size=int(blob.size),
+        sha256=content_sha256,
+        reconciled=reconciled,
+    )
     logger.info(
         "dictation.gcs: immutable audio accepted",
         {
@@ -114,7 +86,9 @@ async def create_audio(
 
 async def object_exists(path: str, generation: str) -> bool:
     def _exists() -> bool:
-        blob = _client().bucket(bucket_name()).get_blob(path, generation=int(generation))
+        blob = immutable_gcs.client().bucket(bucket_name()).get_blob(
+            path, generation=int(generation)
+        )
         return blob is not None
 
     return await asyncio.to_thread(_exists)
@@ -124,49 +98,23 @@ async def current_generation(path: str) -> str | None:
     """Resolve the sole create-only generation when a receipt write crashed."""
 
     def _get() -> str | None:
-        blob = _client().bucket(bucket_name()).get_blob(path)
+        blob = immutable_gcs.client().bucket(bucket_name()).get_blob(path)
         return str(blob.generation) if blob is not None else None
 
     return await asyncio.to_thread(_get)
 
 
 async def download_exact(path: str, generation: str) -> bytes:
-    def _download() -> bytes:
-        blob = _client().bucket(bucket_name()).blob(path, generation=int(generation))
-        return blob.download_as_bytes(if_generation_match=int(generation))
-
-    return await asyncio.to_thread(_download)
+    return await immutable_gcs.download_exact(bucket_name(), path, generation)
 
 
 async def delete_exact(path: str, generation: str) -> bool:
     """Delete one recorded generation. Missing is success for retry recovery."""
-
-    def _delete() -> bool:
-        from google.api_core.exceptions import NotFound  # type: ignore
-
-        blob = _client().bucket(bucket_name()).blob(path, generation=int(generation))
-        try:
-            blob.delete(if_generation_match=int(generation))
-            return True
-        except NotFound:
-            return False
-
-    return await asyncio.to_thread(_delete)
+    return await immutable_gcs.delete_exact(bucket_name(), path, generation)
 
 
 async def delete_user_audio(uid: str) -> int:
     """Strict account deletion for every dictation object owned by one user."""
-    prefix = user_prefix_for(uid)
-
-    def _delete() -> int:
-        bucket = _client().bucket(bucket_name())
-        blobs = list(_client().list_blobs(bucket_name(), prefix=prefix))
-        for blob in blobs:
-            bucket.blob(blob.name, generation=blob.generation).delete(
-                if_generation_match=int(blob.generation),
-            )
-        return len(blobs)
-
-    count = await asyncio.to_thread(_delete)
+    count = await immutable_gcs.delete_prefix(bucket_name(), user_prefix_for(uid))
     logger.info("dictation.gcs: user audio deleted", {"user_id": uid, "deleted": count})
     return count

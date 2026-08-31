@@ -2,7 +2,6 @@ import os
 import re
 
 from dotenv import load_dotenv
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env into os.environ FIRST before pydantic-settings instantiates.
@@ -94,13 +93,10 @@ class Settings(BaseSettings):
     # first (making the task a no-op); only a genuinely abandoned turn gets regenerated.
     CHAT_COMPLETION_DELAY_SECONDS: int = 90
 
-    # Voice gateway
+    # Uvicorn bind for the main FastAPI app (main.py). The VOICE_GATEWAY_ env
+    # names are kept because deployed environments already set them.
     VOICE_GATEWAY_PORT: int = 8000
     VOICE_GATEWAY_HOST: str = "0.0.0.0"
-    VOICE_GATEWAY_SAMPLE_RATE_HZ: int = 16000
-    VOICE_GATEWAY_INPUT_MAX_TOKENS: int = 1024
-    VOICE_GATEWAY_TEMPERATURE: float = 0.7
-    VOICE_GATEWAY_TOP_P: float = 0.9
 
     # Anthropic
     ANTHROPIC_API_KEY: str = ""
@@ -268,8 +264,6 @@ class Settings(BaseSettings):
     # first; graph failures are swallowed. NOTIF_GRAPH gates a separate
     # notification producer (memory-graph sweep), not graph read/write.
     NOTIF_GRAPH: bool = False
-    FOLLOWUP_SHADOW: bool = False
-    PROACTIVE_FOLLOWUP_SEND: bool = False
 
     # Staged reasoning funnel (reason_step tool) — off until verified on a dark deploy.
     # Sonnet drives one step at a time: clarify -> web_surf fetch -> present -> final.
@@ -297,6 +291,13 @@ class Settings(BaseSettings):
     # (or reuse the project's default Firebase Storage bucket) before deploying.
     SCREEN_SAVES_BUCKET: str = "juno-2ea45-screen-saves"
     SCREEN_SAVES_SIGNED_URL_TTL_S: int = 3600
+
+    # Cloud Storage -> immutable audio/transcript blobs (services/dictation/gcs_audio.py,
+    # services/meetings/gcs_audio.py). Same provisioned-infrastructure caveat as above.
+    # Empty MEETINGS_TRANSCRIPT_BUCKET means "use MEETINGS_AUDIO_BUCKET".
+    DICTATION_AUDIO_BUCKET: str = "juno-2ea45-dictation-audio"
+    MEETINGS_AUDIO_BUCKET: str = "juno-2ea45-meeting-audio"
+    MEETINGS_TRANSCRIPT_BUCKET: str = ""
 
     # OIDC audiences accepted by internal endpoints (_verify_scheduler_token).
     # Cloud Run serves one service under several stable hostnames — the
@@ -547,11 +548,6 @@ class Settings(BaseSettings):
     # telegram_feedback_configured.
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_FEEDBACK_CHAT_ID: str = ""
-
-    @field_validator("VOICE_GATEWAY_TEMPERATURE", "VOICE_GATEWAY_TOP_P")
-    @classmethod
-    def clamp_0_1(cls, v: float) -> float:
-        return max(0.0, min(1.0, v))
 
     @property
     def is_production(self) -> bool:

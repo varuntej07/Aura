@@ -25,7 +25,8 @@ EVENTS_SUBCOLLECTION = "events"
 PROCESSED_SUBCOLLECTION = "processed"
 INTENTS_SUBCOLLECTION = "intents"
 RESOLVED_TOPICS_SUBCOLLECTION = "resolved_topics"
-COST_SUBCOLLECTION = "cost"
+# The cost/{date} doc's schema (subcollection name, TTL, field names) lives in
+# services/cost_doc.py, since the analytics spend ledger shares the same doc.
 
 # ── Event / outbox doc fields ────────────────────────────────────────────────
 FIELD_EVENT_ID = "event_id"
@@ -73,9 +74,6 @@ INTENT_PENDING = "pending"
 INTENT_FIRED = "fired"
 INTENT_CANCELLED = "cancelled"
 INTENT_EXPIRED = "expired"
-
-# ── Cost-cap fields ──────────────────────────────────────────────────────────
-FIELD_LLM_CALLS = "llm_calls"
 
 # ── TTLs (native Firestore TTL on expires_at reaps these) ────────────────────
 # Outbox rows are disposable once consumed; keep a short tail so a late sweep crash

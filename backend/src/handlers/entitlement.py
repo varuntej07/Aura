@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from ..lib.time_serialization import firestore_datetime_to_iso
 from ..services.entitlement import (
     FREE_TIER_DAILY_CHAT_LIMIT,
     FREE_TIER_DAILY_OUTBOUND_DRAFT_LIMIT,
@@ -29,6 +30,7 @@ from ..services.entitlement import (
     EntitlementUnavailableError,
     ensure_entitlement_doc,
     normalize_status,
+    read_usage_counter,
     resolve_effective_tier,
 )
 from ..services.geo import resolve_request_country
@@ -51,51 +53,28 @@ _USAGE_COUNTERS: dict[str, tuple[str, str, int]] = {
 }
 
 
-def _iso_or_none(value) -> str | None:
-    """Firestore timestamps -> ISO 8601 strings; anything else -> None."""
-    if isinstance(value, datetime):
-        aware = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return aware.isoformat()
-    return None
-
-
-def _read_usage_doc(uid: str, doc_id: str) -> dict:
-    """One usage counter read, in a worker thread. Raises on Firestore failure."""
-    from ..services.firebase import admin_firestore
-
-    snap = (
-        admin_firestore()
-        .collection("users")
-        .document(uid)
-        .collection("usage")
-        .document(doc_id)
-        .get()
-    )
-    return snap.to_dict() or {}
-
-
 async def _usage_summary(uid: str) -> dict:
-    """All four daily counters as {used, limit}. A counter whose stored date is
-    not today (UTC) has rolled over and counts as 0. A single failed read yields
-    null for that entry; the summary never blocks or fails the response."""
+    """All four daily counters as {used, limit}, via the entitlement service's
+    rollover-aware read (a counter whose stored date is not today (UTC) reads
+    0). A single failed read yields null for that entry; the summary never
+    blocks or fails the response."""
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     doc_ids = list(_USAGE_COUNTERS.keys())
     results = await asyncio.gather(
-        *(asyncio.to_thread(_read_usage_doc, uid, doc_id) for doc_id in doc_ids),
+        *(read_usage_counter(uid, doc_id, _USAGE_COUNTERS[doc_id][1]) for doc_id in doc_ids),
         return_exceptions=True,
     )
 
     summary: dict = {"date": today}
     for doc_id, result in zip(doc_ids, results):
-        key, field, limit = _USAGE_COUNTERS[doc_id]
+        key, _field, limit = _USAGE_COUNTERS[doc_id]
         if isinstance(result, BaseException):
             logger.warn("entitlement: usage read failed", {
                 "user_id": uid, "counter": doc_id, "error": str(result),
             })
             summary[key] = None
             continue
-        used = int(result.get(field, 0)) if result.get("date") == today else 0
-        summary[key] = {"used": used, "limit": limit}
+        summary[key] = {"used": result, "limit": limit}
     return summary
 
 
@@ -122,8 +101,8 @@ async def handle_get_entitlement(request: Request) -> JSONResponse:
         "tier": data.get("tier", "free"),
         "status": normalize_status(data),
         "effective_tier": resolve_effective_tier(data),
-        "trial_end_date": _iso_or_none(data.get("trial_end_date")),
-        "expires_at": _iso_or_none(data.get("expires_at")),
+        "trial_end_date": firestore_datetime_to_iso(data.get("trial_end_date")),
+        "expires_at": firestore_datetime_to_iso(data.get("expires_at")),
         "cancel_at_period_end": bool(data.get("cancel_at_period_end", False)),
         "usage": usage,
         "steering": _LEGACY_STEERING,

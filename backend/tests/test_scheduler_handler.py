@@ -5,12 +5,13 @@ Covers: handle_scheduler_tick — all branches including delivery, no-delivery, 
 exception, and outer exception.
 
 GoogleCalendarConnector is imported inside handle_scheduler_tick's function body, so it
-must be patched at its source module rather than at src.handlers.scheduler.
+must be patched at its source module rather than at src.handlers.scheduler. The per-
+reminder delivery pipeline lives in src.services.reminder_delivery, so its collaborators
+(claim/mark/rewrite/submit) are patched there; fetch_due_reminders stays on the handler.
 """
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +19,7 @@ import pytest
 from src.services.notification_rewriter import ReminderCopy
 
 _GCC_PATH = "src.services.google_calendar_connector.GoogleCalendarConnector"
+_DELIVERY = "src.services.reminder_delivery"
 
 
 def _make_decision(
@@ -55,10 +57,9 @@ class TestHandleSchedulerTick:
             with _patch_gc():
                 result = await handle_scheduler_tick()
 
-        assert result["statusCode"] == 200
-        body = json.loads(result["body"])
-        assert body["scanned"] == 0
-        assert body["accepted"] == 0
+        assert "error" not in result
+        assert result["scanned"] == 0
+        assert result["accepted"] == 0
 
     @pytest.mark.asyncio
     async def test_due_reminder_delivered_marks_fired(self):
@@ -72,18 +73,17 @@ class TestHandleSchedulerTick:
         send_result = _make_decision(delivered=True, desktop_queued_count=1)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
-            with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
-                with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
-                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Take meds"))):
-                        with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
+            with patch(f"{_DELIVERY}.claim_reminder_for_processing", return_value=True):
+                with patch(f"{_DELIVERY}.mark_reminder_fired") as mock_mark:
+                    with patch(f"{_DELIVERY}.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Take meds"))):
+                        with patch(f"{_DELIVERY}.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                             with _patch_gc():
                                 result = await handle_scheduler_tick()
 
-        body = json.loads(result["body"])
-        assert body["scanned"] == 1
-        assert body["accepted"] == 1
-        assert body["mobile_accepted"] == 1
-        assert body["desktop_queued"] == 1
+        assert result["scanned"] == 1
+        assert result["accepted"] == 1
+        assert result["mobile_accepted"] == 1
+        assert result["desktop_queued"] == 1
         mock_mark.assert_called_once_with("u1", "r1")
 
     @pytest.mark.asyncio
@@ -98,14 +98,13 @@ class TestHandleSchedulerTick:
         send_result = _make_decision(delivered=False, tokens_targeted=0, success_count=0)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
-            with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
-                with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Stand up"))):
-                    with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
+            with patch(f"{_DELIVERY}.mark_reminder_fired") as mock_mark:
+                with patch(f"{_DELIVERY}.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Stand up"))):
+                    with patch(f"{_DELIVERY}.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                         with _patch_gc():
                             result = await handle_scheduler_tick()
 
-        body = json.loads(result["body"])
-        assert body["accepted"] == 0
+        assert result["accepted"] == 0
         mock_mark.assert_not_called()
 
     @pytest.mark.asyncio
@@ -132,16 +131,15 @@ class TestHandleSchedulerTick:
             return good_result
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
-            with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
-                with patch("src.handlers.scheduler.mark_reminder_fired") as mock_mark:
-                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="msg"))):
-                        with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(side_effect=send_side_effect)):
+            with patch(f"{_DELIVERY}.claim_reminder_for_processing", return_value=True):
+                with patch(f"{_DELIVERY}.mark_reminder_fired") as mock_mark:
+                    with patch(f"{_DELIVERY}.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="msg"))):
+                        with patch(f"{_DELIVERY}.orchestrator.submit", new=AsyncMock(side_effect=send_side_effect)):
                             with _patch_gc():
                                 result = await handle_scheduler_tick()
 
-        body = json.loads(result["body"])
-        assert body["scanned"] == 2
-        assert body["accepted"] == 1
+        assert result["scanned"] == 2
+        assert result["accepted"] == 1
         mock_mark.assert_called_once_with("u2", "r_ok")
 
     @pytest.mark.asyncio
@@ -152,9 +150,8 @@ class TestHandleSchedulerTick:
             with _patch_gc():
                 result = await handle_scheduler_tick()
 
-        assert result["statusCode"] == 500
-        body = json.loads(result["body"])
-        assert "error" in body
+        assert result["status_code"] == 500
+        assert "error" in result
 
     @pytest.mark.asyncio
     async def test_missing_message_field_defaults_to_reminder_due_now(self):
@@ -169,10 +166,10 @@ class TestHandleSchedulerTick:
         send_result = _make_decision(delivered=True)
 
         with patch("src.handlers.scheduler.fetch_due_reminders", return_value=due):
-            with patch("src.handlers.scheduler.claim_reminder_for_processing", return_value=True):
-                with patch("src.handlers.scheduler.mark_reminder_fired"):
-                    with patch("src.handlers.scheduler.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Reminder due now"))) as mock_rw:
-                        with patch("src.handlers.scheduler.orchestrator.submit", new=AsyncMock(return_value=send_result)):
+            with patch(f"{_DELIVERY}.claim_reminder_for_processing", return_value=True):
+                with patch(f"{_DELIVERY}.mark_reminder_fired"):
+                    with patch(f"{_DELIVERY}.rewrite_reminder_notification", new=AsyncMock(return_value=ReminderCopy(title="", body="Reminder due now"))) as mock_rw:
+                        with patch(f"{_DELIVERY}.orchestrator.submit", new=AsyncMock(return_value=send_result)):
                             with _patch_gc():
                                 await handle_scheduler_tick()
 

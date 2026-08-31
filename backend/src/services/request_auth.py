@@ -74,32 +74,3 @@ def resolve_user_id_from_request(
     return resolve_user_id(request.headers, explicit_user_id=explicit_user_id)
 
 
-def resolve_user_id_from_event(
-    event: dict,
-    *,
-    body: dict | None = None,
-) -> str | None:
-    """Extract uid from the handler event produced by main._to_handler_event.
-
-    firebase-admin's verify_id_token sets 'uid' at the top level of the claims
-    dict AND also includes 'sub' (the JWT standard claim — same value).  We
-    prefer 'uid' first for clarity, then fall back to 'sub'.
-
-    In non-production only: also accepts 'user_id' from the request body so
-    local curl/Postman tests don't require a live Firebase token.
-    """
-    try:
-        claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
-        uid = claims.get("uid") or claims.get("sub")
-        if isinstance(uid, str) and uid:
-            return uid
-    except (KeyError, TypeError):
-        pass
-
-    if not settings.is_production and body:
-        uid = body.get("user_id")
-        if isinstance(uid, str) and uid:
-            logger.warn("REST auth: using dev body fallback user_id", {"user_id": uid})
-            return uid
-
-    return None

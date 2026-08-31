@@ -3,80 +3,37 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import html
-import secrets
 import urllib.parse
-from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from google.cloud import firestore as gcloud_firestore
 from pydantic import BaseModel, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..services.firebase import admin_firestore
-from ..services.gmail_connector import GmailConnector
-from ..services.google_calendar_connector import GoogleCalendarConnector
-from ..services.request_auth import resolve_user_id_from_request
-from .connectors import _resolve_watch_url
-
-ATTEMPTS_COLLECTION = "connector_oauth_attempts"
-ATTEMPT_TTL_SECONDS = 10 * 60
-CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
-GMAIL_SCOPES = (
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
+from ..services.connector_oauth import (
+    ATTEMPT_ID_LENGTH,
+    ATTEMPT_TTL_SECONDS,
+    ConnectorName,
+    claim_attempt,
+    complete_connection,
+    create_attempt,
+    finish_attempt,
+    resolve_watch_url,
 )
-GMAIL_SCOPE = " ".join(GMAIL_SCOPES)
-GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
-
-ConnectorName = Literal["google_calendar", "gmail"]
+from ..services.request_auth import resolve_user_id_from_request
 
 
 class ConnectorOAuthStartBody(BaseModel):
     connector: ConnectorName
 
 
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-def _pkce_pair() -> tuple[str, str]:
-    verifier = secrets.token_urlsafe(64)
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
-
-
-def _scope_for(connector: ConnectorName) -> str:
-    return CALENDAR_SCOPE if connector == "google_calendar" else GMAIL_SCOPE
-
-
-def _authorization_url(
-    *,
-    connector: ConnectorName,
-    state: str,
-    code_challenge: str,
-) -> str:
-    query = urllib.parse.urlencode(
-        {
-            "client_id": settings.GOOGLE_CLIENT_ID,
-            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-            "response_type": "code",
-            "scope": _scope_for(connector),
-            "access_type": "offline",
-            "include_granted_scopes": "true",
-            "prompt": "consent",
-            "state": state,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-        }
+def _watch_url_from_request(request: Request) -> str | None:
+    return resolve_watch_url(
+        proto=request.headers.get("x-forwarded-proto") or request.url.scheme,
+        host=request.headers.get("x-forwarded-host") or request.headers.get("host"),
     )
-    return f"{GOOGLE_AUTHORIZATION_ENDPOINT}?{query}"
 
 
 def _completion_url(
@@ -153,24 +110,11 @@ async def start_connector_oauth(request: Request) -> JSONResponse:
     ):
         return JSONResponse(status_code=503, content={"error": "google_oauth_not_configured"})
 
-    attempt_id = secrets.token_urlsafe(32)
-    verifier, challenge = _pkce_pair()
-    now = _utc_now()
-    expires_at = now + timedelta(seconds=ATTEMPT_TTL_SECONDS)
-    attempt = {
-        "uid": user_id,
-        "connector": body.connector,
-        "status": "pending",
-        "code_verifier": verifier,
-        "created_at": now,
-        "expires_at": expires_at,
-    }
-
-    def _create() -> None:
-        admin_firestore().collection(ATTEMPTS_COLLECTION).document(attempt_id).create(attempt)
+    def _create() -> tuple[str, str]:
+        return create_attempt(user_id=user_id, connector=body.connector)
 
     try:
-        await asyncio.to_thread(_create)
+        attempt_id, authorization_url = await asyncio.to_thread(_create)
     except Exception as exc:
         logger.exception(
             "ConnectorOAuth: attempt creation failed",
@@ -182,60 +126,16 @@ async def start_connector_oauth(request: Request) -> JSONResponse:
         status_code=200,
         content={
             "attempt_id": attempt_id,
-            "authorization_url": _authorization_url(
-                connector=body.connector,
-                state=attempt_id,
-                code_challenge=challenge,
-            ),
+            "authorization_url": authorization_url,
             "expires_in_seconds": ATTEMPT_TTL_SECONDS,
         },
         headers={"Cache-Control": "no-store"},
     )
 
 
-def _claim_attempt(attempt_id: str) -> tuple[str, dict[str, Any] | None]:
-    db = admin_firestore()
-    ref = db.collection(ATTEMPTS_COLLECTION).document(attempt_id)
-    transaction = db.transaction()
-    now = _utc_now()
-
-    @gcloud_firestore.transactional
-    def _claim(txn) -> tuple[str, dict[str, Any] | None]:
-        snapshot = ref.get(transaction=txn)
-        data = snapshot.to_dict() if snapshot.exists else None
-        if not data:
-            return "invalid", None
-        status = data.get("status")
-        expires_at = data.get("expires_at")
-        if status == "completed":
-            return "completed", data
-        if status != "pending":
-            return "invalid", None
-        if not isinstance(expires_at, datetime):
-            return "invalid", None
-        aware_expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=UTC)
-        if aware_expiry <= now:
-            return "expired", None
-        txn.update(ref, {"status": "processing", "processing_at": now})
-        return "claimed", data
-
-    return _claim(transaction)
-
-
-def _finish_attempt(attempt_id: str, *, status: str, error_code: str | None = None) -> None:
-    payload: dict[str, Any] = {
-        "status": status,
-        "completed_at": _utc_now(),
-        "code_verifier": gcloud_firestore.DELETE_FIELD,
-    }
-    if error_code:
-        payload["error_code"] = error_code
-    admin_firestore().collection(ATTEMPTS_COLLECTION).document(attempt_id).update(payload)
-
-
 async def complete_connector_oauth(request: Request) -> HTMLResponse:
     attempt_id = request.query_params.get("state", "")
-    if len(attempt_id) != 43:
+    if len(attempt_id) != ATTEMPT_ID_LENGTH:
         return _completion_page(
             title="This connection expired",
             message="Return to Aura and try connecting again.",
@@ -243,7 +143,7 @@ async def complete_connector_oauth(request: Request) -> HTMLResponse:
         )
 
     try:
-        claim_status, attempt = await asyncio.to_thread(_claim_attempt, attempt_id)
+        claim_status, attempt = await asyncio.to_thread(claim_attempt, attempt_id)
     except Exception as exc:
         logger.exception("ConnectorOAuth: claim failed", {"error": str(exc)})
         return _completion_page(
@@ -275,7 +175,7 @@ async def complete_connector_oauth(request: Request) -> HTMLResponse:
     code = request.query_params.get("code")
     if not code:
         await asyncio.to_thread(
-            _finish_attempt,
+            finish_attempt,
             attempt_id,
             status="cancelled",
             error_code="consent_cancelled",
@@ -291,31 +191,22 @@ async def complete_connector_oauth(request: Request) -> HTMLResponse:
         )
 
     try:
-        if connector == "google_calendar":
-            await asyncio.to_thread(
-                GoogleCalendarConnector(str(attempt["uid"])).connect,
-                code,
-                watch_url=_resolve_watch_url(request),
-                redirect_uri=settings.GOOGLE_REDIRECT_URI,
-                code_verifier=str(attempt["code_verifier"]),
-            )
-        elif connector == "gmail":
-            await asyncio.to_thread(
-                GmailConnector(str(attempt["uid"])).connect,
-                code,
-                redirect_uri=settings.GOOGLE_REDIRECT_URI,
-                code_verifier=str(attempt["code_verifier"]),
-            )
-        else:
-            raise ValueError("invalid connector")
-        await asyncio.to_thread(_finish_attempt, attempt_id, status="completed")
+        await asyncio.to_thread(
+            complete_connection,
+            connector=connector,
+            uid=str(attempt["uid"]),
+            code=code,
+            code_verifier=str(attempt["code_verifier"]),
+            watch_url=_watch_url_from_request(request),
+        )
+        await asyncio.to_thread(finish_attempt, attempt_id, status="completed")
     except Exception as exc:
         logger.exception(
             "ConnectorOAuth: completion failed",
             {"connector": connector, "error": str(exc)},
         )
         await asyncio.to_thread(
-            _finish_attempt,
+            finish_attempt,
             attempt_id,
             status="failed",
             error_code="connection_failed",

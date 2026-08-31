@@ -59,7 +59,9 @@ _INTERROGATIVE = re.compile(
     r"want|is there|are there)\b",
     re.I,
 )
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+# Public: shared/capability_claims.py imports this so both guards agree on what
+# a sentence is.
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def explicitly_requests_reminder_create(message: str) -> bool:
@@ -72,7 +74,7 @@ def explicitly_requests_reminder_create(message: str) -> bool:
 
 def has_unreceipted_reminder_success_claim(text: str) -> bool:
     """Detect a declarative reminder-success claim before it reaches the client."""
-    for sentence in _SENTENCE_SPLIT.split((text or "").strip()):
+    for sentence in SENTENCE_SPLIT.split((text or "").strip()):
         if sentence and not _INTERROGATIVE.search(sentence):
             if _REMINDER_SUCCESS_CLAIM.search(sentence):
                 return True

@@ -4,24 +4,25 @@ Google Calendar connector lifecycle, webhook ingestion, and cached event sync.
 
 from __future__ import annotations
 
-import json
 import secrets
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.cloud import firestore as fs
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
 from ..config.settings import settings
 from ..lib.logger import logger
 from .firebase import admin_firestore
+from .google_connector_base import (
+    GoogleConnectorBase,
+    ReauthorizationRequired,
+    _parse_iso,
+    _to_iso,
+    _utc_now,
+)
+from .google_oauth import exchange_server_auth_code
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 CHANNELS_COLLECTION = "google_calendar_channels"
@@ -30,26 +31,8 @@ CONNECTOR_DOC_ID = "google_calendar"
 SOURCE_DOC_ID = "primary"
 
 
-class GoogleCalendarReauthorizationRequired(Exception):
+class GoogleCalendarReauthorizationRequired(ReauthorizationRequired):
     """Stored Google credentials can no longer authorize Calendar access."""
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-def _to_iso(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=UTC)
-    return value.astimezone(UTC).isoformat()
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -77,7 +60,7 @@ def _format_local_display(value: datetime | None, tz: ZoneInfo) -> str | None:
     """
     if value is None:
         return None
-    
+
     local = value.astimezone(tz)
     hour12 = local.hour % 12 or 12
     return local.strftime(f"%a, %b {local.day}, {hour12}:%M %p %Z")
@@ -104,18 +87,15 @@ def _event_range_to_utc(
     return None, False, None
 
 
-class GoogleCalendarConnector:
-    def __init__(self, user_id: str) -> None:
-        self._user_id = user_id
-
-    def _db(self) -> fs.Client:
-        return admin_firestore()
-
-    def _user_ref(self) -> fs.DocumentReference:
-        return self._db().collection("users").document(self._user_id)
-
-    def _integration_ref(self) -> fs.DocumentReference:
-        return self._user_ref().collection("integrations").document(CONNECTOR_DOC_ID)
+class GoogleCalendarConnector(GoogleConnectorBase):
+    CONNECTOR_DOC_ID = CONNECTOR_DOC_ID
+    SCOPES = [CALENDAR_SCOPE]
+    SCOPE_STRING = CALENDAR_SCOPE
+    API_NAME = "calendar"
+    API_VERSION = "v3"
+    NOT_CONNECTED_ERROR = "Google Calendar is not connected."
+    EXPIRED_ERROR = "Google Calendar connection has expired. Reconnect required."
+    REAUTH_MESSAGE = "Google Calendar authorization is required."
 
     def _source_ref(self, calendar_id: str = SOURCE_DOC_ID) -> fs.DocumentReference:
         return self._user_ref().collection("calendar_sources").document(calendar_id)
@@ -130,127 +110,12 @@ class GoogleCalendarConnector:
         job_id = f"{self._user_id}__{calendar_id.replace('/', '_')}"
         return self._db().collection(SYNC_JOBS_COLLECTION).document(job_id)
 
-    def _load_integration(self) -> dict[str, Any]:
-        doc = self._integration_ref().get()
-        return doc.to_dict() or {}
-
     def _load_source(self, calendar_id: str = SOURCE_DOC_ID) -> dict[str, Any]:
         doc = self._source_ref(calendar_id).get()
         return doc.to_dict() or {}
 
-    def _exchange_server_auth_code(
-        self,
-        auth_code: str,
-        *,
-        redirect_uri: str | None = None,
-        code_verifier: str | None = None,
-    ) -> dict[str, Any]:
-        form_fields: dict[str, str] = {
-            "code": auth_code,
-            "client_id": settings.GOOGLE_CLIENT_ID,
-            "client_secret": settings.GOOGLE_CLIENT_SECRET,
-            "grant_type": "authorization_code",
-        }
-        if redirect_uri:
-            form_fields["redirect_uri"] = redirect_uri
-        if code_verifier:
-            form_fields["code_verifier"] = code_verifier
-        form = urllib.parse.urlencode(form_fields).encode("utf-8")
-
-        request = urllib.request.Request(
-            "https://oauth2.googleapis.com/token",
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            logger.error("Google OAuth code exchange failed", {
-                "user_id": self._user_id,
-                "status": exc.code,
-                "body": body[:300],
-            })
-            raise ValueError(f"Google token exchange failed ({exc.code}): {body[:200]}") from exc
-        except Exception as exc:
-            logger.exception("Google OAuth code exchange failed", {
-                "user_id": self._user_id,
-                "error": str(exc),
-            })
-            raise
-
-    def _credentials_from_integration(self) -> Credentials | None:
-        data = self._load_integration()
-        refresh_token = data.get("refresh_token")
-        access_token = data.get("access_token")
-        if not refresh_token and not access_token:
-            return None
-
-        creds = Credentials(
-            token=access_token,
-            refresh_token=refresh_token,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=settings.GOOGLE_CLIENT_ID,
-            client_secret=settings.GOOGLE_CLIENT_SECRET,
-            scopes=[CALENDAR_SCOPE],
-        )
-        expiry = _parse_iso(data.get("expiry_at"))
-        if expiry is not None:
-            creds.expiry = expiry.replace(tzinfo=None)  # google-auth compares against datetime.utcnow() (naive)
-        return creds
-
-    def _persist_credentials(
-        self,
-        *,
-        access_token: str | None,
-        refresh_token: str | None,
-        expiry_at: datetime | None,
-        enabled: bool = True,
-        last_error: str | None = None,
-    ) -> None:
-        now = _utc_now()
-        existing = self._load_integration()
-        payload: dict[str, Any] = {
-            "provider": CONNECTOR_DOC_ID,
-            "enabled": enabled,
-            "scope": CALENDAR_SCOPE,
-            "updated_at": _to_iso(now),
-            "last_error": last_error,
-        }
-        if access_token:
-            payload["access_token"] = access_token
-        if refresh_token:
-            payload["refresh_token"] = refresh_token
-        elif existing.get("refresh_token"):
-            payload["refresh_token"] = existing.get("refresh_token")
-        if expiry_at:
-            payload["expiry_at"] = _to_iso(expiry_at)
-        if not existing:
-            payload["connected_at"] = _to_iso(now)
-
-        self._integration_ref().set(payload, merge=True)
-
     def _calendar_client(self, refresh: bool = True) -> Any:
-        integration = self._load_integration()
-        creds = self._credentials_from_integration()
-        if creds is None:
-            raise ValueError("Google Calendar is not connected.")
-
-        if refresh and (not creds.valid or creds.expired):
-            if not creds.refresh_token:
-                raise ValueError("Google Calendar connection has expired. Reconnect required.")
-            creds.refresh(GoogleAuthRequest())
-            self._persist_credentials(
-                access_token=creds.token,
-                refresh_token=creds.refresh_token,
-                expiry_at=creds.expiry,
-                enabled=bool(integration.get("enabled")),
-            )
-
-        return build("calendar", "v3", credentials=creds, cache_discovery=False)
+        return self._build_api_client(refresh=refresh)
 
     def calendar_client(self, refresh: bool = True) -> Any:
         return self._calendar_client(refresh=refresh)
@@ -296,11 +161,18 @@ class GoogleCalendarConnector:
         redirect_uri: str | None = None,
         code_verifier: str | None = None,
     ) -> dict[str, Any]:
-        token_data = self._exchange_server_auth_code(
-            auth_code,
-            redirect_uri=redirect_uri,
-            code_verifier=code_verifier,
-        )
+        try:
+            token_data = exchange_server_auth_code(
+                auth_code,
+                redirect_uri=redirect_uri,
+                code_verifier=code_verifier,
+            )
+        except Exception as exc:
+            logger.error("Google OAuth code exchange failed", {
+                "user_id": self._user_id,
+                "error": str(exc),
+            })
+            raise
         expires_in = int(token_data.get("expires_in", 3600) or 3600)
         expiry_at = _utc_now() + timedelta(seconds=expires_in)
 
@@ -329,20 +201,6 @@ class GoogleCalendarConnector:
 
         return self.get_status()
 
-    @staticmethod
-    def _requires_reauthorization(exc: Exception) -> bool:
-        message = str(exc).lower()
-        return any(
-            marker in message
-            for marker in (
-                "invalid_grant",
-                "token has been expired or revoked",
-                "token_revoked",
-                "reconnect required",
-                "not connected",
-            )
-        )
-
     def enable(self, *, watch_url: str | None) -> dict[str, Any]:
         integration = self._load_integration()
         if not integration.get("refresh_token") and not integration.get("access_token"):
@@ -354,14 +212,7 @@ class GoogleCalendarConnector:
             self._sync_calendar(reason="manual_reenable", force_full_sync=True)
         except Exception as exc:
             if self._requires_reauthorization(exc):
-                self._integration_ref().set(
-                    {
-                        "enabled": False,
-                        "last_error": "Google Calendar authorization is required.",
-                        "updated_at": _to_iso(_utc_now()),
-                    },
-                    merge=True,
-                )
+                self._mark_reauthorization_required()
                 raise GoogleCalendarReauthorizationRequired(
                     "Google Calendar authorization is required."
                 ) from exc
@@ -384,14 +235,7 @@ class GoogleCalendarConnector:
                     {"user_id": self._user_id, "error": str(exc)},
                 )
 
-        self._integration_ref().set(
-            {
-                "enabled": True,
-                "last_error": None,
-                "updated_at": _to_iso(_utc_now()),
-            },
-            merge=True,
-        )
+        self._write_enabled_state(True)
         return self.get_status()
 
     def disable(self) -> dict[str, Any]:
@@ -421,14 +265,7 @@ class GoogleCalendarConnector:
         self._job_ref().delete()
         self._purge_calendar_cache()
         self._source_ref().delete()
-        self._integration_ref().set(
-            {
-                "enabled": False,
-                "last_error": None,
-                "updated_at": _to_iso(_utc_now()),
-            },
-            merge=True,
-        )
+        self._write_enabled_state(False)
         return self.get_status()
 
     def disconnect(self) -> dict[str, Any]:
@@ -980,7 +817,7 @@ class GoogleCalendarConnector:
         when Google push notifications are missed, watch channels expire undetected,
         or deliveries are dropped (which Google explicitly documents as possible).
 
-        Uses incremental sync via sync_token — lightweight delta fetch, not a full
+        Uses incremental sync via sync_token: lightweight delta fetch, not a full
         re-download. On first call or after a 410 token invalidation, falls back
         to a full sync automatically (handled inside _sync_calendar).
 
@@ -995,9 +832,9 @@ class GoogleCalendarConnector:
         db = admin_firestore()
 
         # google_calendar_channels holds one doc per connected user (including
-        # users whose channel has expired but was never replaced — they are the
+        # users whose channel has expired but was never replaced -- they are the
         # ones who most need a fallback sync). Dedup by user_id. The .limit() is a
-        # growth guard only (current connected-user counts are far below it) —
+        # growth guard only (current connected-user counts are far below it) --
         # this scan has no other filter, so it's the one place read cost scales
         # with total connected-channel count rather than a bounded query.
         channel_docs = list(db.collection(CHANNELS_COLLECTION).limit(2000).stream())
@@ -1024,14 +861,13 @@ class GoogleCalendarConnector:
                 return "synced"
             except Exception as exc:
                 error_str = str(exc)
-                # OAuth revoked or token permanently expired — disable the integration
+                # OAuth revoked or token permanently expired: disable the integration
                 # so the user is prompted to reconnect rather than seeing stale data.
-                if any(kw in error_str.lower() for kw in ("invalid_grant", "token has been expired or revoked", "token_revoked")):
+                # Uses the same classifier and disable write as the interactive
+                # enable path so both paths classify revocations identically.
+                if cls._requires_reauthorization(exc):
                     try:
-                        cls(user_id)._integration_ref().set(
-                            {"enabled": False, "last_error": f"OAuth revoked — please reconnect: {error_str[:200]}"},
-                            merge=True,
-                        )
+                        cls(user_id)._mark_reauthorization_required()
                     except Exception:
                         pass
                 logger.error("GoogleCalendarConnector.sync_all_connected_users: per-user sync failed", {

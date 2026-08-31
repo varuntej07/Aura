@@ -4,7 +4,10 @@ Dodo is the merchant of record for the web-only subscription (Companion / Pro).
 The purchase handshake is metadata: /billing/checkout stamps the caller's
 firebase_uid into the Dodo checkout session, so every later webhook already
 knows which account it belongs to and this module can upsert
-users/{uid}/entitlement/current as the doc's only backend writer.
+users/{uid}/entitlement/current. (This module is the tier writer, not the
+doc's only backend writer: the first-contact trial stamp in
+services/entitlement.py and the notified markers in
+services/entitlement_notifications.py also write that doc.)
 
 Two non-negotiables (see SUBSCRIPTION_PLAN.md section 6 and the implementation
 prompt's ground rules):
@@ -32,12 +35,14 @@ import base64
 import hashlib
 import hmac
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from .entitlement import entitlement_doc_ref, has_active_paid_subscription, normalize_status
 from .firebase import admin_auth
 
 _DODO_TIMEOUT_S = 15.0
@@ -141,6 +146,55 @@ async def _fetch_customer_identity(uid: str) -> tuple[str, str] | None:
         })
         return None
     return email, name
+
+
+@dataclass(frozen=True)
+class CheckoutEligibility:
+    """Verdict on whether an account may create a checkout session right now.
+
+    blocked_reason is None when checkout is allowed, else "trial_active" or
+    "already_subscribed". tier/status/cancel_at_period_end describe the doc for
+    the handler's error body; customer_id is the existing Dodo customer the
+    session must be pinned to (None when the account has none yet).
+    """
+
+    blocked_reason: str | None
+    tier: str
+    status: str
+    cancel_at_period_end: bool
+    customer_id: str | None
+
+
+def evaluate_checkout_eligibility(entitlement: dict) -> CheckoutEligibility:
+    """Checkout policy for one already-fetched entitlement doc. Pure.
+
+    Every account gets the full 45-day trial before it can purchase (enforced
+    on the authenticated backend route as well as in the client so a stale or
+    modified client cannot create an early checkout session), and one live
+    paid subscription per account, including cancelled-but-not-yet-expired:
+    the user un-cancels through the portal instead of stacking subscriptions.
+    An account with a lapsed subscription reuses its existing Dodo customer so
+    a re-purchase never mints a second customer record.
+    """
+    tier = str(entitlement.get("tier", ""))
+    status = normalize_status(entitlement)
+    cancel_at_period_end = bool(entitlement.get("cancel_at_period_end", False))
+    customer_id = str(entitlement.get("dodo_customer_id", "")).strip() or None
+
+    if status == "trialing":
+        blocked_reason: str | None = "trial_active"
+    elif has_active_paid_subscription(entitlement):
+        blocked_reason = "already_subscribed"
+    else:
+        blocked_reason = None
+
+    return CheckoutEligibility(
+        blocked_reason=blocked_reason,
+        tier=tier,
+        status=status,
+        cancel_at_period_end=cancel_at_period_end,
+        customer_id=customer_id,
+    )
 
 
 async def create_checkout_session(
@@ -492,12 +546,7 @@ def _apply_webhook_txn(
 
     db = admin_firestore()
     claim_ref = db.collection(BILLING_EVENTS_COLLECTION).document(event_id)
-    ent_ref = (
-        db.collection("users")
-        .document(uid)
-        .collection("entitlement")
-        .document("current")
-    )
+    ent_ref = entitlement_doc_ref(uid, db)
     transaction = db.transaction()
 
     @gcloud_firestore.transactional
@@ -585,7 +634,7 @@ async def _send_entitlement_updated(uid: str, event_id: str, write: dict) -> Non
 
 
 # ── Webhook entry point ──────────────────────────────────────────────────────
-def parse_event_occurred_at(envelope_timestamp, header_timestamp: str) -> datetime | None:
+def _parse_event_occurred_at(envelope_timestamp, header_timestamp: str) -> datetime | None:
     """When the event happened, for the staleness guard: the envelope's ISO
     timestamp first, else the webhook-timestamp header (unix seconds)."""
     parsed = _parse_dodo_timestamp(envelope_timestamp)
@@ -595,6 +644,20 @@ def parse_event_occurred_at(envelope_timestamp, header_timestamp: str) -> dateti
         return datetime.fromtimestamp(int(header_timestamp), UTC)
     except (TypeError, ValueError, OSError, OverflowError):
         return None
+
+
+async def process_webhook_envelope(
+    event_id: str, envelope: dict, header_timestamp: str
+) -> dict:
+    """Decomposes one signature-verified webhook envelope (type, data,
+    occurred_at) and applies it via process_webhook_event. The handler hands
+    over the parsed JSON dict as-is; the envelope shape is billing's to own."""
+    event_type = str(envelope.get("type", ""))
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    occurred_at = _parse_event_occurred_at(envelope.get("timestamp"), header_timestamp)
+    return await process_webhook_event(event_id, event_type, data, occurred_at)
 
 
 async def process_webhook_event(

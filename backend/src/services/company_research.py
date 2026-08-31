@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from ..config.settings import settings
 from ..lib.logger import logger
 from .analytics.llm_telemetry import (
+    openai_responses_usage_tokens,
     start_llm_generation,
 )
 
@@ -169,19 +170,6 @@ def _get_client() -> Any:
 
         _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY.strip())
     return _client
-
-
-def _usage_tokens(usage: Any) -> dict[str, int]:
-    details = getattr(usage, "input_tokens_details", None)
-    cached = int(getattr(details, "cached_tokens", 0) or 0)
-    total_input = int(getattr(usage, "input_tokens", 0) or 0)
-    tokens = {
-        "input": max(0, total_input - cached),
-        "output": int(getattr(usage, "output_tokens", 0) or 0),
-    }
-    if cached:
-        tokens["cache_read_input_tokens"] = cached
-    return tokens
 
 
 def _canonical_url(value: str) -> str:
@@ -428,7 +416,7 @@ async def _research_company_once(
     except BaseException as exc:
         recording.finish(success=False, error_type=type(exc).__name__)
         raise
-    recording.finish(tokens=_usage_tokens(getattr(response, "usage", None)))
+    recording.finish(tokens=openai_responses_usage_tokens(getattr(response, "usage", None)))
     result = _assemble(response, payload)
     _log_complete(result)
     return result
@@ -606,7 +594,7 @@ async def research_company_streaming(
         yield result
         return
 
-    recording.finish(tokens=_usage_tokens(getattr(response, "usage", None)))
+    recording.finish(tokens=openai_responses_usage_tokens(getattr(response, "usage", None)))
     result = _assemble(response, payload)
     await _store_result(key, result)
     _log_complete(result)

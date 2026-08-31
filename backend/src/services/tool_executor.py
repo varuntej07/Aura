@@ -729,15 +729,22 @@ class ToolExecutor:
         ))
 
         # Mirror the creation into PostHog so the product dashboard can count how
-        # many reminders users actually set. Fire-and-forget: capture_event never
-        # raises, and the task is detached so it cannot slow the tool response.
-        from .analytics.posthog_client import capture_event
+        # many reminders users actually set. Detached so it cannot slow the tool
+        # response, but the capture is awaited and the SDK queue flushed inside
+        # the task: Cloud Run can freeze the instance once the turn returns, and
+        # an unflushed queue silently drops the event (mirrors the scheduler and
+        # briefing engine flush-after-capture pattern).
+        from .analytics import posthog_client
 
-        asyncio.create_task(capture_event(
-            distinct_id=self._user_id,
-            event="reminder_created",
-            properties={"tier": tier},
-        ))
+        async def _capture_reminder_created() -> None:
+            await posthog_client.capture_event(
+                distinct_id=self._user_id,
+                event="reminder_created",
+                properties={"tier": tier},
+            )
+            await posthog_client.flush()
+
+        asyncio.create_task(_capture_reminder_created())
 
         result: ToolResult = {
             "reminder_id": reminder_id,

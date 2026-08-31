@@ -1,9 +1,9 @@
 """
 Cloud Storage — screen-save images.
 
-This is the first feature in this backend that persists a blob (every other
-store is Firestore-only), so this module is genuinely new infrastructure, not
-a reuse of an existing pattern. Bucket layout:
+One of several features that persist blobs (dictation and meeting audio live in
+services/dictation/gcs_audio.py and services/meetings/gcs_audio.py); the shared
+storage client singleton lives in services/immutable_gcs.py. Bucket layout:
 
     screen_saves/{uid}/{item_id}.jpg
 
@@ -22,20 +22,10 @@ at the first ``signed_url_for`` call, not at import time.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from ..config.settings import settings
 from ..lib.logger import logger
-
-_client_singleton: Any = None
-
-
-def _client() -> Any:
-    global _client_singleton
-    if _client_singleton is None:
-        from google.cloud import storage  # type: ignore
-        _client_singleton = storage.Client()
-    return _client_singleton
+from .immutable_gcs import client as _client
 
 
 def object_path_for(uid: str, item_id: str) -> str:

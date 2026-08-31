@@ -44,40 +44,7 @@ REMINDER_RECEIPT_UPDATED = "updated"
 REMINDER_RECEIPT_EXISTING = "existing"
 
 
-def reminder_ui_payload(
-    receipt: Any, tool_names: list[str] | tuple[str, ...]
-) -> dict[str, Any] | None:
-    """Return a reminder receipt only when this turn changed reminder state.
-
-    Deduplication is a successful tool outcome for the model, but an unchanged
-    pre-existing reminder is not a newly-created UI artifact.  Keeping this
-    distinction structural prevents an old receipt from replacing an unrelated
-    answer without inspecting the user's words or the model's prose.
-    """
-    if not isinstance(receipt, dict):
-        return None
-    raw_status = receipt.get("receipt_status")
-    if raw_status is None:
-        # Canonical transcripts written before receipt outcomes existed are
-        # already trusted creation artifacts. Preserve their exact shape so old
-        # sessions keep hydrating without a migration.
-        return dict(receipt)
-    status = str(raw_status)
-    if status == REMINDER_RECEIPT_EXISTING:
-        return None
-    payload = dict(receipt)
-    payload["receipt_status"] = status
-    payload["display_mode"] = (
-        "supplemental"
-        if any(name != "set_reminder" for name in tool_names)
-        else "standalone"
-    )
-    return payload
-
-
-def resolve_set_reminder_tier(
-    message: str, supplied_tier: Any, *, user_instruction: str = ""
-) -> str:
+def resolve_set_reminder_tier(supplied_tier: Any) -> str:
     """Return the caller-supplied tier, defaulting to the quiet one.
 
     The tier used to be inferred from the wording when the model omitted it
@@ -87,7 +54,6 @@ def resolve_set_reminder_tier(
     tier in the schema; if it does not, the quiet tier is the safe default,
     because a missed alarm is recoverable and a surprise 6am siren is not.
     """
-    del message, user_instruction
     supplied = str(supplied_tier or "").strip().lower()
     return supplied if supplied in {"reminder", "alarm"} else "reminder"
 
@@ -934,13 +900,15 @@ _TOOL_INPUT_SCHEMAS = {
     for tool_definition in TOOL_DEFINITIONS
 }
 
+# Derived once from TOOL_DEFINITIONS, so the lookup cannot diverge from the list.
+_TOOL_DEFINITIONS_BY_NAME = {
+    tool_definition["name"]: tool_definition for tool_definition in TOOL_DEFINITIONS
+}
+
 
 def tool_definition(tool_name: str) -> dict[str, Any] | None:
     """Return an isolated copy of one canonical tool contract."""
-    definition = next(
-        (tool for tool in TOOL_DEFINITIONS if tool["name"] == tool_name),
-        None,
-    )
+    definition = _TOOL_DEFINITIONS_BY_NAME.get(tool_name)
     return deepcopy(definition) if definition is not None else None
 
 

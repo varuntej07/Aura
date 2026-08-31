@@ -454,11 +454,19 @@ async def handle_acknowledge_alarm(request: Request, reminder_id: str) -> JSONRe
         "snooze_count": update.get("snooze_count"),
     })
 
-    from ..services.analytics.posthog_client import capture_event
+    from ..services.analytics import posthog_client
 
-    asyncio.create_task(capture_event(
-        distinct_id=user_id,
-        event="alarm_acked",
-        properties={"action": action, "snooze_count": update.get("snooze_count", 0)},
-    ))
+    async def _capture_alarm_acked() -> None:
+        # Await the capture then drain the SDK queue in the same detached task:
+        # Cloud Run can freeze the instance once the response returns, so an
+        # unflushed queue silently drops the event (mirrors the scheduler and
+        # briefing engine flush-after-capture pattern).
+        await posthog_client.capture_event(
+            distinct_id=user_id,
+            event="alarm_acked",
+            properties={"action": action, "snooze_count": update.get("snooze_count", 0)},
+        )
+        await posthog_client.flush()
+
+    asyncio.create_task(_capture_alarm_acked())
     return JSONResponse(response)

@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...lib.logger import logger
-from ...shared.tools import REMINDER_RECEIPT_EXISTING, reminder_ui_payload
+from ...shared.tools import REMINDER_RECEIPT_EXISTING
 from .. import desktop_chat_store
 from ..action_intent_policy import blocked_write_reasons_for_text_turn
 from ..claude_client import ClaudeClient
@@ -32,6 +32,7 @@ from ..tool_executor import (
 )
 from . import context_assembler, tool_idempotency, turn_store
 from .prompt_builder import build_turn_system_blocks, build_user_content
+from .reminder_receipts import reminder_ui_payload
 
 # Tools whose effect cannot be safely reproduced by a fresh, non-deterministic LLM run.
 _REGEN_EXCLUDED_TOOLS = frozenset({"send_email", "start_research"})

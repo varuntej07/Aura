@@ -3,24 +3,25 @@ from __future__ import annotations
 import urllib.parse
 
 from src.handlers import connector_oauth
+from src.services import connector_oauth as connector_oauth_service
 
 
 def test_authorization_url_is_connector_scoped_and_backend_owned(monkeypatch):
-    monkeypatch.setattr(connector_oauth.settings, "GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setattr(connector_oauth_service.settings, "GOOGLE_CLIENT_ID", "client-id")
     monkeypatch.setattr(
-        connector_oauth.settings,
+        connector_oauth_service.settings,
         "GOOGLE_REDIRECT_URI",
         "https://backend.example/connectors/oauth/google/callback",
     )
 
-    url = connector_oauth._authorization_url(
+    url = connector_oauth_service._authorization_url(
         connector="gmail",
         state="state-token",
         code_challenge="challenge",
     )
     query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
 
-    assert query["scope"] == [connector_oauth.GMAIL_SCOPE]
+    assert query["scope"] == [connector_oauth_service.GMAIL_SCOPE]
     assert query["redirect_uri"] == [
         "https://backend.example/connectors/oauth/google/callback"
     ]
@@ -32,22 +33,22 @@ def test_authorization_url_is_connector_scoped_and_backend_owned(monkeypatch):
 
 
 def test_calendar_authorization_does_not_request_gmail_scope(monkeypatch):
-    monkeypatch.setattr(connector_oauth.settings, "GOOGLE_CLIENT_ID", "client-id")
+    monkeypatch.setattr(connector_oauth_service.settings, "GOOGLE_CLIENT_ID", "client-id")
     monkeypatch.setattr(
-        connector_oauth.settings,
+        connector_oauth_service.settings,
         "GOOGLE_REDIRECT_URI",
         "https://backend.example/connectors/oauth/google/callback",
     )
 
-    url = connector_oauth._authorization_url(
+    url = connector_oauth_service._authorization_url(
         connector="google_calendar",
         state="state-token",
         code_challenge="challenge",
     )
     query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
 
-    assert query["scope"] == [connector_oauth.CALENDAR_SCOPE]
-    assert connector_oauth.GMAIL_SCOPE not in query["scope"]
+    assert query["scope"] == [connector_oauth_service.CALENDAR_SCOPE]
+    assert connector_oauth_service.GMAIL_SCOPE not in query["scope"]
 
 
 def test_completion_url_contains_only_routing_state():
@@ -71,7 +72,7 @@ def test_completion_url_contains_only_routing_state():
 
 
 def test_pkce_pair_matches_s256_challenge():
-    verifier, challenge = connector_oauth._pkce_pair()
+    verifier, challenge = connector_oauth_service._pkce_pair()
 
     assert 43 <= len(verifier) <= 128
     assert "=" not in challenge

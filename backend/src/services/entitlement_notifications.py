@@ -12,9 +12,9 @@ their entitlement doc individually:
                         AND trial_end_date <= now
 
 ``tier == free`` excludes anyone who already upgraded via a real purchase:
-``_verifyAndGrantEntitlement`` (subscription_service.dart) sets ``tier`` to
-companion/pro on purchase but never clears ``trial_end_date``, so without this
-filter a paying user could still match.
+the Dodo webhooks (services/billing.py) set ``tier`` to companion/pro on
+purchase but never clear ``trial_end_date``, so without this filter a paying
+user could still match.
 
 Copy is fixed, not LLM-framed: this is billing-adjacent lifecycle messaging, not
 personalized content, so plain templated strings avoid both the extra LLM cost and
@@ -36,18 +36,18 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ..config.settings import settings
 from ..lib.logger import logger
+from .entitlement import (
+    ENTITLEMENT_COLLECTION as COLLECTION,
+    ENTITLEMENT_DOC_ID as DOC_ID,
+    FIELD_TIER,
+    FIELD_TRIAL_END_DATE,
+    FIELD_TRIAL_NOTIFIED_3D,
+    FIELD_TRIAL_NOTIFIED_EXPIRED,
+)
 from .firebase import admin_firestore
 from .notifications import orchestrator
 from .notifications.proposal import SOURCE_TRIAL, NotificationProposal, ProposalKind
 from .signal_engine.scoring import is_within_active_hours
-
-COLLECTION = "entitlement"
-DOC_ID = "current"
-
-FIELD_TIER = "tier"
-FIELD_TRIAL_END_DATE = "trial_end_date"
-FIELD_TRIAL_NOTIFIED_3D = "trial_notified_3d"
-FIELD_TRIAL_NOTIFIED_EXPIRED = "trial_notified_expired"
 
 TIER_FREE = "free"
 

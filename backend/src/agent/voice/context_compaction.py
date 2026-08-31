@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from ...prompts import VOICE_CONTEXT_COMPACTION_PROMPT
 from ...services.model_provider import get_model_provider
 from ...shared.context_summary import (
     empty_summary as _empty_summary,
+    estimate_tokens as _estimate_tokens,
     normalize_summary as _normalize_summary,
 )
 from .action_policy import tool_output_succeeded
@@ -85,7 +85,7 @@ def estimate_dynamic_tokens(chat_ctx: lk_llm.ChatContext) -> int:
             characters += len(item.name) + len(item.arguments)
         elif isinstance(item, lk_llm.FunctionCallOutput):
             characters += len(item.name) + len(item.output)
-    return math.ceil(characters / 4)
+    return _estimate_tokens(characters)
 
 
 def completed_turn_count(chat_ctx: lk_llm.ChatContext) -> int:

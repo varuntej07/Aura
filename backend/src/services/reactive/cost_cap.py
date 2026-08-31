@@ -14,29 +14,23 @@ stamped with ``expires_at`` so native Firestore TTL reaps it.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from google.cloud import firestore as fs  # type: ignore
 
 from ...lib.logger import logger
-from ..firebase import admin_firestore
-from .fields import (
+from ..cost_doc import (
+    COST_DOC_TTL,
     COST_SUBCOLLECTION,
     FIELD_EXPIRES_AT,
     FIELD_LLM_CALLS,
     USERS_COLLECTION,
 )
+from ..firebase import admin_firestore
 
 # Generous: ~one LLM-bearing orchestrate pass every few minutes, all day, before the
 # breaker trips. A real user's reactive load is a tiny fraction of this.
 DAILY_LLM_CALL_CAP = 100
-
-# The cap only ever reads today's doc, but since 2026-08 the same daily doc also
-# carries the per-user LLM spend ledger (services/analytics/llm_cost_ledger.py):
-# tokens and estimated µUSD per day. Spend history is only useful if it survives,
-# so retention is 90 days rather than the original 3. Storage cost is one tiny
-# doc per active user per day; native TTL still reaps via expires_at.
-COST_DOC_TTL = timedelta(days=90)
 
 
 def _cost_ref(uid: str, day: str):

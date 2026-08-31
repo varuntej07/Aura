@@ -226,7 +226,7 @@ async def set_reminder(
     message: str, when: str, tier: str = "", tone: str = ""
 ) -> dict[str, Any]:
     """Set one reminder or alarm from a natural-language time such as 'tomorrow at 9 AM'."""
-    tier = resolve_set_reminder_tier(message, tier)
+    tier = resolve_set_reminder_tier(tier)
     result = await _run_tool(
         "set_reminder", {"message": message, "when": when, "tier": tier, "tone": tone}
     )

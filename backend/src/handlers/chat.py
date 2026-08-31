@@ -31,7 +31,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..lib.query_logger import log_query
 from ..services import desktop_chat_store
 from ..services.analytics.llm_telemetry import bind_trace_context, reset_trace_context
 from ..services.chat_completion import (
@@ -43,9 +42,11 @@ from ..services.chat_completion import (
 )
 from ..services.chat_completion import prompt_builder as _prompt_builder
 from ..services.chat_completion.prompt_builder import build_turn_system_blocks, fetch_user_doc
+from ..services.chat_completion.reminder_receipts import reminder_ui_payload
 from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from ..services.claude_client import ClaudeClient
 from ..services.engagement.task_scheduler import get_task_scheduler
+from ..services.query_log import log_query
 from ..services.request_auth import resolve_user_id, resolve_user_id_from_request
 from ..services.tool_executor import (
     ToolExecutor,
@@ -54,7 +55,7 @@ from ..services.tool_executor import (
 )
 from ..services.user_aura_extractor import extract_and_update_user_aura
 from ..shared.capability_claims import log_false_capability_claims
-from ..shared.tools import claude_tool_definitions, reminder_ui_payload
+from ..shared.tools import claude_tool_definitions
 
 _build_user_content = _prompt_builder.build_user_content
 _NOTIFICATION_REASON_MAX_CHARS = _prompt_builder.NOTIFICATION_REASON_MAX_CHARS

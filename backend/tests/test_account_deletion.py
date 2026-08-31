@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from src.handlers import account
+from src.services import immutable_gcs
 from src.services.meetings import gcs_audio
 
 
@@ -107,7 +108,7 @@ def test_user_audio_cleanup_deletes_only_the_users_prefix(monkeypatch):
                 _Blob("audio/v2/user-1/meeting-b/run-b/000000/b.flac"),
             ]
 
-    monkeypatch.setattr(gcs_audio, "_client", lambda: _Client())
+    monkeypatch.setattr(immutable_gcs, "client", lambda: _Client())
 
     count = asyncio.run(gcs_audio.delete_user_audio("user-1"))
 

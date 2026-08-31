@@ -59,7 +59,9 @@ class _TraceContextToken:
     chain_span: Any | None
 
 
-def bind_trace_context(**values: str | None) -> _TraceContextToken:
+def bind_trace_context(
+    *, span_name: str = "chat_turn", **values: str | None
+) -> _TraceContextToken:
     """Bind non-sensitive correlation fields for the current async request."""
     current = dict(_trace_context.get())
     current.update(
@@ -70,7 +72,7 @@ def bind_trace_context(**values: str | None) -> _TraceContextToken:
     return _TraceContextToken(
         metadata=metadata_token,
         arize=arize_token,
-        chain_span=start_arize_chain_span("chat_turn"),
+        chain_span=start_arize_chain_span(span_name),
     )
 
 
@@ -324,6 +326,25 @@ def openai_usage_tokens(usage: Any) -> dict[str, int]:
     tokens = {
         "input": max(0, prompt - cached),
         "output": int(getattr(usage, "completion_tokens", 0) or 0),
+    }
+    if cached:
+        tokens["cache_read_input_tokens"] = cached
+    return tokens
+
+
+def openai_responses_usage_tokens(usage: Any) -> dict[str, int]:
+    """Token usage off an OpenAI Responses API response.usage, in Langfuse
+    usage-detail names for finish(tokens=...). The Responses API reports
+    input_tokens/output_tokens (not prompt_tokens/completion_tokens) with cached
+    tokens nested under input_tokens_details; input_tokens INCLUDES cached
+    tokens, so they are subtracted out of input (same reasoning as the
+    chat-completions helper). Fully defensive."""
+    details = getattr(usage, "input_tokens_details", None)
+    cached = int(getattr(details, "cached_tokens", 0) or 0)
+    total_input = int(getattr(usage, "input_tokens", 0) or 0)
+    tokens = {
+        "input": max(0, total_input - cached),
+        "output": int(getattr(usage, "output_tokens", 0) or 0),
     }
     if cached:
         tokens["cache_read_input_tokens"] = cached
