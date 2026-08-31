@@ -20,6 +20,7 @@ from ...lib.logger import logger
 from ..notification_service import NotificationResult
 from .proposal import (
     SOURCE_BRIEFING,
+    SOURCE_FOLLOWUP,
     SOURCE_ICEBREAKER,
     SOURCE_MEMORY_GRAPH,
     SOURCE_NEWS,
@@ -81,6 +82,16 @@ async def dispatch_post_send(
                     "local_date": proposal.data.get("briefing_date", ""),
                 },
             )
+        elif proposal.source == SOURCE_FOLLOWUP:
+            # Session follow-ups (source D) reserve a candidate before submitting and
+            # need transport acceptance recorded so the topic cooldown and fatigue
+            # window advance. The scheduled-intent follow-up shares SOURCE_FOLLOWUP
+            # but carries no candidate_id, so it correctly no-ops here.
+            candidate_id = str(proposal.data.get("candidate_id") or "")
+            if result.accepted and candidate_id:
+                from . import candidate_machine
+
+                await candidate_machine.mark_accepted(proposal.user_id, candidate_id)
         elif proposal.source == SOURCE_MEMORY_GRAPH:
             from .memory_graph_notifications import on_orchestrator_outcome
             from .proposal import REASON_OK, Disposition, OrchestratorDecision

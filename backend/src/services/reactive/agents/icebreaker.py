@@ -92,6 +92,7 @@ class IcebreakerOpenerAgent:
     subscribes_to = frozenset({EVENT_TICK})
     risk = RISK_LOW
     allow_degraded_delivery = False
+    requires_aura_consent = True
 
     # ── SENSE ────────────────────────────────────────────────────────────────
     async def sense(self, ctx: UserContext) -> _Inputs:

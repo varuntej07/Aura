@@ -30,6 +30,8 @@ is exposed for explicit drains (tests, shutdown hooks).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
@@ -50,6 +52,35 @@ _trace_context: ContextVar[dict[str, str]] = ContextVar(
     "llm_trace_context",
     default={},
 )
+
+# Which user the LLM calls made inside the current async context belong to.
+#
+# The per-user spend ledger keys on uid, and uid reached it only as an explicit
+# parameter to start_llm_generation. model_provider.py never passed one, so every
+# cheap/balanced/expert/grounded/reason_turn call attributed to nobody and the ledger
+# silently recorded NOTHING for background work: the icebreaker and thread framers, the
+# tap gate, briefing, the signal engine, tracking, the memory graph. A ContextVar rather
+# than threading uid through every tier signature, matching the reasoning already used
+# for model_provider's _usage_sink: it survives the retry and fallback path, and it is
+# inert when unset so no existing caller changes behaviour.
+_current_llm_uid: ContextVar[str] = ContextVar("llm_current_uid", default="")
+
+
+@contextmanager
+def bind_llm_user(uid: str) -> Iterator[None]:
+    """Attribute every LLM call made inside this block to ``uid``.
+
+    Used by per-user BACKGROUND work, which has no request to carry the id. An explicit
+    ``uid=`` on start_llm_generation still wins, so chat and voice are unaffected.
+    """
+    if not uid:
+        yield
+        return
+    token = _current_llm_uid.set(uid)
+    try:
+        yield
+    finally:
+        _current_llm_uid.reset(token)
 
 
 @dataclass(frozen=True)
@@ -222,7 +253,12 @@ def start_llm_generation(
     or path label the ops dashboard groups by (cheap / balanced / expert /
     grounded / reason_turn / chat / chat_gemini_fallback / chat_openai_fallback /
     voice_session). Without Langfuse this still returns a live _Recording so
-    finish() can ledger per-user spend; only the observation half is absent."""
+    finish() can ledger per-user spend; only the observation half is absent.
+
+    ``uid`` falls back to the ambient bind_llm_user() binding when the caller does not
+    pass one, which is how background work (model_provider's tiers) reaches the spend
+    ledger at all. An explicit argument always wins."""
+    uid = uid or _current_llm_uid.get("")
     client = _get_client()
     if client is None:
         return _Recording(None, uid=uid or "", model=model)

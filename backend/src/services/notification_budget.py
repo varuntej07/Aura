@@ -7,9 +7,14 @@ a user from their own independent cap. Committed sends the user asked for
 so a proactive push is spaced away from them.
 
 SAFETY: the claim is ADDITIVE — each decider keeps its own per-source cap as a
-sub-limit; this only adds one coordinated ceiling on top. It also FAILS OPEN: any
-Firestore error allows the send, because a budget read failure must never become
-a notification outage.
+sub-limit; this only adds one coordinated ceiling on top.
+
+FAILURE POLICY: the READ path (``resolve_limits`` and the engagement/account-age
+lookups) fails OPEN — a read error falls back to the gentle defaults rather than
+zeroing a user's allowance. The CLAIM path fails CLOSED: ``try_claim_proactive_slot``
+returns ``budget_unavailable`` on a transaction error, because a claim that cannot be
+recorded could otherwise be granted repeatedly and blow past the daily ceiling. The
+caller is expected to HOLD (retry next drain), not DROP, on that reason.
 
 Field names live here (single source of truth) and are round-tripped in
 ``backend/tests/test_notification_budget.py``.

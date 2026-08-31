@@ -89,6 +89,47 @@ async def _fan_out_daily_plans() -> None:
     logger.info("scheduler: daily plan fan-out complete", {"users": len(user_ids)})
 
 
+async def _tick_audience(user_ids: list[str]) -> list[str]:
+    """Narrow the hourly tick fan-out to users an agent could actually serve.
+
+    Every agent subscribing to EVENT_TICK currently requires aura consent, so for a user
+    who declined memory the whole pass is guaranteed waste: one Cloud Task, one
+    authenticated Cloud Run request, and a lease acquire/release transaction pair, all to
+    reach a stand-down. Nothing else depends on it (lease docs are read only by lease.py,
+    the cost doc is never touched on this path, and the outbox relay has its own
+    discovery path), so skipping is safe.
+
+    The consent requirement is DERIVED FROM THE REGISTRY, never hardcoded: the moment
+    someone registers a tick agent that does not need consent, this filter disables
+    itself. Hardcoding it would make that new agent silently never run for
+    non-consenting users, which is the sharpest failure mode of this optimization.
+
+    FAILS OPEN. Any error returns the full list. A stale or failed "no consent" must
+    never suppress a real user's notifications, and this runs inside the one scheduler
+    job that is not isolated: an exception here would cost that minute's proactive
+    drain, reminder delivery, intent sweep and session-followup drains.
+    """
+    try:
+        from ..services.reactive.events import EVENT_TICK
+        from ..services.reactive.registry import get_agent_registry
+        from ..services.user_aura_extractor import consented_user_ids
+
+        tick_agents = get_agent_registry().agents_for_event(EVENT_TICK)
+        if not tick_agents or not all(
+            getattr(agent, "requires_aura_consent", False) for agent in tick_agents
+        ):
+            return user_ids
+
+        consented = await consented_user_ids(user_ids)
+        return [uid for uid in user_ids if uid in consented]
+    except Exception as exc:
+        logger.warn(
+            "scheduler: tick audience filter failed, enqueueing everyone (fail-open)",
+            {"error": str(exc)},
+        )
+        return user_ids
+
+
 async def _enqueue_tick_tasks(*, tick_at: datetime) -> int:
     """Enqueue one deterministic Cloud Task per active user for the hourly clock signal.
 
@@ -103,6 +144,15 @@ async def _enqueue_tick_tasks(*, tick_at: datetime) -> int:
 
     user_ids = await list_active_user_ids()
     if not user_ids:
+        return 0
+
+    total_active = len(user_ids)
+    user_ids = await _tick_audience(user_ids)
+    skipped = total_active - len(user_ids)
+    if not user_ids:
+        logger.info("scheduler: hourly reactive ticks enqueued", {
+            "users": 0, "skipped_no_consent": skipped,
+        })
         return 0
 
     semaphore = asyncio.Semaphore(10)
@@ -128,7 +178,9 @@ async def _enqueue_tick_tasks(*, tick_at: datetime) -> int:
         raise RuntimeError(
             f"reactive tick enqueue failed for {len(failures)} of {len(user_ids)} users"
         )
-    logger.info("scheduler: hourly reactive ticks enqueued", {"users": len(user_ids)})
+    logger.info("scheduler: hourly reactive ticks enqueued", {
+        "users": len(user_ids), "skipped_no_consent": skipped,
+    })
     return len(user_ids)
 
 
@@ -218,6 +270,7 @@ async def _run_proactive_drain() -> None:
     written inside the drain survive a Cloud Run container freeze.
     """
     from ..services.analytics import posthog_client
+    from ..services.analytics.llm_telemetry import bind_llm_user
     from ..services.notifications import orchestrator
     from ..services.notifications.queue_store import list_user_ids_with_pending
     from ..services.signal_engine.feature_store import apply_proactive_allowlist
@@ -242,7 +295,10 @@ async def _run_proactive_drain() -> None:
     async def _drain_one(uid: str) -> None:
         async with semaphore:
             try:
-                await orchestrator.drain_user_queue(uid)
+                # The drain makes per-user LLM calls (tap gate, rewriter); attribute
+                # their spend to that user in the per-user cost ledger.
+                with bind_llm_user(uid):
+                    await orchestrator.drain_user_queue(uid)
             except Exception as exc:
                 logger.warn("scheduler: proactive drain per-user failed", {
                     "user_id": uid, "error": str(exc),

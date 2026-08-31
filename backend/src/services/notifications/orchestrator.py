@@ -43,6 +43,7 @@ from .proposal import (
     REASON_STALE,
     REASON_SUPERSEDED,
     REASON_TAP_GATE,
+    SOURCE_FOLLOWUP,
     SOURCE_ICEBREAKER,
     SOURCE_MEMORY_GRAPH,
     SOURCE_THREAD,
@@ -60,6 +61,14 @@ from .proposal import (
 # urgent breaking item opts out by lane. A held news item that never finds a good slot
 # is purged by the queue TTL — fine, stale news shouldn't fire anyway.
 SMART_TIMING_MAX_PRIORITY = 10
+
+# Sources where Buddy is texting the user about the user's OWN life, rather than pushing
+# content at them. These skip the tap-worthiness gate: its bar ("does opening this provide
+# an artifact, a source, or an action beyond the push?") is a content-feed bar that a
+# friend's message correctly fails. "any news on the permit yet?" has no artifact and is
+# exactly the message this product exists to send. Relevance for these is judged upstream,
+# by the producer that knows the subject.
+FRIEND_SOURCES = frozenset({SOURCE_ICEBREAKER, SOURCE_THREAD, SOURCE_FOLLOWUP})
 
 # How far back the cross-agent dedup gate looks. A day is enough to stop the same
 # story firing from two deciders or a proactive item being re-proposed each tick,
@@ -253,8 +262,33 @@ async def drain_user_queue(
     # later — possibly stronger — window. Judged only on the arbitration winner (one LLM
     # call). It fails CLOSED: an optional interruption whose value cannot be
     # established is dropped rather than sent on infrastructure uncertainty.
-    worthy, tap_reason = await tap_gate.passes(winner)
-    _policy_checks(winner)["tap_value"] = tap_reason
+    #
+    # FRIEND SOURCES SKIP THIS GATE ENTIRELY. Icebreaker, thread and follow-up are Buddy
+    # texting the user about their own life; their value is being asked about, not an
+    # artifact behind a tap. Each already carries its own relevance judgment upstream
+    # (the icebreaker's is_send_worthy, the thread engine's conversation-worthiness check
+    # at thread creation, and intent-sense's "would a caring friend check back on this"
+    # at schedule time), so this second veto was pure loss: in the 14 days before this
+    # change it killed 55 of 56 thread proposals and 100% of follow-ups, and the
+    # icebreaker sent nothing at all. The reactive guardrails (empty/over-length/template
+    # leakage) still apply to every source, and the budget/spacing/quiet-hours gates above
+    # are untouched.
+    if winner.source in FRIEND_SOURCES:
+        _policy_checks(winner)["tap_value"] = "skipped_friend_source"
+        worthy, tap_reason = True, "friend_source"
+    else:
+        worthy, tap_reason = await tap_gate.passes(winner)
+        _policy_checks(winner)["tap_value"] = tap_reason
+    if not worthy and tap_reason == tap_gate.REASON_GATE_UNAVAILABLE:
+        # The judge was unreachable — that is infrastructure, not a verdict on this
+        # copy. Dropping here discarded a good notification because Gemini was slow,
+        # and because only the winner is judged it also stranded the losers. HOLD so
+        # the next drain (one minute later) re-judges the same batch.
+        logger.error("orchestrator: tap gate unavailable, holding batch", {
+            "user_id": user_id, "source": winner.source,
+        })
+        await _hold_all(user_id, survivors, now)
+        return OrchestratorDecision(Disposition.HOLD, REASON_TAP_GATE)
     if not worthy:
         await queue_store.mark(user_id, winner_pid, queue_store.STATUS_DROPPED, now=now)
         _log_drop(winner, f"{REASON_TAP_GATE}:{tap_reason}")

@@ -30,9 +30,15 @@ def test_signal_framer_uses_core_and_content_push_voice():
     assert BUDDY_CONTENT_PUSH_RULES in SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT
 
 
-def test_icebreaker_framer_uses_core_and_content_push_voice():
+def test_icebreaker_framer_uses_core_voice_but_not_content_push():
+    # Same rule as the thread framer below, for the same reason. An icebreaker is Buddy
+    # texting the user about the user's own life, not a content push. The tap-through CTA
+    # rules ("open a curiosity loop", "tease the payoff", "anchor in a verified name,
+    # number, contrast or turn") are newsroom rules; applied here they turned a friend's
+    # check-in into clickbait engineering and the producer sent ZERO messages in 14 days
+    # of production. Content rules belong on content sources only.
     assert BUDDY_VOICE_CORE in ICEBREAKER_SYSTEM_PROMPT
-    assert BUDDY_CONTENT_PUSH_RULES in ICEBREAKER_SYSTEM_PROMPT
+    assert BUDDY_CONTENT_PUSH_RULES not in ICEBREAKER_SYSTEM_PROMPT
 
 
 def test_thread_framer_uses_core_voice_but_not_content_push():

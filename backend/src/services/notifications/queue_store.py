@@ -36,7 +36,13 @@ QUEUE_SUBCOLLECTION = "notification_queue"
 # A proactive proposal that cannot win a window within this long is no longer
 # worth sending (news goes stale, an opener loses its moment). The drain skips
 # and a native TTL on ``expires_at`` purges it.
-QUEUE_TTL = timedelta(hours=6)
+#
+# MUST stay longer than one full quiet period. Quiet hours are 23:30-07:00 local
+# (7.5h, notifications/orchestrator.py), so the previous 6h TTL silently deleted
+# everything enqueued after ~22:00 before the user's morning ever arrived — a
+# whole evening's proactive supply, purged by Firestore with no log line. 30h also
+# lets a proposal re-compete across a second day's preferred slots.
+QUEUE_TTL = timedelta(hours=30)
 
 # ── Field-name contract ─────────────────────────────────────────────────────
 FIELD_PROPOSAL_ID = "proposal_id"

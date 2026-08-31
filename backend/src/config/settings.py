@@ -8,6 +8,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Safe to call multiple times; subsequent calls are no-ops.
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", "..", ".env"), override=True)
 
+# `.env` carries GOOGLE_APPLICATION_CREDENTIALS as a path relative to backend/,
+# and the load_dotenv above overrides whatever the process already resolved. A
+# script launched from the repo root (deploy.sh runs the storage preflights that
+# way) would then resolve it against its own cwd and die on a missing file.
+# Anchor a relative value to the backend directory so it means the same thing
+# from anywhere. Cloud Run sets an absolute path and is untouched.
+_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+# The leading-separator test is not redundant: on Windows, Python 3.13's
+# os.path.isabs("/run/secrets/service-account.json") is False, so the Cloud Run
+# style value would be rewritten if it were ever read on a dev machine.
+if (
+    _credentials_path
+    and not os.path.isabs(_credentials_path)
+    and not _credentials_path.startswith(("/", "\\"))
+):
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.normpath(
+        os.path.join(_BACKEND_DIR, _credentials_path)
+    )
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

@@ -145,6 +145,7 @@ class CuriosityThreadFollowUpAgent:
     subscribes_to = frozenset({EVENT_TICK, EVENT_REMINDER_CREATED})
     risk = RISK_LOW
     allow_degraded_delivery = True
+    requires_aura_consent = True
 
     # ── SENSE ────────────────────────────────────────────────────────────────
     async def sense(self, ctx: UserContext) -> _Inputs:

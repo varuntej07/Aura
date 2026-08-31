@@ -358,10 +358,20 @@ async def revalidate_and_submit_followup(
         now=when,
     )
     if decision.disposition == Disposition.SEND and decision.transport_accepted:
+        # Committed-lane path only. A PROACTIVE submit never reaches this branch.
         await machine.mark_accepted(uid, candidate_id, now=when)
         return machine.STATE_ACCEPTED
-    # The orchestrator held or dropped it (presence, budget, arbitration). Retry
-    # once the collision window has passed rather than losing the intent.
+    if decision.disposition == Disposition.HOLD:
+        # A PROACTIVE submit ALWAYS returns HOLD("queued") — the funnel enqueues and
+        # the per-minute drain arbitrates later (notifications/orchestrator.py:92-101).
+        # That is success, not failure: the candidate stays SUBMITTED and
+        # post_send.dispatch_post_send calls mark_accepted once the push is actually
+        # accepted. Deferring here re-submitted the same proposal every drain, which
+        # the funnel then dropped on its dedup key until the candidate expired — so
+        # mark_accepted was unreachable and no session follow-up was ever recorded.
+        return machine.STATE_SUBMITTED
+    # Genuinely rejected by the funnel (stale, deduped). Retry once the collision
+    # window has passed rather than losing the intent.
     return await _defer(
         uid, candidate_id, now=when, reason=f"orchestrator_{decision.disposition}",
         delay=machine.RESERVATION_RETRY_DELAY,

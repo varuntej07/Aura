@@ -131,6 +131,13 @@ class Agent(Protocol):
     subscribes_to: frozenset[str]  # which event types can wake it
     risk: str                    # RISK_LOW | RISK_MED | RISK_HIGH
     allow_degraded_delivery: bool  # on escalate, may a degraded output still ship?
+    # True when the agent's output is built from remembered personal data, so it
+    # cannot run without users/{uid}.aura_consent_granted. Declared here rather than
+    # re-checked inside each sense(): the orchestrator reads consent ONCE per pass
+    # and never dispatches these agents for a non-consenting user, so a user who
+    # declined memory costs no agent run, no LLM budget, and no duplicate user-doc
+    # read. Agents that omit it default to False (no consent needed).
+    requires_aura_consent: bool
 
     async def sense(self, ctx: UserContext) -> Any: ...
     async def plan(self, inputs: Any) -> Plan: ...

@@ -2,10 +2,18 @@
 Regression guard for voice-worker dependency drift.
 
 The voice worker (src/agent/voice_agent.py) imports plugins from livekit.plugins.
-Each of those plugins ships as a separate package installed via a livekit-agents
-EXTRA in pyproject.toml (e.g. livekit-agents[openai] -> livekit-plugins-openai).
+Each of those plugins ships as a separate distribution, reachable two ways:
 
-If a plugin is imported but its extra is not declared, the code still runs
+  1. As a livekit-agents EXTRA (livekit-agents[openai] -> livekit-plugins-openai).
+  2. As a standalone requirement of its own (livekit-plugins-ai-coustics), for
+     plugins livekit-agents does not publish an extra for.
+
+Both routes install the package; only route 1 was recognised here originally, so
+a correctly-declared standalone plugin failed this guard. What the guard actually
+cares about is "will the Docker image contain this plugin", and both routes are
+yes, so both are accepted.
+
+If a plugin is imported and declared by NEITHER route, the code still runs
 locally (the plugin happens to be in the dev venv) but the Docker image built
 from pyproject.toml omits it, and the worker crashes at import with
 "ImportError: cannot import name '<plugin>' from 'livekit.plugins'" — failing
@@ -68,13 +76,32 @@ def _declared_livekit_extras() -> set[str]:
     return {e.strip().replace("_", "-") for e in match.group(1).split(",")}
 
 
+def _declared_standalone_plugins() -> set[str]:
+    """Plugins declared as their own `livekit-plugins-<name>` requirement.
+
+    Not every plugin has a livekit-agents extra. ai-coustics ships only as
+    livekit-plugins-ai-coustics, so it can never appear in the extras list no
+    matter how correctly it is declared. Matched on the requirement line rather
+    than anywhere in the file so a mention inside a comment does not satisfy it.
+    """
+    text = _PYPROJECT.read_text(encoding="utf-8")
+    return {
+        match.group(1).replace("_", "-")
+        for match in re.finditer(r'^\s*"livekit-plugins-([a-z0-9-]+?)(?:\[|[<>=!~])', text, re.M)
+    }
+
+
 def test_every_imported_livekit_plugin_has_a_declared_extra():
     imported = _plugins_imported_by_worker()
-    declared = _declared_livekit_extras()
+    extras = _declared_livekit_extras()
+    standalone = _declared_standalone_plugins()
+    declared = extras | standalone
     missing = imported - declared
     assert not missing, (
         f"Voice worker imports {sorted(missing)} from livekit.plugins but "
-        f"pyproject.toml does not declare the matching livekit-agents extra(s). "
-        f"Add them to the livekit-agents[...] requirement or the Docker image "
-        f"will crash at startup. Declared: {sorted(declared)}"
+        f"pyproject.toml declares them via neither route. Either add them to the "
+        f"livekit-agents[...] extras, or declare a standalone "
+        f'"livekit-plugins-<name>" requirement, or the Docker image will crash at '
+        f"startup. Declared extras: {sorted(extras)}. "
+        f"Declared standalone: {sorted(standalone)}"
     )

@@ -471,6 +471,60 @@ async def _user_has_granted_aura_consent(
         return False
 
 
+# Batched consent lookup for per-user fan-outs, with a short TTL cache.
+#
+# Consent changes on the timescale of onboarding, not minutes, and the hourly tick
+# fan-out asks about every active user at once. Cached and batched for the same reason
+# fcm_token_registry caches the active-user scan. Modelled on that TTL deliberately.
+_CONSENT_CACHE_TTL_SECONDS = 180
+_consent_cache: dict[str, tuple[bool, float]] = {}
+
+
+async def consented_user_ids(uids: list[str]) -> set[str]:
+    """The subset of ``uids`` with aura_consent_granted == True.
+
+    RAISES on a read failure rather than returning a partial set. Callers use this to
+    SKIP work, so a silent partial answer would silently suppress real users; the caller
+    is expected to catch and fall back to treating everyone as consenting. One batched
+    ``get_all`` plus a short TTL cache, so an hourly fan-out over N users is one round
+    trip and, on a warm cache, zero reads.
+    """
+    now = time.monotonic()
+    resolved: set[str] = set()
+    missing: list[str] = []
+    for uid in uids:
+        cached = _consent_cache.get(uid)
+        if cached is not None and (now - cached[1]) < _CONSENT_CACHE_TTL_SECONDS:
+            if cached[0]:
+                resolved.add(uid)
+        else:
+            missing.append(uid)
+    if not missing:
+        return resolved
+
+    from .firebase import admin_firestore
+
+    def _fetch() -> dict[str, bool]:
+        database = admin_firestore()
+        refs = [database.collection("users").document(uid) for uid in missing]
+        out: dict[str, bool] = {}
+        for snap in database.get_all(refs):
+            granted = bool(
+                snap.exists and (snap.to_dict() or {}).get("aura_consent_granted", False) is True
+            )
+            out[snap.id] = granted
+        return out
+
+    fetched = await asyncio.to_thread(_fetch)
+    stamped = time.monotonic()
+    for uid in missing:
+        granted = fetched.get(uid, False)
+        _consent_cache[uid] = (granted, stamped)
+        if granted:
+            resolved.add(uid)
+    return resolved
+
+
 def _insight_entity_keys(insight: MessageInsight) -> list[str]:
     """Entity keys captured from the already-paid extraction result."""
     keys: list[str] = []

@@ -66,7 +66,7 @@ Stale background summary -------> discard rather than overwrite newer turns
 
 - `backend/src/agent/voice/action_policy.py`
 - `backend/src/agent/voice/capabilities.py`
-- `backend/src/agent/voice/tool_skills.py`
+- `backend/src/agent/voice/tool_discovery.py`
 - `backend/src/agent/buddy_agent.py`
 - `backend/src/agent/voice/action_telemetry.py`
 - `backend/src/agent/voice/context_compaction.py`

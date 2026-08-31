@@ -2,7 +2,9 @@
 
 One doc, two writers, one reader today:
   - services/reactive/cost_cap.py increments ``llm_calls`` (the runaway breaker)
-    and reads it back against the daily ceiling.
+    and reads it back against the daily ceiling. Since 2026-08-31 it counts REAL
+    provider attempts made inside the agent dispatch loop (via model_provider's
+    capture_usage), not dispatched agents: the old proxy over-counted ~83x.
   - services/analytics/llm_cost_ledger.py merge-increments the per-user LLM
     spend ledger fields (generations, tokens, estimated microUSD).
 
@@ -41,6 +43,13 @@ COST_SUBCOLLECTION = "cost"
 COST_DOC_TTL = timedelta(days=90)
 
 # Reactive cost-cap counter (the soft per-day LLM-call ceiling).
+#
+# DELIBERATELY NOT the same number as FIELD_LLM_GENERATIONS below, even though both live
+# on this doc and both now count real provider attempts. This one is scoped to REACTIVE
+# agent work only; llm_generations counts every LLM call the user causes, chat included.
+# Pointing the reactive breaker at llm_generations would let a heavy chat day exhaust
+# DAILY_LLM_CALL_CAP and silently suppress that user's icebreakers and thread follow-ups.
+# A runaway breaker must be scoped to the loop it is breaking.
 FIELD_LLM_CALLS = "llm_calls"
 
 # Spend-ledger fields (merge-incremented per provider API attempt).

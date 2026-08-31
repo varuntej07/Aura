@@ -21,9 +21,12 @@ per-event consume, not the lease (the lease only avoids wasted concurrent work).
 from __future__ import annotations
 
 from ...lib.logger import logger
+from ..analytics.llm_telemetry import bind_llm_user
 from ..notifications import orchestrator as funnel
 from ..notifications.proposal import SOURCE_FOLLOWUP
+from ..model_provider import capture_usage
 from ..notifications.queue_store import drop_if_active, proposal_id_for
+from ..user_aura_extractor import _user_has_granted_aura_consent
 from . import cost_cap, guardrails, inbox, lease, policy, reconcile
 from .agent import UserContext
 from .envelope import run_agent
@@ -52,10 +55,13 @@ async def run_orchestrate(
         return {"skipped": "lease_held"}
 
     try:
-        return await _drain_and_dispatch(
-            user_id,
-            transient_events=transient_events,
-        )
+        # Attribute every LLM call this pass makes to this user, so background agent
+        # spend lands in the per-user ledger the same way chat already does.
+        with bind_llm_user(user_id):
+            return await _drain_and_dispatch(
+                user_id,
+                transient_events=transient_events,
+            )
     except Exception as exc:
         logger.exception("orchestrate: unhandled error", {"user_id": user_id, "error": str(exc)})
         return {"error": str(exc)}
@@ -114,6 +120,27 @@ async def _drain_and_dispatch(
             )
         ]
 
+    # CONSENT: agents whose output is built from remembered personal data cannot run
+    # without aura_consent_granted. Filtered HERE, once per pass, instead of inside
+    # each agent's sense(): a non-consenting user previously cost one Cloud Task, one
+    # orchestrate pass, N agent dispatches, N duplicate user-doc reads, and an
+    # LLM-budget debit — all to reach a `no_consent` stand-down. In the 14-day
+    # production window that was the single largest stand-down reason (177 of 400).
+    # Consent is read only if some selected agent actually needs it.
+    if tasks and any(getattr(task.agent, "requires_aura_consent", False) for task in tasks):
+        if not await _user_has_granted_aura_consent(user_id):
+            gated = [
+                task for task in tasks
+                if not getattr(task.agent, "requires_aura_consent", False)
+            ]
+            logger.info("orchestrate: aura consent absent, skipping memory-backed agents", {
+                "user_id": user_id,
+                "skipped": [
+                    task.agent.name for task in tasks if task not in gated
+                ],
+            })
+            tasks = gated
+
     # COST CAP: the runaway guard gates only the LLM-bearing dispatch — reconcile
     # (invalidation) already ran above, so "mom is fine" still cancels its follow-up
     # even on a user who has hit the ceiling. Fails open.
@@ -125,17 +152,27 @@ async def _drain_and_dispatch(
         return {"events": len(events), "reconciled": len(resolved_subjects), "skipped": "cost_cap"}
 
     # DISPATCH: run each agent inside the envelope, collect produced proposals.
+    # capture_usage() records one entry per real provider ATTEMPT made anywhere inside
+    # the block, threading through the retry and cross-provider fallback path without
+    # touching any signature (model_provider.py:53-83). Failed attempts emit too, which
+    # is the correct direction for a runaway breaker: a fallback chain that burned three
+    # providers really did make three API calls.
     proposals = []
-    for task in tasks:
-        ctx = UserContext(user_id=user_id, event=task.event)
-        outcome = await run_agent(task.agent, ctx)
-        if outcome.has_proposal and outcome.proposal is not None:
-            proposals.append(outcome.proposal)
+    with capture_usage() as llm_attempts:
+        for task in tasks:
+            ctx = UserContext(user_id=user_id, event=task.event)
+            outcome = await run_agent(task.agent, ctx)
+            if outcome.has_proposal and outcome.proposal is not None:
+                proposals.append(outcome.proposal)
 
-    # Record the dispatched agents as LLM-bearing work (a conservative proxy: a few
-    # agents stand down without an LLM call, so this over-counts slightly toward the cap).
-    if tasks:
-        await cost_cap.record_llm_call(user_id, n=len(tasks))
+    # Debit REAL provider attempts, not dispatched agents. The old proxy charged once per
+    # dispatched agent whether or not it called an LLM, and the agents stand down without
+    # one on the overwhelming majority of ticks: measured in production over 14 days, the
+    # icebreaker made 6 real calls while being debited ~500 times, and intent.followup
+    # makes no LLM call at all yet was charged every time. A breaker fed idle dispatches
+    # measures the opposite of the runaway it exists to catch.
+    if llm_attempts:
+        await cost_cap.record_llm_call(user_id, n=len(llm_attempts))
 
     # GUARD: deterministic output safety floor — drop a proposal whose copy is empty,
     # over-length, or leaked an unrendered template / refusal (the framing step broke).

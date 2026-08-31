@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from ..analytics.llm_telemetry import bind_llm_user
 from ..analytics import posthog_client
 from ..analytics.funnel_events import (
     EVENT_BRIEFING_SENT,
@@ -106,7 +107,8 @@ async def run_briefing_tick(
     async def _process_with_semaphore(user_id: str) -> None:
         async with semaphore:
             try:
-                await _process_one_user(user_id, models, summary, force=force)
+                with bind_llm_user(user_id):
+                    await _process_one_user(user_id, models, summary, force=force)
             except Exception as exc:
                 # One user's failure is fully contained — never abort the tick.
                 logger.exception("briefing.engine: per-user failure", {

@@ -47,6 +47,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from ..analytics.llm_telemetry import bind_llm_user
 from ..firebase import admin_firestore
 from ..model_provider import ModelProvider, get_model_provider
 from ..user_aura_schema import (
@@ -282,7 +283,8 @@ async def run_tick() -> TickSummary:
     async def _score_with_semaphore(user_id: str) -> None:
         async with semaphore:
             try:
-                await _score_one_user(user_id, models, summary, breaking_candidates)
+                with bind_llm_user(user_id):
+                    await _score_one_user(user_id, models, summary, breaking_candidates)
             except Exception as exc:
                 logger.exception("signal_engine.scoring_loop: per-user failure while scoring concurrently using semaphore", {
                     "user_id": user_id,
