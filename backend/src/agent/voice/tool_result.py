@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from ast import literal_eval
 from typing import Any, Literal
-
 
 RenderMode = Literal["verbatim", "summary"]
 RenderChannel = Literal["card", "voice"]
@@ -45,3 +46,28 @@ def action_truth_envelope(
         }
     envelope["then"] = then
     return envelope
+
+
+def parse_tool_output(output: object) -> dict[str, Any] | None:
+    """Decode a tool result's ``output`` payload, or None when it is not a dict.
+
+    Tool results reach us as a string that is USUALLY JSON but is sometimes a
+    Python repr, because some tools return a dict that gets str()-ed on the way
+    through. Both are accepted, in that order.
+
+    None means "no structured result to read": unparseable, or parsed to
+    something that is not a dict. The distinction between those two cases has
+    never been actioned by any caller, and each caller has its own idea of what
+    the absence should mean (True for success, {} for fields, None for a pending
+    requirement, skip for verbatim speech), so the mapping stays at the call site
+    and this returns one unambiguous value.
+    """
+    raw = getattr(output, "output", "")
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        try:
+            parsed = literal_eval(raw)
+        except (ValueError, SyntaxError):
+            return None
+    return parsed if isinstance(parsed, dict) else None

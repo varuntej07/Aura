@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
+from .stream_intake import AssemblyTasks, ConsumedIdRing, read_stream_bounded
 
 # Byte-stream topic the desktop client publishes frames on (single source of truth;
 # the Flutter client sends this exact string).
@@ -66,12 +67,6 @@ _INFLIGHT_FRAME_WAIT_S = 0.8
 # What an old turn's screenshot collapses into, so exactly one image is ever hot in
 # context (token cost) while the transcript still shows one existed.
 _STALE_IMAGE_PLACEHOLDER = "[screenshot from an earlier moment removed]"
-
-# Turn ids whose frame a finalized turn already attached. Bounded so a long
-# session cannot grow it, and large enough that no realistic reordering
-# re-attaches an old frame.
-_CONSUMED_TURN_RING_SIZE = 16
-
 
 def _downscale_for_model(jpeg_bytes: bytes) -> tuple[bytes, float]:
     """Shrink an oversized frame to the long-edge cap. Returns (bytes, scale applied).
@@ -232,10 +227,10 @@ class ScreenFrameStore:
         self._latest: ScreenFrame | None = None
         self._inflight_count = 0
         self._frame_landed = asyncio.Event()
-        self._assembly_tasks: set[asyncio.Task] = set()
+        self._assembly_tasks = AssemblyTasks()
         self._frame_count = 0
         self._frame_listener: Callable[[ScreenFrame], None] | None = None
-        self._consumed_turn_ids: list[str] = []
+        self._consumed_turn_ids = ConsumedIdRing()
 
     @property
     def has_ever_received_frame(self) -> bool:
@@ -254,12 +249,10 @@ class ScreenFrameStore:
 
     def handle_stream(self, reader, participant_identity: str) -> None:
         """Sync callback for ``room.register_byte_stream_handler``; assembles async."""
-        task = asyncio.create_task(
+        self._assembly_tasks.spawn(
             self._assemble_frame(reader, participant_identity),
             name=f"voice-screen-frame-{self._session_id[:8]}",
         )
-        self._assembly_tasks.add(task)
-        task.add_done_callback(self._assembly_tasks.discard)
 
     async def _assemble_frame(self, reader, participant_identity: str) -> None:
         if participant_identity != self._user_id:
@@ -284,24 +277,21 @@ class ScreenFrameStore:
             "stage": "capture",
         }
         try:
-            chunks = bytearray()
-            async for chunk in reader:
-                chunks.extend(chunk)
-                if len(chunks) > _MAX_FRAME_BYTES:
-                    logger.warn(
-                        "VoiceSession: screen frame over size cap, dropped",
-                        {
-                            "session_id": self._session_id,
-                            "user_id": self._user_id,
-                            "participant": participant_identity,
-                            "bytes_so_far": len(chunks),
-                            "cap": _MAX_FRAME_BYTES,
-                            "outcome": "failed",
-                            "reason": "frame_size_limit_exceeded",
-                            **trace_fields,
-                        },
-                    )
-                    return
+            chunks = await read_stream_bounded(reader, _MAX_FRAME_BYTES)
+            if chunks is None:
+                logger.warn(
+                    "VoiceSession: screen frame over size cap, dropped",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "participant": participant_identity,
+                        "cap": _MAX_FRAME_BYTES,
+                        "outcome": "failed",
+                        "reason": "frame_size_limit_exceeded",
+                        **trace_fields,
+                    },
+                )
+                return
             if not chunks:
                 logger.warn(
                     "VoiceSession: empty screen frame stream, dropped",
@@ -461,18 +451,11 @@ class ScreenFrameStore:
         self._latest = None
         self._frame_listener = None
         self._consumed_turn_ids.clear()
-        for task in tuple(self._assembly_tasks):
-            task.cancel()
-        self._assembly_tasks.clear()
+        self._assembly_tasks.cancel_all()
 
     def mark_turn_consumed(self, turn_context_id: str) -> None:
         """Record that a finalized turn already carries this turn's frame."""
-        if not turn_context_id or turn_context_id in self._consumed_turn_ids:
-            return
-        self._consumed_turn_ids.append(turn_context_id)
-        overflow = len(self._consumed_turn_ids) - _CONSUMED_TURN_RING_SIZE
-        if overflow > 0:
-            del self._consumed_turn_ids[0:overflow]
+        self._consumed_turn_ids.remember(turn_context_id)
 
 
 def strip_stale_images(turn_ctx: lk_llm.ChatContext) -> int:

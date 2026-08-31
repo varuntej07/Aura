@@ -89,7 +89,7 @@ async def test_publish_success_sends_one_reliable_packet(monkeypatch):
         published.append((data, reliable))
 
     room = SimpleNamespace(local_participant=SimpleNamespace(publish_data=_publish))
-    monkeypatch.setattr(va, "get_job_context", lambda: SimpleNamespace(room=room))
+    monkeypatch.setattr(va, "current_room", lambda: room)
 
     spoken = await va.present_visible_artifact(
         user_id="u",
@@ -110,7 +110,7 @@ async def test_publish_failure_never_claims_the_card_is_visible(monkeypatch):
         raise RuntimeError("room disconnected")
 
     room = SimpleNamespace(local_participant=SimpleNamespace(publish_data=_publish))
-    monkeypatch.setattr(va, "get_job_context", lambda: SimpleNamespace(room=room))
+    monkeypatch.setattr(va, "current_room", lambda: room)
 
     spoken = await va.present_visible_artifact(
         user_id="u",

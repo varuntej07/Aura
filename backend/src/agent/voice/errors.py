@@ -7,11 +7,9 @@ reacts immediately instead of waiting on its own silence watchdog.
 
 from __future__ import annotations
 
-import json
-
 from livekit.agents import JobContext
 
-from ...lib.logger import logger
+from .transport import publish_event_dict
 
 
 def classify_pipeline_error(error_text: str) -> tuple[str, str]:
@@ -46,14 +44,16 @@ async def publish_client_error(ctx: JobContext, code: str, message: str) -> None
     The payload shape matches VoiceServerEvent.fromJson on the client:
     {type: 'session.error', message, payload: {code}}.
     """
-    try:
-        payload = json.dumps({
+    # Not the standard {type, payload} envelope: `message` sits at the top level
+    # because that is the shape VoiceServerEvent.fromJson already parses on the
+    # client. Published as a whole dict for that reason.
+    await publish_event_dict(
+        ctx.room,
+        {
             "type": "session.error",
             "message": message,
             "payload": {"code": code},
-        }).encode("utf-8")
-        await ctx.room.local_participant.publish_data(payload, reliable=True)
-    except Exception as exc:
-        logger.warn("VoiceSession: failed to publish client error", {
-            "code": code, "error": str(exc),
-        })
+        },
+        log_message="VoiceSession: failed to publish client error",
+        log_fields={"code": code},
+    )

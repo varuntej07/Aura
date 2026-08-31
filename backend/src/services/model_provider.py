@@ -472,22 +472,29 @@ class ModelProvider:
                 "temperature": temperature,
             }
             if cache_prefix:
-                # Stable content goes in its own system block with a cache
-                # breakpoint, so repeat calls read it instead of re-prefilling it.
-                # A 1h TTL rather than the 5m default: a long candidate answer can
-                # exceed 5 minutes between turns, and a mid-round cache miss is the
-                # one we can least afford. Below the model's minimum cacheable
+                # Stable content goes FIRST, in its own system block carrying the
+                # cache breakpoint, so repeat calls read it instead of re-prefilling
+                # it. A 1h TTL rather than the 5m default: a long candidate answer
+                # can exceed 5 minutes between turns, and a mid-round cache miss is
+                # the one we can least afford. Below the model's minimum cacheable
                 # prefix this simply does not cache (no error, no write premium).
-                blocks: list[dict] = []
-                if system:
-                    blocks.append({"type": "text", "text": system})
-                blocks.append(
+                #
+                # Order is load bearing. Caching is prefix-based, so anything placed
+                # BEFORE the breakpoint becomes part of the cache key. `system` used
+                # to sit there, and callers that vary it per request (the interview
+                # answer path varies it by action) then missed the cache on every
+                # such request and re-prefilled the whole brief at the write
+                # premium. Variable content belongs after the breakpoint, where it
+                # costs ordinary input tokens and invalidates nothing.
+                blocks: list[dict] = [
                     {
                         "type": "text",
                         "text": cache_prefix,
                         "cache_control": {"type": "ephemeral", "ttl": "1h"},
                     }
-                )
+                ]
+                if system:
+                    blocks.append({"type": "text", "text": system})
                 kwargs["system"] = blocks
             elif system:
                 kwargs["system"] = system
@@ -527,7 +534,10 @@ class ModelProvider:
             # cache_control marker, unlike the Anthropic leg.
             effective_system = system
             if cache_prefix:
-                effective_system = f"{system}\n\n{cache_prefix}" if system else cache_prefix
+                # Same ordering rule as the Anthropic leg above: stable prefix
+                # first, variable system after, so OpenAI's automatic prefix
+                # caching sees an identical head on every call.
+                effective_system = f"{cache_prefix}\n\n{system}" if system else cache_prefix
             messages = []
             if effective_system:
                 messages.append({"role": "system", "content": effective_system})

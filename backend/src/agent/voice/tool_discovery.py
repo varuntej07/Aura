@@ -305,7 +305,6 @@ class EligibilityContext:
     fresh_frame_available: bool
     enabled_feature_rollouts: frozenset[str]
     authorization_state: IntentAuthorizationState
-    required_tools: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,30 +473,6 @@ class ToolCatalog:
                 reason_codes=eligibility_reasons + ("no_eligible_tools",),
                 scores=(),
             )
-        if effective_eligibility.required_tools:
-            eligible_by_name = {entry.name: entry for entry in eligible}
-            required_names = tuple(sorted(effective_eligibility.required_tools))
-            if any(name not in eligible_by_name for name in required_names):
-                return ToolSelection(
-                    tool_names=(),
-                    primary_tool=None,
-                    active_capability=None,
-                    fingerprint=self.selection_fingerprint(()),
-                    reason_codes=eligibility_reasons
-                    + ("required_tool_ineligible",),
-                    scores=(),
-                )
-            primary = eligible_by_name[required_names[0]]
-            return ToolSelection(
-                tool_names=required_names,
-                primary_tool=primary.name,
-                active_capability=primary.metadata.capability,
-                fingerprint=self.selection_fingerprint(required_names),
-                reason_codes=eligibility_reasons
-                + ("required_tool_bundle",),
-                scores=tuple((name, 1.0) for name in required_names),
-            )
-
         query = _selection_query(selection, active_intent)
         documents = [_tokenize(entry.search_document()) for entry in eligible]
         query_tokens = _tokenize(query)
@@ -542,15 +517,7 @@ class ToolCatalog:
                 for entry, score in zip(eligible, scores)
             ]
         if not active_intent.referenced_object:
-            scores = [
-                score
-                - (
-                    2.0
-                    if any(name.endswith("_id") for name in entry.metadata.required_fields)
-                    else 0.0
-                )
-                for entry, score in zip(eligible, scores)
-            ]
+            scores = _penalize_id_required(eligible, scores)
         ranked = sorted(
             zip(eligible, scores),
             key=lambda row: (-row[1], row[0].name),
@@ -573,18 +540,7 @@ class ToolCatalog:
         if len(action_clauses) > 1:
             clause_scores = _bm25_scores(_tokenize(action_clauses[-1]), documents)
             if not active_intent.referenced_object:
-                clause_scores = [
-                    score
-                    - (
-                        2.0
-                        if any(
-                            name.endswith("_id")
-                            for name in entry.metadata.required_fields
-                        )
-                        else 0.0
-                    )
-                    for entry, score in zip(eligible, clause_scores)
-                ]
+                clause_scores = _penalize_id_required(eligible, clause_scores)
             clause_ranked = sorted(
                 zip(eligible, clause_scores),
                 key=lambda row: (-row[1], row[0].name),
@@ -648,27 +604,28 @@ class ToolCatalog:
         ]
         return _fingerprint((TOOL_DISCOVERY_VERSION, self.fingerprint, payload))
 
-    def metadata_rows(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "name": entry.name,
-                "capability": entry.metadata.capability.value,
-                "namespace": entry.metadata.namespace,
-                "effect": entry.metadata.effect.value,
-                "surfaces": sorted(surface.value for surface in entry.metadata.allowed_surfaces),
-                "prerequisites": sorted(value.value for value in entry.metadata.prerequisites),
-                "connectors": sorted(entry.metadata.required_connectors),
-                "risk": entry.metadata.risk.value,
-                "required_arguments": sorted(entry.metadata.required_fields),
-                "latency": entry.metadata.latency.value,
-                "concurrency": entry.metadata.concurrency.value,
-                "version": entry.metadata.version,
-                "rollout_state": entry.metadata.rollout_state.value,
-                "feature_rollout": entry.metadata.feature_rollout,
-                "schema_fingerprint": entry.schema_fingerprint,
-            }
-            for entry in sorted(self.entries.values(), key=lambda value: value.name)
-        ]
+
+MISSING_REFERENT_PENALTY = 2.0
+
+
+def _penalize_id_required(
+    entries: Sequence[ToolCatalogEntry], scores: Sequence[float]
+) -> list[float]:
+    """Push down tools that need an id the conversation has not established yet.
+
+    Applied only when no referenced object is in play: a tool whose required
+    fields include an ``*_id`` cannot be called without one, so ranking it first
+    wastes the bundle on a tool the model cannot complete.
+    """
+    return [
+        score
+        - (
+            MISSING_REFERENT_PENALTY
+            if any(name.endswith("_id") for name in entry.metadata.required_fields)
+            else 0.0
+        )
+        for entry, score in zip(entries, scores)
+    ]
 
 
 def recent_dialogue_context(

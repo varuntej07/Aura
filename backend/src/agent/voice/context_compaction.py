@@ -17,7 +17,11 @@ from ...prompts import VOICE_CONTEXT_COMPACTION_PROMPT
 from ...services.model_provider import get_model_provider
 from ...shared.context_summary import (
     empty_summary as _empty_summary,
+)
+from ...shared.context_summary import (
     estimate_tokens as _estimate_tokens,
+)
+from ...shared.context_summary import (
     normalize_summary as _normalize_summary,
 )
 from .action_policy import tool_output_succeeded

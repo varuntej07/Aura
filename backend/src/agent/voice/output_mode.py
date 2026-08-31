@@ -24,13 +24,13 @@ would mute its own speakers, look muted, and quietly keep paying for TTS.
 
 from __future__ import annotations
 
-import json
 from typing import Protocol
 
 from livekit import rtc
 from livekit.agents import AgentSession
 
 from ...lib.logger import logger
+from .transport import publish_client_event
 
 OUTPUT_MODE_TYPE = "output.mode"
 OUTPUT_MODE_ACK_TYPE = "output.mode_ack"
@@ -166,27 +166,20 @@ class OutputModeController:
     async def _publish_ack(
         self, *, mode: str, generation: int, applied: bool, reason: str | None
     ) -> None:
-        payload = json.dumps(
+        await publish_client_event(
+            self._room,
+            OUTPUT_MODE_ACK_TYPE,
             {
-                "type": OUTPUT_MODE_ACK_TYPE,
-                "payload": {
-                    "mode": mode,
-                    "generation": generation,
-                    "applied": applied,
-                    "reason": reason,
-                },
-            }
-        ).encode("utf-8")
-        try:
-            await self._room.local_participant.publish_data(payload, reliable=True)
-        except Exception as exc:
-            logger.warn(
-                "VoiceSession: output mode acknowledgement failed",
-                {
-                    "session_id": self._session_id,
-                    "user_id": self._user_id,
-                    "mode": mode,
-                    "generation": generation,
-                    "error_type": type(exc).__name__,
-                },
-            )
+                "mode": mode,
+                "generation": generation,
+                "applied": applied,
+                "reason": reason,
+            },
+            log_message="VoiceSession: output mode acknowledgement failed",
+            log_fields={
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "mode": mode,
+                "generation": generation,
+            },
+        )

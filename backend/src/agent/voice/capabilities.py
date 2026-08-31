@@ -106,7 +106,6 @@ class VoiceToolCapability:
     allowed_surfaces: frozenset[VoiceSurface]
     requires_fresh_desktop_frame: bool
     safe_concurrently: bool
-    complex_lane_eligible: bool
     prerequisites: frozenset[ToolPrerequisite]
     required_connectors: frozenset[str]
     risk: ToolRisk
@@ -155,7 +154,6 @@ def _tool(
     surfaces: frozenset[VoiceSurface] = ALL_SURFACES,
     frame: bool = False,
     concurrent: bool = True,
-    complex_eligible: bool = False,
     connectors: tuple[str, ...] = (),
     risk: ToolRisk | None = None,
     latency: ToolLatency = ToolLatency.LOW,
@@ -178,7 +176,6 @@ def _tool(
         allowed_surfaces=surfaces,
         requires_fresh_desktop_frame=frame,
         safe_concurrently=concurrent,
-        complex_lane_eligible=complex_eligible,
         prerequisites=frozenset(prerequisites),
         required_connectors=frozenset(connectors),
         risk=risk or (ToolRisk.LOW if effect is ToolEffect.READ else ToolRisk.MODERATE),
@@ -200,7 +197,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.READ,
             namespace="product.help",
             concurrent=False,
-            complex_eligible=True,
             required=_execution_required_fields(GET_AURA_PRODUCT_INFO_TOOL_DEFINITION),
         ),
         _tool(
@@ -208,7 +204,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             Capability.REMINDER_READ,
             ToolEffect.READ,
             namespace="productivity.reminders",
-            complex_eligible=True,
         ),
         _tool(
             "set_reminder",
@@ -216,7 +211,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             namespace="productivity.reminders",
             concurrent=False,
-            complex_eligible=True,
             # Derived, not retyped. This drifted once already: the canonical schema
             # grew `tier` and this copy did not, so the voice path and the chat path
             # disagreed about what a valid set_reminder call looks like.
@@ -228,7 +222,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             namespace="productivity.reminders",
             concurrent=False,
-            complex_eligible=True,
             required=("reminder_id",),
         ),
         _tool(
@@ -237,7 +230,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.READ,
             namespace="productivity.calendar",
             connectors=("google_calendar",),
-            complex_eligible=True,
         ),
         _tool(
             "create_calendar_event",
@@ -247,7 +239,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             connectors=("google_calendar",),
             latency=ToolLatency.MEDIUM,
             concurrent=False,
-            complex_eligible=True,
             required=tuple(
                 CREATE_CALENDAR_EVENT_TOOL_DEFINITION["inputSchema"]["required"]
             ),
@@ -261,7 +252,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             connectors=("google_calendar",),
             latency=ToolLatency.MEDIUM,
             concurrent=False,
-            complex_eligible=True,
             required=tuple(
                 UPDATE_CALENDAR_EVENT_TOOL_DEFINITION["inputSchema"]["required"]
             ),
@@ -275,7 +265,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             Capability.MEMORY_READ,
             ToolEffect.READ,
             namespace="personal.memory",
-            complex_eligible=True,
         ),
         _tool(
             "store_memory",
@@ -283,7 +272,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             namespace="personal.memory",
             concurrent=False,
-            complex_eligible=True,
             required=("key", "value", "category"),
         ),
         _tool(
@@ -293,7 +281,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             namespace="personal.memory",
             risk=ToolRisk.HIGH,
             concurrent=False,
-            complex_eligible=True,
             required=("memory_id",),
         ),
         _tool(
@@ -302,7 +289,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.READ,
             namespace="research.web",
             latency=ToolLatency.HIGH,
-            complex_eligible=True,
         ),
         _tool(
             "start_research",
@@ -312,7 +298,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             surfaces=DESKTOP_ONLY,
             latency=ToolLatency.HIGH,
             concurrent=False,
-            complex_eligible=True,
             required=("request", "depth"),
         ),
         _tool(
@@ -320,7 +305,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             Capability.USER_CONTEXT_READ,
             ToolEffect.READ,
             namespace="personal.context",
-            complex_eligible=True,
         ),
         _tool(
             "report_feedback",
@@ -328,7 +312,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             namespace="feedback",
             concurrent=True,
-            complex_eligible=True,
             required=("category", "about", "summary", "severity"),
         ),
         _tool(
@@ -338,7 +321,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             namespace="research.tracking",
             latency=ToolLatency.HIGH,
             concurrent=False,
-            complex_eligible=True,
             required=("request",),
         ),
         _tool(
@@ -347,7 +329,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             ToolEffect.WRITE,
             namespace="writing.drafts",
             concurrent=False,
-            complex_eligible=True,
             required=("operation", "skill_id"),
         ),
         _tool(
@@ -357,7 +338,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             namespace="desktop.screen",
             surfaces=DESKTOP_ONLY,
             concurrent=False,
-            complex_eligible=True,
             required=("kind", "title", "content"),
         ),
         _tool(
@@ -421,16 +401,6 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
     )
 }
 
-
-READ_TOOL_NAMES = frozenset(
-    name for name, item in VOICE_TOOL_REGISTRY.items() if item.effect is ToolEffect.READ
-)
-LOW_CONFIDENCE_SAFE_READ_TOOL_NAMES = frozenset(
-    {"query_memory", "web_surf", "get_user_context"}
-)
-WRITE_TOOL_NAMES = frozenset(
-    name for name, item in VOICE_TOOL_REGISTRY.items() if item.effect is ToolEffect.WRITE
-)
 
 
 def tool_name(tool: object) -> str:

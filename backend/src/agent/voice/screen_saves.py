@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 from dataclasses import dataclass
 from io import BytesIO
-
-from livekit.agents import get_job_context
 
 from ...lib.logger import logger
 from ...services import gcs
 from ...services.screen_saves import fields as F
 from ...services.screen_saves import store as screen_save_store
 from .screen_frames import ScreenFrame
+from .transport import current_room, publish_client_event
 
 _SCREENSHOT_COLLECTION = "Screenshots"
 
@@ -202,25 +200,19 @@ async def _publish_screen_save_created(
     *, item_id: str, title: str, collection_name: str, session_id: str, user_id: str,
 ) -> None:
     """Publish the desktop toast after durable persistence; fail soft on toast loss."""
-    try:
-        room = get_job_context().room
-        payload = json.dumps(
-            {
-                "type": "screen_save.created",
-                "payload": {
-                    "item_id": item_id,
-                    "collection_name": collection_name,
-                    "title": title,
-                },
-            }
-        ).encode("utf-8")
-        await room.local_participant.publish_data(payload, reliable=True)
+    published = await publish_client_event(
+        current_room(),
+        "screen_save.created",
+        {
+            "item_id": item_id,
+            "collection_name": collection_name,
+            "title": title,
+        },
+        log_message="screen_saves: screen_save.created publish failed",
+        log_fields={"session_id": session_id, "user_id": user_id},
+    )
+    if published:
         logger.info(
             "screen_saves: screen_save.created published",
             {"session_id": session_id, "user_id": user_id, "item_id": item_id},
-        )
-    except Exception as exc:
-        logger.warn(
-            "screen_saves: screen_save.created publish failed",
-            {"session_id": session_id, "user_id": user_id, "error": str(exc)},
         )

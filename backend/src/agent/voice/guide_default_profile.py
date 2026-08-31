@@ -4,9 +4,10 @@ Guide Mode must adapt to whatever the user asks (editing a photo, filling a form
 configuring an app, learning a tool), not one hard-coded flow. This profile owns
 no application entities: it trusts the planner's own ordered steps and the app the
 planner identified from the user's request, and verifies each step against the
-per-step predicates the planner produced. ``CapCutExampleProfile`` remains an
-isolated example skill (``guide_capcut_example.py``) that a future task-profile
-registry can select; it is no longer the one wired-in profile.
+per-step predicates the planner produced. This is the only profile there is: the
+earlier per-application example profile and its CapCut step template were deleted
+once Guide stopped being scripted per application. A second profile would
+implement ``GuideTaskProfile`` (``guide_kernel.py``) alongside this one.
 """
 
 from __future__ import annotations

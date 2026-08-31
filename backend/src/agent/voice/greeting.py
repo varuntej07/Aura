@@ -18,6 +18,7 @@ from ...prompts import VOICE_OPENER_SYSTEM_PROMPT
 from ...services.model_provider import get_model_provider
 from .context import SessionContext
 
+
 # The opener teaches a category (a friend's hello that lands personal), never a
 # fixed line. The model decides whether the digest holds anything worth a
 # callback; an empty/none answer is a valid outcome and falls back to static.

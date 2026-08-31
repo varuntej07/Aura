@@ -244,7 +244,8 @@ def build_agent_session(
         # which makes bounding how long that vote costs a defensible tradeoff
         # rather than papering over a broken signal.
         #
-        # mode="dynamic" (DynamicEndpointing in voice/endpointing.py) derives
+        # mode="dynamic" (livekit.agents.voice.endpointing.DynamicEndpointing,
+        # in the SDK, not this package) derives
         # max_delay from an ExpFilter over this user's observed
         # between_turn_delay, bounded by [min_delay, max_delay], so the ceiling
         # converges toward how they actually pause. Two honest limits: alpha

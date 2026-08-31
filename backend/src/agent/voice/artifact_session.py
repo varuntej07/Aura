@@ -62,11 +62,6 @@ READ_ONLY_CAPABILITIES = frozenset(
     and all(item.effect is ToolEffect.READ for item in tools)
 )
 
-CAPABILITY_TOOLS: dict[Capability, str] = {
-    Capability.OUTBOUND_DRAFT: "draft_outbound_message",
-    Capability.VISIBLE_ARTIFACT: "present_visible_artifact",
-}
-
 # Turns of unrelated conversation before an open card is assumed abandoned.
 # A capability change closes the session immediately, so this ceiling only
 # catches drift that never commits to any tool at all. Six is deliberately
@@ -103,13 +98,6 @@ class ArtifactSession:
     @property
     def is_open(self) -> bool:
         return self.capability is not None
-
-    @property
-    def owning_tool(self) -> str:
-        """The tool that must be forced while this session is open."""
-        if self.capability is None:
-            return ""
-        return CAPABILITY_TOOLS.get(self.capability, "")
 
     def open(
         self,

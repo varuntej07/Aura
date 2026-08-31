@@ -10,9 +10,11 @@ from src.prompts import DESKTOP_VOICE_SYSTEM_PROMPT, MOBILE_VOICE_SYSTEM_PROMPT
 
 
 def _policy(transcript: str, *, finalized: bool = True):
+    # The transcript is accepted here only to keep the call sites readable.
+    # derive_turn_policy no longer takes it: exposure cannot depend on wording
+    # because the wording is not passed in at all.
+    del transcript
     return derive_turn_policy(
-        transcript,
-        lk_llm.ChatContext(),
         VoiceSurface.APP,
         fresh_frame_available=False,
         finalized_turn=finalized,

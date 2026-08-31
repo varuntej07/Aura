@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import time
-from ast import literal_eval
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from livekit.agents import AgentSession, JobContext
 
@@ -36,6 +34,7 @@ from .interview import interview_owns_conversation
 from .telemetry import log_turn_metrics, log_voice_failure
 from .text_sanitizer import strip_nonverbal_cues
 from .tool_discovery import IntentPendingRequirement
+from .tool_result import parse_tool_output
 from .turn_metrics import VoiceTurnMetrics
 
 # Slow-tool filler phrases moved to voice/tool_filler.py, triggered from
@@ -61,30 +60,16 @@ _SAFE_RESULT_FIELDS: dict[str, frozenset[str]] = {
 
 
 def _safe_tool_result(tool_name: str, output: object) -> dict[str, Any]:
-    raw = getattr(output, "output", "")
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        try:
-            parsed = literal_eval(raw)
-        except (ValueError, SyntaxError):
-            return {}
-    if not isinstance(parsed, dict):
+    parsed = parse_tool_output(output)
+    if parsed is None:
         return {}
     allowed = _SAFE_RESULT_FIELDS.get(tool_name, frozenset())
     return {key: parsed[key] for key in allowed if key in parsed}
 
 
 def _pending_requirement(output: object) -> IntentPendingRequirement | None:
-    raw = getattr(output, "output", "")
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        try:
-            parsed = literal_eval(raw)
-        except (ValueError, SyntaxError):
-            return None
-    if not isinstance(parsed, dict):
+    parsed = parse_tool_output(output)
+    if parsed is None:
         return None
     if parsed.get("approval_required") is True:
         return IntentPendingRequirement.APPROVAL
@@ -94,6 +79,43 @@ def _pending_requirement(output: object) -> IntentPendingRequirement | None:
     ):
         return IntentPendingRequirement.CLARIFICATION
     return None
+
+
+
+class GuideObserver(Protocol):
+    """The Guide coordinator, as the recorder uses it.
+
+    Declared rather than duck-typed because the recorder forwards five methods
+    and used to reach every one of them through ``getattr`` + ``callable``. That
+    made a rename silent: the recorder kept running and simply stopped
+    forwarding, so Guide usage would quietly stop being measured.
+    """
+
+    def is_active(self) -> bool: ...
+
+    def current_reply_source(self) -> str: ...
+
+    def note_turn_metrics(self, role: str, metrics: dict) -> None: ...
+
+    def note_tool(self, name: str) -> None: ...
+
+    def note_user_turn(self, text: str) -> None: ...
+
+
+class VoiceToolObserver(Protocol):
+    """The BuddyAgent, as the recorder uses it. Same reasoning as above."""
+
+    def record_voice_conversation_item(self, item: object) -> None: ...
+
+    def record_voice_tool_execution(
+        self,
+        tool_name_value: str,
+        *,
+        success: bool,
+        pending_requirement: IntentPendingRequirement | None = None,
+    ) -> int | None: ...
+
+    def close_voice_context(self) -> None: ...
 
 
 class VoiceSessionRecorder:
@@ -107,9 +129,9 @@ class VoiceSessionRecorder:
         session_id: str,
         user_id: str,
         user_tier: str,
-        tool_observer: object | None = None,
+        tool_observer: VoiceToolObserver | None = None,
         screen_frames: "ScreenFrameStore | None" = None,
-        guide: object | None = None,
+        guide: GuideObserver | None = None,
         worker_started_monotonic: float | None = None,
         voice_requested_at_ms: int | None = None,
         voice_request_id: str = "",
@@ -148,6 +170,7 @@ class VoiceSessionRecorder:
         # True when the 5-minute no-transcript watchdog is what ended the call, rather
         # than the user hanging up. Read at teardown to explain a zero-turn session.
         self.closed_by_idle_timeout = False
+        self._closing = False
         self._followup_idle_task: asyncio.Task | None = None
         # Latched True once Buddy has checked in during the CURRENT silence span;
         # released only by a real final user transcript. Stops LiveKit's repeated
@@ -180,7 +203,6 @@ class VoiceSessionRecorder:
 
         async def _close_after_idle() -> None:
             from ...services.session_followup import fields as followup_fields
-            from ...services.session_followup.lifecycle import session_lifecycle_service
 
             try:
                 await asyncio.sleep(followup_fields.VOICE_IDLE_TIMEOUT.total_seconds())
@@ -188,26 +210,10 @@ class VoiceSessionRecorder:
                 # here means the whole window passed without one. On a session that
                 # also captured no turns it is the signature of a dead inbound audio
                 # path, and it used to end the call with no trace of why.
-                logger.warn(
-                    "voice_session_closed_by_idle_timeout",
-                    {
-                        "session_id": self._session_id,
-                        "user_id": self._user_id,
-                        "idle_s": followup_fields.VOICE_IDLE_TIMEOUT.total_seconds(),
-                        "turns_captured": len(self.turns),
-                    },
+                await self.close_session(
+                    "idle_timeout",
+                    idle_s=followup_fields.VOICE_IDLE_TIMEOUT.total_seconds(),
                 )
-                self.closed_by_idle_timeout = True
-                await session_lifecycle_service.finalize_session(
-                    self._user_id,
-                    self._session_id,
-                    reason="idle_timeout",
-                )
-                await self._session.aclose()
-                try:
-                    await self._ctx.delete_room()
-                except Exception:
-                    pass
             except asyncio.CancelledError:
                 return
 
@@ -215,6 +221,44 @@ class VoiceSessionRecorder:
             _close_after_idle(),
             name=f"followup-voice-idle-{self._session_id[:8]}",
         )
+
+
+    async def close_session(self, reason: str, *, idle_s: float | None = None) -> None:
+        """End the live session, stamping WHY on the session doc. Idempotent.
+
+        The single server-side close. Guide's idle watchdog used to call
+        ``session.aclose()`` directly, which meant a session it ended was
+        indistinguishable in Firestore from the user hanging up: no
+        ``closed_by_idle_timeout``, no finalize reason, nothing for the
+        post-session pipeline to explain a zero-turn call with. Every
+        server-initiated close comes through here so that can no longer happen.
+        """
+        if self._closing:
+            return
+        self._closing = True
+        from ...services.session_followup.lifecycle import session_lifecycle_service
+
+        logger.warn(
+            "voice_session_closed_by_idle_timeout",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "reason": reason,
+                "idle_s": idle_s,
+                "turns_captured": len(self.turns),
+            },
+        )
+        self.closed_by_idle_timeout = True
+        await session_lifecycle_service.finalize_session(
+            self._user_id,
+            self._session_id,
+            reason=reason,
+        )
+        await self._session.aclose()
+        try:
+            await self._ctx.delete_room()
+        except Exception:
+            pass
 
     def _on_state(self, ev) -> None:  # type: ignore[misc]
         state = str(getattr(ev, "new_state", ""))
@@ -237,8 +281,7 @@ class VoiceSessionRecorder:
             return
         # Guide Mode owns the conversation with terse, screen-driven steps; a chatty
         # companion-persona away nudge would break that flow, so suppress it.
-        guide_is_active = getattr(self._guide, "is_active", None)
-        if callable(guide_is_active) and guide_is_active():
+        if self._guide is not None and self._guide.is_active():
             return
         # Same reasoning one step further: Interview Mode owns the conversation
         # outright, and a companion-persona check-in landing on the intake task
@@ -314,9 +357,8 @@ class VoiceSessionRecorder:
                 "text": ev.transcript,
                 "timestamp": timestamp.isoformat(),
             })
-            note_user_turn = getattr(self._guide, "note_user_turn", None)
-            if callable(note_user_turn):
-                note_user_turn(str(ev.transcript))
+            if self._guide is not None:
+                self._guide.note_user_turn(str(ev.transcript))
             from ...services.session_followup.lifecycle import session_lifecycle_service
 
             turn_digest = hashlib.sha1(
@@ -345,10 +387,11 @@ class VoiceSessionRecorder:
         metrics_payload: dict[str, Any] = {}
 
         if role == "assistant":
-            source = "normal_turn"
-            reply_source = getattr(self._guide, "current_reply_source", None)
-            if callable(reply_source):
-                source = reply_source()
+            source = (
+                self._guide.current_reply_source()
+                if self._guide is not None
+                else "normal_turn"
+            )
             logger.info("VoiceSession: reply completed", {
                 "session_id": self._session_id,
                 "user_id": self._user_id,
@@ -369,9 +412,8 @@ class VoiceSessionRecorder:
             )
             if self._turn_metrics is not None and role == "user":
                 self._turn_metrics.note_user_metrics(metrics_payload)
-            note_metrics = getattr(self._guide, "note_turn_metrics", None)
-            if callable(note_metrics):
-                note_metrics(role, metrics)
+            if self._guide is not None:
+                self._guide.note_turn_metrics(role, metrics)
             if role == "assistant" and not self._first_talk_logged:
                 self._first_talk_logged = True
                 now_epoch_ms = int(time.time() * 1000)
@@ -416,10 +458,8 @@ class VoiceSessionRecorder:
                     assistant_text=str(content),
                     metrics_payload=metrics_payload,
                 )
-            observer = self._tool_observer
-            record_item = getattr(observer, "record_voice_conversation_item", None)
-            if callable(record_item):
-                record_item(item)
+            if self._tool_observer is not None:
+                self._tool_observer.record_voice_conversation_item(item)
 
         # Tool-call CAPTURE lives in _on_tools_executed (the function_tools_executed
         # event), the only session event that actually carries tool names on this stack
@@ -439,9 +479,8 @@ class VoiceSessionRecorder:
             name = getattr(fnc_call, "name", "") or ""
             if name:
                 self.tool_calls.append(name)
-                note_tool = getattr(self._guide, "note_tool", None)
-                if callable(note_tool):
-                    note_tool(name)
+                if self._guide is not None:
+                    self._guide.note_tool(name)
                 output = outputs[index] if index < len(outputs) else None
                 success = output is not None and tool_output_succeeded(output)
                 registration = VOICE_TOOL_REGISTRY.get(name)
@@ -459,11 +498,9 @@ class VoiceSessionRecorder:
                     if safe_result:
                         receipt["result"] = safe_result
                     self._append_action_receipt(receipt)
-                observer = self._tool_observer
-                record = getattr(observer, "record_voice_tool_execution", None)
                 latency_ms = None
-                if callable(record):
-                    latency_ms = record(
+                if self._tool_observer is not None:
+                    latency_ms = self._tool_observer.record_voice_tool_execution(
                         name,
                         success=success,
                         pending_requirement=(
@@ -503,9 +540,8 @@ class VoiceSessionRecorder:
     ) -> None:
         """Record a finalized deterministic action that bypassed model tools."""
         self.tool_calls.append(name)
-        note_tool = getattr(self._guide, "note_tool", None)
-        if callable(note_tool):
-            note_tool(name)
+        if self._guide is not None:
+            self._guide.note_tool(name)
         receipt: dict[str, Any] = {
             "tool_name": name,
             "call_id": call_id,
@@ -655,9 +691,8 @@ class VoiceSessionRecorder:
                 name=f"voice-client-error-close-{self._session_id[:8]}",
             )
         self._record_session_llm_usage()
-        close_context = getattr(self._tool_observer, "close_voice_context", None)
-        if callable(close_context):
-            close_context()
+        if self._tool_observer is not None:
+            self._tool_observer.close_voice_context()
         self.done.set()
 
     def watch_llm_fallback(self, adapter: Any) -> None:

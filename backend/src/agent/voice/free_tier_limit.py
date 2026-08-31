@@ -37,21 +37,15 @@ from ...prompts import (
     FREE_TIER_VOICE_WARNING_INSTRUCTIONS,
     FREE_TIER_VOICE_WIND_DOWN_INSTRUCTIONS,
 )
-
-# How long to wait for a turn boundary before speaking, so a line never lands on
-# top of the user or Buddy mid-sentence. Polled, matching the away-nudge gate.
-_LISTENING_POLL_INTERVAL_S = 0.5
-_LISTENING_MAX_WAIT_S = 15.0
+from .transport import await_turn_boundary
 
 # Warn when this many seconds of budget remain.
 _WARN_LEAD_SECONDS = 60
 
 
 async def _wait_for_listening(session: AgentSession) -> None:
-    waited = 0.0
-    while str(getattr(session, "agent_state", "")) != "listening" and waited < _LISTENING_MAX_WAIT_S:
-        await asyncio.sleep(_LISTENING_POLL_INTERVAL_S)
-        waited += _LISTENING_POLL_INTERVAL_S
+    """Wait for a turn boundary so a budget line never lands mid-sentence."""
+    await await_turn_boundary(session)
 
 
 async def _speak_goodbye_and_close(

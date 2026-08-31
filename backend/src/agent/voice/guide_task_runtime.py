@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +20,7 @@ from ...services.guide_task_store import (
     GuideTaskLeaseError,
     GuideTaskStore,
 )
+from .chat_context import latest_user_text
 from .guide_kernel import (
     GuideDecisionProvider,
     GuideFrameInput,
@@ -48,6 +48,7 @@ from .guide_prompt import (
 )
 from .point_tag import PointTarget, publish_element_point
 from .screen_frames import ScreenFrame, ScreenFrameStore
+from .transport import publish_client_event
 
 _TERMINAL_STATES = {GuideTaskStatus.COMPLETED, GuideTaskStatus.CANCELLED}
 _CURRENT_APP = "the current app"
@@ -62,13 +63,6 @@ _CURRENT_APP_ALIASES = frozenset(
         "unknown application",
     }
 )
-
-
-def _latest_user_text(chat_ctx: lk_llm.ChatContext) -> str:
-    for item in reversed(chat_ctx.items):
-        if isinstance(item, lk_llm.ChatMessage) and item.role == "user":
-            return item.text_content.strip()
-    return ""
 
 
 def _kernel_frame(frame: ScreenFrame) -> GuideFrameInput:
@@ -143,6 +137,7 @@ class GuideTaskRuntime:
         self._last_activity_at = time.monotonic()
         self._turn_started_at = 0.0
         self._failure_handler: Callable[[str], None] | None = None
+        self._session_closer: Callable[[str], Awaitable[None]] | None = None
         self._current_trace = GuideTraceContext(
             trace_id=uuid.uuid4().hex,
             event_id=uuid.uuid4().hex,
@@ -158,6 +153,16 @@ class GuideTaskRuntime:
 
     def bind_failure_handler(self, handler: Callable[[str], None]) -> None:
         self._failure_handler = handler
+
+    def bind_session_closer(self, closer: Callable[[str], Awaitable[None]]) -> None:
+        """Attach the one owner allowed to end the voice session.
+
+        Guide can decide the session is dead, but it must not be the thing that
+        closes it: the owner stamps the reason the post-session pipeline reads.
+        Unbound, this falls back to closing directly so a runtime built outside
+        the worker still terminates rather than idling forever.
+        """
+        self._session_closer = closer
 
     def should_delegate(self) -> bool:
         return self._active
@@ -316,7 +321,7 @@ class GuideTaskRuntime:
         proactive: bool = False,
         force_replan: bool = False,
     ) -> str:
-        raw_transcript = _latest_user_text(chat_ctx)
+        raw_transcript = latest_user_text(chat_ctx)
         transcript = "" if proactive else raw_transcript
         frame = await self._screen_frames.fresh_frame(
             current_turn_context_id=current_turn_context_id
@@ -1295,7 +1300,7 @@ class GuideTaskRuntime:
                             GuideTaskStatus.PAUSED_OFFLINE,
                             "no activity for five minutes",
                         )
-                        await self._session.aclose()
+                        await self._close_session("guide_idle_timeout")
                         return
                     if idle_seconds >= 120 and task.status not in {
                         GuideTaskStatus.WAITING_EXTERNAL,
@@ -1311,22 +1316,27 @@ class GuideTaskRuntime:
             name=f"guide-idle-{self._voice_session_id[:8]}",
         )
 
+    async def _close_session(self, reason: str) -> None:
+        closer = self._session_closer
+        if closer is None:
+            await self._session.aclose()
+            return
+        await closer(reason)
+
     async def _publish(self, message_type: str, payload: dict[str, Any]) -> None:
-        message = json.dumps({"type": message_type, "payload": payload}).encode()
-        try:
-            await self._room.local_participant.publish_data(message, reliable=True)
-        except Exception as exc:
-            logger.warn(
-                "GuideTelemetry: protocol publish failed",
-                {
-                    **self._correlation(),
-                    "message_type": message_type,
-                    "error_type": type(exc).__name__,
-                    "stage": GuideStage.EXECUTION,
-                    "outcome": GuideTraceOutcome.FAILED,
-                    "reason": "protocol_publish_failed",
-                },
-            )
+        await publish_client_event(
+            self._room,
+            message_type,
+            payload,
+            log_message="GuideTelemetry: protocol publish failed",
+            log_fields={
+                **self._correlation(),
+                "message_type": message_type,
+                "stage": GuideStage.EXECUTION,
+                "outcome": GuideTraceOutcome.FAILED,
+                "reason": "protocol_publish_failed",
+            },
+        )
 
     async def _publish_task(self) -> None:
         task = self._task

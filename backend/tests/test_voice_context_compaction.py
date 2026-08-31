@@ -141,23 +141,11 @@ async def test_compaction_failure_cannot_change_structural_tool_exposure():
     compacted = compactor.enforce_hard_ceiling(context)
     assert compacted is not None
     assert completed_turn_count(compacted) == 10
-    policy = derive_turn_policy(
-        "Generate a prompt for my coding agent",
-        compacted,
-        VoiceSurface.DESKTOP,
-        False,
-        source_message_id="turn-21",
-        turn_index=21,
-    )
-    unrelated_policy = derive_turn_policy(
-        "Or tonight",
-        compacted,
-        VoiceSurface.DESKTOP,
-        False,
-        source_message_id="turn-21",
-        turn_index=21,
-    )
-    assert policy.allowed_tools == unrelated_policy.allowed_tools
+    # derive_turn_policy no longer ACCEPTS the transcript or the chat context, so
+    # "exposure cannot depend on wording" is now guaranteed by the signature
+    # rather than asserted over two phrasings. What is still worth pinning is
+    # that a failed compaction leaves the structural exposure intact.
+    policy = derive_turn_policy(VoiceSurface.DESKTOP, False)
     assert "set_reminder" in policy.allowed_tools
 
 

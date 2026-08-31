@@ -33,9 +33,11 @@ def _policy(
     frame: bool = False,
     finalized: bool = True,
 ):
+    # `text` is kept for call-site readability only. derive_turn_policy no longer
+    # accepts the transcript or the chat context: structural exposure cannot
+    # depend on what the user said, and not taking the argument is what enforces it.
+    del text
     return derive_turn_policy(
-        text,
-        lk_llm.ChatContext(),
         VoiceSurface(surface),
         frame,
         finalized_turn=finalized,

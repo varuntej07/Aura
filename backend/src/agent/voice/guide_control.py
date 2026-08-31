@@ -15,11 +15,8 @@ spoken line that does NOT claim success, never a raised tool error mid-turn.
 
 from __future__ import annotations
 
-import json
-
-from livekit.agents import get_job_context
-
 from ...lib.logger import logger
+from .transport import current_room, publish_client_event
 
 GUIDE_REQUEST_TYPE = "guide.request"
 
@@ -34,22 +31,18 @@ SPOKEN_GUIDE_REQUEST_FAILED = (
 
 async def request_guide_mode(*, user_id: str, session_id: str, enable: bool) -> str:
     """Ask the desktop to arm/disarm Guide Mode. Never raises (fail-soft)."""
-    try:
-        room = get_job_context().room
-        data = json.dumps(
-            {"type": GUIDE_REQUEST_TYPE, "payload": {"enable": enable}}
-        ).encode("utf-8")
-        await room.local_participant.publish_data(data, reliable=True)
-    except Exception as exc:
-        logger.warn(
-            "guide_control: request publish failed",
-            {
-                "user_id": user_id,
-                "session_id": session_id,
-                "enable": enable,
-                "error_type": type(exc).__name__,
-            },
-        )
+    published = await publish_client_event(
+        current_room(),
+        GUIDE_REQUEST_TYPE,
+        {"enable": enable},
+        log_message="guide_control: request publish failed",
+        log_fields={
+            "user_id": user_id,
+            "session_id": session_id,
+            "enable": enable,
+        },
+    )
+    if not published:
         return SPOKEN_GUIDE_REQUEST_FAILED
     logger.info(
         "guide_control: request published",

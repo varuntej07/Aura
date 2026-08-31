@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
 
 from ....lib.logger import logger
+from ..stream_intake import AssemblyTasks
 from .contracts import (
     ATTR_INTERVIEW_ID,
     ATTR_MATERIAL_TYPE,
@@ -57,7 +57,7 @@ class InterviewMaterialStore:
         self._session_id = session_id
         self._user_id = user_id
         self._client_events_topic = client_events_topic
-        self._assembly_tasks: set[asyncio.Task] = set()
+        self._assembly_tasks = AssemblyTasks()
         # Armed by request_material_overlay BEFORE the request is published, so a
         # paste that somehow beats our own await still resolves the right waiter.
         self._expected_key = ""
@@ -108,13 +108,7 @@ class InterviewMaterialStore:
         session that asked for them.
         """
         self.disarm()
-        tasks = list(self._assembly_tasks)
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with suppress(asyncio.CancelledError, Exception):
-                await task
-        self._assembly_tasks.clear()
+        await self._assembly_tasks.drain()
 
     async def wait_for_overlay(self, timeout_s: float = OVERLAY_ACK_TIMEOUT_S) -> bool:
         """True when the client confirmed the paste overlay is actually on screen."""
@@ -173,12 +167,10 @@ class InterviewMaterialStore:
 
     def handle_stream(self, reader, participant_identity: str) -> None:
         """Sync callback for ``room.register_byte_stream_handler``; assembles async."""
-        task = asyncio.create_task(
+        self._assembly_tasks.spawn(
             self._assemble_bounded(reader, participant_identity),
             name=f"voice-interview-material-{self._session_id[:8]}",
         )
-        self._assembly_tasks.add(task)
-        task.add_done_callback(self._assembly_tasks.discard)
 
     async def _assemble_bounded(self, reader, participant_identity: str) -> None:
         """Assemble one stream under a hard bound. Never raises."""

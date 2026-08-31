@@ -58,6 +58,25 @@ from ..config.settings import settings
 from ..lib.logger import logger
 from ..prompts import voice_system_prompt
 from ..services.analytics.llm_telemetry import start_tool_span
+from ..services.feedback.feedback_capture import capture_feedback
+from ..services.feedback.feedback_schema import (
+    VOICE_FEEDBACK_TOOL_DEFINITION,
+    FeedbackReport,
+    voice_feedback_document_id,
+)
+from ..services.memory.retrieval import (
+    EARLY_MEMORY_BUDGET_S,
+    VOICE_RETRIEVAL_BUDGET_S,
+    RetrievalObservation,
+    render_relevant_memory_block,
+    retrieve_relevant_subgraph,
+    should_retrieve_for_message,
+)
+from ..services.outbound_draft.skills import (
+    WRITING_SKILL_IDS,
+    get_writing_skill,
+    is_writing_skill_id,
+)
 from ..services.product_knowledge import (
     CurrentProductSurface,
     ProductInfoKind,
@@ -72,25 +91,6 @@ from ..shared.tools import (
     resolve_set_reminder_tier,
     validate_and_coerce_tool_input,
 )
-from ..services.feedback.feedback_capture import capture_feedback
-from ..services.feedback.feedback_schema import (
-    VOICE_FEEDBACK_TOOL_DEFINITION,
-    FeedbackReport,
-    voice_feedback_document_id,
-)
-from ..services.memory.retrieval import (
-    EARLY_MEMORY_BUDGET_S,
-    RetrievalObservation,
-    VOICE_RETRIEVAL_BUDGET_S,
-    render_relevant_memory_block,
-    retrieve_relevant_subgraph,
-    should_retrieve_for_message,
-)
-from ..services.outbound_draft.skills import (
-    WRITING_SKILL_IDS,
-    get_writing_skill,
-    is_writing_skill_id,
-)
 from .voice.action_policy import (
     TurnCapabilityPolicy,
     completed_tool_results,
@@ -100,6 +100,7 @@ from .voice.action_policy import (
 )
 from .voice.action_telemetry import VoiceActionTelemetry
 from .voice.artifact_delivery import ArtifactDeliveryTracker
+from .voice.artifact_session import ArtifactSession
 from .voice.capabilities import (
     VOICE_TOOL_REGISTRY,
     Capability,
@@ -107,6 +108,7 @@ from .voice.capabilities import (
     VoiceSurface,
     tool_name,
 )
+from .voice.chat_context import latest_user_message
 from .voice.context_compaction import VoiceContextCompactor
 from .voice.draft_outbound import (
     SPOKEN_DRAFT_READY,
@@ -126,7 +128,6 @@ from .voice.screen_context_stream import (
     live_context_message_present,
 )
 from .voice.screen_frames import ScreenFrameStore, attach_screen_frame_to_turn
-from .voice.artifact_session import ARTIFACT_CAPABILITIES, ArtifactSession
 from .voice.screen_saves import SaveScreenItemResult, save_screen_capture
 from .voice.speculation import SpeculationDecision, TurnMutations, decide, is_reusable
 from .voice.spoken_action_guard import (
@@ -812,12 +813,8 @@ class BuddyAgent(agents.Agent):
                 frame_id=frame.frame_id if frame is not None else None,
             )
         policy = derive_turn_policy(
-            turn_instruction,
-            turn_ctx,
             self._launch_surface,
             self._fresh_frame_for_turn,
-            source_message_id=new_message.id,
-            turn_index=current_turn_index,
             stt_confidence=stt_confidence,
         )
         self._finalized_tool_selection = None
@@ -1909,7 +1906,6 @@ class BuddyAgent(agents.Agent):
                 fresh_frame_available=fresh_frame_available,
                 enabled_feature_rollouts=self._enabled_feature_rollouts,
                 authorization_state=self._active_intent.authorization_state,
-                required_tools=policy.required_tools,
             ),
             policy.allowed_tools,
             self._active_intent,
@@ -2122,7 +2118,7 @@ class BuddyAgent(agents.Agent):
         desktop overlay animates. Sessions without screen sight pass through
         the same filter as a cheap no-op (no '[' in normal speech).
         """
-        latest_user = self._latest_user_message(chat_ctx)
+        latest_user = latest_user_message(chat_ctx)
         finalized = bool(
             latest_user is not None
             and latest_user.id == self._finalized_message_id
@@ -2173,13 +2169,9 @@ class BuddyAgent(agents.Agent):
         if policy is None:
             # EXPOSURE policy. General tool schemas stay stable across passes.
             policy = derive_turn_policy(
-                transcript,
-                chat_ctx,
                 self._launch_surface,
                 fresh_frame_available,
                 finalized_turn=True,
-                source_message_id=latest_user.id if latest_user is not None else "",
-                turn_index=self._action_telemetry.turn_index,
                 stt_confidence=(
                     self._finalized_stt_confidence if finalized else None
                 ),
@@ -2403,7 +2395,7 @@ class BuddyAgent(agents.Agent):
             finalized
             and exposed_names
             and not already_ran
-            and (armed or policy.required_tools)
+            and armed
         )
         if force_channel:
             model_settings = replace(model_settings, tool_choice="required")
@@ -2506,13 +2498,6 @@ class BuddyAgent(agents.Agent):
             user_id=self._user_id,
             session_id=self._session_id,
         )
-
-    @staticmethod
-    def _latest_user_message(chat_ctx: lk_llm.ChatContext) -> lk_llm.ChatMessage | None:
-        for item in reversed(chat_ctx.items):
-            if isinstance(item, lk_llm.ChatMessage) and item.role == "user":
-                return item
-        return None
 
     @staticmethod
     def _turn_instruction(

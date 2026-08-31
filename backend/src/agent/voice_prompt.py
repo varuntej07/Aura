@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 VOICE_SESSION_CONTEXT_START = "<session>"
 
 

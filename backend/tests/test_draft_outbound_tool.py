@@ -64,7 +64,7 @@ class _Harness:
             local_participant=SimpleNamespace(publish_data=_publish_data)
         )
         monkeypatch.setattr(
-            dm, "get_job_context", lambda: SimpleNamespace(room=fake_room)
+            dm, "current_room", lambda: fake_room
         )
         monkeypatch.setattr(dm, "settings", SimpleNamespace(is_production=production))
 

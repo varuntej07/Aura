@@ -29,7 +29,6 @@ Wire protocol (JSON over the LiveKit data channel):
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from typing import TYPE_CHECKING
 
@@ -37,6 +36,7 @@ from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
 from ...prompts import DESKTOP_BRIDGE_CONTINUATION_INSTRUCTIONS
+from .transport import publish_event_dict
 
 if TYPE_CHECKING:
     from livekit.agents import AgentSession
@@ -272,16 +272,14 @@ class BridgeHandoverCoordinator:
         )
 
     async def _emit(self, payload: dict) -> None:
-        try:
-            data = json.dumps(payload).encode("utf-8")
-            await self._room.local_participant.publish_data(data, reliable=True)
-        except Exception as exc:
-            logger.warn(
-                "bridge: control publish failed",
-                {
-                    "session_id": self._session_id,
-                    "type": payload.get("type"),
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                },
-            )
+        # The bridge envelope is flat (`handover_id` sits beside `type`), not the
+        # {type, payload} shape, so the whole dict is published as-is.
+        await publish_event_dict(
+            self._room,
+            payload,
+            log_message="bridge: control publish failed",
+            log_fields={
+                "session_id": self._session_id,
+                "type": payload.get("type"),
+            },
+        )

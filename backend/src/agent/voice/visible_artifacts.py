@@ -12,19 +12,17 @@ richer renderer. These artifacts are never persisted or executed.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import uuid
 from typing import TYPE_CHECKING
-
-from livekit.agents import get_job_context
 
 if TYPE_CHECKING:
     from .artifact_delivery import ArtifactDeliveryTracker
 
 from ...lib.logger import logger
 from .artifact_contract import artifact_ready_event, new_request_id
+from .transport import current_room, publish_event_dict
 
 ARTIFACT_KINDS: frozenset[str] = frozenset(
     {"command", "code", "config", "prompt", "steps", "checklist", "note"}
@@ -116,24 +114,18 @@ async def present_visible_artifact(
     artifact = event["payload"]["artifact"]
 
     async def _publish() -> bool:
-        try:
-            room = get_job_context().room
-            await asyncio.wait_for(
-                room.local_participant.publish_data(data, reliable=True),
-                timeout=PUBLISH_TIMEOUT_S,
-            )
-            return True
-        except Exception as exc:
-            logger.warn(
-                "visible_artifact: publish failed",
-                {
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    "kind": event["payload"]["artifact_kind"],
-                    "error_type": type(exc).__name__,
-                },
-            )
-            return False
+        return await publish_event_dict(
+            current_room(),
+            event,
+            timeout_s=PUBLISH_TIMEOUT_S,
+            ensure_ascii=False,
+            log_message="visible_artifact: publish failed",
+            log_fields={
+                "user_id": user_id,
+                "session_id": session_id,
+                "kind": event["payload"]["artifact_kind"],
+            },
+        )
 
     key = (
         delivery.expect(artifact["id"], artifact["revision"])

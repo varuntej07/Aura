@@ -90,94 +90,93 @@ async def gather_session_context(
     source falls back to its declared default; on a partial failure only the
     failed source does (and is logged with its name).
     """
-    # (coroutine, default) pairs — the single source of truth for each fetch's
-    # fallback value, used identically on timeout and on per-fetch failure.
-    sources: list[tuple[Awaitable[Any], Any]] = [
-        (fetch_user_profile(user_id), {"name": "there", "timezone": "UTC", "voice_id": ""}),
-        (fetch_memory_summary(user_id), ""),
-        (fetch_last_session_summary(user_id), {"summary": "", "last_session_at": ""}),
-        (fetch_archive_context(user_id), {"archive_summary": ""}),
+    # One record per source. The name is what a failure is logged against and
+    # what the result is read back by, so a source cannot drift out of step with
+    # its own default the way four hand-maintained parallel lists could.
+    sources: list[tuple[str, Awaitable[Any], Any]] = [
         (
+            "user_profile",
+            fetch_user_profile(user_id),
+            {"name": "there", "timezone": "UTC", "voice_id": ""},
+        ),
+        ("memory_summary", fetch_memory_summary(user_id), ""),
+        (
+            "last_session_summary",
+            fetch_last_session_summary(user_id),
+            {"summary": "", "last_session_at": ""},
+        ),
+        ("archive_context", fetch_archive_context(user_id), {"archive_summary": ""}),
+        (
+            "user_aura_profile",
             fetch_user_aura_profile(user_id),
             {"summary": "", "dominant_tone": "", "dominant_emotion": ""},
         ),
-        (get_user_effective_tier(user_id), "unknown"),
-        (get_remaining_free_voice_seconds(user_id), None),
+        ("user_tier", get_user_effective_tier(user_id), "unknown"),
+        (
+            "remaining_free_voice_seconds",
+            get_remaining_free_voice_seconds(user_id),
+            None,
+        ),
+        ("graph_context", fetch_graph_digest(user_id), ""),
+        ("connector_states", fetch_connector_states(user_id), {}),
     ]
-    coroutines = [coro for coro, _ in sources]
-    defaults = [default for _, default in sources]
-    names = [
-        "user_profile", "memory_summary", "last_session_summary",
-        "archive_context", "user_aura_profile", "user_tier",
-        "remaining_free_voice_seconds",
-    ]
-    graph_source = (fetch_graph_digest(user_id), "")
-    sources.append(graph_source)
-    coroutines.append(graph_source[0])
-    defaults.append(graph_source[1])
-    names.append("graph_context")
-    connector_source = (fetch_connector_states(user_id), {})
-    sources.append(connector_source)
-    coroutines.append(connector_source[0])
-    defaults.append(connector_source[1])
-    names.append("connector_states")
     # Cross-lane continuity. Only desktop sends a conversation_id today, and only after
     # it has handed its recent text turns to /chat/handoff, so this read is skipped
     # entirely for every other caller. It rides the same 1.5s ceiling and the same
     # per-source default as everything above: a slow or missing handoff means the call
     # starts with no text context, never that the greeting waits for one.
     if conversation_id:
-        handoff_source = (fetch_text_handoff(user_id, conversation_id), "")
-        sources.append(handoff_source)
-        coroutines.append(handoff_source[0])
-        defaults.append(handoff_source[1])
-        names.append("text_chat_context")
+        sources.append(
+            ("text_chat_context", fetch_text_handoff(user_id, conversation_id), "")
+        )
 
     try:
         raw_results = await asyncio.wait_for(
-            asyncio.gather(*coroutines, return_exceptions=True),
+            asyncio.gather(
+                *(coroutine for _, coroutine, _ in sources), return_exceptions=True
+            ),
             timeout=PRE_SESSION_FETCH_TIMEOUT_S,
         )
     except TimeoutError:
         logger.warn("VoiceSession: pre-session fetch timed out, using defaults", {
             "session_id": session_id, "user_id": user_id,
         })
-        raw_results = list(defaults)
+        raw_results = [default for _, _, default in sources]
 
-    resolved: list = []
-    for name, value, default in zip(names, raw_results, defaults):
+    resolved: dict[str, Any] = {}
+    for (name, _coroutine, default), value in zip(sources, raw_results):
         if isinstance(value, BaseException):
             logger.warn("VoiceSession: pre-session fetch failed", {
                 "session_id": session_id, "user_id": user_id,
                 "source": name, "error": str(value),
             })
-            resolved.append(default)
+            resolved[name] = default
         else:
-            resolved.append(value)
+            resolved[name] = value
 
-    profile, memory_summary, last_session, archive_data, aura_profile = resolved[:5]
-    user_tier, remaining_free_voice_seconds = resolved[5:7]
-    graph_digest = resolved[7]
-    connector_states = resolved[8]
-    text_chat_context = resolved[9] if conversation_id else ""
+    profile = resolved["user_profile"]
+    last_session = resolved["last_session_summary"]
+    archive_data = resolved["archive_context"]
+    aura_profile = resolved["user_aura_profile"]
+    graph_digest = resolved["graph_context"]
 
     return SessionContext(
         profile=profile,
-        memory_summary=memory_summary,
+        memory_summary=resolved["memory_summary"],
         last_session_summary=last_session.get("summary", ""),
         last_session_at=last_session.get("last_session_at", ""),
         archive_context=archive_data.get("archive_summary", ""),
         aura_summary=aura_profile.get("summary", ""),
         dominant_tone=aura_profile.get("dominant_tone", ""),
         dominant_emotion=aura_profile.get("dominant_emotion", ""),
-        user_tier=user_tier,
-        remaining_free_voice_seconds=remaining_free_voice_seconds,
+        user_tier=resolved["user_tier"],
+        remaining_free_voice_seconds=resolved["remaining_free_voice_seconds"],
         graph_context=(
             "\n\n            Related long-term memory:\n            "
             + graph_digest.replace("\n", "\n            ")
             if graph_digest
             else ""
         ),
-        connector_states=connector_states,
-        text_chat_context=text_chat_context,
+        connector_states=resolved["connector_states"],
+        text_chat_context=resolved.get("text_chat_context", ""),
     )

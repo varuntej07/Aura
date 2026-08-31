@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import re
 import time
 from typing import Protocol
@@ -37,6 +36,7 @@ from .guide_supervisor import GuideSupervisorAgent
 from .guide_task_runtime import GuideTaskRuntime
 from .interview import VoiceSessionState, interview_owns_conversation
 from .screen_frames import ScreenFrame, ScreenFrameStore, strip_stale_images
+from .transport import await_turn_boundary, publish_client_event
 
 GUIDE_MODE_TYPE = "guide.mode"
 GUIDE_HEARTBEAT_TYPE = "guide.heartbeat"
@@ -46,7 +46,6 @@ GUIDE_MODE_ACK_TYPE = "guide.mode_ack"
 _GUIDE_SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 _GUIDE_FRAME_RE = re.compile(r"^([0-9a-f]{32}):(\d+)$")
 _LISTENING_POLL_INTERVAL_S = 0.25
-_LISTENING_MAX_WAIT_S = 15.0
 # A frame older than this no longer reflects "their screen right now", so it is
 # never used to ground a proactive nudge.
 _GUIDE_FRAME_MAX_AGE_S = 15.0
@@ -198,7 +197,7 @@ class GuideCoordinator:
                 resume_task_id is not None
                 and (
                     not isinstance(resume_task_id, str)
-                    or re.fullmatch(r"^[0-9a-f]{32}$", resume_task_id) is None
+                    or _GUIDE_SESSION_RE.fullmatch(resume_task_id) is None
                 )
             )
         ):
@@ -535,20 +534,28 @@ class GuideCoordinator:
         protocol_version: int,
         reason: str | None,
     ) -> None:
-        payload = json.dumps(
+        published = await publish_client_event(
+            self._room,
+            GUIDE_MODE_ACK_TYPE,
             {
-                "type": GUIDE_MODE_ACK_TYPE,
-                "payload": {
-                    "active": active,
-                    "generation": generation,
-                    "guide_session_id": guide_session_id,
-                    "protocol_version": protocol_version,
-                    "reason": reason,
-                },
-            }
-        ).encode("utf-8")
-        try:
-            await self._room.local_participant.publish_data(payload, reliable=True)
+                "active": active,
+                "generation": generation,
+                "guide_session_id": guide_session_id,
+                "protocol_version": protocol_version,
+                "reason": reason,
+            },
+            log_message="VoiceSession: Guide mode acknowledgement failed",
+            log_fields={
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "generation": generation,
+                "active": active,
+                "stage": "execution",
+                "outcome": "failed",
+                "reason": "mode_ack_publish_failed",
+            },
+        )
+        if published:
             logger.info(
                 "GuideTrace",
                 {
@@ -561,20 +568,6 @@ class GuideCoordinator:
                     "stage": "execution",
                     "outcome": "succeeded",
                     "reason": "mode_ack_published",
-                },
-            )
-        except Exception as exc:
-            logger.warn(
-                "VoiceSession: Guide mode acknowledgement failed",
-                {
-                    "session_id": self._session_id,
-                    "user_id": self._user_id,
-                    "generation": generation,
-                    "active": active,
-                    "error_type": type(exc).__name__,
-                    "stage": "execution",
-                    "outcome": "failed",
-                    "reason": "mode_ack_publish_failed",
                 },
             )
 
@@ -749,14 +742,13 @@ class GuideCoordinator:
         )
 
     async def _wait_for_turn_boundary(self) -> None:
-        waited = 0.0
-        while waited < _LISTENING_MAX_WAIT_S:
-            agent_listening = str(getattr(self._session, "agent_state", "")) == "listening"
-            user_state = str(getattr(self._session, "user_state", ""))
-            if agent_listening and user_state != "speaking":
-                return
-            await asyncio.sleep(_LISTENING_POLL_INTERVAL_S)
-            waited += _LISTENING_POLL_INTERVAL_S
+        """Wait for a quiet moment. Unlike the other callers this also waits out
+        the user speaking: a proactive nudge must never talk over them."""
+        await await_turn_boundary(
+            self._session,
+            poll_s=_LISTENING_POLL_INTERVAL_S,
+            require_user_idle=True,
+        )
 
     async def _run(self) -> None:
         while not self._closed:
@@ -909,36 +901,29 @@ class GuideCoordinator:
         match = _GUIDE_FRAME_RE.fullmatch(frame.frame_id)
         sequence = int(match.group(2)) if match else frame.sequence
         newest = self._latest_frame.frame_id if self._latest_frame else ""
-        payload = json.dumps(
+        published = await publish_client_event(
+            self._room,
+            GUIDE_FRAME_ACK_TYPE,
             {
-                "type": GUIDE_FRAME_ACK_TYPE,
-                "payload": {
-                    "frame_id": frame.frame_id,
-                    "frame_seq": sequence,
-                    "accepted": accepted,
-                    "rejection_reason": reason,
-                    "newest_frame_id": newest,
-                },
-            }
-        ).encode("utf-8")
-        try:
-            await self._room.local_participant.publish_data(payload, reliable=True)
-            if accepted and self._last_acked_frame_id != frame.frame_id:
-                self._last_acked_frame_id = frame.frame_id
-                self._step_index += 1
-        except Exception as exc:
-            logger.warn(
-                "VoiceSession: Guide frame acknowledgement failed",
-                {
-                    "session_id": self._session_id,
-                    "user_id": self._user_id,
-                    "frame_id": frame.frame_id,
-                    "accepted": accepted,
-                    "error": str(exc),
-                    "stage": "execution",
-                    "outcome": "failed",
-                    "reason": "frame_ack_publish_failed",
-                    "trace_id": frame.attributes.get("trace_id") or None,
-                    "event_id": frame.attributes.get("event_id") or None,
-                },
-            )
+                "frame_id": frame.frame_id,
+                "frame_seq": sequence,
+                "accepted": accepted,
+                "rejection_reason": reason,
+                "newest_frame_id": newest,
+            },
+            log_message="VoiceSession: Guide frame acknowledgement failed",
+            log_fields={
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "frame_id": frame.frame_id,
+                "accepted": accepted,
+                "stage": "execution",
+                "outcome": "failed",
+                "reason": "frame_ack_publish_failed",
+                "trace_id": frame.attributes.get("trace_id") or None,
+                "event_id": frame.attributes.get("event_id") or None,
+            },
+        )
+        if published and accepted and self._last_acked_frame_id != frame.frame_id:
+            self._last_acked_frame_id = frame.frame_id
+            self._step_index += 1

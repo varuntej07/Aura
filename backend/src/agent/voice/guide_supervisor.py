@@ -15,20 +15,14 @@ from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
 from ...prompts import GUIDE_SYSTEM_PROMPT
-from .guide_control import SPOKEN_GUIDE_REQUEST_FAILED, request_guide_mode
+from .chat_context import latest_user_message
+from .guide_control import request_guide_mode
 from .guide_planning_task import GuidePlanningTask
 from .guide_session_state import GuidePhase, GuideStartClaim
 from .guide_task_runtime import GuideTaskRuntime
 from .interview import VoiceSessionState
 from .point_tag import PointTarget, filter_point_tags, publish_element_point
 from .screen_frames import ScreenFrameStore, attach_screen_frame_to_turn
-
-
-def _latest_user_message(chat_ctx: lk_llm.ChatContext) -> lk_llm.ChatMessage | None:
-    for item in reversed(chat_ctx.items):
-        if isinstance(item, lk_llm.ChatMessage) and item.role == "user":
-            return item
-    return None
 
 
 def _planning_fillers(dynamic_phrase: str, *, replanning: bool) -> tuple[str, ...]:
@@ -166,7 +160,7 @@ class GuideSupervisorAgent(Agent):
         tools: list,
         model_settings: ModelSettings,
     ):
-        latest_user = _latest_user_message(chat_ctx)
+        latest_user = latest_user_message(chat_ctx)
         proactive = bool(
             latest_user is not None
             and self._proactive_message_id
@@ -295,11 +289,14 @@ class GuideSupervisorAgent(Agent):
     ) -> str:
         """Stop Guide Mode when the user asks to leave it or return to Buddy."""
         del context
-        result = await request_guide_mode(
+        # request_guide_mode returns the spoken line directly, and returns
+        # SPOKEN_GUIDE_REQUEST_FAILED when the publish did not land. Keep this
+        # call identical in shape to BuddyAgent.set_guide_mode's: this tool
+        # previously passed `voice_session_id=` and read `.requested`/`.spoken`
+        # off the returned string, so every spoken request to leave Guide Mode
+        # raised TypeError and the user was stuck in the mode.
+        return await request_guide_mode(
             user_id=self._user_id,
-            voice_session_id=self._session_id,
+            session_id=self._session_id,
             enable=False,
         )
-        if not result.requested:
-            return SPOKEN_GUIDE_REQUEST_FAILED
-        return result.spoken

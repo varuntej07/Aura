@@ -28,12 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from livekit.agents import RunContext, get_job_context
+from livekit.agents import RunContext
 
 from ...config.settings import settings
 from ...lib.logger import logger
@@ -64,6 +63,7 @@ from .tool_filler import (
     DRAFT_STILL_WORKING_DELAY_S,
     DRAFT_STILL_WORKING_PHRASES,
 )
+from .transport import current_room, publish_event_dict
 
 if TYPE_CHECKING:
     from .artifact_delivery import ArtifactDeliveryTracker
@@ -124,6 +124,18 @@ class DraftOutboundSession:
         self.display_name = display_name
         self.current: DraftState | None = None
         self.delivery: ArtifactDeliveryTracker | None = None
+
+
+def _snippet_shape(channel: str, skill_title: str) -> tuple[str, str, str]:
+    """(artifact kind, card title, content format) for one draft channel.
+
+    A snippet is code the user copies; every other channel is prose they send.
+    Derived in one place because the same three-way choice is made on the
+    generating event, the ready event, and both of their refine counterparts.
+    """
+    if channel == SNIPPET_CHANNEL:
+        return "code", "Snippet", "code"
+    return "outbound_message", skill_title, "plain_text"
 
 
 async def run_draft_tool(
@@ -203,6 +215,7 @@ async def _draft_new(
     request_id = new_request_id()
     draft_id = uuid.uuid4().hex
     skill = get_writing_skill(skill_id)
+    new_kind, new_title, new_format = _snippet_shape(channel, skill.title)
     frame = None
     if screen_frames is not None:
         try:
@@ -273,8 +286,8 @@ async def _draft_new(
             channel=channel,
             length=length,
             mode="new",
-            kind="code" if channel == SNIPPET_CHANNEL else "outbound_message",
-            title="Snippet" if channel == SNIPPET_CHANNEL else skill.title,
+            kind=new_kind,
+            title=new_title,
             skill_id=skill_id,
         ),
         state=state,
@@ -364,12 +377,12 @@ async def _draft_new(
             request_id=request_id,
             artifact_id=draft_id,
             revision=1,
-            kind="code" if channel == SNIPPET_CHANNEL else "outbound_message",
+            kind=new_kind,
             channel=channel,
             length=length,
-            title="Snippet" if channel == SNIPPET_CHANNEL else skill.title,
+            title=new_title,
             body=result.text,
-            content_format="code" if channel == SNIPPET_CHANNEL else "plain_text",
+            content_format=new_format,
             language=None,
             persisted=channel != SNIPPET_CHANNEL,
             context_summary=result.context_summary,
@@ -416,6 +429,9 @@ async def _refine_current(
     current = state.current
     assert current is not None  # guarded by the caller
     skill = get_writing_skill(current.skill_id)
+    refine_kind, refine_title, refine_format = _snippet_shape(
+        current.channel, skill.title
+    )
     request_id = new_request_id()
     await _publish_draft_event(
         artifact_generating_event(
@@ -424,8 +440,8 @@ async def _refine_current(
             channel=current.channel,
             length=current.length,
             mode="refine",
-            kind="code" if current.channel == SNIPPET_CHANNEL else "outbound_message",
-            title="Snippet" if current.channel == SNIPPET_CHANNEL else skill.title,
+            kind=refine_kind,
+            title=refine_title,
             skill_id=current.skill_id,
         ),
         state=state,
@@ -461,12 +477,12 @@ async def _refine_current(
             request_id=request_id,
             artifact_id=current.draft_id,
             revision=current.revision,
-            kind="code" if current.channel == SNIPPET_CHANNEL else "outbound_message",
+            kind=refine_kind,
             channel=current.channel,
             length=current.length,
-            title="Snippet" if current.channel == SNIPPET_CHANNEL else skill.title,
+            title=refine_title,
             body=current.text,
-            content_format="code" if current.channel == SNIPPET_CHANNEL else "plain_text",
+            content_format=refine_format,
             language=None,
             persisted=current.channel != SNIPPET_CHANNEL,
             skill_id=current.skill_id,
@@ -531,13 +547,23 @@ async def _publish_draft_event(
         and isinstance(artifact.get("revision"), int)
     ):
         display_key = state.delivery.expect(artifact["id"], artifact["revision"])
-    try:
-        room = get_job_context().room
-        data = json.dumps(event, ensure_ascii=False).encode("utf-8")
-        await asyncio.wait_for(
-            room.local_participant.publish_data(data, reliable=True),
-            timeout=_PUBLISH_TIMEOUT_S,
+    async def _publish() -> bool:
+        return await publish_event_dict(
+            current_room(),
+            event,
+            timeout_s=_PUBLISH_TIMEOUT_S,
+            ensure_ascii=False,
+            log_message="draft_outbound: event publish failed",
+            log_fields={
+                "session_id": state.session_id,
+                "user_id": state.user_id,
+                "event": event.get("type"),
+            },
         )
+
+    try:
+        if not await _publish():
+            return False
         if (
             display_key is not None
             and state.delivery is not None
@@ -545,11 +571,10 @@ async def _publish_draft_event(
         ):
             confirmed = await state.delivery.wait(display_key)
             if not confirmed:
-                await asyncio.wait_for(
-                    room.local_participant.publish_data(data, reliable=True),
-                    timeout=_PUBLISH_TIMEOUT_S,
-                )
-                confirmed = await state.delivery.wait(display_key)
+                # Same id and revision, so a card that did render is deduped by
+                # the client rather than drawn twice.
+                if await _publish():
+                    confirmed = await state.delivery.wait(display_key)
             if not confirmed:
                 logger.warn("draft_outbound: display not confirmed", {
                     "session_id": state.session_id,
@@ -564,12 +589,6 @@ async def _publish_draft_event(
             "text_chars": len(payload.get("text") or ""),
         })
         return True
-    except Exception as exc:
-        logger.warn("draft_outbound: event publish failed", {
-            "session_id": state.session_id, "user_id": state.user_id,
-            "event": event.get("type"), "error": str(exc),
-        })
-        return False
     finally:
         if display_key is not None and state.delivery is not None:
             state.delivery.release(display_key)

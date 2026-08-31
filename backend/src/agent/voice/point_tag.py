@@ -20,15 +20,14 @@ raise into the pipeline.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterable, AsyncIterator, Callable
 from dataclasses import dataclass
 
-from livekit.agents import get_job_context
 from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
+from .transport import current_room, publish_client_event
 
 # Matches clicky's grammar: [POINT:none] | [POINT:x,y] | [POINT:x,y:label]
 # | [POINT:x,y:label:screenN]. The label may not contain ']' or ':'.
@@ -196,22 +195,23 @@ async def publish_element_point(
     unchanged, which is what keeps already-installed desktop builds pointing
     correctly. A scale of 1.0 (no downscale happened) is a no-op.
     """
-    try:
-        room = get_job_context().room
-        scale = coordinate_scale if coordinate_scale > 0 else 1.0
-        published_x = round(target.x / scale)
-        published_y = round(target.y / scale)
-        payload = json.dumps({
-            "type": "element.point",
-            "payload": {
-                "x": published_x,
-                "y": published_y,
-                "label": target.label,
-                "screen": target.screen,
-                "frame_id": frame_id,
-            },
-        }).encode("utf-8")
-        await room.local_participant.publish_data(payload, reliable=True)
+    scale = coordinate_scale if coordinate_scale > 0 else 1.0
+    published_x = round(target.x / scale)
+    published_y = round(target.y / scale)
+    published = await publish_client_event(
+        current_room(),
+        "element.point",
+        {
+            "x": published_x,
+            "y": published_y,
+            "label": target.label,
+            "screen": target.screen,
+            "frame_id": frame_id,
+        },
+        log_message="VoiceSession: element.point publish failed",
+        log_fields={"session_id": session_id, "user_id": user_id},
+    )
+    if published:
         logger.info("VoiceSession: element.point published", {
             "session_id": session_id,
             "user_id": user_id,
@@ -222,8 +222,4 @@ async def publish_element_point(
             "coordinate_scale": round(scale, 4),
             "label": target.label,
             "frame_id": frame_id,
-        })
-    except Exception as exc:
-        logger.warn("VoiceSession: element.point publish failed", {
-            "session_id": session_id, "user_id": user_id, "error": str(exc),
         })

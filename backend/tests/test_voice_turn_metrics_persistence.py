@@ -102,7 +102,6 @@ def test_appends_one_complete_turn_record(tmp_path) -> None:
         "artifact_signal",
         "artifact_kind",
         "artifact_published",
-        "screen_visibility_deterministic",
         "tools_deferred",
         "user_transcript",
         "assistant_text",

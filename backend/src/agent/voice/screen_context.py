@@ -26,7 +26,6 @@ fail-soft and never raises into the session.
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -37,6 +36,7 @@ from livekit.agents import AgentSession
 
 from ...lib.logger import logger
 from ...prompts import keyboard_shared_context_instruction
+from .transport import await_turn_boundary, publish_client_event
 
 # Wire types for the data-channel messages (the single source of truth; the keyboard
 # and the Flutter client send these exact strings).
@@ -50,9 +50,6 @@ AGENT_EVENTS_TOPIC = "agent_events"
 # CONTEXT_MAX_CHARS).
 _CONTEXT_MAX_CHARS = 2000
 
-# Wait for a turn boundary so the injected turn never lands on top of Buddy mid-sentence.
-_LISTENING_POLL_INTERVAL_S = 0.5
-_LISTENING_MAX_WAIT_S = 15.0
 
 
 def build_screen_context_instruction(
@@ -68,14 +65,8 @@ def build_screen_context_instruction(
 
 
 async def _wait_for_turn_boundary(session: AgentSession) -> bool:
-    waited = 0.0
-    while (
-        str(getattr(session, "agent_state", "")) != "listening"
-        and waited < _LISTENING_MAX_WAIT_S
-    ):
-        await asyncio.sleep(_LISTENING_POLL_INTERVAL_S)
-        waited += _LISTENING_POLL_INTERVAL_S
-    return str(getattr(session, "agent_state", "")) == "listening"
+    """Wait for a turn boundary so an injected turn never interrupts Buddy."""
+    return await await_turn_boundary(session)
 
 
 async def deliver_screen_context(
@@ -292,20 +283,16 @@ class TypedMessageQueue:
         while True:
             event_type, payload = await self._events.get()
             try:
-                data = json.dumps({"type": event_type, "payload": payload}).encode("utf-8")
-                await self._room.local_participant.publish_data(
-                    data, reliable=True, topic=AGENT_EVENTS_TOPIC
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warn(
-                    "VoiceSession: typed message event publish failed",
-                    {
+                await publish_client_event(
+                    self._room,
+                    event_type,
+                    payload,
+                    topic=AGENT_EVENTS_TOPIC,
+                    log_message="VoiceSession: typed message event publish failed",
+                    log_fields={
                         "session_id": self._session_id,
                         "user_id": self._user_id,
                         "type": event_type,
-                        "error_type": type(exc).__name__,
                     },
                 )
             finally:

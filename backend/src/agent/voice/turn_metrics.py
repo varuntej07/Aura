@@ -99,8 +99,6 @@ class VoiceTurnMetrics:
                 "artifact_signal": None,  # "intent" | "output" | None
                 "artifact_kind": None,
                 "artifact_published": False,
-                # The deterministic "I can't see your screen" answer fired.
-                "screen_visibility_deterministic": False,
                 # Calls the action policy refused, with the reason code. Executed
                 # calls land in tool_calls; a gated one produced no call at all
                 # and was invisible here.
@@ -207,10 +205,6 @@ class VoiceTurnMetrics:
         self._turn(turn_index)["tools_deferred"].append(
             {"name": name, "reason": reason, "effect": effect}
         )
-
-    def note_screen_visibility_answer(self, *, turn_index: int) -> None:
-        """Records that the screen-visibility answer bypassed the model."""
-        self._turn(turn_index)["screen_visibility_deterministic"] = True
 
     def note_model_first_chunk(self, *, turn_index: int, latency_ms: int) -> None:
         turn = self._turn(turn_index)
@@ -352,9 +346,6 @@ class VoiceTurnMetrics:
                     "context_strategy": record.get("context_strategy"),
                     "structured_context_bytes": record.get("structured_context_bytes"),
                     "turn_context_id": record.get("turn_context_id"),
-                    "screen_visibility_deterministic": record.get(
-                        "screen_visibility_deterministic"
-                    ),
                     "artifact_signal": record.get("artifact_signal"),
                     "artifact_kind": record.get("artifact_kind"),
                     "artifact_published": record.get("artifact_published"),
@@ -382,8 +373,22 @@ class VoiceTurnMetrics:
             # Metrics reporting must never be able to take down a live call.
             pass
 
+    # Free-text fields that carry what was actually said. Redacted on the way
+    # to disk for the same reason `_log` omits them entirely: this file has no
+    # retention or access story, and the row it sits in already redacts long
+    # tool arguments.
+    _SPOKEN_TEXT_FIELDS = ("user_transcript", "assistant_text")
+
     def _append(self, record: dict[str, Any]) -> None:
         try:
+            record = {
+                key: (
+                    _redact_value(value)
+                    if key in self._SPOKEN_TEXT_FIELDS
+                    else value
+                )
+                for key, value in record.items()
+            }
             line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
             with _APPEND_LOCK:
                 self._output_path.parent.mkdir(parents=True, exist_ok=True)

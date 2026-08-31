@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ...lib.logger import logger
+from .stream_intake import AssemblyTasks, ConsumedIdRing, read_stream_bounded
 
 # Byte-stream topic the desktop client publishes structured context on.
 SCREEN_CONTEXT_TOPIC = "screen_context"
@@ -53,10 +54,6 @@ _CONTEXT_MAX_AGE_S = 15.0
 # Wire schema versions this worker understands. A client sending anything else
 # is rejected loudly rather than parsed on a guess.
 _SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
-
-# Turn ids already attached to a finalized turn. Bounded so a long session
-# cannot grow it, and large enough that no realistic reordering re-attaches.
-_CONSUMED_RING_SIZE = 16
 
 # Defensive caps applied on receipt, independent of what the client claims to
 # have applied. Mirrors the desktop's own bounds in src-tauri/src/uia/.
@@ -365,8 +362,8 @@ class StructuredContextStore:
         self._session_id = session_id
         self._user_id = user_id
         self._latest: StructuredContext | None = None
-        self._consumed: list[str] = []
-        self._assembly_tasks: set[asyncio.Task] = set()
+        self._consumed = ConsumedIdRing()
+        self._assembly_tasks = AssemblyTasks()
         self._context_listener: Callable[[StructuredContext], None] | None = None
         self._received_count = 0
 
@@ -383,22 +380,18 @@ class StructuredContextStore:
 
     def handle_stream(self, reader, participant_identity: str) -> None:
         """Sync callback for ``room.register_byte_stream_handler``."""
-        task = asyncio.create_task(
+        self._assembly_tasks.spawn(
             self._assemble(reader, participant_identity),
             name=f"voice-screen-context-{self._session_id[:8]}",
         )
-        self._assembly_tasks.add(task)
-        task.add_done_callback(self._assembly_tasks.discard)
 
     async def _assemble(self, reader, participant_identity: str) -> None:
         started_at = time.monotonic()
         try:
-            chunks = bytearray()
-            async for chunk in reader:
-                chunks.extend(chunk)
-                if len(chunks) > _MAX_CONTEXT_BYTES:
-                    self._reject("context_size_limit_exceeded", len(chunks))
-                    return
+            chunks = await read_stream_bounded(reader, _MAX_CONTEXT_BYTES)
+            if chunks is None:
+                self._reject("context_size_limit_exceeded", _MAX_CONTEXT_BYTES)
+                return
             if not chunks:
                 self._reject("empty_context_stream", 0)
                 return
@@ -504,8 +497,4 @@ class StructuredContextStore:
     def mark_consumed(self, turn_context_id: str) -> None:
         """Record that a turn already carries this snapshot, so no later turn
         re-attaches the same one."""
-        if not turn_context_id or turn_context_id in self._consumed:
-            return
-        self._consumed.append(turn_context_id)
-        if len(self._consumed) > _CONSUMED_RING_SIZE:
-            del self._consumed[0 : len(self._consumed) - _CONSUMED_RING_SIZE]
+        self._consumed.remember(turn_context_id)

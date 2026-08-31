@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable
 from datetime import UTC, datetime
+from typing import Any
 
 from google.cloud import firestore as fs
 from pydantic import BaseModel, Field
@@ -384,6 +386,35 @@ async def _cleanup_archived_docs(user_id: str, doc_ids: list[str]) -> None:
         })
 
 
+async def _gather_named(
+    tasks: dict[str, Awaitable[Any]],
+    *,
+    user_id: str,
+    session_id: str,
+    failure_message: str,
+) -> dict[str, Any]:
+    """Run every task concurrently; a failure is logged by NAME and returns None.
+
+    The step below used to unpack a positional results list by index and repeat
+    a near-identical isinstance/log block per slot, which meant adding a step
+    renumbered every branch after it and a mis-numbered index would attribute a
+    failure to the wrong source.
+    """
+    names = list(tasks)
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    resolved: dict[str, Any] = {}
+    for name, result in zip(names, results):
+        if isinstance(result, BaseException):
+            logger.warn(failure_message, {
+                "user_id": user_id, "session_id": session_id,
+                "step": name, "error": str(result),
+            })
+            resolved[name] = None
+        else:
+            resolved[name] = result
+    return resolved
+
+
 async def run_post_session_pipeline(
     user_id: str,
     session_id: str,
@@ -450,93 +481,73 @@ async def run_post_session_pipeline(
             })
 
     # Step A: summary + count in parallel
-    results_a = await asyncio.gather(
-        _generate_session_summary(turns),
-        _count_active_sessions(user_id),
-        return_exceptions=True,
+    step_a = await _gather_named(
+        {
+            "summary_generation": _generate_session_summary(turns),
+            "session_count": _count_active_sessions(user_id),
+        },
+        user_id=user_id,
+        session_id=session_id,
+        failure_message="VoiceSession: post-session step failed",
     )
 
-    memory: VoiceSessionMemory
-    if isinstance(results_a[0], BaseException):
-        logger.warn("VoiceSession: summary generation failed", {
-            "user_id": user_id, "session_id": session_id,
-            "error": str(results_a[0]),
-        })
-        memory = VoiceSessionMemory()
-    else:
-        generated = results_a[0]
-        memory = (
-            generated
-            if isinstance(generated, VoiceSessionMemory)
-            else VoiceSessionMemory(recap=str(generated).strip())
-        )
-
-    session_count: int
-    if isinstance(results_a[1], BaseException):
-        logger.warn("VoiceSession: session count failed", {
-            "user_id": user_id, "session_id": session_id,
-            "error": str(results_a[1]),
-        })
-        session_count = 0
-    else:
-        session_count = int(results_a[1])
+    generated = step_a["summary_generation"]
+    memory: VoiceSessionMemory = (
+        generated
+        if isinstance(generated, VoiceSessionMemory)
+        else VoiceSessionMemory()
+        if generated is None
+        else VoiceSessionMemory(recap=str(generated).strip())
+    )
+    session_count = int(step_a["session_count"] or 0)
 
     # Step B: persist session doc + latest summary + aura profile in parallel
     user_turns_text = "\n".join(
         t["text"] for t in turns if t.get("role") == "user" and t.get("text")
     )
-    results_b = await asyncio.gather(
-        _write_session_doc(
-            user_id, session_id, memory, turns,
-            started_at, ended_at, duration_ms, tool_calls,
-            screen_sight_frame_count,
-            conversation_id=conversation_id,
-            surface=surface,
-            action_receipts=action_receipts or [],
-            health=health,
-            closed_by_idle_timeout=closed_by_idle_timeout,
-            llm_usage=llm_usage or {},
-            llm_fallback_events=llm_fallback_events or [],
-        ),
-        _write_latest_summary(
-            user_id, memory, session_id, len(turns), duration_ms,
-        ),
-        extract_and_update_user_aura(
-            uid=user_id,
-            message=user_turns_text,
-            session_id=session_id,
-            turn_id=f"voice_summary_{session_id}",
-            turn_index=max(0, len(turns) - 1),
-            surface="voice",
-        ) if user_turns_text else asyncio.sleep(0),
-        # Reflection tier: the same per-session narrative pass text chat uses, so a
-        # voice session also yields storylines/traits, not just flat interests.
-        consolidate_session(
-            user_id, session_id, turns, modality="voice",
-        ) if user_turns_text else asyncio.sleep(0),
-        return_exceptions=True,
+    step_b = await _gather_named(
+        {
+            "session_doc_write": _write_session_doc(
+                user_id, session_id, memory, turns,
+                started_at, ended_at, duration_ms, tool_calls,
+                screen_sight_frame_count,
+                conversation_id=conversation_id,
+                surface=surface,
+                action_receipts=action_receipts or [],
+                health=health,
+                closed_by_idle_timeout=closed_by_idle_timeout,
+                llm_usage=llm_usage or {},
+                llm_fallback_events=llm_fallback_events or [],
+            ),
+            "latest_summary_write": _write_latest_summary(
+                user_id, memory, session_id, len(turns), duration_ms,
+            ),
+            "aura_extraction": (
+                extract_and_update_user_aura(
+                    uid=user_id,
+                    message=user_turns_text,
+                    session_id=session_id,
+                    turn_id=f"voice_summary_{session_id}",
+                    turn_index=max(0, len(turns) - 1),
+                    surface="voice",
+                )
+                if user_turns_text
+                else asyncio.sleep(0)
+            ),
+            # Reflection tier: the same per-session narrative pass text chat uses,
+            # so a voice session also yields storylines/traits, not just flat
+            # interests.
+            "aura_reflection": (
+                consolidate_session(user_id, session_id, turns, modality="voice")
+                if user_turns_text
+                else asyncio.sleep(0)
+            ),
+        },
+        user_id=user_id,
+        session_id=session_id,
+        failure_message="VoiceSession: post-session step failed",
     )
-
-    if isinstance(results_b[0], Exception):
-        logger.warn("VoiceSession: session doc write failed", {
-            "user_id": user_id, "session_id": session_id,
-            "error": str(results_b[0]),
-        })
-    if isinstance(results_b[1], Exception):
-        logger.warn("VoiceSession: latest summary write failed", {
-            "user_id": user_id, "session_id": session_id,
-            "error": str(results_b[1]),
-        })
-    if isinstance(results_b[2], Exception):
-        logger.warn("VoiceSession: aura extraction failed", {
-            "user_id": user_id, "session_id": session_id,
-            "error": str(results_b[2]),
-        })
-    if isinstance(results_b[3], Exception):
-        logger.warn("VoiceSession: aura reflection failed", {
-            "user_id": user_id, "session_id": session_id,
-            "error": str(results_b[3]),
-        })
+    del step_b
 
     # Canonical transcript repair is safe only for schema-v2 identity. The reconciler
     # verifies all present deterministic ids before inserting any missing child.

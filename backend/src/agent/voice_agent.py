@@ -27,6 +27,8 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, inference
@@ -44,29 +46,35 @@ from ..services.analytics.arize_tracing import (
 from ..services.entitlement import add_free_voice_seconds
 from ..services.voice_session_summarizer import run_post_session_pipeline
 from .buddy_agent import BuddyAgent
+from .voice.artifact_delivery import (
+    ARTIFACT_DISPLAYED_TYPE,
+    ArtifactDeliveryTracker,
+)
 from .voice.auth import mint_firebase_id_token
 from .voice.bridge_handover import BRIDGE_CONTROL_TYPES, BridgeHandoverCoordinator
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
-from .voice.input_liveness import InputLiveness, watch_input_liveness
 from .voice.guide_default_profile import GenericGuideProfile
 from .voice.guide_mode import (
     GUIDE_HEARTBEAT_TYPE,
     GUIDE_MODE_TYPE,
     GuideCoordinator,
 )
-from .voice.artifact_delivery import (
-    ARTIFACT_DISPLAYED_TYPE,
-    ArtifactDeliveryTracker,
-)
 from .voice.guide_provider_adapter import AuraGuideDecisionProvider
+from .voice.guide_task_runtime import GuideTaskRuntime
+from .voice.input_liveness import InputLiveness, watch_input_liveness
+from .voice.interview import (
+    INTERVIEW_MATERIAL_TOPIC,
+    MATERIAL_OVERLAY_SHOWN_TYPE,
+    InterviewMaterialStore,
+    buddy_owns_conversation,
+)
 from .voice.output_mode import (
     DEFAULT_OUTPUT_MODE,
     KNOWN_OUTPUT_MODES,
     OUTPUT_MODE_TYPE,
     OutputModeController,
 )
-from .voice.guide_task_runtime import GuideTaskRuntime
 from .voice.pipelines import (
     build_agent_session,
     build_llm_pipeline,
@@ -77,12 +85,6 @@ from .voice.pipelines import (
     describe_llm_fallback_legs,
 )
 from .voice.recorder import VoiceSessionRecorder
-from .voice.voice_catalog import (
-    REASON_TIER_LOCKED,
-    REASON_UNKNOWN,
-    BuddyVoice,
-    resolve_voice,
-)
 from .voice.revision import worker_revision_fields
 from .voice.screen_context import (
     CLIENT_EVENTS_TOPIC,
@@ -93,15 +95,15 @@ from .voice.screen_context import (
     deliver_screen_context,
 )
 from .voice.screen_context_stream import SCREEN_CONTEXT_TOPIC, StructuredContextStore
-from .voice.interview import (
-    INTERVIEW_MATERIAL_TOPIC,
-    MATERIAL_OVERLAY_SHOWN_TYPE,
-    InterviewMaterialStore,
-    buddy_owns_conversation,
-)
 from .voice.screen_frames import SCREEN_FRAME_TOPIC, ScreenFrameStore
 from .voice.telemetry import log_voice_failure, voice_session_logger
 from .voice.turn_metrics import VoiceTurnMetrics
+from .voice.voice_catalog import (
+    REASON_TIER_LOCKED,
+    REASON_UNKNOWN,
+    BuddyVoice,
+    resolve_voice,
+)
 from .voice.voice_controls import derive_voice_controls
 
 # Firebase auto-issued UIDs are 28 alphanumeric chars.
@@ -118,154 +120,125 @@ _ARTIFACT_ACK_CAPABILITY = "displayed-v1"
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
-def _resolve_participant_metadata(ctx: JobContext) -> tuple[str | None, str]:
-    """Return validated ``(surface, conversation_id)`` from the user's token metadata."""
+@dataclass(frozen=True, slots=True)
+class LaunchMetadata:
+    """Everything the client stamped into its participant token, validated once.
+
+    This used to be nine ``_resolve_*`` functions with a byte-identical body:
+    walk ``remote_participants``, strip ``participant.metadata``, ``json.loads``
+    it, read one key, validate, swallow every exception, return a default. The
+    entrypoint called seven of them back to back, so one JSON document was
+    parsed seven times and seven independent ``except: pass`` blocks could each
+    hide a malformed blob without anyone noticing.
+
+    Every field keeps the default its own resolver had, so a client that sends
+    nothing, or sends nonsense, lands exactly where it did before.
+    """
+
+    surface: str | None = None
+    conversation_id: str = ""
+    voice_mode: str = "standard"
+    client_platform: str = ""
+    app_version: str = ""
+    bridged: bool = False
+    output_mode: str = DEFAULT_OUTPUT_MODE
+    artifact_ack_capable: bool = False
+    voice_request_id: str = ""
+    voice_requested_at_ms: int | None = None
+    origin: str = "organic"
+    origin_candidate_id: str | None = None
+    lineage_chain: tuple[str, ...] = ()
+
+
+def _first_participant_metadata(ctx: JobContext) -> dict:
+    """The first remote participant's token metadata, or {}.
+
+    ``ctx.connect()`` connects the AGENT. This is empty until the USER joins,
+    which is why every caller must sit behind ``_wait_for_user_participant``.
+    """
     try:
         for participant in ctx.room.remote_participants.values():
             raw = (getattr(participant, "metadata", "") or "").strip()
             if not raw:
                 continue
             data = json.loads(raw)
-            surface = data.get("surface")
-            conversation_id = str(data.get("conversation_id") or "").strip()
-            return (
-                surface if surface in _KNOWN_SURFACES else None,
-                conversation_id if _CONVERSATION_ID_RE.fullmatch(conversation_id) else "",
-            )
+            return data if isinstance(data, dict) else {}
     except Exception:
-        pass
-    return None, ""
+        return {}
+    return {}
+
+
+def parse_launch_metadata(ctx: JobContext) -> LaunchMetadata:
+    """Read and validate the whole launch token in one pass."""
+    data = _first_participant_metadata(ctx)
+    if not data:
+        return LaunchMetadata()
+
+    surface = data.get("surface")
+    conversation_id = str(data.get("conversation_id") or "").strip()
+    mode = data.get("mode")
+    platform = str(data.get("platform") or "").casefold()
+    app_version = str(data.get("app_version") or "").strip()
+    output_mode = data.get("output_mode")
+    requested_at = data.get("voice_requested_at_ms")
+
+    origin, candidate_id, lineage = "organic", None, ()
+    if data.get("origin") == "notification_tap":
+        raw_lineage = data.get("lineage_chain")
+        origin = "notification_tap"
+        candidate_id = str(data.get("origin_candidate_id") or "").strip()[:80] or None
+        lineage = (
+            tuple(
+                str(value).strip()[:80]
+                for value in raw_lineage
+                if str(value).strip()
+            )[:20]
+            if isinstance(raw_lineage, list)
+            else ()
+        )
+
+    return LaunchMetadata(
+        surface=surface if surface in _KNOWN_SURFACES else None,
+        conversation_id=(
+            conversation_id
+            if _CONVERSATION_ID_RE.fullmatch(conversation_id)
+            else ""
+        ),
+        voice_mode=mode if mode in _KNOWN_VOICE_MODES else "standard",
+        client_platform=platform if platform in _KNOWN_CLIENT_PLATFORMS else "",
+        app_version=app_version if _APP_VERSION_RE.fullmatch(app_version) else "",
+        bridged=data.get("bridged") is True,
+        output_mode=(
+            output_mode if output_mode in KNOWN_OUTPUT_MODES else DEFAULT_OUTPUT_MODE
+        ),
+        artifact_ack_capable=data.get("artifact_ack") == _ARTIFACT_ACK_CAPABILITY,
+        voice_request_id=str(data.get("voice_request_id") or "")[:64],
+        voice_requested_at_ms=(
+            requested_at if isinstance(requested_at, int) else None
+        ),
+        origin=origin,
+        origin_candidate_id=candidate_id,
+        lineage_chain=lineage,
+    )
+
+
+def _resolve_participant_metadata(ctx: JobContext) -> tuple[str | None, str]:
+    """Validated ``(surface, conversation_id)``. Kept as the narrow read used by
+    the identity contract test; everything else goes through
+    :func:`parse_launch_metadata`."""
+    launch = parse_launch_metadata(ctx)
+    return launch.surface, launch.conversation_id
 
 
 def _resolve_voice_mode(ctx: JobContext) -> str:
-    """Read the bounded voice-session mode stamped by the token endpoint."""
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            mode = json.loads(raw).get("mode")
-            return mode if mode in _KNOWN_VOICE_MODES else "standard"
-    except Exception:
-        pass
-    return "standard"
-
-
-def _resolve_product_client_context(ctx: JobContext) -> tuple[str, str]:
-    """Return bounded platform and app version stamped by the token endpoint."""
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            data = json.loads(raw)
-            platform = str(data.get("platform") or "").casefold()
-            app_version = str(data.get("app_version") or "").strip()
-            return (
-                platform if platform in _KNOWN_CLIENT_PLATFORMS else "",
-                app_version if _APP_VERSION_RE.fullmatch(app_version) else "",
-            )
-    except Exception:
-        pass
-    return "", ""
+    """The bounded voice-session mode stamped by the token endpoint."""
+    return parse_launch_metadata(ctx).voice_mode
 
 
 def _resolve_bridged(ctx: JobContext) -> bool:
-    """True when the desktop stamped ``bridged`` into its token metadata, meaning it
-    opened a Realtime leg and this worker should HOLD for a handover instead of greeting."""
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            return json.loads(raw).get("bridged") is True
-    except Exception:
-        pass
-    return False
-
-
-def _resolve_output_mode(ctx: JobContext) -> str:
-    """Read the output mode ('voice' vs 'text') stamped by the token endpoint.
-
-    Read BEFORE the agent is built, because a mute published after connect
-    loses the race against the worker's first speech (see voice/output_mode.py).
-    """
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            mode = json.loads(raw).get("output_mode")
-            return mode if mode in KNOWN_OUTPUT_MODES else DEFAULT_OUTPUT_MODE
-    except Exception:
-        pass
-    return DEFAULT_OUTPUT_MODE
-
-
-def _resolve_artifact_ack_capability(ctx: JobContext) -> bool:
-    """True only when the desktop advertised committed-render acknowledgements."""
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            return json.loads(raw).get("artifact_ack") == _ARTIFACT_ACK_CAPABILITY
-    except Exception:
-        pass
-    return False
-
-
-def _resolve_voice_request_timing(ctx: JobContext) -> tuple[str, int | None]:
-    """Return the request correlation id and backend request timestamp."""
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            data = json.loads(raw)
-            request_id = str(data.get("voice_request_id") or "")[:64]
-            requested_at = data.get("voice_requested_at_ms")
-            return request_id, requested_at if isinstance(requested_at, int) else None
-    except Exception:
-        pass
-    return "", None
-
-
-def _resolve_surface(ctx: JobContext) -> str:
-    """Read the launch surface ('keyboard' vs 'app') from the user's participant metadata.
-
-    The /voice/token endpoint stamps {"surface": ...} into the token's participant
-    metadata; the keyboard sends 'keyboard', the in-app orb sends nothing. We read it
-    right after connect (the user is already in the room, since the job is dispatched on
-    their join) and default to 'app' on anything unexpected, so a missing or malformed
-    value never changes behavior.
-    """
-    surface, _ = _resolve_participant_metadata(ctx)
-    return surface or "app"
-
-
-def _resolve_followup_metadata(ctx: JobContext) -> tuple[str, str | None, list[str]]:
-    """Read optional notification lineage stamped by the token endpoint."""
-    try:
-        for participant in ctx.room.remote_participants.values():
-            raw = (getattr(participant, "metadata", "") or "").strip()
-            if not raw:
-                continue
-            data = json.loads(raw)
-            if data.get("origin") != "notification_tap":
-                return "organic", None, []
-            candidate_id = str(data.get("origin_candidate_id") or "").strip()[:80]
-            lineage = data.get("lineage_chain")
-            return (
-                "notification_tap",
-                candidate_id or None,
-                [str(value).strip()[:80] for value in lineage if str(value).strip()][:20]
-                if isinstance(lineage, list)
-                else [],
-            )
-    except Exception:
-        pass
-    return "organic", None, []
+    """True when the desktop stamped ``bridged``, meaning it opened a Realtime leg
+    and this worker should HOLD for a handover instead of greeting."""
+    return parse_launch_metadata(ctx).bridged
 
 
 def prewarm(process: JobProcess) -> None:
@@ -323,8 +296,8 @@ async def _wait_for_user_participant(ctx: JobContext, user_id: str) -> bool:
 
     ``ctx.connect()`` connects the AGENT, nothing more. Every launch parameter this
     worker reads (surface, conversation_id, bridged, output_mode, voice_request_id) lives
-    in the USER's participant token metadata, and all eight ``_resolve_*`` helpers below
-    iterate ``ctx.room.remote_participants`` and quietly return their defaults when that
+    in the USER's participant token metadata, which ``parse_launch_metadata`` reads from
+    ``ctx.room.remote_participants`` and which quietly returns its defaults when that
     dict is still empty. The old code asserted in a comment that connect implied the
     participant existed; it does not, and the resulting doc reads
     ``surface: "unknown", conversation_id: ""`` with no error anywhere.
@@ -443,14 +416,19 @@ async def entrypoint(ctx: JobContext) -> None:
 
     from ..services.session_followup.lifecycle import session_lifecycle_service
 
-    origin, origin_candidate_id, lineage_chain = _resolve_followup_metadata(ctx)
+    # Parsed ONCE, here, and read from everywhere below. Safe at this point and
+    # not before: _wait_for_user_participant has returned, so the participant
+    # carrying this metadata is genuinely in the room. An empty
+    # remote_participants map reads as "client sent nothing" and is
+    # indistinguishable from a client that sent everything.
+    launch = parse_launch_metadata(ctx)
     followup_session_id: str | None = await session_lifecycle_service.start_session(
         user_id,
         None,
         surface="voice",
-        origin=origin,
-        origin_candidate_id=origin_candidate_id,
-        lineage_chain=lineage_chain,
+        origin=launch.origin,
+        origin_candidate_id=launch.origin_candidate_id,
+        lineage_chain=list(launch.lineage_chain),
     )
 
     async with voice_session_logger(
@@ -461,35 +439,35 @@ async def entrypoint(ctx: JobContext) -> None:
         # Where the call was launched from. Baked into the prompt once here (the prompt is
         # built once per session in BuddyAgent), so a keyboard tap stays short and
         # task-focused for the whole session, not just the first turn.
-        # Resolved BEFORE the context fetch, not after: conversation_id is what lets the
-        # fetch pick up the text exchanges this same conversation typed just before
-        # starting the call. Safe because _wait_for_user_participant has returned, so the
-        # participant carrying this metadata is genuinely in the room. Do not move this
-        # above that wait: an empty remote_participants map reads as "client sent
-        # nothing" and is indistinguishable from a client that sent everything.
-        persisted_surface, conversation_id = _resolve_participant_metadata(ctx)
+        # conversation_id is read BEFORE the context fetch: it is what lets the
+        # fetch pick up the text exchanges this same conversation typed just
+        # before starting the call.
+        persisted_surface = launch.surface
+        conversation_id = launch.conversation_id
 
         # Fetch profile, memory, last session, archive, aura, and tier in
         # parallel under a hard ceiling. Each source defaults independently.
         session_context = await gather_session_context(user_id, session_id, conversation_id)
         context_vars = session_context.prompt_context_vars
 
-        voice_request_id, voice_requested_at_ms = _resolve_voice_request_timing(ctx)
+        voice_request_id = launch.voice_request_id
+        voice_requested_at_ms = launch.voice_requested_at_ms
         surface = persisted_surface or "app"
-        client_platform, app_version = _resolve_product_client_context(ctx)
-        voice_mode = _resolve_voice_mode(ctx)
+        client_platform = launch.client_platform
+        app_version = launch.app_version
+        voice_mode = launch.voice_mode
         # Realtime-bridge session: the API only stamps signed `bridged` participant
         # metadata after it has admitted the Realtime leg. Treat that metadata as the
         # single handover authority so the separately deployed API and LiveKit worker
         # cannot disagree because one runtime missed an environment update.
-        bridged = _resolve_bridged(ctx)
+        bridged = launch.bridged
         # Output mute is audio-only suppression, and the Realtime bridge plays
         # through the desktop's own <audio> element rather than a LiveKit track,
         # so a bridged text-mode session would speak straight past the mute. The
         # token endpoint already refuses to stamp `bridged` in text mode; this is
         # the worker-side half of the same rule.
-        output_mode = _resolve_output_mode(ctx)
-        artifact_ack_capable = _resolve_artifact_ack_capability(ctx)
+        output_mode = launch.output_mode
+        artifact_ack_capable = launch.artifact_ack_capable
         if output_mode == "text" and bridged:
             bridged = False
             logger.info(
@@ -747,9 +725,10 @@ async def entrypoint(ctx: JobContext) -> None:
             screen_frames=screen_frames,
             room=ctx.room,
             session=session,
-            # Application-neutral by default: Guide adapts to whatever task the
-            # user asks by trusting the planner's own steps. CapCutExampleProfile
-            # stays an isolated example skill for a future task-profile registry.
+            # Application-neutral by design: Guide adapts to whatever task the
+            # user asks by trusting the planner's own steps, rather than following
+            # a script written per application. GenericGuideProfile is the only
+            # GuideTaskProfile implementation.
             profile=GenericGuideProfile(),
             decision_provider=AuraGuideDecisionProvider(),
         )
@@ -819,6 +798,9 @@ async def entrypoint(ctx: JobContext) -> None:
             liveness=liveness,
         )
         buddy.bind_direct_action_recorder(recorder.record_direct_action)
+        # The recorder is the one owner of a server-side close, so a session
+        # Guide gives up on is stamped with a reason like any other.
+        guide_runtime.bind_session_closer(recorder.close_session)
         recorder.attach()
         recorder.watch_llm_fallback(llm_pipeline)
 
@@ -892,108 +874,143 @@ async def entrypoint(ctx: JobContext) -> None:
             )
             return True
 
-        def _dispatch_context_payload(msg: dict, participant_identity: str, topic: str) -> None:
-            nonlocal screen_context_fired
-            msg_type = msg.get("type")
-            if msg_type in BRIDGE_CONTROL_TYPES:
-                if bridge is not None and participant_identity == user_id:
-                    bridge.handle(msg)
-                elif bridge is not None:
-                    logger.warn(
-                        "bridge: control packet participant rejected",
-                        {
-                            "session_id": session_id,
-                            "user_id": user_id,
-                            "participant": participant_identity,
-                            "type": msg_type,
-                        },
-                    )
+        def _handle_bridge(msg: dict, participant_identity: str, topic: str) -> None:
+            del topic
+            if bridge is None:
                 return
-            if msg_type == OUTPUT_MODE_TYPE:
-                context_tasks.append(
-                    asyncio.create_task(
-                        output_mode_controller.apply_control(
-                            msg, participant_identity, topic
-                        ),
-                        name=f"voice-output-mode-{session_id[:8]}",
-                    )
+            if participant_identity != user_id:
+                logger.warn(
+                    "bridge: control packet participant rejected",
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "participant": participant_identity,
+                        "type": msg.get("type"),
+                    },
                 )
-            elif msg_type == ARTIFACT_DISPLAYED_TYPE:
-                artifact_delivery.handle_ack(msg, participant_identity, topic)
-            elif msg_type == MATERIAL_OVERLAY_SHOWN_TYPE:
-                interview_materials.handle_overlay_ack(msg, participant_identity, topic)
-            elif msg_type == GUIDE_MODE_TYPE:
-                guide.apply_control(msg, participant_identity)
-            elif msg_type == GUIDE_HEARTBEAT_TYPE:
-                guide.apply_heartbeat(msg, participant_identity)
-            elif msg_type == SCREEN_CONTEXT_TYPE:
-                if screen_context_fired:
-                    return
-                if _ambient_context_suspended(msg_type):
-                    return
-                screen_context_fired = True
-                context_tasks.append(
-                    asyncio.create_task(
-                        deliver_screen_context(
-                            session,
-                            context_before=str(msg.get("context_before", "")),
-                            field_type=msg.get("field_type"),
-                            app=msg.get("app"),
-                            session_id=session_id,
-                            user_id=user_id,
-                            on_instruction=turn_metrics.note_screen_text_context,
-                        ),
-                        name=f"voice-screen-ctx-{session_id[:8]}",
-                    )
+                return
+            bridge.handle(msg)
+
+        def _handle_output_mode(msg: dict, participant_identity: str, topic: str) -> None:
+            context_tasks.append(
+                asyncio.create_task(
+                    output_mode_controller.apply_control(
+                        msg, participant_identity, topic
+                    ),
+                    name=f"voice-output-mode-{session_id[:8]}",
                 )
-            elif msg_type == OCR_CONTEXT_TYPE:
-                if _ambient_context_suspended(msg_type):
-                    return
-                context_tasks.append(
-                    asyncio.create_task(
-                        deliver_screen_context(
-                            session,
-                            context_before=str(msg.get("text", "")),
-                            field_type=None,
-                            app=None,
-                            session_id=session_id,
-                            user_id=user_id,
-                            on_instruction=turn_metrics.note_screen_text_context,
-                        ),
-                        name=f"voice-ocr-ctx-{session_id[:8]}",
-                    )
+            )
+
+        def _handle_artifact_ack(msg: dict, participant_identity: str, topic: str) -> None:
+            artifact_delivery.handle_ack(msg, participant_identity, topic)
+
+        def _handle_material_ack(msg: dict, participant_identity: str, topic: str) -> None:
+            interview_materials.handle_overlay_ack(msg, participant_identity, topic)
+
+        def _handle_guide_mode(msg: dict, participant_identity: str, topic: str) -> None:
+            del topic
+            guide.apply_control(msg, participant_identity)
+
+        def _handle_guide_heartbeat(
+            msg: dict, participant_identity: str, topic: str
+        ) -> None:
+            del topic
+            guide.apply_heartbeat(msg, participant_identity)
+
+        def _handle_screen_context(
+            msg: dict, participant_identity: str, topic: str
+        ) -> None:
+            nonlocal screen_context_fired
+            del participant_identity, topic
+            if screen_context_fired or _ambient_context_suspended(SCREEN_CONTEXT_TYPE):
+                return
+            screen_context_fired = True
+            context_tasks.append(
+                asyncio.create_task(
+                    deliver_screen_context(
+                        session,
+                        context_before=str(msg.get("context_before", "")),
+                        field_type=msg.get("field_type"),
+                        app=msg.get("app"),
+                        session_id=session_id,
+                        user_id=user_id,
+                        on_instruction=turn_metrics.note_screen_text_context,
+                    ),
+                    name=f"voice-screen-ctx-{session_id[:8]}",
                 )
-            elif msg_type == TEXT_INPUT_TYPE:
-                if participant_identity != user_id:
-                    logger.warn(
-                        "VoiceSession: typed message packet rejected",
-                        {
-                            "session_id": session_id,
-                            "user_id": user_id,
-                            "participant": participant_identity,
-                            "topic": topic,
-                        },
-                    )
-                    return
-                if surface != "desktop" and not topic and not msg.get("client_message_id"):
-                    typed_messages.submit_legacy(text=str(msg.get("text", "")))
-                    return
-                if topic != CLIENT_EVENTS_TOPIC:
-                    logger.warn(
-                        "VoiceSession: typed message packet rejected",
-                        {
-                            "session_id": session_id,
-                            "user_id": user_id,
-                            "participant": participant_identity,
-                            "topic": topic,
-                        },
-                    )
-                    return
-                typed_messages.submit(
-                    text=str(msg.get("text", "")),
-                    client_message_id=str(msg.get("client_message_id", "")),
-                    generation=msg.get("generation"),
+            )
+
+        def _handle_ocr_context(msg: dict, participant_identity: str, topic: str) -> None:
+            del participant_identity, topic
+            if _ambient_context_suspended(OCR_CONTEXT_TYPE):
+                return
+            context_tasks.append(
+                asyncio.create_task(
+                    deliver_screen_context(
+                        session,
+                        context_before=str(msg.get("text", "")),
+                        field_type=None,
+                        app=None,
+                        session_id=session_id,
+                        user_id=user_id,
+                        on_instruction=turn_metrics.note_screen_text_context,
+                    ),
+                    name=f"voice-ocr-ctx-{session_id[:8]}",
                 )
+            )
+
+        def _handle_text_input(msg: dict, participant_identity: str, topic: str) -> None:
+            if participant_identity != user_id:
+                logger.warn(
+                    "VoiceSession: typed message packet rejected",
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "participant": participant_identity,
+                        "topic": topic,
+                    },
+                )
+                return
+            if surface != "desktop" and not topic and not msg.get("client_message_id"):
+                typed_messages.submit_legacy(text=str(msg.get("text", "")))
+                return
+            if topic != CLIENT_EVENTS_TOPIC:
+                logger.warn(
+                    "VoiceSession: typed message packet rejected",
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "participant": participant_identity,
+                        "topic": topic,
+                    },
+                )
+                return
+            typed_messages.submit(
+                text=str(msg.get("text", "")),
+                client_message_id=str(msg.get("client_message_id", "")),
+                generation=msg.get("generation"),
+            )
+
+        # One named handler per client message type, instead of an eight-branch
+        # if/elif every new control message had to be threaded into. Dispatch is a
+        # lookup, so no ordering between types is implied or relied on; the only
+        # ordering that matters is the pre-start buffering below.
+        control_handlers: dict[str, Callable[[dict, str, str], None]] = {
+            OUTPUT_MODE_TYPE: _handle_output_mode,
+            ARTIFACT_DISPLAYED_TYPE: _handle_artifact_ack,
+            MATERIAL_OVERLAY_SHOWN_TYPE: _handle_material_ack,
+            GUIDE_MODE_TYPE: _handle_guide_mode,
+            GUIDE_HEARTBEAT_TYPE: _handle_guide_heartbeat,
+            SCREEN_CONTEXT_TYPE: _handle_screen_context,
+            OCR_CONTEXT_TYPE: _handle_ocr_context,
+            TEXT_INPUT_TYPE: _handle_text_input,
+            **{control: _handle_bridge for control in BRIDGE_CONTROL_TYPES},
+        }
+
+        def _dispatch_context_payload(msg: dict, participant_identity: str, topic: str) -> None:
+            handler = control_handlers.get(str(msg.get("type") or ""))
+            if handler is not None:
+                handler(msg, participant_identity, topic)
 
         def _on_data_received(packet) -> None:
             try:
