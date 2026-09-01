@@ -201,8 +201,14 @@ async def test_handler_analytics_never_carries_typed_content(monkeypatch):
 
     assert resp.status_code == 200
     assert captured["event"] == "keyboard_draft_requested"
-    # Only breakdown dimensions are captured, and the typed content leaks nowhere.
-    assert set(captured["properties"].keys()) == {"action", "host_app", "field_type"}
+    # Only breakdown dimensions plus the correlation id are captured, and the
+    # typed content leaks nowhere.
+    assert set(captured["properties"].keys()) == {
+        "action",
+        "host_app",
+        "field_type",
+        "request_id",
+    }
     assert secret not in str(captured)
 
 

@@ -24,9 +24,12 @@ from typing import Any
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from google.cloud import firestore as gcloud_firestore
+
 from ..firebase import admin_firestore
 from . import fields as F
-from . import store
+from . import refs
+from .audit import audit_event
 
 _client_singleton: Any = None
 
@@ -127,8 +130,8 @@ async def dispatch_job(uid: str, job_id: str) -> bool:
     now = datetime.now(UTC)
 
     def _read() -> tuple[dict[str, Any], dict[str, Any]]:
-        job = store._jobs_ref(uid).document(job_id).get()
-        outbox = store._outbox_ref(uid).document(job_id).get()
+        job = refs.jobs_ref(uid).document(job_id).get()
+        outbox = refs.outbox_ref(uid).document(job_id).get()
         return job.to_dict() or {}, outbox.to_dict() or {}
 
     job, outbox = await asyncio.to_thread(_read)
@@ -157,12 +160,12 @@ async def dispatch_job(uid: str, job_id: str) -> bool:
 
     def _commit() -> bool:
         db = admin_firestore()
-        job_ref = store._jobs_ref(uid).document(job_id)
-        outbox_ref = store._outbox_ref(uid).document(job_id)
-        meeting_ref = store._meetings_ref(uid).document(str(job["meeting_id"]))
+        job_ref = refs.jobs_ref(uid).document(job_id)
+        outbox_ref = refs.outbox_ref(uid).document(job_id)
+        meeting_ref = refs.meetings_ref(uid).document(str(job["meeting_id"]))
         txn = db.transaction()
 
-        @store.gcloud_firestore.transactional
+        @gcloud_firestore.transactional
         def _execute(transaction) -> bool:
             job_snap = job_ref.get(transaction=transaction)
             outbox_snap = outbox_ref.get(transaction=transaction)
@@ -192,13 +195,13 @@ async def dispatch_job(uid: str, job_id: str) -> bool:
                 {
                     "state": "dispatched",
                     "task_name": task_name,
-                    "dispatch_attempts": store.gcloud_firestore.Increment(1),
+                    "dispatch_attempts": gcloud_firestore.Increment(1),
                     "last_dispatched_at": recorded_at,
                     "updated_at": recorded_at,
                 },
             )
             transaction.update(meeting_ref, {F.AUDIT_SEQUENCE: sequence})
-            store._audit_event(
+            audit_event(
                 transaction,
                 uid=uid,
                 meeting_id=str(job["meeting_id"]),
@@ -220,33 +223,72 @@ async def dispatch_job(uid: str, job_id: str) -> bool:
     return await asyncio.to_thread(_commit)
 
 
+# Upper bound on cursor pages per sweep, so a pathological backlog of due
+# terminal rows cannot pin a scheduler tick; the truncation warn below makes
+# hitting it visible instead of silent.
+_MAX_SWEEP_PAGES = 5
+
+
 async def dispatch_pending(*, limit: int = 50) -> dict[str, int]:
-    """Sweep due outbox rows. Zero results are logged distinctly for operations."""
+    """Sweep due outbox rows. Zero results are logged distinctly for operations.
+
+    The state filter runs in Python (an in+range Firestore filter would need a
+    composite index; same constraint documented in services/research/store.py),
+    but it no longer competes with the limit: pages are cursored until `limit`
+    ACTIONABLE rows are found or the due set is exhausted, so due-but-terminal
+    rows can never permanently crowd real work out of the sweep.
+    """
     now = datetime.now(UTC)
 
-    def _query() -> list[dict[str, Any]]:
-        query = (
+    def _query() -> tuple[list[dict[str, Any]], int, bool]:
+        base = (
             admin_firestore()
             .collection_group(F.JOB_OUTBOX_SUBCOLLECTION)
             .where("dispatch_due_at", "<=", now.isoformat())
-            .limit(limit)
+            .order_by("dispatch_due_at")
         )
-        rows: list[dict[str, Any]] = []
-        for snap in query.stream():
-            row = snap.to_dict() or {}
-            if row.get("state") in ("pending", "retry", "dispatched"):
-                rows.append(row)
-        return rows
+        actionable: list[dict[str, Any]] = []
+        scanned = 0
+        cursor = None
+        for _ in range(_MAX_SWEEP_PAGES):
+            query = base.limit(limit)
+            if cursor is not None:
+                query = query.start_after(cursor)
+            snaps = list(query.stream())
+            if not snaps:
+                return actionable, scanned, False
+            scanned += len(snaps)
+            for snap in snaps:
+                row = snap.to_dict() or {}
+                if row.get("state") in ("pending", "retry", "dispatched"):
+                    actionable.append(row)
+                    if len(actionable) >= limit:
+                        return actionable, scanned, True
+            if len(snaps) < limit:
+                return actionable, scanned, False
+            cursor = snaps[-1]
+        return actionable, scanned, True
 
-    rows = await asyncio.to_thread(_query)
+    rows, scanned, truncated = await asyncio.to_thread(_query)
+    if truncated:
+        logger.warn(
+            "meetings.tasks: outbox sweep truncated",
+            {
+                "scanned": scanned,
+                "actionable": len(rows),
+                "limit": limit,
+                "alert": True,
+            },
+        )
     if not rows:
         logger.info(
             "meetings.tasks: outbox sweep empty",
             {
                 "query": "meeting_job_outbox.dispatch_due_at",
+                "scanned": scanned,
             },
         )
-        return {"scanned": 0, "dispatched": 0, "failed": 0}
+        return {"scanned": scanned, "actionable": 0, "dispatched": 0, "failed": 0}
     dispatched = 0
     failed = 0
     for row in rows:
@@ -266,4 +308,9 @@ async def dispatch_pending(*, limit: int = 50) -> dict[str, int]:
                 },
             )
             # The row remains authoritative and due; the next sweep retries.
-    return {"scanned": len(rows), "dispatched": dispatched, "failed": failed}
+    return {
+        "scanned": scanned,
+        "actionable": len(rows),
+        "dispatched": dispatched,
+        "failed": failed,
+    }

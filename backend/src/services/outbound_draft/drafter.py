@@ -19,7 +19,6 @@ sentence and the desktop card shows graceful copy instead of hanging.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +30,7 @@ from ...prompts import (
     outbound_draft_user_prompt,
     outbound_refine_user_prompt,
 )
+from .. import draft_common
 from ..model_provider import get_model_provider
 from ..user_aura_schema import interest_prompt_lines
 from .skills import GENERAL_SKILL_ID, get_writing_skill, is_writing_skill_id
@@ -64,11 +64,13 @@ LENGTHS: frozenset[str] = frozenset({"short", "medium", "detailed"})
 # persona; it is handled separately.
 _ADAPTIVE_LENGTH_CHANNELS: frozenset[str] = frozenset({DEFAULT_CHANNEL, SNIPPET_CHANNEL})
 
-# Coded reasons, mirroring the keyboard drafter: the caller maps every one of
-# these to graceful speech/UI copy. Loud, never silent.
-REASON_OK = "ok"
-REASON_TIMEOUT = "timeout"
-REASON_MODEL_ERROR = "model_error"
+# Coded reasons: the caller maps every one of these to graceful speech/UI
+# copy. Loud, never silent. The three shared with the keyboard drafter live in
+# services/draft_common.py (one wire vocabulary); re-exported here so clients
+# keep reading drafter.REASON_*.
+REASON_OK = draft_common.REASON_OK
+REASON_TIMEOUT = draft_common.REASON_TIMEOUT
+REASON_MODEL_ERROR = draft_common.REASON_MODEL_ERROR
 REASON_NO_FRAME = "no_frame"
 REASON_INVALID = "invalid_request"
 
@@ -208,34 +210,31 @@ async def draft_outbound(
     # A message draft wants creative range; a snippet wants exactness.
     temperature = 0.2 if channel == SNIPPET_CHANNEL else 0.7
 
-    try:
-        provider = get_model_provider()
-        if jpeg_base64:
-            model_call = provider.expert(
-                user_prompt,
-                system=system_prompt,
-                images=[{"media_type": "image/jpeg", "data": jpeg_base64}],
-                response_model=_DraftOutput,
-                temperature=temperature,
-            )
-        else:
-            model_call = provider.balanced(
-                user_prompt,
-                system=system_prompt,
-                response_model=_DraftOutput,
-                temperature=temperature,
-            )
-        raw = await asyncio.wait_for(model_call, timeout=DRAFT_TIMEOUT_SECONDS)
-        result = cast(_DraftOutput, raw)
-    except asyncio.TimeoutError:
-        logger.warn("outbound_draft: draft timed out", {"user_id": uid, "channel": channel})
-        return OutboundDraftResult(reason=REASON_TIMEOUT)
-    except Exception as exc:
-        logger.warn(
-            "outbound_draft: draft model call failed",
-            {"user_id": uid, "channel": channel, "error": str(exc)},
+    provider = get_model_provider()
+    if jpeg_base64:
+        model_call = provider.expert(
+            user_prompt,
+            system=system_prompt,
+            images=[{"media_type": "image/jpeg", "data": jpeg_base64}],
+            response_model=_DraftOutput,
+            temperature=temperature,
         )
-        return OutboundDraftResult(reason=REASON_MODEL_ERROR)
+    else:
+        model_call = provider.balanced(
+            user_prompt,
+            system=system_prompt,
+            response_model=_DraftOutput,
+            temperature=temperature,
+        )
+    raw, reason = await draft_common.bounded_model_call(
+        model_call,
+        timeout_s=DRAFT_TIMEOUT_SECONDS,
+        log_prefix="outbound_draft: draft",
+        log_fields={"user_id": uid, "channel": channel},
+    )
+    if reason != REASON_OK:
+        return OutboundDraftResult(reason=reason)
+    result = cast(_DraftOutput, raw)
 
     text = result.artifact.body.strip()
     if not text:
@@ -296,26 +295,20 @@ async def refine_outbound(
         context=summary,
     )
 
-    try:
-        raw = await asyncio.wait_for(
-            get_model_provider().balanced(
-                user_prompt,
-                system=system_prompt,
-                response_model=_RefineOutput,
-                temperature=0.2 if channel == SNIPPET_CHANNEL else 0.7,
-            ),
-            timeout=REFINE_TIMEOUT_SECONDS,
-        )
-        result = cast(_RefineOutput, raw)
-    except asyncio.TimeoutError:
-        logger.warn("outbound_draft: refine timed out", {"user_id": uid, "channel": channel})
-        return OutboundDraftResult(reason=REASON_TIMEOUT)
-    except Exception as exc:
-        logger.warn(
-            "outbound_draft: refine model call failed",
-            {"user_id": uid, "channel": channel, "error": str(exc)},
-        )
-        return OutboundDraftResult(reason=REASON_MODEL_ERROR)
+    raw, reason = await draft_common.bounded_model_call(
+        get_model_provider().balanced(
+            user_prompt,
+            system=system_prompt,
+            response_model=_RefineOutput,
+            temperature=0.2 if channel == SNIPPET_CHANNEL else 0.7,
+        ),
+        timeout_s=REFINE_TIMEOUT_SECONDS,
+        log_prefix="outbound_draft: refine",
+        log_fields={"user_id": uid, "channel": channel},
+    )
+    if reason != REASON_OK:
+        return OutboundDraftResult(reason=reason)
+    result = cast(_RefineOutput, raw)
 
     text = result.artifact.body.strip()
     if not text:

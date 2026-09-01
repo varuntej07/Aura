@@ -30,6 +30,7 @@ from livekit.agents import llm as lk_llm
 
 from ...lib.logger import logger
 from ...prompts import GUIDE_INSTRUCTIONS
+from ...services import guide_usage_fields as GF
 from ...services.guide_usage_store import record_guide_usage
 from .guide_session_state import GuidePhase, GuideStartClaim
 from .guide_supervisor import GuideSupervisorAgent
@@ -727,16 +728,17 @@ class GuideCoordinator:
         avg_ttft_ms = int(self._ttft_sum_ms / self._ttft_count) if self._ttft_count else None
         await record_guide_usage(
             self._user_id,
+            writer=GF.WRITER_VOICE,
             guide_session_id=guide_session_id,
             ended_at_ms=int(time.time() * 1000),
             snapshot_fields={
-                "guide_last_voice_session_id": self._session_id,
-                "guide_last_model": self._model or None,
-                "guide_last_provider": self._provider or None,
-                "guide_last_avg_ttft_ms": avg_ttft_ms,
-                "guide_last_tools_used": sorted(self._tools_used),
-                "guide_last_user_turn": self._last_user_turn or None,
-                "guide_last_frames_processed": self._step_index,
+                GF.LAST_VOICE_SESSION_ID: self._session_id,
+                GF.LAST_MODEL: self._model or None,
+                GF.LAST_PROVIDER: self._provider or None,
+                GF.LAST_AVG_TTFT_MS: avg_ttft_ms,
+                GF.LAST_TOOLS_USED: sorted(self._tools_used),
+                GF.LAST_USER_TURN: self._last_user_turn or None,
+                GF.LAST_FRAMES_PROCESSED: self._step_index,
             },
             increments={},
         )

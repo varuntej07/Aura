@@ -1,5 +1,5 @@
 """Screen Saves: durable, per-user bookmarks of a screen-sight frame the user
-explicitly asked Buddy to remember (see ``architectures/desktop-buddy.md``).
+explicitly asked Buddy to remember (see ``architectures/buddy-everywhere.md``).
 
 See ``fields.py`` for the document contract, ``collections.py`` for the
 free-form collection-name resolver (semantic dedup via ``find_nearest``,

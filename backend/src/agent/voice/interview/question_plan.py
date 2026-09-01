@@ -204,7 +204,6 @@ class QuestionPlanService:
 
     async def plan(self, dossier: InterviewDossier) -> QuestionPlan | None:
         """Questions for this dossier, or None when tailored planning failed."""
-        focus = (dossier.interview_focus or "mixed").strip().lower()
         for attempt, (timeout_s, system) in enumerate(
             (
                 (PLANNING_TIMEOUT_S, PLANNER_SYSTEM),
@@ -216,7 +215,7 @@ class QuestionPlanService:
                 async with asyncio.timeout(timeout_s):
                     response = await get_model_provider().balanced(
                         _planning_prompt(dossier),
-                        system=system.format(count=QUESTION_COUNT, focus=focus),
+                        system=system.format(count=QUESTION_COUNT),
                         response_model=_PlannerResponse,
                         temperature=0.6,
                         # No tools=. There is nothing a job description crafted to

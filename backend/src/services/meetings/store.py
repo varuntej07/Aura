@@ -27,71 +27,29 @@ from typing import Any
 
 from google.cloud import firestore as gcloud_firestore
 
+from ...lib.firestore_read import is_expired
 from ...lib.logger import logger
+from .. import usage_counter
 from ..firebase import admin_firestore
 from . import evidence
 from . import fields as F
+from . import refs
+from .audit import audit_event as _shared_audit_event
+from .audit import txn_create as _shared_txn_create
 
 
-def _meetings_ref(uid: str):
-    return (
-        admin_firestore().collection(F.PARENT_COLLECTION).document(uid).collection(F.SUBCOLLECTION)
-    )
-
-
-def _claim_ref(uid: str, event_key: str):
-    return (
-        admin_firestore()
-        .collection(F.PARENT_COLLECTION)
-        .document(uid)
-        .collection(F.CLAIMS_SUBCOLLECTION)
-        .document(event_key)
-    )
-
-
-def _usage_ref(uid: str, month_key: str):
-    return (
-        admin_firestore()
-        .collection(F.PARENT_COLLECTION)
-        .document(uid)
-        .collection(F.USAGE_SUBCOLLECTION)
-        .document(f"meetings_{month_key}")
-    )
-
-
-def _capture_run_ref(uid: str, meeting_id: str, capture_run_id: str):
-    return (
-        _meetings_ref(uid)
-        .document(meeting_id)
-        .collection(F.CAPTURE_RUNS_SUBCOLLECTION)
-        .document(capture_run_id)
-    )
-
-
-def _segments_ref(uid: str, meeting_id: str, capture_run_id: str):
-    return _capture_run_ref(uid, meeting_id, capture_run_id).collection(F.SEGMENTS_SUBCOLLECTION)
-
-
-def _jobs_ref(uid: str):
-    return (
-        admin_firestore()
-        .collection(F.PARENT_COLLECTION)
-        .document(uid)
-        .collection(F.JOBS_SUBCOLLECTION)
-    )
-
-
-def _outbox_ref(uid: str):
-    return (
-        admin_firestore()
-        .collection(F.PARENT_COLLECTION)
-        .document(uid)
-        .collection(F.JOB_OUTBOX_SUBCOLLECTION)
-    )
-
-
-def _audit_ref(uid: str, meeting_id: str):
-    return _meetings_ref(uid).document(meeting_id).collection(F.AUDIT_SUBCOLLECTION)
+# Ref builders and the audit/create primitives live in refs.py / audit.py
+# (the documented internal API shared with tasks.py and deletion.py). The
+# historical underscore names are kept as aliases for this module's own
+# ~100 call sites.
+_meetings_ref = refs.meetings_ref
+_claim_ref = refs.claim_ref
+_usage_ref = refs.usage_ref
+_capture_run_ref = refs.capture_run_ref
+_segments_ref = refs.segments_ref
+_jobs_ref = refs.jobs_ref
+_outbox_ref = refs.outbox_ref
+_audit_ref = refs.audit_ref
 
 
 class MeetingIntegrityError(RuntimeError):
@@ -110,71 +68,12 @@ class DeletedMeetingError(MeetingIntegrityError):
         super().__init__(F.FAIL_DELETION_IN_PROGRESS, "Meeting deletion is in progress.")
 
 
-def _actor_hash(actor_identity: str) -> str:
-    return hashlib.sha256(actor_identity.encode("utf-8")).hexdigest()
+# Promoted to audit.py (shared with tasks.py / deletion.py); aliased for this
+# module's historical names.
+from .audit import actor_hash as _actor_hash  # noqa: E402
 
-
-def _txn_create(txn: Any, ref: Any, value: dict[str, Any]) -> None:
-    """Use Firestore's create-only primitive; old in-repo fakes fall back to set."""
-    create = getattr(txn, "create", None)
-    if callable(create):
-        create(ref, value)
-    else:
-        txn.set(ref, value)
-
-
-def _audit_event(
-    txn: Any,
-    *,
-    uid: str,
-    meeting_id: str,
-    sequence: int,
-    event_type: str,
-    occurred_at: str,
-    actor_type: str = "server",
-    actor_identity: str = "juno-backend",
-    runtime_instance_id: str = "",
-    capture_run_id: str = "",
-    capture_fence: int = 0,
-    job_id: str = "",
-    attempt: int = 0,
-    lease_token: str = "",
-    prior_state: str = "",
-    next_state: str = "",
-    artifacts: list[dict[str, Any]] | None = None,
-    reason_code: str = "",
-    correlation_id: str = "",
-    causation_id: str = "",
-    policy_version: str = "",
-) -> str:
-    event_id = uuid.uuid4().hex
-    envelope = {
-        "event_id": event_id,
-        "sequence": sequence,
-        "event_type": event_type,
-        "occurred_at": occurred_at,
-        "recorded_at": datetime.now(UTC).isoformat(),
-        "actor_type": actor_type,
-        "actor_identity_hash": _actor_hash(actor_identity),
-        F.RUNTIME_INSTANCE_ID: runtime_instance_id,
-        "meeting_id": meeting_id,
-        F.CAPTURE_RUN_ID: capture_run_id,
-        F.CAPTURE_FENCE: capture_fence,
-        "job_id": job_id,
-        "attempt": attempt,
-        "lease_token_hash": _actor_hash(lease_token) if lease_token else "",
-        "prior_state": prior_state,
-        "next_state": next_state,
-        "artifacts": artifacts or [],
-        "reason_code": reason_code,
-        "software_version": F.SOFTWARE_COMPONENT,
-        "schema_version": F.AUDIT_SCHEMA_VERSION,
-        "policy_version": policy_version,
-        "correlation_id": correlation_id or event_id,
-        "causation_id": causation_id,
-    }
-    _txn_create(txn, _audit_ref(uid, meeting_id).document(event_id), envelope)
-    return event_id
+_txn_create = _shared_txn_create
+_audit_event = _shared_audit_event
 
 
 def event_key_for(event_id: str) -> str:
@@ -185,11 +84,7 @@ def event_key_for(event_id: str) -> str:
 
 
 def _seconds_until_next_month(now: datetime) -> int:
-    if now.month == 12:
-        reset = datetime(now.year + 1, 1, 1, tzinfo=UTC)
-    else:
-        reset = datetime(now.year, now.month + 1, 1, tzinfo=UTC)
-    return max(0, int((reset - now).total_seconds()))
+    return usage_counter.month_window(now)[2]
 
 
 @dataclass
@@ -422,7 +317,9 @@ async def claim_meeting(
                     F.CAP_MINUTES: cap_minutes,
                 },
             )
-            txn.set(usage_ref, {"count": count + 1})
+            # merge=True per the usage_counter write discipline: a bare set
+            # would clobber any sibling field a future writer adds.
+            txn.set(usage_ref, {"count": count + 1}, merge=True)
             _audit_event(
                 txn,
                 uid=uid,
@@ -815,9 +712,7 @@ async def verify_v2_completion(
         total_duration_ms=total_duration_ms,
         reason=reason,
     )
-    job_id = hashlib.sha256(
-        f"{uid}:{meeting_id}:{capture_run_id}:{manifest_sha256}".encode()
-    ).hexdigest()
+    job_id = F.job_id_for(uid, meeting_id, capture_run_id, manifest_sha256)
 
     def _run() -> CompletionResult:
         db = admin_firestore()
@@ -1541,7 +1436,7 @@ async def fail_job(
     *,
     error_code: str,
     retryable: bool,
-    max_attempts: int = 3,
+    max_attempts: int = F.MAX_SYNTHESIS_ATTEMPTS,
 ) -> bool:
     """Fenced failure commit with durable full-jitter redispatch state."""
     now = datetime.now(UTC)
@@ -1654,7 +1549,7 @@ async def retry_v2_job(uid: str, meeting_id: str) -> str:
             run_id = str(meeting.get(F.CAPTURE_RUN_ID, ""))
             if not manifest or not run_id:
                 return ""
-            job_id = hashlib.sha256(f"{uid}:{meeting_id}:{run_id}:{manifest}".encode()).hexdigest()
+            job_id = F.job_id_for(uid, meeting_id, run_id, manifest)
             job_ref = _jobs_ref(uid).document(job_id)
             outbox_ref = _outbox_ref(uid).document(job_id)
             job_snap = job_ref.get(transaction=txn)
@@ -1870,8 +1765,7 @@ async def list_recent(uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, 
         rows: list[dict[str, Any]] = []
         for snap in query.stream():
             data = snap.to_dict() or {}
-            expires_at = data.get(F.EXPIRES_AT)
-            if expires_at is not None and expires_at < now:
+            if is_expired(data.get(F.EXPIRES_AT), now=now):
                 continue
             data["meeting_id"] = snap.id
             rows.append(data)

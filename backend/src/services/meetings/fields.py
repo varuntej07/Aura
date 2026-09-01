@@ -26,6 +26,8 @@ audio is not deleted by successful processing. See
 
 from __future__ import annotations
 
+import hashlib
+
 # --- Firestore locations -----------------------------------------------------
 PARENT_COLLECTION = "users"
 SUBCOLLECTION = "meetings"
@@ -192,6 +194,20 @@ MAX_SEGMENT_START_MS = MAX_CAPTURE_MINUTES * 60_000
 # without letting a concurrent duplicate double-run STT+LLM).
 SYNTHESIS_LEASE_MS = 30 * 60_000
 
+# The one encoding of "how many job attempts before a retryable failure goes
+# terminal". store.fail_job (job state) and synthesis's redelivery decision
+# both read this; they diverged when the value lived in each as a literal.
+MAX_SYNTHESIS_ATTEMPTS = 3
+
+
+def job_id_for(uid: str, meeting_id: str, capture_run_id: str, manifest_sha256: str) -> str:
+    """The durable synthesis job identity. One recipe: changing it anywhere
+    else orphans in-flight jobs and silently blinds the deletion saga to its
+    transcript artifacts."""
+    return hashlib.sha256(
+        f"{uid}:{meeting_id}:{capture_run_id}:{manifest_sha256}".encode()
+    ).hexdigest()
+
 # How long a meeting may sit in a non-terminal state before reconciliation calls
 # it stalled and stamps FAIL_PROCESSING_TIMEOUT. Deliberately far beyond the
 # worst legitimate path (a 30 minute lease, three job attempts, up to an hour of
@@ -226,6 +242,18 @@ JOB_BLOCKED = "blocked"
 MEETING_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
 TRANSCRIPT_SCHEMA_VERSION = "meeting-transcript-v2"
+PROVIDER_ATTEMPT_SCHEMA_VERSION = "meeting-provider-attempt-v2"
+
+# One table drives BOTH the artifact writes and the Firestore pointer
+# projection in synthesis: name -> (revision filename, content type or None
+# for JSON, schema_version). Adding an artifact means adding one row here.
+REVISION_ARTIFACTS: dict[str, tuple[str, str | None, str]] = {
+    "canonical": ("canonical.json", None, TRANSCRIPT_SCHEMA_VERSION),
+    "webvtt": ("transcript.vtt", "text/vtt", "webvtt"),
+    "quality_report": ("quality-report.json", None, "meeting-quality-report-v1"),
+    "note_input": ("note-input.json", None, "meeting-note-input-v1"),
+}
+
 QUALITY_POLICY_V1 = "meeting-quality-v1"
 AUDIT_SCHEMA_VERSION = "meeting-audit-v2"
 SOFTWARE_COMPONENT = "juno-backend"

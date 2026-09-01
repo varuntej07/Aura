@@ -20,9 +20,37 @@ blocking call runs in ``asyncio.to_thread``.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any, Callable
 
 _client_singleton: Any = None
+
+
+@dataclass(frozen=True)
+class ImmutableObject:
+    """The one value type for an accepted immutable object. The optional
+    fields exist because meetings snapshots richer blob identity (crc32c,
+    etag, content type) than dictation needs; both features re-export this
+    class so handlers and account deletion deal with a single type."""
+
+    path: str
+    generation: str
+    size: int
+    sha256: str
+    crc32c: str | None = None
+    etag: str | None = None
+    content_type: str = ""
+    reconciled: bool = False
+
+
+class ImmutableObjectConflict(RuntimeError):
+    """An existing object at the path whose identity does NOT match: terminal
+    split-brain evidence, never retried. Carries ``path`` for conflict
+    bookkeeping (handlers/meetings.py records it)."""
+
+    def __init__(self, path: str):
+        super().__init__(f"Immutable object identity conflict at {path}")
+        self.path = path
 
 
 def client() -> Any:

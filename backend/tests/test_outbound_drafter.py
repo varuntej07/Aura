@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from src.handlers import draft_outbound as handler
 from src.prompts import UNTRUSTED_INPUT_OPEN
 from src.services.outbound_draft import drafter
@@ -437,13 +439,20 @@ def test_writing_voice_lines_empty_profile():
 
 
 async def test_handler_requires_auth(monkeypatch):
-    monkeypatch.setattr(handler, "resolve_user_id_from_request", lambda r: None)
-    resp = await handler.handle_draft_outbound_refine(_Req(_VALID_REFINE_BODY))
-    assert resp.status_code == 401
+    # Auth moved behind handlers/request_guards.require_user, which raises a
+    # typed error that main.py's exception handler maps to the canonical 401.
+    from src.handlers import request_guards
+
+    monkeypatch.setattr(
+        request_guards, "resolve_user_id_from_request", lambda request: None
+    )
+    with pytest.raises(request_guards.UnauthorizedError):
+        await handler.handle_draft_outbound_refine(_Req(_VALID_REFINE_BODY))
+    assert request_guards.unauthorized_response().status_code == 401
 
 
 async def test_handler_rejects_missing_prior_draft(monkeypatch):
-    monkeypatch.setattr(handler, "resolve_user_id_from_request", lambda r: "uid1")
+    monkeypatch.setattr(handler, "require_user", lambda r: "uid1")
     body = dict(_VALID_REFINE_BODY)
     del body["prior_draft"]
     resp = await handler.handle_draft_outbound_refine(_Req(body))
@@ -466,7 +475,7 @@ async def test_handler_analytics_never_carries_draft_content(monkeypatch):
     async def _fake_fetch(uid):
         return {}, []
 
-    monkeypatch.setattr(handler, "resolve_user_id_from_request", lambda r: "uid1")
+    monkeypatch.setattr(handler, "require_user", lambda r: "uid1")
     monkeypatch.setattr(handler, "refine_outbound", _fake_refine)
     monkeypatch.setattr(handler, "capture_event", _fake_capture)
     monkeypatch.setattr(handler, "fetch_cached_aura_data", _fake_fetch)
@@ -500,7 +509,7 @@ async def test_handler_profile_read_failure_degrades_gracefully(monkeypatch):
     async def _boom(uid):
         raise RuntimeError("firestore down")
 
-    monkeypatch.setattr(handler, "resolve_user_id_from_request", lambda r: "uid1")
+    monkeypatch.setattr(handler, "require_user", lambda r: "uid1")
     monkeypatch.setattr(handler, "refine_outbound", _fake_refine)
     monkeypatch.setattr(handler, "capture_event", _fake_capture)
     monkeypatch.setattr(handler, "fetch_cached_aura_data", _boom)

@@ -237,8 +237,34 @@ _PROVIDER_PREFIXES: dict[str, str] = {
     "o3": "openai",       # future
 }
 
+# Exact-id overrides, consulted before the prefix scan, for providers whose
+# model ids collide with another provider's namespace: Groq serves
+# OpenAI-architecture models under ids like "openai/gpt-oss-20b", which no
+# prefix rule can classify safely. Keyed off the settings value so a model
+# change cannot strand the map.
+_MODEL_ID_PROVIDER_OVERRIDES: dict[str, str] = {
+    model_id: "groq"
+    for model_id in (
+        settings.GROQ_POLISH_MODEL,
+        settings.INTERVIEW_ANSWER_PRIMARY_MODEL,
+    )
+    # Namespaced ids ("openai/gpt-oss-20b", "moonshotai/kimi-k2-instruct") are
+    # Groq's; a bare id here means the setting was pointed back at a first-party
+    # provider and must fall through to the prefix scan instead.
+    if model_id and "/" in model_id
+}
+
+
+def provider_for_model(model_id: str) -> str:
+    """Public name for the provider inference, for callers that route by
+    capability (e.g. skipping vision-less Groq models for image turns)."""
+    return _infer_provider(model_id)
+
 
 def _infer_provider(model_id: str) -> str:
+    override = _MODEL_ID_PROVIDER_OVERRIDES.get(model_id)
+    if override:
+        return override
     for prefix, provider in _PROVIDER_PREFIXES.items():
         if model_id.startswith(prefix):
             return provider
@@ -356,6 +382,7 @@ class ModelProvider:
         self._anthropic: anthropic.AsyncAnthropic | None = None
         self._gemini_client: Any = None   # google.genai.Client, lazy
         self._openai_client: Any = None
+        self._groq_client: Any = None     # AsyncOpenAI with Groq base_url, lazy
 
     async def cheap(
         self,
@@ -568,6 +595,52 @@ class ModelProvider:
             _emit_usage(model_id, raw_usage)
             return
 
+        if provider == "groq":
+            # OpenAI-compatible surface on Groq's endpoint. No cache_control
+            # markers and no reasoning_effort: kimi/llama ids reject the OpenAI
+            # parameter, and Groq prefill is fast enough that re-sending the
+            # stable prefix per turn costs little. Same ordering rule as the
+            # legs above so any provider-side prefix caching sees an identical
+            # head. Vision is unsupported here; callers route image turns to a
+            # vision-capable model (the interview handler filters Groq ids out
+            # of its chain when a screen frame is attached).
+            if images:
+                recording.finish(success=False, error_type="NotImplementedError")
+                _emit_usage(model_id, None)
+                raise NotImplementedError("groq text streaming does not accept images")
+            effective_system = system
+            if cache_prefix:
+                effective_system = f"{cache_prefix}\n\n{system}" if system else cache_prefix
+            messages = []
+            if effective_system:
+                messages.append({"role": "system", "content": effective_system})
+            messages.append({"role": "user", "content": prompt})
+            raw_usage = None
+            try:
+                stream = await self._get_groq_client().chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    temperature=temperature,
+                    max_completion_tokens=max(1, int(max_output_tokens or 2048)),
+                    stream=True,
+                    stream_options={"include_usage": True},
+                )
+                async for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        raw_usage = usage
+                    for choice in getattr(chunk, "choices", []):
+                        text = getattr(getattr(choice, "delta", None), "content", None)
+                        if text:
+                            yield text
+            except BaseException as exc:
+                recording.finish(success=False, error_type=type(exc).__name__)
+                _emit_usage(model_id, None)
+                raise
+            recording.finish(tokens=openai_usage_tokens(raw_usage))
+            _emit_usage(model_id, raw_usage)
+            return
+
         recording.finish(success=False, error_type="NotImplementedError")
         _emit_usage(model_id, None)
         raise NotImplementedError(f"text streaming is unavailable for provider '{provider}'")
@@ -592,6 +665,61 @@ class ModelProvider:
             caller=caller,
         ):
             yield text
+
+    async def polish(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model_id: str | None = None,
+        temperature: float = 0.0,
+        max_output_tokens: int,
+        reasoning_effort: str = "low",
+        timeout_s: float,
+        caller: str = "polish",
+    ) -> str:
+        """One bounded completion on the fast-inference tier (Groq today).
+
+        Built for the dictation-polish path and intentionally SINGLE-ATTEMPT
+        with a hard caller-owned timeout and no fallback chain: the desktop
+        types the raw transcript after its own deadline, so a retry or a
+        second provider is wasted work for a reply nobody will use. Unlike
+        the handler-local httpx call this replaced, the call is wrapped in
+        llm_telemetry, so it is traced and - when a uid is bound via
+        ``bind_llm_user`` - priced into the per-user LLM cost ledger.
+        """
+        model = model_id or settings.GROQ_POLISH_MODEL
+        provider = _infer_provider(model)
+        recording = start_llm_generation(model=model, provider=provider, caller=caller)
+        _spend_attempt()
+        if provider != "groq":
+            recording.finish(success=False, error_type="NotImplementedError")
+            raise NotImplementedError(f"polish() is unavailable for provider '{provider}'")
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        try:
+            completion = await asyncio.wait_for(
+                self._get_groq_client().chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    # Groq's API deprecates max_tokens in favour of
+                    # max_completion_tokens; the reasoning burst counts against
+                    # it, so callers budget headroom beyond the visible output.
+                    max_completion_tokens=max(1, int(max_output_tokens)),
+                    reasoning_effort=reasoning_effort,
+                ),
+                timeout=timeout_s,
+            )
+        except BaseException as exc:
+            recording.finish(success=False, error_type=type(exc).__name__)
+            raise
+        recording.finish(tokens=openai_usage_tokens(getattr(completion, "usage", None)))
+        choices = getattr(completion, "choices", None) or []
+        text = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        return text or ""
 
     async def expert(
         self,
@@ -1422,6 +1550,22 @@ class ModelProvider:
 
             self._openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY.strip())
         return self._openai_client
+
+    def _get_groq_client(self) -> Any:
+        if self._groq_client is None:
+            if not settings.GROQ_API_KEY:
+                raise ValueError("GROQ_API_KEY is not set - polish() tier unavailable")
+            from openai import AsyncOpenAI  # type: ignore
+
+            # Groq's API is OpenAI-compatible behind a base_url. .strip() is
+            # mandatory: a mounted secret carries a trailing newline, and an
+            # Authorization header containing CR/LF is rejected by httpx
+            # before the request is even sent.
+            self._groq_client = AsyncOpenAI(
+                api_key=settings.GROQ_API_KEY.strip(),
+                base_url="https://api.groq.com/openai/v1",
+            )
+        return self._groq_client
 
 
 #  Module-level singleton

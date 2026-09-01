@@ -25,12 +25,14 @@ import asyncio
 from google.cloud import firestore as fs
 
 from ..lib.logger import logger
+from . import guide_usage_fields as GF
 from .firebase import admin_firestore
 
 
 async def record_guide_usage(
     uid: str,
     *,
+    writer: str,
     guide_session_id: str,
     ended_at_ms: int,
     snapshot_fields: dict,
@@ -41,11 +43,14 @@ async def record_guide_usage(
     ``snapshot_fields`` are the ``guide_last_*`` fields this writer owns; they are
     applied only when this session is the current latest (same id) or strictly
     newer (``ended_at_ms`` >= the stored latest). ``increments`` are additive
-    counters applied unconditionally, so each writer must own DISTINCT counter
-    keys and call at most once per session to avoid double counting. Returns True
-    on a committed write, False on any failure (logged, never raised).
+    counters; each writer must own DISTINCT counter keys, and the per-writer
+    ``guide_counted_{writer}_session_id`` marker makes them idempotent per
+    session, so a client retry after a timed-out-but-committed write (an
+    expected event on this fail-soft endpoint) can never double count. Returns
+    True on a committed write, False on any failure (logged, never raised).
     """
     increments = increments or {}
+    counted_marker = GF.counted_marker(writer)
     ref = admin_firestore().collection("users").document(uid)
 
     def _txn() -> bool:
@@ -56,18 +61,20 @@ async def record_guide_usage(
             snap = ref.get(transaction=txn)
             data = (snap.to_dict() or {}) if snap.exists else {}
             update: dict = {}
-            for key, delta in increments.items():
-                update[key] = fs.Increment(delta)
+            if data.get(counted_marker) != guide_session_id:
+                for key, delta in increments.items():
+                    update[key] = fs.Increment(delta)
+                update[counted_marker] = guide_session_id
 
-            stored_id = data.get("guide_last_session_id")
-            stored_ended_ms = data.get("guide_last_ended_ms")
+            stored_id = data.get(GF.LAST_SESSION_ID)
+            stored_ended_ms = data.get(GF.LAST_ENDED_MS)
             is_same_session = stored_id == guide_session_id
             is_newer = not isinstance(stored_ended_ms, (int, float)) or ended_at_ms >= stored_ended_ms
             if is_same_session or is_newer:
-                update["guide_last_session_id"] = guide_session_id
-                update["guide_last_ended_ms"] = ended_at_ms
+                update[GF.LAST_SESSION_ID] = guide_session_id
+                update[GF.LAST_ENDED_MS] = ended_at_ms
                 update.update(snapshot_fields)
-                update["guide_last_updated_at"] = fs.SERVER_TIMESTAMP
+                update[GF.LAST_UPDATED_AT] = fs.SERVER_TIMESTAMP
 
             if update:
                 txn.set(ref, update, merge=True)

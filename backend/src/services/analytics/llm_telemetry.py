@@ -288,9 +288,12 @@ def start_tool_span(
     tool_name: str,
     source: str,
     uid: str | None = None,
+    request_id: str | None = None,
 ) -> _Recording | _NoopRecording:
     """Open one span per tool call, named ``tool:{tool_name}`` so the ops
-    dashboard can aggregate by name. ``source`` is text | voice | keyboard."""
+    dashboard can aggregate by name. ``source`` is text | voice | keyboard.
+    ``request_id`` is the caller-visible correlation id (the keyboard returns
+    it to the client), so a client report can be joined to its span."""
     client = _get_client()
     arize_span = start_arize_tool_span(tool_name)
     if client is None and arize_span is None:
@@ -301,6 +304,8 @@ def start_tool_span(
             metadata: dict[str, Any] = {"source": source, **_trace_context.get()}
             if uid:
                 metadata["uid"] = uid
+            if request_id:
+                metadata["request_id"] = request_id
             observation = _start_observation(
                 client,
                 name=f"tool:{tool_name}",

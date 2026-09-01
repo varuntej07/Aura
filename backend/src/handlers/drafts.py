@@ -19,16 +19,14 @@ from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
 from ..services.drafts import store
-from ..services.request_auth import resolve_user_id_from_request
+from .request_guards import require_user
 
 
 async def handle_list_drafts(request: Request) -> JSONResponse:
     """GET /drafts - recent drafts, newest first, already filtered of expired
     rows. Fails closed (empty list) rather than raising, matching
     screen_saves' read path."""
-    user_id = resolve_user_id_from_request(request)
-    if not user_id:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user_id = require_user(request)
 
     items = await store.list_drafts(user_id)
     logger.info("Drafts: listed", {"user_id": user_id, "total": len(items)})
@@ -39,9 +37,7 @@ async def handle_delete_draft(request: Request, draft_id: str) -> JSONResponse:
     """DELETE /drafts/{draft_id} - forget one draft. Always allowed for the
     owner. Hard delete, no tombstone; the store's update-only refine paths
     guarantee a deleted draft can never come back."""
-    user_id = resolve_user_id_from_request(request)
-    if not user_id:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user_id = require_user(request)
     draft_id = (draft_id or "").strip()
     if not draft_id:
         return JSONResponse({"error": "Missing draft id."}, status_code=400)

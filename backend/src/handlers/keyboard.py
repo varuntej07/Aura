@@ -27,7 +27,7 @@ from pydantic import ValidationError
 
 from ..services.analytics import funnel_events
 from ..services.analytics.llm_telemetry import start_tool_span
-from ..services.analytics.posthog_client import capture_event
+from ..services.analytics.posthog_client import capture_event, flush
 from ..services.keyboard.drafter import REASON_OK, DraftRequest, draft
 from ..services.keyboard.vocab import build_vocab_hints
 from ..services.request_auth import resolve_user_id_from_request
@@ -65,8 +65,15 @@ async def handle_keyboard_draft(request: Request) -> JSONResponse:
     request_id = uuid.uuid4().hex
     # One telemetry span per draft (ops dashboard tool analytics). Carries only
     # the action label, never the typed content (privacy contract above); the
-    # underlying LLM call is traced separately inside ModelProvider.
-    span = start_tool_span(tool_name="keyboard_draft", source="keyboard", uid=user_id)
+    # underlying LLM call is traced separately inside ModelProvider. request_id
+    # rides the span and the funnel event so the id handed to the client
+    # actually correlates with something server-side.
+    span = start_tool_span(
+        tool_name="keyboard_draft",
+        source="keyboard",
+        uid=user_id,
+        request_id=request_id,
+    )
     try:
         result = await draft(user_id, req)
     except Exception as exc:
@@ -85,8 +92,12 @@ async def handle_keyboard_draft(request: Request) -> JSONResponse:
             funnel_events.PROP_KEYBOARD_ACTION: req.action,
             funnel_events.PROP_KEYBOARD_HOST_APP: req.host_app or "unknown",
             funnel_events.PROP_KEYBOARD_FIELD_TYPE: req.field_type or "unknown",
+            "request_id": request_id,
         },
     )
+    # Cloud Run freezes the container as soon as the response returns; without
+    # a drain the queued event is silently lost (same fix as handlers/threads.py).
+    await flush()
 
     return JSONResponse(
         {

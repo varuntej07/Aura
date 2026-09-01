@@ -5,8 +5,8 @@ Screen-save document contract — the single source of truth for field names on
 helpers (``collection_slug``, ``normalized_collection_name``)
 the writer and every reader both depend on.
 
-Per the data-layer discipline in CLAUDE.md, ``store.py``/``collections.py`` and
-every reader import field names from HERE, never inline a string literal, so a
+Data-layer rule for this module: ``store.py``/``collections.py`` and every
+reader import field names from HERE, never inline a string literal, so a
 rename can never silently split the writer/reader contract.
 
 Stored shape:

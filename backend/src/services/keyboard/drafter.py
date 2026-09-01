@@ -15,7 +15,6 @@ list with a coded reason, so the keyboard shows a graceful state and never hangs
 
 from __future__ import annotations
 
-import asyncio
 from typing import Literal, cast
 
 from pydantic import BaseModel, Field
@@ -23,6 +22,7 @@ from pydantic import BaseModel, Field
 from ...config.settings import settings
 from ...lib.logger import logger
 from ...prompts import keyboard_draft_system_prompt, keyboard_draft_user_prompt
+from .. import draft_common
 from ..chat_completion.prompt_builder import fetch_cached_aura_data
 from ..model_provider import get_model_provider
 from ..user_aura_schema import interest_prompt_lines
@@ -58,10 +58,12 @@ COMPACT_OUTPUT_ACTIONS: frozenset[str] = frozenset({"rewrite", "continue", "tone
 COMPACT_OUTPUT_MAX = 2
 
 # Coded reasons returned with the suggestion list so the handler/client can show the
-# right graceful copy instead of a spinner. Loud, never silent.
-REASON_OK = "ok"
-REASON_TIMEOUT = "timeout"
-REASON_MODEL_ERROR = "model_error"
+# right graceful copy instead of a spinner. Loud, never silent. The three shared
+# reasons live in services/draft_common.py (one wire vocabulary with the
+# outbound drafter); re-exported here so clients keep reading drafter.REASON_*.
+REASON_OK = draft_common.REASON_OK
+REASON_TIMEOUT = draft_common.REASON_TIMEOUT
+REASON_MODEL_ERROR = draft_common.REASON_MODEL_ERROR
 REASON_EMPTY_CONTEXT = "empty_context"
 
 # Defensive caps. The keyboard only ever needs the local conversation context, so we
@@ -156,27 +158,21 @@ async def draft(uid: str, req: DraftRequest) -> DraftResult:
         context_after_max_chars=CONTEXT_AFTER_MAX_CHARS,
     )
 
-    try:
-        raw = await asyncio.wait_for(
-            get_model_provider().cheap(
-                user_prompt,
-                system=system_prompt,
-                response_model=_Suggestions,
-                temperature=0.7,
-                model=KEYBOARD_DRAFT_MODEL,
-            ),
-            timeout=KEYBOARD_DRAFT_TIMEOUT_SECONDS,
-        )
-        result = cast(_Suggestions, raw)
-    except asyncio.TimeoutError:
-        logger.warn("keyboard.draft: timed out", {"user_id": uid, "action": req.action})
-        return DraftResult(suggestions=[], reason=REASON_TIMEOUT)
-    except Exception as exc:
-        logger.warn(
-            "keyboard.draft: model call failed",
-            {"user_id": uid, "action": req.action, "error": str(exc)},
-        )
-        return DraftResult(suggestions=[], reason=REASON_MODEL_ERROR)
+    raw, reason = await draft_common.bounded_model_call(
+        get_model_provider().cheap(
+            user_prompt,
+            system=system_prompt,
+            response_model=_Suggestions,
+            temperature=0.7,
+            model=KEYBOARD_DRAFT_MODEL,
+        ),
+        timeout_s=KEYBOARD_DRAFT_TIMEOUT_SECONDS,
+        log_prefix="keyboard.draft:",
+        log_fields={"user_id": uid, "action": req.action},
+    )
+    if reason != REASON_OK:
+        return DraftResult(suggestions=[], reason=reason)
+    result = cast(_Suggestions, raw)
 
     suggestions = [s.strip() for s in (result.suggestions or []) if s and s.strip()]
     suggestions = suggestions[:effective_n]

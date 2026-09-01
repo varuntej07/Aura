@@ -29,6 +29,7 @@ from livekit.api import AccessToken, VideoGrants
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config.settings import settings
+from .handlers import request_guards
 from .handlers.account import handle_delete_account
 from .handlers.account_onboarding import (
     handle_complete_account_onboarding,
@@ -198,9 +199,22 @@ configure_sentry()
 
 app = FastAPI(title="Juno Backend", version="1.0.0")
 
-# MCP server (POST /mcp) exposes ToolExecutor tools to the LiveKit voice worker over MCP streamable HTTP. 
+# MCP server (POST /mcp) exposes ToolExecutor tools to the LiveKit voice worker over MCP streamable HTTP.
 # Lifespan starts inside register_mcp via the parent app's startup/shutdown events.
 register_mcp(app)
+
+
+# Typed guard exceptions from handlers/request_guards.py map to the canonical
+# response bodies here, so every desktop-surface route answers auth and
+# content-type failures byte-identically to the previous per-handler copies.
+@app.exception_handler(request_guards.UnauthorizedError)
+async def _handle_unauthorized(request: Request, exc: request_guards.UnauthorizedError):
+    return request_guards.unauthorized_response()
+
+
+@app.exception_handler(request_guards.NotJsonError)
+async def _handle_not_json(request: Request, exc: request_guards.NotJsonError):
+    return request_guards.not_json_response()
 
 
 # Request / Response logging middleware

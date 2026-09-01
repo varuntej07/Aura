@@ -56,8 +56,11 @@ async def upload_screen_save(uid: str, item_id: str, jpeg_bytes: bytes) -> str:
 
 
 async def delete_screen_save(path: str) -> bool:
-    """Best-effort delete of one screen-save object. Never raises — a failed
-    GCS delete must not block the Firestore item delete that owns it."""
+    """Delete one screen-save object. True means the object is gone (deleted
+    now, or already absent from an earlier partial attempt); False means the
+    delete failed and the caller must NOT remove the Firestore doc that points
+    at it — the doc is the only reference left, so keeping it is what keeps
+    the delete retryable. Never raises."""
     if not path:
         return False
 
@@ -68,6 +71,10 @@ async def delete_screen_save(path: str) -> bool:
         await asyncio.to_thread(_delete)
         return True
     except Exception as exc:
+        from google.api_core import exceptions as gexc  # type: ignore
+
+        if isinstance(exc, gexc.NotFound):
+            return True
         logger.warn("gcs: screen save delete failed", {"path": path, "error": str(exc)})
         return False
 

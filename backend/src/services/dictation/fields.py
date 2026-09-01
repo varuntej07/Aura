@@ -34,6 +34,11 @@ AUDIO_UPLOADED_AT = "audio_uploaded_at"
 AUDIO_EXPIRES_AT = "audio_expires_at"
 METADATA_EXPIRES_AT = "expires_at"
 AUDIO_BYTES = "audioBytes"
+# camelCase like AUDIO_BYTES: written by the client's trace metadata payload,
+# read server-side for the audio identity checks.
+AUDIO_SHA256 = "audioSha256"
+DURATION_MS = "durationMs"
+AUDIO_MISSING_CONFIRMED_AT = "audio_missing_confirmed_at"
 DELETION_STATE = "deletion_state"
 DELETION_REQUESTED_AT = "deletion_requested_at"
 DELETED_AT = "deleted_at"

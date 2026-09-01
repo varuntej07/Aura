@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..prompts import INTERVIEW_BRIEF_BUILD_TASK
+
 VerificationState = Literal["verified", "unverified"]
 SourceKind = Literal[
     "company",
@@ -182,21 +184,12 @@ class InterviewBrief(BaseModel):
 
 
 def interview_brief_prompt(payload: InterviewBriefBuildRequest) -> str:
+    # The task text lives in prompts.py (every prompt in one home; prompts.py
+    # is itself dependency-free, so this module stays contracts-plus-glue).
     return json.dumps(
         {
             "sources": [source.model_dump() for source in payload.sources],
-            "task": (
-                "Build four strictly separate groups. Candidate evidence contains only candidate "
-                "facts, projects, complete STAR stories and metrics supported by resume, candidate "
-                "fact, STAR story or metric sources. Job requirements contain only requirements "
-                "supported by the job description. Likely interviewer questions are questions the "
-                "interviewer may ask the candidate and may use only company, role, job description "
-                "or company research sources. They are not questions for the candidate to ask a "
-                "panel. Every output item must list the exact source IDs that support it. Never "
-                "turn a target company, target role, job requirement, research fact, gap or "
-                "do-not-claim item into candidate experience. Do not create an item when no "
-                "compatible supplied source supports it."
-            ),
+            "task": INTERVIEW_BRIEF_BUILD_TASK,
         },
         separators=(",", ":"),
     )

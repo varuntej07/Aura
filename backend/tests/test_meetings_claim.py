@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.services.meetings import fields as F
-from src.services.meetings import store
+from src.services.meetings import refs, store
 
 UID = "user-1"
 EVENT = "cal-instance-abc123"
@@ -51,8 +51,11 @@ class _FakeDocRef:
     def get(self, transaction=None) -> _FakeSnapshot:
         return _FakeSnapshot(self._store.get(self._path))
 
-    def set(self, data: dict) -> None:
-        self._store[self._path] = dict(data)
+    def set(self, data: dict, merge: bool = False) -> None:
+        if merge and self._path in self._store:
+            self._store[self._path] = {**self._store[self._path], **dict(data)}
+        else:
+            self._store[self._path] = dict(data)
 
     def update(self, fields: dict) -> None:
         if self._path not in self._store:
@@ -83,8 +86,8 @@ class _FakeCollection:
 
 
 class _FakeTransaction:
-    def set(self, ref: _FakeDocRef, data: dict) -> None:
-        ref.set(data)
+    def set(self, ref: _FakeDocRef, data: dict, merge: bool = False) -> None:
+        ref.set(data, merge=merge)
 
     def update(self, ref: _FakeDocRef, fields: dict) -> None:
         ref.update(fields)
@@ -133,6 +136,8 @@ class _FakeFirestoreModule:
 def docs(monkeypatch) -> dict:
     store_docs: dict = {}
     monkeypatch.setattr(store, "admin_firestore", lambda: _FakeDb(store_docs))
+    # The ref builders moved to refs.py; they resolve the client there now.
+    monkeypatch.setattr(refs, "admin_firestore", lambda: _FakeDb(store_docs))
     monkeypatch.setattr(store, "gcloud_firestore", _FakeFirestoreModule)
     return store_docs
 

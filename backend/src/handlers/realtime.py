@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from ..config.settings import settings
 from ..lib.logger import logger
 from ..prompts import DESKTOP_ONBOARDING_VOICE_MODIFIER, DESKTOP_REALTIME_GATHER_INSTRUCTIONS
+from ..services.openai_client import get_async_openai
 from ..services.request_auth import decode_firebase_claims
 
 # The mint sits on the tap-to-first-voice path, so cap each attempt and retry once
@@ -34,23 +35,9 @@ _MINT_TIMEOUT_S = 4.0
 _MINT_ATTEMPTS = 2
 _REALTIME_MODES = frozenset({"standard", "onboarding"})
 
-_client: Any = None
-
-
 def _get_openai_client() -> Any:
-    """Lazy AsyncOpenAI singleton, mirroring openai_chat_fallback._get_openai_client."""
-    global _client
-    if _client is None:
-        if not settings.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is not set — realtime bridge unavailable")
-        from openai import AsyncOpenAI  # type: ignore
-
-        # .strip() is mandatory here: the mounted secret carries a trailing newline,
-        # and an Authorization header value with a CR/LF is rejected by httpx before
-        # the request is even sent (LocalProtocolError, surfaced as APIConnectionError).
-        # Every other key in this codebase is stripped the same way (see voice/pipelines.py).
-        _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY.strip())
-    return _client
+    """Thin alias over the shared services accessor (promoted from here)."""
+    return get_async_openai()
 
 
 async def create_realtime_session(request: Request) -> JSONResponse:

@@ -26,6 +26,7 @@ from typing import Any
 from google.api_core.exceptions import NotFound
 from google.cloud import firestore as fs
 
+from ...lib.firestore_read import is_expired
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from . import fields as F
@@ -126,9 +127,9 @@ async def update_draft_text(
 
 async def list_drafts(uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, Any]]:
     """Recent drafts, newest first, capped. Fails closed (empty list) rather
-    than raising, matching screen_saves.store's read path. Rows whose
-    ``expires_at`` has passed are dropped here because the Firestore TTL
-    sweeper can lag up to ~72h behind the deadline."""
+    than raising, matching screen_saves.store's read path. Already-expired
+    rows are dropped via lib.firestore_read.is_expired (the TTL-lag rule's
+    one home)."""
     if not uid:
         return []
 
@@ -142,8 +143,7 @@ async def list_drafts(uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, 
         rows: list[dict[str, Any]] = []
         for snap in query.stream():
             data = snap.to_dict() or {}
-            expires_at = data.get(F.EXPIRES_AT)
-            if expires_at is not None and expires_at < now:
+            if is_expired(data.get(F.EXPIRES_AT), now=now):
                 continue
             rows.append({
                 "draft_id": snap.id,

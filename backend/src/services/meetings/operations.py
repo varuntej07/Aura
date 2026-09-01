@@ -37,17 +37,24 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
             snap.to_dict() or {}
             for snap in db.collection_group(F.JOBS_SUBCOLLECTION).limit(limit).stream()
         ]
-        stranded_runs = [
-            snap.to_dict() or {}
-            for snap in (
-                db.collection_group(F.CAPTURE_RUNS_SUBCOLLECTION)
-                .where(F.UPDATED_AT, "<=", stale_capture_before)
-                .limit(limit)
-                .stream()
-            )
-            if (snap.to_dict() or {}).get(F.CAPTURE_RUN_STATE) == F.CAPTURE_RUN_FINALIZED
-        ]
-        return {"meetings": meetings, "jobs": jobs, "stranded_runs": stranded_runs}
+        stranded_runs = []
+        stale_runs_scanned = 0
+        for snap in (
+            db.collection_group(F.CAPTURE_RUNS_SUBCOLLECTION)
+            .where(F.UPDATED_AT, "<=", stale_capture_before)
+            .limit(limit)
+            .stream()
+        ):
+            stale_runs_scanned += 1
+            row = snap.to_dict() or {}
+            if row.get(F.CAPTURE_RUN_STATE) == F.CAPTURE_RUN_FINALIZED:
+                stranded_runs.append(row)
+        return {
+            "meetings": meetings,
+            "jobs": jobs,
+            "stranded_runs": stranded_runs,
+            "stale_runs_scanned": stale_runs_scanned,
+        }
 
     data = await asyncio.to_thread(_read)
     meetings = data["meetings"]
@@ -108,6 +115,27 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
     }
     repairs = await _repair(meetings, jobs, stall_deadline=stall_deadline)
     alerts = {key: value for key, value in metrics.items() if value}
+    # A sweep that filled its limit almost certainly did NOT see everything;
+    # at scale a permanently-stuck meeting beyond the cutoff would otherwise
+    # be invisible while the snapshot reports healthy. Loud, not silent.
+    truncated_sweeps = sorted(
+        name
+        for name, scanned in (
+            ("meetings", len(meetings)),
+            ("jobs", len(jobs)),
+            ("stale_capture_runs", data["stale_runs_scanned"]),
+        )
+        if scanned >= limit
+    )
+    if truncated_sweeps:
+        logger.warn(
+            "meetings.operations: reconciliation sweep truncated",
+            {
+                "truncated_sweeps": truncated_sweeps,
+                "limit": limit,
+                "alert": True,
+            },
+        )
     logger.info(
         "meetings.operations: reconciliation snapshot",
         {

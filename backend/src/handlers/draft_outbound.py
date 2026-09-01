@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from ..services.analytics import funnel_events
-from ..services.analytics.posthog_client import capture_event
+from ..services.analytics.posthog_client import capture_event, flush
 from ..services.chat_completion.prompt_builder import fetch_cached_aura_data
 from ..services.drafts import store as draft_store
 from ..services.outbound_draft.drafter import (
@@ -40,7 +40,7 @@ from ..services.outbound_draft.drafter import (
     writing_voice_lines,
 )
 from ..services.outbound_draft.skills import WritingSkillId
-from ..services.request_auth import resolve_user_id_from_request
+from .request_guards import require_user
 
 # Chip slugs the desktop sends; anything else is a free-form instruction and gets
 # reported to analytics as "custom" so the breakdown stays low-cardinality.
@@ -68,9 +68,7 @@ class RefineRequest(BaseModel):
 
 
 async def handle_draft_outbound_refine(request: Request) -> JSONResponse:
-    user_id = resolve_user_id_from_request(request)
-    if not user_id:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user_id = require_user(request)
 
     try:
         body = await request.json()
@@ -125,5 +123,8 @@ async def handle_draft_outbound_refine(request: Request) -> JSONResponse:
             funnel_events.PROP_DRAFT_INSTRUCTION_KIND: instruction_kind,
         },
     )
+    # Cloud Run freezes the container as soon as the response returns; without
+    # a drain the queued event is silently lost (same fix as handlers/threads.py).
+    await flush()
 
     return JSONResponse({"text": result.text, "reason": result.reason}, status_code=200)

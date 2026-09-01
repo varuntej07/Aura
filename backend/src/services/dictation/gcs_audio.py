@@ -8,11 +8,15 @@ dictation paths, metadata composition, result shape, and log lines.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 
 from ...config.settings import settings
 from ...lib.logger import logger
 from .. import immutable_gcs
+
+# Canonical value/conflict types live beside the mechanics; re-exported here
+# so existing `gcs_audio.ImmutableObjectConflict` catch sites keep working.
+ImmutableObject = immutable_gcs.ImmutableObject
+ImmutableObjectConflict = immutable_gcs.ImmutableObjectConflict
 
 
 def bucket_name() -> str:
@@ -25,21 +29,6 @@ def object_path_for(uid: str, trace_id: str, content_sha256: str) -> str:
 
 def user_prefix_for(uid: str) -> str:
     return f"dictation/v1/{uid}/"
-
-
-@dataclass(frozen=True)
-class ImmutableObject:
-    path: str
-    generation: str
-    size: int
-    sha256: str
-    reconciled: bool
-
-
-class ImmutableObjectConflict(RuntimeError):
-    def __init__(self, path: str):
-        super().__init__(f"Immutable object identity conflict at {path}")
-        self.path = path
 
 
 async def create_audio(

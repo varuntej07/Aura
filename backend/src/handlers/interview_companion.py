@@ -12,10 +12,8 @@ import binascii
 import json
 import time
 from collections.abc import AsyncGenerator
-from typing import Literal
+from typing import Any, Literal
 
-import anthropic
-import openai
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -37,19 +35,32 @@ from ..services.interview_preparation import (
     assemble_interview_brief,
     interview_brief_prompt,
 )
-from ..services.model_provider import get_model_provider, is_quota_exhausted
-from ..services.request_auth import resolve_user_id_from_request
+from ..prompts import (
+    INTERVIEW_ACTION_OVERRIDE_RULE,
+    INTERVIEW_DECISION_INSTRUCTION,
+    INTERVIEW_GROUNDED_SYSTEM,
+    INTERVIEW_REASONING_FLOW_RULE,
+    INTERVIEW_SCREEN_NOTE_INSTRUCTION,
+    INTERVIEW_SHAPE_INSTRUCTION,
+    INTERVIEW_SPOKEN_RULE,
+    INTERVIEW_UNVERIFIED_SYSTEM,
+    INTERVIEW_VOICE_RULE,
+)
+from ..services import provider_health
+from ..services.model_provider import get_model_provider, provider_for_model
+from ..services.stt import deepgram_grant
+from .request_guards import SSE_HEADERS as _SSE_HEADERS
+from .request_guards import no_store_json, require_json, require_user
 
-_DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
 _TOKEN_MINT_TIMEOUT_S = 6.0
 _RESEARCH_HEARTBEAT_S = 10.0
-_PROVIDER_CIRCUITS: dict[str, tuple[float, str]] = {}
-_PROVIDER_SLOW_STARTS: dict[str, int] = {}
-_SSE_HEADERS = {
-    "Cache-Control": "no-cache, no-store",
-    "X-Accel-Buffering": "no",
-    "Connection": "keep-alive",
-}
+# How many leading characters may arrive before a bare "SKIP..." opening is
+# classified without waiting for its newline. Sized to the longest legal skip
+# line ("SKIP|another_interviewer" is 24 chars) plus streaming slack; anything
+# longer is answer prose that merely starts with the word. The ANSWER/SKIP
+# first line is a wire contract with the prompt (_DECISION_INSTRUCTION) and is
+# documented in ECOSYSTEM.md section 5a-2; parsing fails open to answer text.
+_DECISION_MAX_PREFIX_CHARS = 40
 
 
 class _FirstVisibleTokenTimeout(TimeoutError):
@@ -64,53 +75,23 @@ class _StreamDeadlineExceeded(TimeoutError):
     pass
 
 
+# Circuit state and the provider-failure classifier live in
+# services/provider_health.py (per-process by design; see its docstring).
+# These thin wrappers keep the fallback loop's control flow byte-for-byte.
 def _provider_circuit_reason(model_id: str) -> str | None:
-    circuit = _PROVIDER_CIRCUITS.get(model_id)
-    if circuit is None:
-        return None
-    open_until, reason = circuit
-    if time.monotonic() < open_until:
-        return reason
-    _PROVIDER_CIRCUITS.pop(model_id, None)
-    return None
-
-
-def _open_provider_circuit(model_id: str, seconds: float, reason: str) -> None:
-    _PROVIDER_CIRCUITS[model_id] = (time.monotonic() + seconds, reason)
+    return provider_health.open_reason(model_id)
 
 
 def _record_provider_success(model_id: str) -> None:
-    _PROVIDER_SLOW_STARTS.pop(model_id, None)
-    _PROVIDER_CIRCUITS.pop(model_id, None)
+    provider_health.record_success(model_id)
 
 
 def _record_provider_failure(model_id: str, exc: Exception) -> str:
-    if isinstance(exc, _FirstVisibleTokenTimeout):
-        slow_starts = _PROVIDER_SLOW_STARTS.get(model_id, 0) + 1
-        _PROVIDER_SLOW_STARTS[model_id] = slow_starts
-        if slow_starts >= 2:
-            _open_provider_circuit(model_id, 30.0, "slow_first_token")
-        return "slow_first_token"
-    if is_quota_exhausted(exc):
-        _open_provider_circuit(model_id, 600.0, "credits_or_quota")
-        return "credits_or_quota"
-    status_code = getattr(exc, "status_code", None)
-    if status_code in (401, 403, 404):
-        _open_provider_circuit(model_id, 600.0, "provider_access")
-        return "provider_access"
-    if status_code == 429:
-        _open_provider_circuit(model_id, 30.0, "rate_limited")
-        return "rate_limited"
-    if isinstance(status_code, int) and status_code >= 500:
-        _open_provider_circuit(model_id, 30.0, "provider_outage")
-        return "provider_outage"
-    if isinstance(
+    return provider_health.record_failure(
+        model_id,
         exc,
-        (anthropic.APIConnectionError, openai.APIConnectionError, ConnectionError, OSError),
-    ):
-        _open_provider_circuit(model_id, 30.0, "connection_failure")
-        return "connection_failure"
-    return "request_failure"
+        slow_start=isinstance(exc, _FirstVisibleTokenTimeout),
+    )
 
 
 class TranscriptTurn(BaseModel):
@@ -253,51 +234,16 @@ def _terminal() -> str:
 
 
 async def _mint_deepgram_stt_token() -> tuple[str, int] | None:
-    if not settings.DEEPGRAM_DICTATION_API_KEY:
-        return None
-    import httpx
-
-    try:
-        async with httpx.AsyncClient(timeout=_TOKEN_MINT_TIMEOUT_S) as client:
-            grant = await client.post(
-                _DEEPGRAM_GRANT_URL,
-                headers={
-                    "Authorization": f"Token {settings.DEEPGRAM_DICTATION_API_KEY.strip()}",
-                    "Content-Type": "application/json",
-                },
-                json={"ttl_seconds": settings.DEEPGRAM_STT_TOKEN_TTL_S},
-            )
-    except Exception as exc:
-        logger.warn(
-            "interview_companion: deepgram token mint failed",
-            {"error_type": type(exc).__name__},
-        )
-        return None
-    if grant.status_code != 200:
-        logger.warn(
-            "interview_companion: deepgram token mint rejected",
-            {"status": grant.status_code},
-        )
-        return None
-    try:
-        payload = grant.json()
-        access_token = payload["access_token"]
-        expires_in = int(float(payload.get("expires_in") or settings.DEEPGRAM_STT_TOKEN_TTL_S))
-    except Exception as exc:
-        logger.warn(
-            "interview_companion: deepgram token response unusable",
-            {"error_type": type(exc).__name__},
-        )
-        return None
-    if not isinstance(access_token, str) or not access_token or expires_in <= 0:
-        return None
-    return access_token, expires_in
+    return await deepgram_grant.mint_grant(
+        ttl_seconds=settings.DEEPGRAM_STT_TOKEN_TTL_S,
+        caller="interview_companion",
+    )
 
 
 async def _mint_openai_stt_token() -> tuple[str, int] | None:
     if not settings.OPENAI_API_KEY:
         return None
-    from .realtime import _get_openai_client
+    from ..services.openai_client import get_async_openai as _get_openai_client
 
     session_config = {
         "type": "transcription",
@@ -336,35 +282,38 @@ async def _mint_openai_stt_token() -> tuple[str, int] | None:
 
 
 async def handle_mint_stt_token(request: Request) -> JSONResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    uid = require_user(request)
     deepgram, openai = await asyncio.gather(
         _mint_deepgram_stt_token(),
         _mint_openai_stt_token(),
     )
     if deepgram is None and openai is None:
         return JSONResponse({"error": "Interview transcription is unavailable."}, status_code=503)
-    deepgram_token, deepgram_ttl = deepgram or ("", 30)
-    openai_token, openai_ttl = openai or ("", 30)
-    response = JSONResponse(
-        {
-            "accessToken": deepgram_token,
-            "deepgramAccessToken": deepgram_token,
-            "openaiAccessToken": openai_token,
-            "expiresInSeconds": min(deepgram_ttl, openai_ttl),
-        }
-    )
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    # A partial outage must be visible as one: a failed leg's token fields are
+    # OMITTED, never sent as "", and its hardcoded TTL never drags
+    # expiresInSeconds down. Absent field beats blank credential - a released
+    # client reading a missing accessToken fails its Deepgram leg loudly
+    # instead of handshaking with an empty string from a 200.
+    payload: dict[str, Any] = {
+        "providers": {"deepgram": deepgram is not None, "openai": openai is not None},
+    }
+    ttls: list[int] = []
+    if deepgram is not None:
+        deepgram_token, deepgram_ttl = deepgram
+        payload["accessToken"] = deepgram_token
+        payload["deepgramAccessToken"] = deepgram_token
+        ttls.append(deepgram_ttl)
+    if openai is not None:
+        openai_token, openai_ttl = openai
+        payload["openaiAccessToken"] = openai_token
+        ttls.append(openai_ttl)
+    payload["expiresInSeconds"] = min(ttls)
+    return no_store_json(payload)
 
 
 async def handle_build_brief(request: Request) -> JSONResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-        return JSONResponse({"error": "Content-Type must be application/json."}, status_code=400)
+    uid = require_user(request)
+    require_json(request)
     try:
         payload = InterviewBriefBuildRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
@@ -395,17 +344,12 @@ async def handle_build_brief(request: Request) -> JSONResponse:
         )
         return JSONResponse({"error": "Interview preparation failed."}, status_code=503)
 
-    response = JSONResponse(brief.model_dump())
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    return no_store_json(brief.model_dump())
 
 
 async def handle_company_research(request: Request) -> JSONResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-        return JSONResponse({"error": "Content-Type must be application/json."}, status_code=400)
+    uid = require_user(request)
+    require_json(request)
     try:
         payload = CompanyResearchRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
@@ -423,9 +367,7 @@ async def handle_company_research(request: Request) -> JSONResponse:
         )
         return JSONResponse({"error": "Company research failed."}, status_code=503)
 
-    response = JSONResponse(result.model_dump())
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    return no_store_json(result.model_dump())
 
 
 async def _company_research_stream(
@@ -496,11 +438,8 @@ async def _company_research_stream(
 async def handle_company_research_stream(
     request: Request,
 ) -> JSONResponse | StreamingResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-        return JSONResponse({"error": "Content-Type must be application/json."}, status_code=400)
+    uid = require_user(request)
+    require_json(request)
     try:
         payload = CompanyResearchRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
@@ -577,125 +516,19 @@ def _evidence_ids_by_scope(brief: InterviewBriefSlice | None) -> tuple[set[str],
     return candidate_ids, target_ids
 
 
-# Applies to every shape: the difference between prose a person wrote and prose a
-# person says out loud. The bullet formats these replaced glanced well but read
-# like notes; a live answer is spoken, so it has to sound spoken.
-_SPOKEN_RULE = (
-    "Write it the way people actually talk, not the way people write. Use "
-    "contractions. It is fine to start a sentence with And, So, or But when that "
-    "is how it would land out loud. Vary the sentence lengths - a short sentence "
-    "after a long one is what real speech sounds like. Never use bullet points, "
-    "headings, numbered lists, a colon that introduces a list, or any formatting a "
-    "person cannot say aloud. Avoid words nobody says out loud in an interview, "
-    "such as leverage, utilize, furthermore, moreover, delve, robust, or seamless. "
-    "The FIRST sentence must be short and able to stand on its own, because the "
-    "candidate starts speaking on it while the rest is still arriving. Allow at "
-    "most one brief lead-in of no more than three words, such as 'Yeah, so' or "
-    "'Right, so', and never more than one."
-)
-
-# The refinement actions used to lose to the shape rule above, because the shape
-# rule lives in this cached system block and the action was one sentence in a
-# JSON field of the user message. Every pill then returned the same answer. This
-# line is byte-identical across the session, so it costs nothing in cache terms
-# and it hands the volatile action authority over the rule it sits beside.
-_ACTION_OVERRIDE_RULE = (
-    "If the task names an action other than drafting a fresh answer, that action "
-    "overrides the length and shape rules above. The new answer must differ "
-    "materially from current_answer. Never restate it and never return it "
-    "unchanged."
-)
-
-# Answers should acquire structure only where the question earns it, and never
-# announce that structure. Cached with the rest of the style, so free.
-_REASONING_FLOW_RULE = (
-    "When the question is really asking you to reason - a design, a tradeoff, a "
-    "'how would you' - let the answer move on its own from what the problem "
-    "actually is, to what you would do, to what that costs, to why it is still "
-    "the right call. Keep it flowing speech: never announce those as steps, never "
-    "label them, and never use the words problem, approach, tradeoff, or "
-    "rationale as headings. When the question does not call for that, just answer "
-    "it."
-)
-
-# Per-round register on top of _SPOKEN_RULE. These set length and shape of the
-# spoken answer; the register instruction, not a bullet character, is what
-# differs between rounds now.
-_SHAPE_INSTRUCTION = {
-    "script_conversational": (
-        "Four to six sentences of connected speech. Open by answering the question "
-        "directly in one short sentence, then give the substance. Use one concrete "
-        "specific, not three."
-    ),
-    "script_star": (
-        "Five to seven sentences of connected speech that move through the "
-        "situation, what the candidate owned, what they did, and what came of it, "
-        "in that order and never labelled. The sentence about the result carries "
-        "the number or the outcome."
-    ),
-    "script_technical": (
-        "Four to six sentences of connected speech. Name the approach in the first "
-        "sentence, then how it works, then the one tradeoff that matters most."
-    ),
-    "script_structured": (
-        "Six to eight sentences of connected speech. Precise wording matters most "
-        "here, so this is the one round where slight formality is correct. Do not "
-        "use the brief lead-in; open directly. Say what the system actually has to "
-        "do before saying how you would build it, name the one constraint that "
-        "drives the design, and close on what the design gives up to get it."
-    ),
-}
-
-# Mirrors the decision line: one metadata line the parser strips before any of
-# it reaches the screen. Screen Sight is a manual action, so it never competes
-# with the decision line for the first line of the stream.
-_SCREEN_NOTE_INSTRUCTION = (
-    "Your FIRST line must be SCREEN| followed by a neutral description of what is "
-    "on the attached screen, at most 15 words. Put nothing else on that line. "
-    "Begin the spoken answer on the next line."
-)
-
-_DECISION_INSTRUCTION = (
-    "Your FIRST line decides whether this turn needs an answer at all. Write exactly "
-    "ANSWER when the remote speaker asked the candidate something that needs a reply "
-    "now. Otherwise write SKIP| followed by one of another_interviewer, self, crosstalk, "
-    "media_playback, uncertain. Skip statements, rhetorical questions, questions the "
-    "speaker answers themselves, panel-to-panel talk, media playback, and incomplete "
-    "turns. When unsure, skip. Put nothing else on that line."
-)
-
-# The single hardest constraint, and the one the model breaks first. Anything
-# that reads as advice ABOUT the answer is useless in a live call: the candidate
-# cannot say it out loud, and they have no time to translate it while the
-# interviewer is waiting. Stated once here so both modes carry it identically.
-_VOICE_RULE = (
-    "You are the candidate, speaking. Write ONLY the words they say out loud, in first "
-    "person, addressed to the interviewer, continuing the conversation that is already "
-    "happening. Never write about the answer. Never explain, introduce, coach, or "
-    "describe what a good answer would contain. Never open with phrasing such as "
-    "Here's how, You could say, A strong answer, I would suggest, Try, Consider, or "
-    "Start by. Never address the candidate as you. Read every line back in your head: "
-    "if it would sound strange said aloud in a real interview, it is wrong."
-)
-
-_GROUNDED_SYSTEM = (
-    _VOICE_RULE
-    + " Every claim about your experience, employers, projects, skills, or metrics must "
-    "come from the supplied evidence, and every claim about the target company must come "
-    "from the supplied target context. Never state a target-company fact as your own "
-    "experience. Treat the constraints as hard boundaries."
-)
-
-_UNVERIFIED_SYSTEM = (
-    _VOICE_RULE
-    + " Your prepared background is not available right now. Answer anyway, with the real "
-    "substance of a good answer rather than a description of one. Never invent an "
-    "employer, job title, date, metric, project name, or technology that has not already "
-    "been said in this conversation. Where you need a specific from your own history, "
-    "leave a square-bracket slot such as [your most recent project] inside the sentence "
-    "and keep talking around it, so the line stays something you can read out and fill in "
-    "as you go."
-)
+# The prompt constants live in prompts.py (every prompt in one home), aliased
+# to their historical names here. Byte-stability was hash-verified at move
+# time: _answer_cache_prefix depends on these strings staying byte-identical
+# or the Anthropic prompt-cache prefix churns at the write premium.
+_SPOKEN_RULE = INTERVIEW_SPOKEN_RULE
+_ACTION_OVERRIDE_RULE = INTERVIEW_ACTION_OVERRIDE_RULE
+_REASONING_FLOW_RULE = INTERVIEW_REASONING_FLOW_RULE
+_SHAPE_INSTRUCTION = INTERVIEW_SHAPE_INSTRUCTION
+_SCREEN_NOTE_INSTRUCTION = INTERVIEW_SCREEN_NOTE_INSTRUCTION
+_DECISION_INSTRUCTION = INTERVIEW_DECISION_INSTRUCTION
+_VOICE_RULE = INTERVIEW_VOICE_RULE
+_GROUNDED_SYSTEM = INTERVIEW_GROUNDED_SYSTEM
+_UNVERIFIED_SYSTEM = INTERVIEW_UNVERIFIED_SYSTEM
 
 
 def _answer_system(grounded: bool) -> str:
@@ -840,7 +673,7 @@ def _read_decision(buffer: str, *, final: bool = False) -> tuple[str, str, str] 
     if upper.startswith("SKIP"):
         newline = stripped.find("\n")
         if newline < 0:
-            if not final and len(stripped) < 40:
+            if not final and len(stripped) < _DECISION_MAX_PREFIX_CHARS:
                 return None
             line = stripped
         else:
@@ -1083,6 +916,15 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
             settings.INTERVIEW_ANSWER_PRIMARY_MODEL,
             settings.INTERVIEW_ANSWER_FALLBACK_MODEL,
         )))
+        if payload.screen_sight is not None:
+            # Groq-hosted models have no vision; a screen frame rides the
+            # remaining (vision-capable) chain exactly as it did before Groq
+            # became the text primary.
+            vision_models = tuple(
+                model_id for model_id in models
+                if provider_for_model(model_id) != "groq"
+            )
+            models = vision_models or (settings.INTERVIEW_ANSWER_FALLBACK_MODEL,)
         last_exception: Exception | None = None
         for model_id in models:
             circuit_reason = _provider_circuit_reason(model_id)
@@ -1120,6 +962,7 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
                                 "target": "candidate",
                                 "accepted": True,
                                 "gate_ms": answer_ttft_ms,
+                                "model": model_id,
                             },
                         )
                         # Emitted alongside the decision, not after the answer:
@@ -1210,11 +1053,8 @@ async def _answer_stream(payload: InterviewAnswerRequest) -> AsyncGenerator[str,
 
 
 async def handle_answer_stream(request: Request) -> JSONResponse | StreamingResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-        return JSONResponse({"error": "Content-Type must be application/json."}, status_code=400)
+    uid = require_user(request)
+    require_json(request)
     try:
         payload = InterviewAnswerRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
@@ -1272,11 +1112,8 @@ def _reflection_prompt(payload: InterviewReflectionRequest) -> str:
 
 
 async def handle_reflection(request: Request) -> JSONResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-        return JSONResponse({"error": "Content-Type must be application/json."}, status_code=400)
+    uid = require_user(request)
+    require_json(request)
     try:
         payload = InterviewReflectionRequest.model_validate(await request.json())
     except (ValidationError, ValueError):
@@ -1306,6 +1143,4 @@ async def handle_reflection(request: Request) -> JSONResponse:
         )
         return JSONResponse({"error": "Interview reflection failed."}, status_code=503)
 
-    response = JSONResponse(reflection.model_dump())
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    return no_store_json(reflection.model_dump())

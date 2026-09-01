@@ -110,8 +110,10 @@ async def delete_item(uid: str, item_id: str) -> bool:
 
 
 async def get_item(uid: str, item_id: str) -> dict[str, Any] | None:
-    """One item's raw doc, for the delete handler to find its image_path
-    before removing the GCS object. None if missing."""
+    """One item's raw doc, fail-closed to None on read errors (dashboard-read
+    semantics). Currently unreferenced: the delete handler moved to
+    ``get_item_strict`` because a deleter must distinguish "missing" from
+    "could not verify". Kept for future read-only surfaces."""
     def _read() -> dict[str, Any] | None:
         snap = _items_ref(uid).document(item_id).get()
         return (snap.to_dict() or {}) if snap.exists else None

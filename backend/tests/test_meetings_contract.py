@@ -71,6 +71,8 @@ def test_detail_includes_transcript_and_recent_projection_omits_it():
 
 
 def test_retry_rejects_ready_and_actively_synthesizing_meetings(monkeypatch):
+    # Auth moved behind handlers/request_guards.require_user; patch that seam.
+    monkeypatch.setattr(meetings, "require_user", lambda request: "user-1")
     monkeypatch.setattr(meetings, "resolve_user_id_from_request", lambda request: "user-1")
 
     async def run(meeting_doc: dict):
@@ -88,6 +90,8 @@ def test_retry_rejects_ready_and_actively_synthesizing_meetings(monkeypatch):
 
 
 def test_retry_dispatches_the_current_v2_job(monkeypatch):
+    # Auth moved behind handlers/request_guards.require_user; patch that seam.
+    monkeypatch.setattr(meetings, "require_user", lambda request: "user-1")
     monkeypatch.setattr(meetings, "resolve_user_id_from_request", lambda request: "user-1")
 
     async def get_meeting(uid, meeting_id):

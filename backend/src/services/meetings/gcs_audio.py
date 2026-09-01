@@ -21,7 +21,6 @@ Audio and transcript bucket names come from ``MEETINGS_AUDIO_BUCKET`` and
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from ...config.settings import settings
@@ -29,31 +28,20 @@ from ...lib.logger import logger
 from .. import immutable_gcs
 from .evidence import canonical_json_bytes, sha256_hex
 
+# Canonical value/conflict types live beside the mechanics; re-exported here
+# so existing `gcs_audio.ImmutableObjectConflict` catch sites keep working.
+ImmutableObject = immutable_gcs.ImmutableObject
+ImmutableObjectConflict = immutable_gcs.ImmutableObjectConflict
+
 
 def bucket_name() -> str:
     return settings.MEETINGS_AUDIO_BUCKET
 
 
 def transcript_bucket_name() -> str:
+    # Only meetings knows this fallback rule: transcripts co-locate with audio
+    # unless a dedicated bucket is configured.
     return settings.MEETINGS_TRANSCRIPT_BUCKET or bucket_name()
-
-
-@dataclass(frozen=True)
-class ImmutableObject:
-    path: str
-    generation: str
-    size: int
-    sha256: str
-    crc32c: str | None
-    etag: str | None
-    content_type: str
-    reconciled: bool = False
-
-
-class ImmutableObjectConflict(RuntimeError):
-    def __init__(self, path: str):
-        super().__init__(f"Immutable object identity conflict at {path}")
-        self.path = path
 
 
 def v2_object_path_for(

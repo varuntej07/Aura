@@ -11,6 +11,7 @@ from google.cloud import firestore as gcloud_firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ...lib.logger import logger
+from .. import usage_counter
 from ..firebase import admin_firestore
 from . import fields as F
 from . import gcs_audio
@@ -28,22 +29,12 @@ def _trace_ref(uid: str, trace_id: str):
 
 
 def _usage_ref(uid: str, month_key: str):
-    return (
-        admin_firestore()
-        .collection(F.PARENT_COLLECTION)
-        .document(uid)
-        .collection(F.USAGE_SUBCOLLECTION)
-        .document(f"dictation_{month_key}")
-    )
+    return usage_counter.usage_doc_ref(admin_firestore(), uid, f"dictation_{month_key}")
 
 
 def _month_window(now: datetime) -> tuple[str, int]:
-    month_key = now.strftime("%Y%m")
-    if now.month == 12:
-        reset = datetime(now.year + 1, 1, 1, tzinfo=UTC)
-    else:
-        reset = datetime(now.year, now.month + 1, 1, tzinfo=UTC)
-    return month_key, int(reset.timestamp() * 1_000)
+    month_key, resets_at_ms, _ = usage_counter.month_window(now)
+    return month_key, resets_at_ms
 
 
 @dataclass(frozen=True)
@@ -112,6 +103,8 @@ async def put_metadata(
                     F.QUOTA_MONTH: month_key,
                 },
             )
+            # merge=True per the usage_counter write discipline: never clobber
+            # fields a sibling writer or future schema adds to this doc.
             txn.set(
                 usage_ref,
                 {
@@ -120,6 +113,7 @@ async def put_metadata(
                     "resets_at_ms": resets_at_ms,
                     "updated_at": now,
                 },
+                merge=True,
             )
             return MetadataResult(
                 "created",
@@ -172,7 +166,7 @@ async def attach_audio(
                 return AttachResult("deleted")
             current_audio_bytes = current.get(F.AUDIO_BYTES)
             if (
-                current.get("audioSha256") != content_sha256
+                current.get(F.AUDIO_SHA256) != content_sha256
                 or (
                     current_audio_bytes is not None
                     and int(current_audio_bytes) != byte_length
@@ -243,7 +237,7 @@ async def begin_delete(uid: str, trace_id: str) -> DeleteTarget:
                 str(current.get(F.AUDIO_GENERATION))
                 if current.get(F.AUDIO_GENERATION) is not None
                 else None,
-                current.get("audioSha256"),
+                current.get(F.AUDIO_SHA256),
             )
 
         return _execute(transaction)
@@ -304,7 +298,7 @@ async def mark_audio_missing(reference, *, path: str, generation: str) -> bool:
                 {
                     F.HAS_AUDIO: False,
                     F.AUDIO_EXPIRES_AT: gcloud_firestore.DELETE_FIELD,
-                    "audio_missing_confirmed_at": now,
+                    F.AUDIO_MISSING_CONFIRMED_AT: now,
                 },
             )
             return True

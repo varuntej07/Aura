@@ -8,13 +8,17 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from google.cloud import firestore as gcloud_firestore
+
+from ..firebase import admin_firestore
 from . import fields as F
-from . import gcs_audio, store
+from . import gcs_audio, refs, store
+from .audit import audit_event, txn_create
 
 
 def _deletion_ref(uid: str, meeting_id: str):
     return (
-        store.admin_firestore()
+        admin_firestore()
         .collection(F.PARENT_COLLECTION)
         .document(uid)
         .collection(F.DELETIONS_SUBCOLLECTION)
@@ -32,12 +36,12 @@ async def request_deletion(
     now = datetime.now(UTC).isoformat()
 
     def _run() -> dict[str, Any]:
-        db = store.admin_firestore()
-        meeting_ref = store._meetings_ref(uid).document(meeting_id)
+        db = admin_firestore()
+        meeting_ref = refs.meetings_ref(uid).document(meeting_id)
         deletion_ref = _deletion_ref(uid, meeting_id)
         txn = db.transaction()
 
-        @store.gcloud_firestore.transactional
+        @gcloud_firestore.transactional
         def _execute(transaction) -> dict[str, Any]:
             meeting_snap = meeting_ref.get(transaction=transaction)
             deletion_snap = deletion_ref.get(transaction=transaction)
@@ -66,7 +70,7 @@ async def request_deletion(
             if deletion_snap.exists:
                 transaction.update(deletion_ref, saga)
             else:
-                store._txn_create(transaction, deletion_ref, saga)
+                txn_create(transaction, deletion_ref, saga)
             transaction.update(
                 meeting_ref,
                 {
@@ -75,10 +79,10 @@ async def request_deletion(
                     F.DELETION_STATE: F.STAGE_BLOCK_NEW_WORK,
                     F.AUDIT_SEQUENCE: sequence,
                     F.UPDATED_AT: now,
-                    F.STATUS_REVISION: store.gcloud_firestore.Increment(1),
+                    F.STATUS_REVISION: gcloud_firestore.Increment(1),
                 },
             )
-            store._audit_event(
+            audit_event(
                 transaction,
                 uid=uid,
                 meeting_id=meeting_id,
@@ -111,7 +115,7 @@ async def _targets(uid: str, meeting_id: str) -> tuple[dict[str, Any], list[dict
     def _read() -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for seq in range(count):
-            snap = store._segments_ref(uid, meeting_id, run_id).document(f"{seq:06d}").get()
+            snap = refs.segments_ref(uid, meeting_id, run_id).document(f"{seq:06d}").get()
             if snap.exists:
                 receipt = (snap.to_dict() or {}).get("upload_receipt") or {}
                 if receipt.get("object") and receipt.get("generation"):
@@ -144,8 +148,8 @@ async def _targets(uid: str, meeting_id: str) -> tuple[dict[str, Any], list[dict
                 )
         manifest = str(meeting.get(F.MANIFEST_SHA256, ""))
         if manifest and run_id:
-            job_id = hashlib.sha256(f"{uid}:{meeting_id}:{run_id}:{manifest}".encode()).hexdigest()
-            job_snap = store._jobs_ref(uid).document(job_id).get()
+            job_id = F.job_id_for(uid, meeting_id, run_id, manifest)
+            job_snap = refs.jobs_ref(uid).document(job_id).get()
             job = job_snap.to_dict() or {}
             for attempt in (job.get("segment_attempts") or {}).values():
                 pointer = attempt.get("artifact") if isinstance(attempt, dict) else None
@@ -194,12 +198,12 @@ async def _record_receipt(
     ).hexdigest()
 
     def _run() -> None:
-        db = store.admin_firestore()
-        meeting_ref = store._meetings_ref(uid).document(meeting_id)
+        db = admin_firestore()
+        meeting_ref = refs.meetings_ref(uid).document(meeting_id)
         deletion_ref = _deletion_ref(uid, meeting_id)
         txn = db.transaction()
 
-        @store.gcloud_firestore.transactional
+        @gcloud_firestore.transactional
         def _execute(transaction) -> None:
             meeting_snap = meeting_ref.get(transaction=transaction)
             deletion_snap = deletion_ref.get(transaction=transaction)
@@ -237,7 +241,7 @@ async def _record_receipt(
                     F.UPDATED_AT: now,
                 },
             )
-            store._audit_event(
+            audit_event(
                 transaction,
                 uid=uid,
                 meeting_id=meeting_id,
@@ -294,16 +298,16 @@ async def run_deletion(uid: str, meeting_id: str) -> dict[str, Any]:
     now = datetime.now(UTC).isoformat()
 
     def _tombstone() -> dict[str, Any]:
-        db = store.admin_firestore()
-        meeting_ref = store._meetings_ref(uid).document(meeting_id)
+        db = admin_firestore()
+        meeting_ref = refs.meetings_ref(uid).document(meeting_id)
         capture_run_id = str(meeting.get(F.CAPTURE_RUN_ID, ""))
         run_ref = (
-            store._capture_run_ref(uid, meeting_id, capture_run_id) if capture_run_id else None
+            refs.capture_run_ref(uid, meeting_id, capture_run_id) if capture_run_id else None
         )
         deletion_ref = _deletion_ref(uid, meeting_id)
         txn = db.transaction()
 
-        @store.gcloud_firestore.transactional
+        @gcloud_firestore.transactional
         def _execute(transaction) -> dict[str, Any]:
             meeting_snap = meeting_ref.get(transaction=transaction)
             deletion_snap = deletion_ref.get(transaction=transaction)
@@ -327,13 +331,13 @@ async def run_deletion(uid: str, meeting_id: str) -> dict[str, Any]:
                     F.PROCESSING_STAGE: F.STAGE_DELETE_COMPLETE,
                     F.DELETION_STATE: F.STAGE_DELETE_COMPLETE,
                     F.DELETED_AT: now,
-                    F.NOTE: store.gcloud_firestore.DELETE_FIELD,
-                    F.TITLE: store.gcloud_firestore.DELETE_FIELD,
-                    F.START_TIME: store.gcloud_firestore.DELETE_FIELD,
-                    F.END_TIME: store.gcloud_firestore.DELETE_FIELD,
-                    F.ARTIFACTS: store.gcloud_firestore.DELETE_FIELD,
+                    F.NOTE: gcloud_firestore.DELETE_FIELD,
+                    F.TITLE: gcloud_firestore.DELETE_FIELD,
+                    F.START_TIME: gcloud_firestore.DELETE_FIELD,
+                    F.END_TIME: gcloud_firestore.DELETE_FIELD,
+                    F.ARTIFACTS: gcloud_firestore.DELETE_FIELD,
                     F.AUDIT_SEQUENCE: sequence,
-                    F.STATUS_REVISION: store.gcloud_firestore.Increment(1),
+                    F.STATUS_REVISION: gcloud_firestore.Increment(1),
                     F.UPDATED_AT: now,
                 },
             )
@@ -345,7 +349,7 @@ async def run_deletion(uid: str, meeting_id: str) -> dict[str, Any]:
                     "updated_at": now,
                 },
             )
-            store._audit_event(
+            audit_event(
                 transaction,
                 uid=uid,
                 meeting_id=meeting_id,

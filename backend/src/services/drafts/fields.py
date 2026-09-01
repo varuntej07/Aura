@@ -2,9 +2,9 @@
 Outbound-draft document contract - the single source of truth for field names
 on ``UserAura/{uid}/drafts/{draft_id}``.
 
-Per the data-layer discipline in CLAUDE.md, ``store.py`` and every reader
-import field names from HERE, never inline a string literal, so a rename can
-never silently split the writer/reader contract.
+Data-layer rule for this module: ``store.py`` and every reader import field
+names from HERE, never inline a string literal, so a rename can never silently
+split the writer/reader contract.
 
 Stored shape (latest version only - refines overwrite ``text`` in place):
 

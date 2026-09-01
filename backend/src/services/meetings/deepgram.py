@@ -14,7 +14,6 @@ sets it from Secret Manager); no new secret. httpx is already a runtime dep
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,6 +21,7 @@ import httpx
 
 from ...config.settings import settings
 from ...lib.logger import logger
+from . import transcript
 
 _LISTEN_URL = "https://api.deepgram.com/v1/listen"
 _PARAMS = {
@@ -35,59 +35,41 @@ _PARAMS = {
 _TIMEOUT_S = 120.0
 _MAX_ATTEMPTS = 3
 
-MIC_CHANNEL = 0
-LOOPBACK_CHANNEL = 1
+# DTOs and channel constants live in transcript.py; imported here unchanged so
+# existing `deepgram.SegmentTranscript` / channel-constant imports keep working.
+from .transcript import (  # noqa: E402  (re-export)
+    LOOPBACK_CHANNEL,
+    MIC_CHANNEL,
+    SegmentTranscript,
+    Utterance,
+)
 
 
-@dataclass
-class Utterance:
-    channel: int
-    start_s: float
-    end_s: float
-    text: str
-    speaker: str | None = None
+class DeepgramError(transcript.TranscriptionError):
+    """A Deepgram request that failed after retries (retryable infra)."""
+
+    provider = "deepgram"
+    model = "nova-3"
+    parser_version = "deepgram-meeting-v2"
 
 
-@dataclass
-class SegmentTranscript:
-    utterances: list[Utterance] = field(default_factory=list)
-    mic_words: int = 0
-    loopback_words: int = 0
-    language: str | None = None
-    language_confidence: float | None = None
-    confidence: float | None = None
-    words: list[dict[str, Any]] = field(default_factory=list)
-    provider: str = "deepgram"
-    model: str = "nova-3"
-    parameters: dict[str, str] = field(default_factory=dict)
-    request_id: str = ""
-    responded_at: str = ""
-    raw_response: dict[str, Any] = field(default_factory=dict)
-    parser_version: str = "deepgram-meeting-v2"
-    forced_english: bool = False
-
-
-class DeepgramError(Exception):
-    """A transcription request that failed after retries. The worker treats
-    this as an infrastructure failure (retryable), not a bad meeting."""
-
-
-class DeepgramRejectedError(DeepgramError):
-    """Deepgram rejected the request outright (non-429 4xx): resending the
+class DeepgramRejectedError(DeepgramError, transcript.TranscriptionRejectedError):
+    """Deepgram rejected the request outright (terminal 4xx): resending the
     same bytes can never succeed. The worker treats this as TERMINAL - a
     retry loop here just resends the identical bad audio forever."""
 
 
-class ProviderOutputError(DeepgramError):
-    code = "provider_output_invalid"
+class ProviderOutputError(DeepgramError, transcript.ProviderOutputError):
+    pass
 
 
-class ProviderMalformedError(ProviderOutputError):
-    code = "provider_output_malformed"
+class ProviderMalformedError(ProviderOutputError, transcript.ProviderMalformedError):
+    pass
 
 
-class ProviderEmptyError(ProviderOutputError):
-    code = "provider_output_empty"
+class ProviderEmptyError(ProviderOutputError, transcript.ProviderEmptyError):
+    # Never raised - see transcript.ProviderEmptyError. Kept, not deleted.
+    pass
 
 
 async def transcribe_segment(
@@ -96,9 +78,9 @@ async def transcribe_segment(
     force_english: bool = False,
 ) -> SegmentTranscript:
     """Transcribe one 2-channel FLAC segment. Retries transient failures
-    (429/5xx/network) twice with a short backoff, then raises DeepgramError.
-    A 4xx other than 429 raises immediately - resending the same bytes cannot
-    fix a rejected request."""
+    (429/422/5xx/network) twice with a short backoff, then raises
+    DeepgramError. Any other 4xx raises DeepgramRejectedError immediately -
+    resending the same bytes cannot fix a rejected request."""
     if not settings.DEEPGRAM_API_KEY:
         raise DeepgramError("DEEPGRAM_API_KEY is not configured")
 
@@ -135,7 +117,11 @@ async def transcribe_segment(
                         parameters=params,
                         force_english=force_english,
                     )
-                if response.status_code not in (429,) and response.status_code < 500:
+                # Deepgram's error contract (developers.deepgram.com/reference/errors):
+                # 400/401/402/403/404 can never succeed on a resend; 422 means the
+                # upload was interrupted mid-transfer and MAY succeed on retry, so
+                # it stays transient alongside 429 and 5xx.
+                if response.status_code not in (429, 422) and response.status_code < 500:
                     raise DeepgramRejectedError(
                         f"deepgram rejected request: {response.status_code}"
                     )

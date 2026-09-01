@@ -32,6 +32,7 @@ from ..services.meetings import (
 )
 from ..services.meetings import fields as F
 from ..services.request_auth import resolve_user_id_from_request
+from .request_guards import require_user
 
 _ENTITLEMENT_UNAVAILABLE = JSONResponse(
     {"error": "Entitlement temporarily unavailable."},
@@ -51,8 +52,6 @@ def _classify_upload_error(exc: Exception) -> tuple[str, bool]:
 
     if isinstance(exc, (gexc.NotFound, gexc.Forbidden)):
         return F.FAIL_UPLOAD_STORAGE_UNAVAILABLE, True
-    if isinstance(exc, gexc.ServiceUnavailable):
-        return F.FAIL_UPLOAD_STORAGE_UNAVAILABLE, False
     return F.FAIL_UPLOAD_STORAGE_UNAVAILABLE, False
 
 
@@ -271,16 +270,16 @@ async def handle_claim(request: Request) -> JSONResponse:
             correlation_id=correlation_id,
         )
     except Exception as exc:
+        # Fails closed: an allowed claim commits real STT+LLM spend, so an
+        # outage denies with a retryable status instead of guessing.
         _meeting_event(
             request,
             "claim.failed",
             level="error",
             code="claim_temporarily_unavailable",
             error=exc,
+            user_id=user_id,
         )
-        # Fails closed: an allowed claim commits real STT+LLM spend, so an
-        # outage denies with a retryable status instead of guessing.
-        logger.warn("meetings: claim failed", {"user_id": user_id, "error": str(exc)})
         return JSONResponse({"error": "Claim temporarily unavailable."}, status_code=503)
 
     if result.denied_cap:
@@ -815,16 +814,15 @@ async def handle_complete_v2(
             capture_run_id=capture_run_id,
             capture_fence=capture_fence,
         )
-        logger.error(
-            "meetings.v2: completion verification failed",
-            {
-                "meeting_id": meeting_id,
-                "capture_run_id": capture_run_id,
-                "capture_fence": capture_fence,
-                "correlation_id": correlation_id,
-                "error_code": "completion_verification_unavailable",
-                "error": str(exc),
-            },
+        _meeting_event(
+            request,
+            "complete_v2.verify_failed",
+            level="error",
+            code="completion_verification_unavailable",
+            error=exc,
+            meeting_id=meeting_id,
+            capture_run_id=capture_run_id,
+            capture_fence=capture_fence,
         )
         return JSONResponse({"error": "Complete failed."}, status_code=503)
     if result.conflict_code:
@@ -861,19 +859,10 @@ async def handle_complete_v2(
         meeting_id=meeting_id,
         capture_run_id=capture_run_id,
         capture_fence=int(meeting.get(F.CAPTURE_FENCE, -1)),
+        receipt_id=result.receipt.get("receipt_id", ""),
+        job_id=result.job_id,
     )
     try:
-        logger.info(
-            "meetings.v2: complete verified",
-            {
-                "meeting_id": meeting_id,
-                "capture_run_id": capture_run_id,
-                "capture_fence": int(meeting.get(F.CAPTURE_FENCE, -1)),
-                "receipt_id": result.receipt.get("receipt_id", ""),
-                "job_id": result.job_id,
-                "correlation_id": correlation_id,
-            },
-        )
         await tasks.dispatch_job(user_id, result.job_id)
     except Exception as exc:
         # The durable outbox is already committed. The scheduler sweeper owns
@@ -900,9 +889,7 @@ async def handle_retry(request: Request, meeting_id: str) -> JSONResponse:
     meeting. A retryable=false failure (no audio, audio rejected) stays terminal.
     The re-enqueue carries an attempt-count dedup suffix so Cloud Tasks does not
     swallow it as a duplicate of the original /complete task."""
-    user_id = resolve_user_id_from_request(request)
-    if not user_id:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user_id = require_user(request)
 
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
@@ -995,15 +982,6 @@ async def handle_delete_meeting(request: Request, meeting_id: str) -> JSONRespon
             correlation_id=correlation_id,
             meeting_id=meeting_id,
         )
-        logger.error(
-            "meetings.v2: deletion saga retry required",
-            {
-                "meeting_id": meeting_id,
-                "correlation_id": correlation_id,
-                "error_code": "meeting_deletion_retry_required",
-                "error": str(exc),
-            },
-        )
         return JSONResponse(
             {
                 "detail": {
@@ -1027,9 +1005,7 @@ async def handle_delete_meeting(request: Request, meeting_id: str) -> JSONRespon
 
 async def handle_get_meeting(request: Request, meeting_id: str) -> JSONResponse:
     """GET /meetings/{meeting_id} - status + note poll target."""
-    user_id = resolve_user_id_from_request(request)
-    if not user_id:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user_id = require_user(request)
 
     try:
         meeting = await store.get_meeting(user_id, meeting_id)
@@ -1043,9 +1019,7 @@ async def handle_get_meeting(request: Request, meeting_id: str) -> JSONResponse:
 async def handle_list_recent(request: Request) -> JSONResponse:
     """GET /meetings/recent - newest first, expired rows dropped. Fails closed
     (empty list), matching the drafts read path."""
-    user_id = resolve_user_id_from_request(request)
-    if not user_id:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user_id = require_user(request)
 
     try:
         limit = int(request.query_params.get("limit", str(F.LIST_LIMIT)))
@@ -1064,7 +1038,12 @@ async def handle_internal_synthesize(request: Request) -> JSONResponse:
     """POST /internal/meetings/synthesize - the Cloud Tasks target. Terminal
     outcomes answer 200 (the queue must stop); lease contention answers 409 and
     other retryable failures propagate as 500 so the queue tries again with
-    audio intact."""
+    audio intact.
+
+    Auth: the ONLY handler in this module that trusts a body-supplied user_id.
+    That is safe because the route is gated by
+    ``Depends(_verify_scheduler_token)`` in main.py, which admits only the
+    Cloud Tasks OIDC service account - never end-user traffic."""
     body = await _json_body(request) or {}
     user_id = str(body.get("user_id") or "").strip()
     meeting_id = str(body.get("meeting_id") or "").strip()

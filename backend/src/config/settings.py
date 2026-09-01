@@ -135,9 +135,13 @@ class Settings(BaseSettings):
     OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
     OPENAI_TEXT_CHAT_MODEL: str = "gpt-5.6-luna"
     INTERVIEW_COMPANY_RESEARCH_MODEL: str = "gpt-5.6-terra"
-    INTERVIEW_ANSWER_PRIMARY_MODEL: str = "claude-haiku-4-5-20251001"
-    INTERVIEW_ANSWER_FALLBACK_MODEL: str = "gpt-5.6-luna"
-    INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S: float = 3.0
+    # Groq-hosted primary for first-token speed (LPU TTFT is a fraction of the
+    # frontier providers'); Haiku keeps the fallback leg, where its per-session
+    # prompt cache stays warm. Groq models have no vision: a screen_sight turn
+    # skips them and runs the fallback chain (see interview_companion handler).
+    INTERVIEW_ANSWER_PRIMARY_MODEL: str = "moonshotai/kimi-k2-instruct"
+    INTERVIEW_ANSWER_FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
+    INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S: float = 2.0
     # Sized for full spoken-script answers, which are longer than the keyword
     # bullets this replaced and so have more room to stall inside the window.
     INTERVIEW_ANSWER_STREAM_IDLE_TIMEOUT_S: float = 4.0

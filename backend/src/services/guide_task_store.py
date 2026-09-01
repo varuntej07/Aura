@@ -10,6 +10,7 @@ from google.cloud import firestore as fs  # type: ignore
 
 from ..agent.voice.guide_models import GuideTask
 from ..lib.logger import logger
+from ..lib.time_serialization import to_aware
 from .firebase import admin_firestore
 
 GUIDE_TASKS_SUBCOLLECTION = "guide_tasks"
@@ -29,7 +30,23 @@ class GuideTaskLeaseError(RuntimeError):
 def _aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
-    return value if value.tzinfo else value.replace(tzinfo=UTC)
+    return to_aware(value)
+
+
+def _task_to_doc(task: GuideTask) -> dict:
+    """The store's document contract - the ONLY seam through which the
+    agent-layer ``GuideTask`` model reaches Firestore. The persisted shape is
+    the model's field set (goal, plan/step state, lease_owner,
+    lease_expires_at, revision, resume_count, timestamps, bounded
+    recent_instruction_ids / verified_evidence). A rename in
+    ``agent/voice/guide_models.py`` changes the stored schema; this function
+    exists so that change is a reviewed store-contract change, not a silent
+    side effect of ``model_dump()`` at six call sites."""
+    return task.model_dump(mode="python")
+
+
+def _task_from_doc(data: dict) -> GuideTask:
+    return GuideTask.model_validate(data)
 
 
 def _bounded(task: GuideTask) -> GuideTask:
@@ -57,7 +74,7 @@ class GuideTaskStore:
             snap = self._ref(db, user_id, task_id).get()
             if not snap.exists:
                 return None
-            return GuideTask.model_validate(snap.to_dict() or {})
+            return _task_from_doc(snap.to_dict() or {})
 
         task = await asyncio.to_thread(_read)
         logger.info(
@@ -83,8 +100,8 @@ class GuideTaskStore:
             def _apply(txn: fs.Transaction) -> GuideTask:
                 snap = ref.get(transaction=txn)
                 if snap.exists:
-                    return GuideTask.model_validate(snap.to_dict() or {})
-                txn.create(ref, task.model_dump(mode="python"))
+                    return _task_from_doc(snap.to_dict() or {})
+                txn.create(ref, _task_to_doc(task))
                 return task
 
             return _apply(transaction)
@@ -111,7 +128,7 @@ class GuideTaskStore:
                 snap = ref.get(transaction=txn)
                 if not snap.exists:
                     raise GuideTaskConflictError("Guide task does not exist")
-                task = GuideTask.model_validate(snap.to_dict() or {})
+                task = _task_from_doc(snap.to_dict() or {})
                 expires = _aware(task.lease_expires_at)
                 if (
                     task.lease_owner
@@ -127,7 +144,7 @@ class GuideTaskStore:
                 if resumed:
                     task.resume_count += 1
                 task.revision += 1
-                txn.set(ref, _bounded(task).model_dump(mode="python"))
+                txn.set(ref, _task_to_doc(_bounded(task)))
                 return task
 
             return _apply(transaction)
@@ -152,7 +169,7 @@ class GuideTaskStore:
                 snap = ref.get(transaction=txn)
                 if not snap.exists:
                     raise GuideTaskConflictError("Guide task does not exist")
-                task = GuideTask.model_validate(snap.to_dict() or {})
+                task = _task_from_doc(snap.to_dict() or {})
                 if task.lease_owner != lease_owner:
                     raise GuideTaskLeaseError("Guide task lease changed")
                 task.lease_expires_at = now + LEASE_TTL
@@ -191,7 +208,7 @@ class GuideTaskStore:
                 snap = ref.get(transaction=txn)
                 if not snap.exists:
                     raise GuideTaskConflictError("Guide task does not exist")
-                task = GuideTask.model_validate(snap.to_dict() or {})
+                task = _task_from_doc(snap.to_dict() or {})
                 if task.revision != expected_revision:
                     raise GuideTaskConflictError(
                         f"Guide task revision is {task.revision}, expected {expected_revision}"
@@ -203,7 +220,7 @@ class GuideTaskStore:
                 updated.revision = expected_revision + 1
                 updated.updated_at = now
                 updated.lease_expires_at = now + LEASE_TTL
-                txn.set(ref, updated.model_dump(mode="python"))
+                txn.set(ref, _task_to_doc(updated))
                 return updated
 
             return _apply(transaction)

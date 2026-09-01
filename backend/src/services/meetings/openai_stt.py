@@ -12,31 +12,46 @@ import io
 from typing import Any
 
 import soundfile  # type: ignore
-from openai import AsyncOpenAI
 
 from ...config.settings import settings
-from . import deepgram
+from ..openai_client import get_async_openai
+from . import deepgram, transcript
 
 _MODEL = "whisper-1"
+_PARSER_VERSION = "openai-verbose-json-v1"
+
+
+class OpenAITranscriptionError(transcript.TranscriptionError):
+    """A transcription failure attributed to THIS leg, so the persisted
+    failure evidence never claims Deepgram failed when OpenAI did."""
+
+    provider = "openai"
+    model = _MODEL
+    parser_version = _PARSER_VERSION
+
+
+def _error(message: str) -> OpenAITranscriptionError:
+    return OpenAITranscriptionError(message)
 
 
 async def transcribe_segment(flac_bytes: bytes) -> deepgram.SegmentTranscript:
     api_key = settings.OPENAI_API_KEY.strip()
     if not api_key:
-        raise deepgram.DeepgramError("OPENAI_API_KEY is not configured")
+        raise _error("OPENAI_API_KEY is not configured")
 
     try:
         with soundfile.SoundFile(io.BytesIO(flac_bytes)) as audio:
             sample_rate = int(audio.samplerate)
             samples = audio.read(dtype="int16", always_2d=True)
         if samples.shape[1] != 2:
-            raise deepgram.DeepgramError("OpenAI fallback requires two-channel audio")
+            raise _error("OpenAI fallback requires two-channel audio")
 
-        client = AsyncOpenAI(api_key=api_key, timeout=120.0)
+        client = get_async_openai()
         result = deepgram.SegmentTranscript(
             provider="openai",
             model=_MODEL,
             parameters={"response_format": "verbose_json"},
+            parser_version=_PARSER_VERSION,
         )
         responses: list[dict[str, Any]] = []
         for channel in (deepgram.MIC_CHANNEL, deepgram.LOOPBACK_CHANNEL):
@@ -83,7 +98,7 @@ async def transcribe_segment(flac_bytes: bytes) -> deepgram.SegmentTranscript:
                 result.language = str(language)
         result.raw_response = {"channels": responses}
         return result
-    except deepgram.DeepgramError:
+    except transcript.TranscriptionError:
         raise
     except Exception as exc:
-        raise deepgram.DeepgramError("OpenAI meeting transcription fallback failed") from exc
+        raise _error("OpenAI meeting transcription fallback failed") from exc

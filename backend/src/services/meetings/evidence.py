@@ -8,13 +8,12 @@ all use the same parsers and policy constants.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import math
 import re
-from dataclasses import dataclass
 from typing import Any
 
+from .. import audio_validation
 from . import fields as F
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -51,18 +50,9 @@ class EvidenceValidationError(ValueError):
         self.code = code
 
 
-@dataclass(frozen=True)
-class FlacStreamInfo:
-    sample_rate_hz: int
-    channel_count: int
-    bits_per_sample: int
-    total_samples: int
-
-    @property
-    def duration_ms(self) -> int:
-        if self.sample_rate_hz <= 0:
-            return 0
-        return round(self.total_samples * 1000 / self.sample_rate_hz)
+# The value type moved to services/audio_validation.py (shared with the
+# dictation FLAC check); re-exported so existing imports keep working.
+from ..audio_validation import FlacStreamInfo  # noqa: E402  (re-export)
 
 
 def require_identity(value: str, label: str) -> str:
@@ -188,55 +178,32 @@ def parse_completion_segment(raw: Any) -> dict[str, Any]:
 
 
 def parse_flac_streaminfo(data: bytes) -> FlacStreamInfo:
-    """Read the mandatory FLAC STREAMINFO block without decoding audio."""
-    if len(data) < 42 or data[:4] != b"fLaC":
-        raise EvidenceValidationError("invalid_flac", "Missing FLAC marker.")
-    block_type = data[4] & 0x7F
-    block_length = int.from_bytes(data[5:8], "big")
-    if block_type != 0 or block_length != 34 or len(data) < 8 + block_length:
-        raise EvidenceValidationError("invalid_flac", "Missing FLAC STREAMINFO.")
-    packed = int.from_bytes(data[18:26], "big")
-    sample_rate = (packed >> 44) & 0xFFFFF
-    channels = ((packed >> 41) & 0x7) + 1
-    bits_per_sample = ((packed >> 36) & 0x1F) + 1
-    total_samples = packed & ((1 << 36) - 1)
-    if sample_rate <= 0 or total_samples <= 0:
-        raise EvidenceValidationError("invalid_flac", "Invalid FLAC duration.")
-    return FlacStreamInfo(sample_rate, channels, bits_per_sample, total_samples)
+    """Read the mandatory FLAC STREAMINFO block without decoding audio.
+
+    Mechanics live in services/audio_validation.py (shared with dictation);
+    this wrapper converts the error type so existing callers are unchanged."""
+    try:
+        return audio_validation.parse_flac_streaminfo(data)
+    except audio_validation.AudioValidationError as exc:
+        raise EvidenceValidationError(exc.code, str(exc)) from exc
 
 
 def decode_flac_info(data: bytes) -> FlacStreamInfo:
     """Decode every FLAC frame so truncated/corrupt payloads cannot reach STT."""
-    import soundfile  # type: ignore
-
     try:
-        header = parse_flac_streaminfo(data)
-        max_frames = round(
-            header.sample_rate_hz
-            * (F.MAX_SEGMENT_DURATION_MS + duration_tolerance_ms(F.MAX_SEGMENT_DURATION_MS))
-            / 1_000
+        return audio_validation.decode_flac_info(
+            data,
+            max_duration_ms=(
+                F.MAX_SEGMENT_DURATION_MS
+                + duration_tolerance_ms(F.MAX_SEGMENT_DURATION_MS)
+            ),
         )
-        if header.total_samples > max_frames:
-            raise EvidenceValidationError("invalid_flac", "FLAC duration is out of range.")
-        with soundfile.SoundFile(io.BytesIO(data)) as audio:
-            sample_rate = int(audio.samplerate)
-            channels = int(audio.channels)
-            expected_frames = int(audio.frames)
-            decoded = audio.read(dtype="int16", always_2d=True)
-            total_frames = len(decoded)
-            if total_frames != expected_frames:
-                raise EvidenceValidationError("invalid_flac", "FLAC frame count is truncated.")
-            return FlacStreamInfo(
-                sample_rate_hz=sample_rate,
-                channel_count=channels,
-                bits_per_sample=16,
-                total_samples=total_frames,
-            )
-    except EvidenceValidationError:
-        raise
-    except Exception as exc:
-        raise EvidenceValidationError("invalid_flac", "FLAC decode failed.") from exc
+    except audio_validation.AudioValidationError as exc:
+        raise EvidenceValidationError(exc.code, str(exc)) from exc
 
 
 def duration_tolerance_ms(expected_ms: int) -> int:
-    return max(F.DURATION_TOLERANCE_FLOOR_MS, round(expected_ms * 0.01))
+    return audio_validation.duration_tolerance_ms(
+        expected_ms,
+        floor_ms=F.DURATION_TOLERANCE_FLOOR_MS,
+    )

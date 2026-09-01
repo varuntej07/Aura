@@ -9,13 +9,14 @@ separately. See services/guide_usage_store.py for the merge semantics.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from ..services import guide_usage_fields as GF
 from ..services.guide_usage_store import record_guide_usage
-from ..services.request_auth import resolve_user_id_from_request
+from .request_guards import require_user
 
 _GUIDE_SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 _VALID_OUTCOMES = frozenset({"completed", "abandoned", "signed_out", "session_ended"})
@@ -38,14 +39,15 @@ def _ended_at_ms(ended_at: str) -> int:
         return int(parsed.timestamp() * 1000)
     except Exception:
         # Snapshot guard degrades to "treat as now" rather than rejecting the
-        # whole write over an unparseable timestamp.
-        return int(datetime.now().timestamp() * 1000)
+        # whole write over an unparseable timestamp. Aware UTC, because the
+        # value is compared against guide_last_ended_ms, which comes from an
+        # aware ISO parse - a naive now() would compare two different clocks
+        # on any non-UTC host.
+        return int(datetime.now(UTC).timestamp() * 1000)
 
 
 async def handle_guide_usage(request: Request) -> JSONResponse:
-    uid = resolve_user_id_from_request(request)
-    if not uid:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    uid = require_user(request)
     try:
         body = await request.json()
     except Exception:
@@ -77,23 +79,24 @@ async def handle_guide_usage(request: Request) -> JSONResponse:
     ended_at = ended_at[:64] if isinstance(ended_at, str) else None
 
     snapshot_fields = {
-        "guide_last_started_at": started_at,
-        "guide_last_ended_at": ended_at,
-        "guide_last_duration_ms": duration_ms,
-        "guide_last_outcome": outcome,
-        "guide_last_frames_sent": frames_sent,
-        "guide_last_steps_received": steps_received,
-        "guide_last_agent_timeouts": agent_timeouts,
+        GF.LAST_STARTED_AT: started_at,
+        GF.LAST_ENDED_AT: ended_at,
+        GF.LAST_DURATION_MS: duration_ms,
+        GF.LAST_OUTCOME: outcome,
+        GF.LAST_FRAMES_SENT: frames_sent,
+        GF.LAST_STEPS_RECEIVED: steps_received,
+        GF.LAST_AGENT_TIMEOUTS: agent_timeouts,
     }
     increments = {
-        "guide_sessions_count": 1,
-        "guide_total_ms": duration_ms,
-        "guide_completed_count": 1 if outcome == "completed" else 0,
-        "guide_frames_sent_total": frames_sent,
+        GF.SESSIONS_COUNT: 1,
+        GF.TOTAL_MS: duration_ms,
+        GF.COMPLETED_COUNT: 1 if outcome == "completed" else 0,
+        GF.FRAMES_SENT_TOTAL: frames_sent,
     }
 
     await record_guide_usage(
         uid,
+        writer=GF.WRITER_DESKTOP,
         guide_session_id=guide_session_id,
         ended_at_ms=_ended_at_ms(ended_at or ""),
         snapshot_fields=snapshot_fields,
