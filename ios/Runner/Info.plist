@@ -30,6 +30,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
@@ -63,8 +65,23 @@
 	<string>https://us.i.posthog.com</string>
 	<key>com.posthog.posthog.CAPTURE_APPLICATION_LIFECYCLE_EVENTS</key>
 	<true/>
+	<!-- Firebase Analytics: turn off automatic native screen tracking. Flutter runs
+	     inside one FlutterViewController, so the automatic screen_view only ever
+	     reports that container. Real screen names are logged from the route observer
+	     instead (see AppRouteObserver), so this keeps the dashboard free of noise. -->
+	<key>FirebaseAutomaticScreenReportingEnabled</key>
+	<false/>
 	<key>GIDClientID</key>
-	<string>620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0.apps.googleusercontent.com</string>
+	<string>620715294422-8eardf337q20amjabr9ht8c762g2too5.apps.googleusercontent.com</string>
+	<!-- DeepLinkService (lib/data/services/deep_link_service.dart) is the SINGLE
+	     owner of incoming links on both platforms, via app_links. Flutter 3.27+
+	     turns iOS deep linking ON by default, which made the engine ALSO push every
+	     incoming URL into the Router API: aura://checkout has an empty path, so
+	     GoRouter read it as location "/", found no route, and showed its raw
+	     "Page Not Found / GoException" screen to a buyer who had just paid.
+	     app_links keeps receiving openURL regardless of this key. -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -72,11 +89,21 @@
 			<string>Editor</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0</string>
+				<string>com.googleusercontent.apps.620715294422-8eardf337q20amjabr9ht8c762g2too5</string>
+			</array>
+		</dict>
+		<!-- The aura custom scheme: aura://checkout (web checkout return) and
+		     aura://voice both deliver through app_links on iOS from here on. -->
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.aura.deeplink</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>aura</string>
 			</array>
 		</dict>
 	</array>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 </dict>
 </plist>

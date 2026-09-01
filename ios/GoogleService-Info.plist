@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0.apps.googleusercontent.com</string>
+	<string>620715294422-8eardf337q20amjabr9ht8c762g2too5.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.620715294422-lfnj0qk2rditl5neviusofbmv0c7o7r0</string>
+	<string>com.googleusercontent.apps.620715294422-8eardf337q20amjabr9ht8c762g2too5</string>
 	<key>ANDROID_CLIENT_ID</key>
-	<string>620715294422-hbaqdmqiji1b2trn80rh22dvsjfniuf5.apps.googleusercontent.com</string>
+	<string>620715294422-2ba1t250db8b8io4gmvml3593eouiuhj.apps.googleusercontent.com</string>
 	<key>API_KEY</key>
 	<string>AIzaSyBufZ9tH_xygLbDSGzmWbC9rlZAZNOH9vE</string>
 	<key>GCM_SENDER_ID</key>
@@ -15,7 +15,7 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>dev.varuntej.aura</string>
+	<string>com.varundevs.aura</string>
 	<key>PROJECT_ID</key>
 	<string>juno-2ea45</string>
 	<key>STORAGE_BUCKET</key>
@@ -31,6 +31,6 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:620715294422:ios:958693caa47842606e1377</string>
+	<string>1:620715294422:ios:0be8c53452ad36376e1377</string>
 </dict>
 </plist>
