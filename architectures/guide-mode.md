@@ -172,8 +172,8 @@ never clobbers a newer session.
 - `backend/src/agent/voice/guide_provider_adapter.py`
 - `backend/src/agent/voice/guide_prompt.py`
 - `backend/src/agent/voice/guide_default_profile.py`
-- `backend/src/agent/voice/guide_template.py` + `guide_capcut_example.py`
-  (one bounded CapCut podcast-short template used to seed planning)
+- `backend/src/agent/voice/guide_kernel.py` (the `GuideTaskProfile` contract
+  `guide_default_profile.py` implements)
 
 ## LiveKit references
 

@@ -103,6 +103,14 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
   For chat, do not implement an architecture or data-flow change without a
   reasonable, defensible justification for the change and its latency tradeoff,
   followed by Varun's explicit approval.
+- **Voice work is docs-first. Never answer a provider question from memory.**
+  Before changing anything in the voice pipeline, read the CURRENT official docs from web
+  for every tool involved (LiveKit Agents, Deepgram, Cartesia, the noise
+  cancellation plugins), then confirm the behaviour against the INSTALLED version.
+  Those are two different checks: the docs describe latest, `constraints.txt` pins
+  what actually runs. `python -c` the real class for its signature and defaults,
+  and read the plugin source when a default is not documented.
+
 - **TEST FREEZE. YOU MUST NOT write any new test file, test function, test case, or
   fixture.** In force until Varun bumps the version or asks for tests in the current
   message. Nothing else lifts it: not a rule that "needs" a test, not a bug you just

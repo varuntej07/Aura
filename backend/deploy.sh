@@ -133,20 +133,25 @@ echo "▶ Audiences the backend will accept:   ${ACCEPTED_AUDIENCES}"
 # exit aborts the deploy. Runtime upload failures stay retryable in the handler,
 # so this gate does not change the at-runtime retry contract.
 echo "▶ Preflighting meeting-audio bucket (existence, region, lifecycle, access)..."
-python "${SCRIPT_DIR}/scripts/check_meeting_storage.py" --check \
+# Both storage preflights run from backend/, the directory their docstrings assume,
+# so any path relative to the backend root (notably the .env
+# GOOGLE_APPLICATION_CREDENTIALS value) resolves the same way it does for every
+# other backend command. The subshell keeps the cd out of the rest of the script
+# and still aborts the deploy on a non-zero exit under `set -euo pipefail`.
+(cd "${SCRIPT_DIR}" && python scripts/check_meeting_storage.py --check \
   --project "${PROJECT_ID}" \
   --bucket "juno-2ea45-meeting-audio" \
   --region "${REGION}" \
   --required-member "serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
-  --required-role "roles/storage.objectAdmin"
+  --required-role "roles/storage.objectAdmin")
 
 echo "▶ Preflighting dictation-audio bucket (region, prefix lifecycle, IAM)..."
-python "${SCRIPT_DIR}/scripts/check_dictation_storage.py" --check \
+(cd "${SCRIPT_DIR}" && python scripts/check_dictation_storage.py --check \
   --project "${PROJECT_ID}" \
   --bucket "${DICTATION_AUDIO_BUCKET}" \
   --region "${REGION}" \
   --required-member "serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
-  --required-role "roles/storage.objectAdmin"
+  --required-role "roles/storage.objectAdmin")
 
 # ── Firestore collection-group index preflight ───────────────────────────────
 # Meeting reconciliation (services/meetings/operations.py, run hourly by

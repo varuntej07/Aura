@@ -1,7 +1,69 @@
 # Changelog
 
 All notable production release changes are recorded here. The current release
-version is `2.3.0+13`.
+version is `2.4.0+16`.
+
+Every version bump in `pubspec.yaml` gets an entry here in the same commit,
+including the exact text uploaded to the Play Console release notes field.
+
+## 2.4.0+16 - 2026-08-28
+
+The Buddy Keyboard release.
+
+### Play Store release notes
+
+```text
+What's new
+
+• Buddy Keyboard: a new keyboard for your phone. Buddy helps you write,
+  rewrite, shorten, and reply to anyone without leaving the app you're in.
+• Reminders arrive with clearer wording and better timing.
+• Fixes and stability improvements.
+```
+
+### Added (mobile)
+
+- **Buddy Keyboard**, an Android input method. Buddy drafts, rewrites, and
+  replies inline in any app, with a writing-tools action row above the keys.
+
+### Changed (mobile)
+
+- Reminder copy is generated as structured text for clearer, better-timed
+  notifications, with reminder tiers resolved at set time.
+- Reminder retries and lifetime are now bounded, so a stuck reminder cannot
+  repeat forever.
+- Deep-link handling and billing customer identity when returning from web
+  checkout.
+- Keyboard action row spacing and initialism rendering in spoken text.
+
+### Backend only, no mobile surface
+
+These shipped in the same commit range but serve Aura-Desktop, not the phone.
+They must never appear in Play Store notes.
+
+- Interview Companion REST routes: brief, streamed answers, STT token,
+  reflection (desktop-only, `ECOSYSTEM.md` 5a-2).
+- Interview Mode job-description transfer over the voice worker
+  (desktop-only, `ECOSYSTEM.md` 5a).
+- Guide Supervisor for Guide Mode, which is armed natively on desktop
+  (`ECOSYSTEM.md` 7b).
+- Meetings service cleanup (desktop-only capture, `ECOSYSTEM.md` 5b).
+
+### Play policy
+
+- Removed `USE_FULL_SCREEN_INTENT` and its companion permissions. Build 15 was
+  rejected over this. Alarms still ring on schedule; they no longer take over
+  the lock screen.
+
+## 2.4.0+15 - 2026-08-14 (rejected by Play, not shipped)
+
+Rejected for `USE_FULL_SCREEN_INTENT`. Its contents reached users in build 16.
+
+### Added
+
+- Alarms. Buddy can set a device-local alarm that rings on schedule, with
+  snooze and day-of-week repeats.
+- A voice picker for choosing how Buddy sounds.
 
 ## 2.3.0+13 - 2026-07-27
 

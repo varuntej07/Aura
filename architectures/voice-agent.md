@@ -274,10 +274,10 @@ treated the same way `screen_context_stream.render_for_model` treats its own.
 - `backend/src/agent/voice/context.py`
 - `backend/src/agent/voice/pipelines.py`
 - `backend/src/agent/voice/action_policy.py`
-- `backend/src/agent/voice/screen_capture_command.py`
+- `backend/src/agent/voice/capabilities.py`
+- `backend/src/agent/voice/tool_discovery.py`
 - `backend/src/agent/voice/screen_frames.py`
 - `backend/src/agent/voice/screen_saves.py`
-- `backend/src/agent/voice/tool_skills.py`
 - `backend/src/agent/voice/recorder.py`
 - `backend/src/agent/voice/interview/`
 
