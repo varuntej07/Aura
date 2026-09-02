@@ -111,7 +111,7 @@ def test_shared_voice_generation_profile() -> None:
     assert (
         pipelines.VOICE_GENERATION_TEMPERATURE,
         pipelines.VOICE_MAX_OUTPUT_TOKENS,
-    ) == (0.2, 16_384)
+    ) == (0.7, 16_384)
 
 
 def test_agent_session_uses_streaming_endpointing_and_preemptive_tts(monkeypatch) -> None:

@@ -193,6 +193,8 @@ class VoiceSessionRecorder:
         self._session.on("conversation_item_added", self._on_conversation_item)
         self._session.on("function_tools_executed", self._on_tools_executed)
         self._session.on("session_usage_updated", self._on_usage)
+        self._session.on("agent_false_interruption", self._on_false_interruption)
+        self._session.on("overlapping_speech", self._on_overlapping_speech)
         self._session.on("error", self._on_session_error)
         self._session.on("close", self._on_close)
         self._reset_followup_idle_timer()
@@ -651,6 +653,33 @@ class VoiceSessionRecorder:
             if model:
                 # Overwrite, never add: these are running totals for the session.
                 self._model_usage_totals[model] = usage_totals
+
+    def _on_false_interruption(self, ev) -> None:  # type: ignore[misc]
+        # Observability only, no behavior change. Counts how often a detected
+        # interruption produced no transcript and Buddy resumed talking — the
+        # exact mechanism behind "it keeps talking over me" reports. Tune
+        # interruption knobs (min_duration, resume_false_interruption) from
+        # these counts, never from intuition. Only `resumed`/`created_at` are
+        # read: the event's `message`/`extra_instructions` fields are
+        # deprecated in livekit-agents 1.6.4 and warn on access.
+        logger.info("voice_false_interruption_resumed", {
+            "session_id": self._session_id, "user_id": self._user_id,
+            "resumed": bool(getattr(ev, "resumed", False)),
+            "created_at": getattr(ev, "created_at", None),
+        })
+
+    def _on_overlapping_speech(self, ev) -> None:  # type: ignore[misc]
+        # The adaptive interruption model's per-detection verdict: whether user
+        # speech over Buddy's playback counted as a real interruption. Paired
+        # with voice_false_interruption_resumed this separates "never detected"
+        # from "detected, then wrongly resumed".
+        logger.info("voice_overlapping_speech", {
+            "session_id": self._session_id, "user_id": self._user_id,
+            "is_interruption": bool(getattr(ev, "is_interruption", False)),
+            "total_duration": getattr(ev, "total_duration", None),
+            "prediction_duration": getattr(ev, "prediction_duration", None),
+            "detected_at": getattr(ev, "detected_at", None),
+        })
 
     def _on_session_error(self, ev) -> None:  # type: ignore[misc]
         error = getattr(ev, "error", None) or ev

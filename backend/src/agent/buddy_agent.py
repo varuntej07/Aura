@@ -92,6 +92,7 @@ from ..shared.tools import (
     validate_and_coerce_tool_input,
 )
 from .voice.action_policy import (
+    WRITE_INTENT_MIN_STT_CONFIDENCE,
     TurnCapabilityPolicy,
     completed_tool_results,
     derive_turn_policy,
@@ -806,6 +807,28 @@ class BuddyAgent(agents.Agent):
         current_turn_index = self._action_telemetry.turn_index
         stt_confidence = self._consume_stt_confidence()
         self._finalized_stt_confidence = stt_confidence
+        # Same structural gate as the write suppression in derive_turn_policy,
+        # surfaced to the model. Without it the model riffs on garbled STT as if
+        # it were real speech and invents explanations for the gibberish.
+        # Injected ONLY on low-confidence turns: mutating turn_ctx invalidates
+        # LiveKit's speculative reply, and these are exactly the turns that
+        # should not be answered from a speculation anyway.
+        if (
+            stt_confidence is not None
+            and stt_confidence < WRITE_INTENT_MIN_STT_CONFIDENCE
+        ):
+            turn_ctx.add_message(
+                role="system",
+                content=[
+                    "<transcript_confidence>"
+                    "The transcription of this user turn is low-confidence and may be "
+                    "garbled. If the words do not clearly parse into something they "
+                    "would plausibly say right now, ask briefly and warmly for a "
+                    "repeat instead of interpreting or building on them. Action tools "
+                    "are withheld for this turn for the same reason."
+                    "</transcript_confidence>"
+                ],
+            )
         if self._turn_metrics is not None:
             self._turn_metrics.start_turn(
                 turn_index=current_turn_index,

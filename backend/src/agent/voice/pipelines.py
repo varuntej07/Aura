@@ -23,7 +23,11 @@ from ...shared.tools import openai_function_definition
 from .fallback_tts_wrapper import SpeechMarkupStrippingTTS
 from .interview import VoiceSessionState
 
-VOICE_GENERATION_TEMPERATURE = 0.2
+# 0.7, not the old 0.2: at 0.2 gpt-4.1-class models flatten into help-desk
+# phrasing and near-verbatim repeats, which is the opposite of the persona
+# prompt. Warmth needs sampling room; tool-call correctness is carried by the
+# strict schemas, not a cold temperature.
+VOICE_GENERATION_TEMPERATURE = 0.7
 VOICE_MAX_OUTPUT_TOKENS = 16_384
 
 

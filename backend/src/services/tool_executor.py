@@ -1610,6 +1610,7 @@ class ToolExecutor:
         return await brave_search(query, uid=self._user_id, recency=recency)
 
     async def _start_research(self, inp: dict[str, Any]) -> ToolResult:
+        from .research import fields as research_fields
         from .research.engine import get_research_engine
 
         request = str(inp.get("request") or "").strip()
@@ -1626,21 +1627,60 @@ class ToolExecutor:
                     "research run."
                 ),
             }
-        client_run_id = self._client_message_id or str(uuid4())
-        handle = await get_research_engine().start(
-            self._user_id,
-            {"request": request, "preset": depth, "origin_surface": self._created_via},
-            client_run_id=client_run_id,
-        )
+        # The run identity must vary with the request content. On voice,
+        # _client_message_id is "voice:{session_id}" — constant for the whole
+        # call — so using it alone mapped EVERY research request in one voice
+        # session to the same run doc, and a second, different topic silently
+        # replayed the first run (observed replaying a FAILED run as "started").
+        # Salting with the request hash gives distinct topics distinct runs
+        # while a retried identical request still replays, mirroring the outer
+        # receipt key in chat_completion/tool_idempotency.py (cmid + args hash).
+        if self._client_message_id:
+            request_digest = hashlib.sha256(request.casefold().encode("utf-8")).hexdigest()[:16]
+            client_run_id = f"{self._client_message_id}:{request_digest}"
+        else:
+            client_run_id = str(uuid4())
+        engine = get_research_engine()
+        spec = {"request": request, "preset": depth, "origin_surface": self._created_via}
+        handle = await engine.start(self._user_id, spec, client_run_id=client_run_id)
+
+        if handle.replayed and handle.state in (
+            research_fields.STATE_FAILED,
+            research_fields.STATE_CANCELLED,
+        ):
+            # A dead run must never masquerade as a live one. The deterministic
+            # run id points at a terminal failure, so start a genuinely fresh
+            # run under a nonce-salted identity. Accidental duplicate calls with
+            # identical args in the same turn are already absorbed by the outer
+            # tool receipt before reaching this method.
+            handle = await engine.start(
+                self._user_id, spec, client_run_id=f"{client_run_id}:retry:{uuid4()}"
+            )
+
+        if handle.replayed and handle.state in (
+            research_fields.STATE_READY,
+            research_fields.STATE_PARTIAL,
+        ):
+            user_message = (
+                "That research is already done — the sourced brief is ready in your "
+                "research results."
+            )
+        elif handle.replayed:
+            user_message = (
+                "I'm already researching that one. You can close Aura or keep working, "
+                "and I'll notify you when the sourced brief is ready."
+            )
+        else:
+            user_message = (
+                "I started the research. You can close Aura or keep working, and I'll "
+                "notify you when the sourced brief is ready."
+            )
         return {
             "run_id": handle.run_id,
             "state": handle.state,
             "replayed": handle.replayed,
             "requires_scope_confirmation": False,
-            "user_message": (
-                "I started the research. You can close Aura or keep working, and I'll "
-                "notify you when the sourced brief is ready."
-            ),
+            "user_message": user_message,
         }
 
     # Clarification (chat-only — returns sentinel dict, not a Firestore call)

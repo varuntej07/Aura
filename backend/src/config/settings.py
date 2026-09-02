@@ -132,7 +132,7 @@ class Settings(BaseSettings):
 
     # OpenAI (primary voice LLM; Anthropic Haiku is the fallback)
     OPENAI_API_KEY: str = ""
-    OPENAI_CHAT_MODEL: str = "gpt-4.1-mini"
+    OPENAI_CHAT_MODEL: str = "gpt-4.1"
     OPENAI_TEXT_CHAT_MODEL: str = "gpt-5.6-luna"
     INTERVIEW_COMPANY_RESEARCH_MODEL: str = "gpt-5.6-terra"
     # Groq-hosted primary for first-token speed (LPU TTFT is a fraction of the
