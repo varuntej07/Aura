@@ -117,7 +117,7 @@ _FIREBASE_UID_RE = re.compile(r"^[A-Za-z0-9]{28}$")
 # Anything else (or a missing value) collapses to "app", the neutral default.
 _KNOWN_SURFACES = frozenset({"app", "keyboard", "desktop"})
 _KNOWN_VOICE_MODES = frozenset({"standard", "guide", "onboarding"})
-_KNOWN_CLIENT_PLATFORMS = frozenset({"android", "ios", "windows"})
+_KNOWN_CLIENT_PLATFORMS = frozenset({"android", "ios", "windows", "macos"})
 _APP_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}$")
 _ARTIFACT_ACK_CAPABILITY = "displayed-v1"
 _CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")

@@ -342,7 +342,7 @@ Aura-Web has no authenticated product dashboard. History, saved items, drafts, m
 
 ### 7b. Aura-Desktop dashboard reads and first-run profile attribution
 
-Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebase ID token>`. Every response is scoped to the token uid. The desktop sends `X-Aura-Platform: windows` and `X-Aura-App-Version` for observability; neither header is required.
+Aura-Desktop calls these endpoints directly with `Authorization: Bearer <Firebase ID token>`. Every response is scoped to the token uid. The desktop sends `X-Aura-Platform: windows` or `X-Aura-Platform: macos` (`platformTag()` in `src/lib/platformKeys.ts`) and `X-Aura-App-Version`; neither header is required. The backend recognizes `android`, `ios`, `windows`, and `macos` (voice token stamping, chat product lookups, and per-platform latency metrics); unknown values degrade to an empty platform rather than erroring.
 
 | Endpoint | Request | Response contract |
 |---|---|---|

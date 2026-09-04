@@ -34,7 +34,7 @@ ProductInfoKind = Literal[
 ProductSurface = Literal["app", "keyboard", "desktop", "all"]
 CurrentProductSurface = Literal["app", "keyboard", "desktop"]
 ProductTargetSurface = Literal["current", "app", "keyboard", "desktop", "all"]
-ProductTargetPlatform = Literal["current", "android", "ios", "windows", "all"]
+ProductTargetPlatform = Literal["current", "android", "ios", "windows", "macos", "all"]
 ResponseChannel = Literal["voice", "chat"]
 
 _CONTENT_PATH = Path(__file__).parent / "content" / "product_knowledge_v1.json"
@@ -106,7 +106,7 @@ class ProductEvidence(_StrictModel):
 
 class ProductClientRelease(_StrictModel):
     surface: Literal["app", "keyboard", "desktop"]
-    platform: Literal["android", "ios", "windows"]
+    platform: Literal["android", "ios", "windows", "macos"]
     availability: Literal["available", "unavailable"]
     distribution: str = Field(min_length=1, max_length=160)
 
@@ -134,7 +134,7 @@ class ProductEntry(_StrictModel):
     summary: str = Field(min_length=1, max_length=500)
     answers: ProductAnswers
     surfaces: tuple[ProductSurface, ...] = Field(min_length=1)
-    platforms: tuple[Literal["android", "ios", "windows", "all"], ...] = Field(min_length=1)
+    platforms: tuple[Literal["android", "ios", "windows", "macos", "all"], ...] = Field(min_length=1)
     availability: ProductAvailability
     navigation: tuple[str, ...]
     action_tools: tuple[str, ...]
@@ -434,10 +434,13 @@ def lookup_product_knowledge(
                     knowledge_version=PRODUCT_KNOWLEDGE.knowledge_version,
                     confidence=1.0,
                 )
+        # This string can reach the user's ears verbatim, so it must be speakable
+        # product voice, never internal vocabulary ("guide", "catalog"): a live
+        # 2026-09 session read "the product guide doesn't cover that" aloud.
         fallback = (
-            "I don't have a verified answer for that in Aura's product guide yet."
+            "I'm not sure about that part of Aura yet."
             if channel == "voice"
-            else "I don’t have a verified answer for that in Aura’s product guide yet."
+            else "I’m not sure about that part of Aura yet."
         )
         return ProductKnowledgeResult(
             answer=fallback,

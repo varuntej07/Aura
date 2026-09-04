@@ -26,12 +26,17 @@ _ENCODING = tiktoken.get_encoding("o200k_base")
 # A bloat ceiling, not a hard API limit: the whole prompt is spoken-turn latency and it
 # is paid on every session. Raised once, by the measured cost of _AURA_PRODUCT_TRUTH,
 # after Buddy invented a cross-device limitation it does not have because no prompt on
-# any surface stated a single fact about Aura. Anything added here has to earn its
-# tokens the same way; do not raise these to make a comfortable prompt fit.
+# any surface stated a single fact about Aura. Raised a second time (2026-09), by the
+# measured cost of the Session facts blocks and the catalog-derived capability digest,
+# after a live desktop session had Buddy tell a speaking user "I can't actually hear
+# you, but I can read everything you type" — LiveKit's prompting guide names the gap:
+# the LLM in an STT-LLM-TTS pipeline "has no built-in understanding of its own position
+# in a voice pipeline." Anything added here has to earn its tokens the same way; do not
+# raise these to make a comfortable prompt fit.
 _BEFORE_TOTAL_TOKENS = {
-    "app": 1720,
-    "keyboard": 1760,
-    "desktop": 2000,
+    "app": 2000,
+    "keyboard": 2050,
+    "desktop": 2170,
 }
 
 _CONTEXT_ONE = {

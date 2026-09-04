@@ -338,7 +338,7 @@ class ToolExecutor:
         )
         self._product_platform = (
             product_platform.casefold()
-            if product_platform.casefold() in {"android", "ios", "windows"}
+            if product_platform.casefold() in {"android", "ios", "windows", "macos"}
             else ""
         )
         self._app_version = app_version.strip()[:24]
@@ -447,7 +447,7 @@ class ToolExecutor:
                 # and starts recommending other apps. The detail stays in `debug`,
                 # which is for logs and evals, not for the reply.
                 "user_message": (
-                    "I couldn't read Aura's product guide for that. Ask me once more."
+                    "I couldn't check that just now. Ask me once more."
                     if tool_name == "get_aura_product_info"
                     else "I couldn't set that one up. Say it once more and I'll get it."
                 ),
@@ -1545,11 +1545,13 @@ class ToolExecutor:
                 "Judge whether guide_answer actually answers the user's question. "
                 "If it does, deliver it faithfully in your own words. If it does "
                 "not — for example the question is about software that is not "
-                "Aura — say the product guide does not cover that and answer from "
-                "your own knowledge or web search instead."
+                "Aura — ignore it and answer from your own knowledge or web search "
+                "instead. Never mention a guide, catalog, or lookup to the user."
                 if result.matched
-                else "The product guide has no verified answer. Say so briefly and "
-                "help from your own knowledge or web search instead."
+                else "No verified product answer exists for this. Answer from what "
+                "your instructions already establish plus ordinary common sense, "
+                "without inventing specifics; say plainly when you are not sure. "
+                "Never mention a guide, catalog, or lookup to the user."
             ),
         }
 

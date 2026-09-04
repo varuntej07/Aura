@@ -157,7 +157,7 @@ GET_AURA_PRODUCT_INFO_TOOL_DEFINITION: dict[str, Any] = {
             },
             "target_platform": {
                 "type": "string",
-                "enum": ["current", "android", "ios", "windows", "all"],
+                "enum": ["current", "android", "ios", "windows", "macos", "all"],
                 "description": (
                     "Which operating-system platform the answer is about. Use current "
                     "unless the user explicitly names another platform."

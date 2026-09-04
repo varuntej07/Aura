@@ -83,6 +83,7 @@ from ..services.product_knowledge import (
     ProductTargetPlatform,
     ProductTargetSurface,
     lookup_product_knowledge,
+    voice_capability_digest,
 )
 from ..shared.capability_claims import log_false_capability_claims
 from ..shared.tools import (
@@ -333,9 +334,23 @@ class BuddyAgent(agents.Agent):
         # because a description cannot see its siblings: cross-tool routing and the
         # turn-authority boundary, selected once for this surface.
         # Segments are ordered least-volatile first so the static persona is a stable
-        # cache prefix; per-session values render last. Do not reorder.
-        instructions = voice_system_prompt(voice_surface.value, voice_mode) + render_voice_session_context(
-            context_vars
+        # cache prefix; per-session values render last. Do not reorder. The catalog
+        # digest is part of the stable prefix: it is precomputed at import and only
+        # changes when the catalog (and therefore the deploy) does.
+        normalized_platform = (
+            client_platform.casefold()
+            if client_platform.casefold() in {"android", "ios", "windows", "macos"}
+            else ""
+        )
+        session_context = {
+            **context_vars,
+            "client_platform": normalized_platform,
+            "app_version": app_version.strip()[:24],
+        }
+        instructions = (
+            voice_system_prompt(voice_surface.value, voice_mode)
+            + voice_capability_digest(voice_surface.value)
+            + render_voice_session_context(session_context)
         )
         super().__init__(
             instructions=instructions,
@@ -349,12 +364,10 @@ class BuddyAgent(agents.Agent):
         self._screen_context = screen_context
         self._session_id = session_id
         self._launch_surface = voice_surface
-        self._client_platform = (
-            client_platform.casefold()
-            if client_platform.casefold() in {"android", "ios", "windows"}
-            else ""
-        )
-        self._app_version = app_version.strip()[:24]
+        # Normalized once above, where the same values were rendered into the
+        # session context block of the instructions.
+        self._client_platform = normalized_platform
+        self._app_version = session_context["app_version"]
         # Product-guide entries already delivered this session. A lookup that
         # resolves to only already-delivered entries means the guide did not
         # satisfy the user; the tool result says so instead of repeating it.
@@ -1701,11 +1714,11 @@ class BuddyAgent(agents.Agent):
                 },
                 ok=False,
                 then=(
-                    "You already gave the user this exact guide entry earlier in "
-                    "this session and it did not satisfy them. Do not repeat it. "
+                    "You already gave the user this exact verified answer earlier "
+                    "in this session and it did not satisfy them. Do not repeat it. "
                     "Answer from your own knowledge or use web search, and if the "
-                    "question is about software that is not Aura, say plainly that "
-                    "it is outside Aura's product guide and help directly."
+                    "question is about software that is not Aura, help with it "
+                    "directly. Never mention a guide, catalog, or lookup to the user."
                 ),
             )
         return action_truth_envelope(
@@ -1722,11 +1735,14 @@ class BuddyAgent(agents.Agent):
                 "the question. First judge whether it actually answers what the user "
                 "asked; if it does, deliver it faithfully in your own voice. If it "
                 "does not — for example the user asked about software that is not "
-                "Aura — ignore it, say the product guide does not cover that, and "
-                "answer from your own knowledge or web search instead."
+                "Aura — ignore it and answer from your own knowledge or web search "
+                "instead. Never mention a guide, catalog, or lookup to the user."
                 if result.matched
-                else "The product guide has no verified answer for this. Say so "
-                "briefly and help from your own knowledge or web search instead."
+                else "No verified product answer exists for this. Answer from the "
+                "session facts and capability summary already in your instructions "
+                "plus ordinary common sense, without inventing specifics; if you "
+                "genuinely do not know, say so plainly. Never mention a guide, "
+                "catalog, prompt, or lookup to the user."
             ),
         )
 

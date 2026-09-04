@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
-  "knowledge_version": "2026.08.25.5",
+  "knowledge_version": "2026.09.03.1",
   "product_release": {
     "stage": "beta",
     "answers": {
-      "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS yet, and Aura Desktop is available on Windows not MacOS yet.",
-      "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows not MacOS yet"
+      "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS yet, and Aura Desktop runs on Windows and, in a fresh beta, on Mac.",
+      "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows, and a **macOS** beta is rolling out."
     },
     "clients": [
       {"surface": "app", "platform": "android", "availability": "available", "distribution": "Google Play beta or Android App Bundle"},
       {"surface": "keyboard", "platform": "android", "availability": "available", "distribution": "Included with the Android app"},
       {"surface": "desktop", "platform": "windows", "availability": "available", "distribution": "Aura Desktop for Windows"},
+      {"surface": "desktop", "platform": "macos", "availability": "available", "distribution": "Aura Desktop for macOS (beta)"},
       {"surface": "app", "platform": "ios", "availability": "unavailable", "distribution": "No iOS release"}
     ]
   },
@@ -20,10 +21,10 @@
       "kind": "capabilities",
       "status": "shipped",
       "title": "What Aura can do across devices",
-      "summary": "Aura is a beta companion available as an Android mobile app and Windows desktop app, with account-scoped state and surface-specific tools.",
+      "summary": "Aura is a beta companion available as an Android mobile app and a desktop app on Windows and macOS (beta), with account-scoped state and surface-specific tools.",
       "answers": {
         "voice": "I can talk or chat with you, remember what matters, handle reminders, work with your calendar and Gmail, look things up, and help you write. There's more on Android and on Windows. Want me to go deeper on any of it?",
-        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS, and Aura Desktop is available on **Windows**. Across supported devices, Buddy provides chat and voice, account-scoped memory and Your Aura context, reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive follow-ups, a daily briefing, feedback, and writing help. Android adds Buddy Keyboard, a one-tap voice widget, notifications, loud alarm reminders, and the Get Better idea feed. Windows adds text and voice shortcuts, dictation, screen understanding when you ask, Screen Saves, Guide Mode, Buddy Drafts and visible artifacts, meeting notes, Interview Companion, mock interviews, background research, insights, notifications, and dashboard pages for conversations, drafts, saved items, meetings, research, and connectors. Durable account data is shared, while each surface keeps its own visible conversation scrollback."
+        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS, and Aura Desktop is available on **Windows** with a **macOS** beta rolling out. Across supported devices, Buddy provides chat and voice, account-scoped memory and Your Aura context, reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive follow-ups, a daily briefing, feedback, and writing help. Android adds Buddy Keyboard, a one-tap voice widget, notifications, loud alarm reminders, and the Get Better idea feed. Windows adds text and voice shortcuts, dictation, screen understanding when you ask, Screen Saves, Guide Mode, Buddy Drafts and visible artifacts, meeting notes, Interview Companion, mock interviews, background research, insights, notifications, and dashboard pages for conversations, drafts, saved items, meetings, research, and connectors. Durable account data is shared, while each surface keeps its own visible conversation scrollback."
       },
       "surfaces": ["all"],
       "platforms": ["all"],
@@ -64,14 +65,14 @@
       "id": "capabilities.desktop",
       "kind": "capabilities",
       "status": "shipped",
-      "title": "Aura Windows capabilities",
-      "summary": "The beta Windows client provides chat, voice, dictation, screen-aware help, dashboard workflows, meetings, interviews, research, and settings.",
+      "title": "Aura Desktop capabilities",
+      "summary": "The beta desktop client (Windows, plus a fresh macOS beta) provides chat, voice, dictation, screen-aware help, dashboard workflows, meetings, interviews, research, and settings.",
       "answers": {
-        "voice": "On Windows I can chat or talk, take dictation, and when you ask, understand what's on your screen, save things from it, draft for you, guide you through a task, or run a mock interview. Want me to dig into any of those?",
-        "chat": "Aura Desktop is currently in **beta on Windows**. It uses the same account-scoped reminders, memories, Your Aura profile, Google Calendar tools, Calendar and Gmail connections, trackers, and research as Android. Its companion overlay supports text and voice shortcuts, hold-to-talk dictation, screen understanding when you ask, Screen Saves, pointing, Guide Mode, Buddy Drafts, visible artifacts, and mock interviews. Its dashboard provides Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, notifications, General/Voice/System settings, account, billing, privacy, updates, and a link to the Android app."
+        "voice": "On your computer I can chat or talk, take dictation, and when you ask, understand what's on your screen, save things from it, draft for you, guide you through a task, or run a mock interview. Want me to dig into any of those?",
+        "chat": "Aura Desktop is currently in **beta on Windows**, with a fresh **macOS** beta rolling out; some desktop features reach the Mac build after Windows. It uses the same account-scoped reminders, memories, Your Aura profile, Google Calendar tools, Calendar and Gmail connections, trackers, and research as Android. Its companion overlay supports text and voice shortcuts, hold-to-talk dictation, screen understanding when you ask, Screen Saves, pointing, Guide Mode, Buddy Drafts, visible artifacts, and mock interviews. Its dashboard provides Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, notifications, General/Voice/System settings, account, billing, privacy, updates, and a link to the Android app."
       },
       "surfaces": ["desktop"],
-      "platforms": ["windows"],
+      "platforms": ["windows", "macos"],
       "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
       "navigation": [],
       "action_tools": ["save_screen_item", "present_visible_artifact", "set_guide_mode", "start_mock_interview", "start_research"],
@@ -131,10 +132,10 @@
       "kind": "product_background",
       "status": "shipped",
       "title": "What Aura and Buddy are",
-      "summary": "Aura is a beta companion available on Android and Windows; Buddy is the companion users talk to inside Aura.",
+      "summary": "Aura is a beta companion available on Android, Windows, and macOS (beta); Buddy is the companion users talk to inside Aura.",
       "answers": {
-        "voice": "Aura is the app, and Buddy is the companion you talk to inside it. Aura is currently in beta on Android and Windows, with no iOS app yet. The idea is one smart friend across supported devices that can remember useful context and help you act on it.",
-        "chat": "Aura is the cross-device companion application; Buddy is the conversational companion inside it. Aura is currently in **beta**, available on **Android and Windows**, and not available on iOS. The product is designed around one account-scoped Buddy with useful remembered context and tools appropriate to each supported surface."
+        "voice": "Aura is the app, and Buddy is the companion you talk to inside it. Aura is currently in beta on Android, Windows, and now Mac, with no iOS app yet. The idea is one smart friend across supported devices that can remember useful context and help you act on it.",
+        "chat": "Aura is the cross-device companion application; Buddy is the conversational companion inside it. Aura is currently in **beta**, available on **Android and Windows** with a **macOS** beta rolling out, and not available on iOS. The product is designed around one account-scoped Buddy with useful remembered context and tools appropriate to each supported surface."
       },
       "surfaces": ["all"],
       "platforms": ["all"],
@@ -152,19 +153,21 @@
       "kind": "availability",
       "status": "beta",
       "title": "Aura beta and supported platforms",
-      "summary": "Aura is in beta, with an Android mobile app and a Windows desktop app; there is no iOS release.",
+      "summary": "Aura is in beta, with an Android mobile app and a desktop app on Windows and macOS (beta); there is no iOS release.",
       "answers": {
-        "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS yet, and Aura Desktop is available on Windows not MacOS yet.",
-        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows not MacOS yet"
+        "voice": "Aura is currently in beta. The mobile app is available on Android, not iOS yet, and Aura Desktop runs on Windows and, in a fresh beta, on Mac.",
+        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS. **Aura Desktop** is available on Windows, and a **macOS** beta is rolling out."
       },
       "surfaces": ["all"],
       "platforms": ["all"],
       "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
       "navigation": [],
       "action_tools": [],
-      "search_terms": ["beta", "early access", "supported platforms", "mobile availability", "android app", "play store", "ios app", "iphone app", "apple app store", "windows app", "desktop availability", "is aura released"],
+      "search_terms": ["beta", "early access", "supported platforms", "mobile availability", "android app", "play store", "ios app", "iphone app", "apple app store", "windows app", "mac app", "macos app", "macbook", "desktop availability", "is aura released"],
       "evidence": [
-        {"path": "ECOSYSTEM.md", "symbol": "System map release targets and product stage", "verified_at": "2026-08-25"}
+        {"path": "ECOSYSTEM.md", "symbol": "System map release targets and product stage", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/MACOS_RELEASE_CHECKLIST.md", "symbol": "macOS release workflow", "verified_at": "2026-09-03"},
+        {"path": "../Aura-Desktop/src/lib/platformKeys.ts", "symbol": "platformTag", "verified_at": "2026-09-03"}
       ]
     },
     {
@@ -684,7 +687,7 @@
       "availability": {"tiers": ["all"], "connectors": [], "permissions": ["user-provided screen context"], "minimum_versions": {}},
       "navigation": [],
       "action_tools": ["save_screen_item", "set_guide_mode"],
-      "search_terms": ["privacy screen", "can you see my screen", "when do you look", "screen capture permission", "screen data", "monitor"],
+      "search_terms": ["privacy screen", "can you see my screen", "when do you look", "screen capture permission", "screen data", "monitor", "are you watching me", "see what i'm doing"],
       "evidence": [
         {"path": "backend/src/agent/voice/capabilities.py", "symbol": "FRESH_DESKTOP_FRAME prerequisite", "verified_at": "2026-08-25"},
         {"path": "architectures/guide-mode.md", "symbol": "explicit Guide Mode ownership", "verified_at": "2026-08-25"}
@@ -751,6 +754,88 @@
       "evidence": [
         {"path": "architectures/chat-and-tools.md", "symbol": "surface transcript and shared account state", "verified_at": "2026-08-25"},
         {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Link this PC row", "verified_at": "2026-08-25"}
+      ]
+    },
+    {
+      "id": "how_to.end_voice_app",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "End a voice call in the Aura app",
+      "summary": "In the Aura phone app, tapping the same mic orb that started the voice call also ends it; Buddy never ends the call from something the user says.",
+      "answers": {
+        "voice": "Whenever you're done, tap the same mic orb you used to start our call and it ends right away. I'll never hang up on you myself mid-conversation.",
+        "chat": "In the Aura app, the mic orb is a toggle: tap it to start a Buddy voice call and tap it again to end the call. Buddy never ends the call from something you say; only your tap ends it, and a long silence eventually times the session out."
+      },
+      "surfaces": ["app"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Open Aura", "Tap the mic orb"],
+      "action_tools": [],
+      "search_terms": ["end the call", "hang up", "hang up voice", "end voice call", "stop the call", "quit voice", "leave voice", "close voice", "turn off voice", "stop listening", "exit voice mode", "end conversation"],
+      "evidence": [
+        {"path": "lib/presentation/screens/home/home_screen.dart", "symbol": "_handleMicTap", "verified_at": "2026-09-03"}
+      ]
+    },
+    {
+      "id": "how_to.end_voice_keyboard",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "End a voice call started from Buddy Keyboard",
+      "summary": "Voice sessions launched from Buddy Keyboard end with the Stop talking button, returning the user to the app they were typing in.",
+      "answers": {
+        "voice": "Just tap the Stop talking button and our call ends, leaving you right where you were typing.",
+        "chat": "A voice call started from Buddy Keyboard ends when you tap the **Stop talking** button. You land back in the app and text field you were typing in."
+      },
+      "surfaces": ["keyboard"],
+      "platforms": ["android"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Tap Stop talking"],
+      "action_tools": [],
+      "search_terms": ["end the call", "hang up", "stop talking", "quit voice", "close voice", "stop listening", "exit voice", "go back to typing"],
+      "evidence": [
+        {"path": "android/app/src/main/kotlin/dev/varuntej/aura/keyboard/BuddyImeService.kt", "symbol": "makeStopButton", "verified_at": "2026-09-03"}
+      ]
+    },
+    {
+      "id": "how_to.end_voice_desktop",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "End a voice call on Aura Desktop",
+      "summary": "On desktop, the same notch gesture that starts a voice call also stops it, and the Escape key ends it too; Buddy never ends the call from something the user says.",
+      "answers": {
+        "voice": "End our call the same way you started it, with the notch at the top of your screen, or just press Escape. Either one stops voice whenever you like.",
+        "chat": "On Aura Desktop, the notch at the top of your screen is the voice toggle: the same gesture that starts a Buddy voice call also stops it, and pressing **Escape** ends the call too. Buddy never ends the call from something you say. Other shortcuts are rebindable in Aura's keyboard settings."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows", "macos"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": ["Move to the notch at the top of the screen", "Use the stop gesture, or press Escape"],
+      "action_tools": [],
+      "search_terms": ["end the call", "hang up", "stop the call", "quit voice", "close voice", "stop listening", "exit voice", "notch", "escape key", "turn off buddy"],
+      "evidence": [
+        {"path": "../Aura-Desktop/src/overlay/useNotchGesture.ts", "symbol": "notch stop action", "verified_at": "2026-09-03"},
+        {"path": "../Aura-Desktop/src/overlay/OverlayRoot.tsx", "symbol": "Escape keydown endSession", "verified_at": "2026-09-03"}
+      ]
+    },
+    {
+      "id": "background.voice_loop",
+      "kind": "product_background",
+      "status": "shipped",
+      "title": "How Buddy hears and speaks in a voice call",
+      "summary": "Voice sessions carry the user's speech to Buddy through live speech-to-text; replies are spoken through text-to-speech, or shown as live captions when audio is muted.",
+      "answers": {
+        "voice": "Yes, I can hear you. Your words reach me through live speech-to-text as you speak, and my replies are spoken aloud. If you mute my voice, you'll see my words as live captions instead. Either way, just talk; you never need to type during a call.",
+        "chat": "In a Buddy voice call your speech reaches Buddy through live speech-to-text, and replies come back through text-to-speech. If you mute Buddy's audio, the words appear as live captions instead of being spoken, while you keep talking normally. You never need to type during a voice call."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["microphone access"], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": [],
+      "search_terms": ["can you hear me", "are you listening", "how do you hear", "do i need to type", "voice captions", "speech to text", "hear my voice", "can you talk", "are you deaf", "hello can you hear"],
+      "evidence": [
+        {"path": "backend/src/agent/voice/pipelines.py", "symbol": "build_stt_pipeline and build_llm_pipeline", "verified_at": "2026-09-03"},
+        {"path": "backend/src/agent/voice/output_mode.py", "symbol": "output mute keeps captions", "verified_at": "2026-09-03"}
       ]
     }
   ]
