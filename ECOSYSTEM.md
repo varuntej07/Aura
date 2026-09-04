@@ -1,6 +1,6 @@
 # Aura Ecosystem
 
-How the three live Aura codebases fit together: Aura (this repo, Flutter mobile app plus the `juno-backend` FastAPI service), Aura-Desktop (Tauri Windows companion), and Aura-Web (Next.js marketing site plus the browser auth handoff page).
+How the three live Aura codebases fit together: Aura (this repo, Flutter mobile app plus the `juno-backend` FastAPI service), Aura-Desktop (Tauri Windows and macOS companion), and Aura-Web (Next.js marketing site plus the browser auth handoff page).
 
 Each repo's own CLAUDE.md covers that repo. This file covers only what no single repo can see: which repo calls which, over what transport, and what breaks when one side changes a contract without telling the others.
 
@@ -17,10 +17,10 @@ Do not update it for internal refactors, UI changes, or anything that stays insi
 | Repo | Path (this machine) | GitHub remote | Stack | Deploy mechanism | Role |
 |---|---|---|---|---|---|
 | **Aura** (this repo) | `MobileApps/Aura` | `varuntej07/juno` (repo renamed Aura, remote URL still says juno) | Flutter mobile client (Android release target; iOS source exists but is not distributed) + FastAPI (`backend/`) | Product is in beta. Mobile: Android through Play Store / manual `.aab`; no iOS release. Backend: `docker build` straight from local disk (`backend/deploy.sh`), no git trigger, Cloud Run `juno-2ea45`/`us-central1` | Primary client (full API surface) and the shared backend every other repo talks to |
-| **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` + `latest.json`) | Current live Windows companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
+| **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` for Windows and a notarized universal `.dmg` for macOS, plus `latest.json` covering `windows-x86_64`, `darwin-aarch64` and `darwin-x86_64`) | Current live Windows and macOS companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
 | **Aura-Web** | `MobileApps/Aura-Web` | `varuntej07/aura-web` | Next.js (App Router) + React + Framer Motion | Git-triggered deploy to Vercel (push to main auto-builds) | Marketing site (`auravoiceapp.com`), hosts the Google sign-in browser leg, and serves as the download page for Aura-Desktop |
 
-A legacy Flutter Windows client was deleted from this repo on 2026-07-11 (code, `windows/` tree, and its GCS-hosted installers). Aura-Desktop is the only Windows client. This repo still owns the backend contracts that client consumes: pairing, web-auth, connector OAuth, draft-outbound, voice screen-sight, and screen saves.
+A legacy Flutter Windows client was deleted from this repo on 2026-07-11 (code, `windows/` tree, and its GCS-hosted installers). Aura-Desktop is the only Windows client, and since 0.13.2 the only macOS one. This repo still owns the backend contracts that client consumes: pairing, web-auth, connector OAuth, draft-outbound, voice screen-sight, and screen saves.
 
 ## Shared infrastructure
 
@@ -327,11 +327,11 @@ so an alarm currently degrades to a generic desktop notification. Adding it mean
 a new outbox type plus a local timer driven by `GET /reminders/alarms`, since the
 outbox poll cadence cannot ring at an exact minute.
 
-### 6. Windows desktop distribution and auto-update
+### 6. Desktop distribution and auto-update
 
 Two independent consumers of the same Aura-Desktop GitHub release, not one shared mechanism:
 
-- **Aura-Web's download page** (`src/lib/windows-release.ts`) calls the public GitHub Releases API (`GET /repos/AuraVoice/Aura-Desktop/releases/latest`) at request time (cached 15 min), picks the `.msi` asset, and shows its version/size. No redeploy needed when a new Aura-Desktop version ships; the page just reflects whatever is tagged `latest` on GitHub.
+- **Aura-Web's download page** (`src/lib/desktop-release.ts`) calls the public GitHub Releases API (`GET /repos/AuraVoice/Aura-Desktop/releases/latest`) at request time (cached 15 min), picks the `.msi` asset for Windows and the universal `.dmg` for macOS out of that one response, and shows each platform's version/size. The two resolve independently, so a release carrying only one of them serves that one and falls back to the waitlist for the other. No redeploy needed when a new Aura-Desktop version ships; the page just reflects whatever is tagged `latest` on GitHub.
 - **Aura-Desktop's own in-app updater** (`src-tauri/src/updater.rs`, Tauri's updater plugin) checks `https://github.com/AuraVoice/Aura-Desktop/releases/latest/download/latest.json` directly at startup, independent of Aura-Web entirely. Signed with a minisign keypair (`pubkey` in `tauri.conf.json`).
 
 So: publishing a new Aura-Desktop GitHub release is a single action that both the download page and the in-app auto-updater pick up on their own, with no manual step in Aura-Web. This replaced the older mechanism (see "Known gaps" below).
