@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -28,7 +27,29 @@ RECEIPTS_ROOT = "UserAura"
 RECEIPTS_SUBCOLLECTION = "notion_writes"
 
 _RICH_TEXT_LIMIT = 2000
-_MAX_RETRY_AFTER_S = 5.0
+
+
+class NotionRequestRejected(ValueError):
+    """Notion rejected the request body as invalid (4xx other than auth/429).
+
+    Permanent by definition: the same body will be rejected again, so callers
+    with retry budgets (the research deliver stage) must fail fast instead of
+    burning attempts. Transient failures stay plain ValueError.
+    """
+
+    def __init__(self, message: str, *, status_code: int, code: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+
+
+class ReceiptCheckFailed(Exception):
+    """The Firestore idempotency-receipt read failed BEFORE any Notion call.
+
+    Distinct from a write failure on purpose: the caller knows the page was
+    never created, so a retry is always safe and the spoken line can say
+    "try again" without any risk of a duplicate.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +63,9 @@ class WriteResult:
     error: str | None = None
 
 
+FAILURES_SUBCOLLECTION = "notion_write_failures"
+
+
 def _receipt_ref(uid: str, idempotency_key: str) -> fs.DocumentReference:
     return (
         admin_firestore()
@@ -50,6 +74,72 @@ def _receipt_ref(uid: str, idempotency_key: str) -> fs.DocumentReference:
         .collection(RECEIPTS_SUBCOLLECTION)
         .document(idempotency_key)
     )
+
+
+async def record_write_failure(
+    *,
+    uid: str,
+    idempotency_key: str,
+    stage: str,
+    error_code: str,
+    http_status: int | None = None,
+    detail: str = "",
+) -> None:
+    """Durable Firestore record of a failed capture step; best-effort.
+
+    Lives in its own subcollection, NEVER at the receipt key: a failure doc at
+    the receipt path would satisfy the idempotency check and turn a retry into
+    a false "already saved". This is what makes a Phase 1 failure explicable
+    from Firestore alone instead of requiring Cloud Logging archaeology; the
+    doc id is the idempotency key, so it joins directly to the voice action
+    receipt and to every log line carrying that key.
+    """
+    ref = (
+        admin_firestore()
+        .collection(RECEIPTS_ROOT)
+        .document(uid)
+        .collection(FAILURES_SUBCOLLECTION)
+        .document(idempotency_key)
+    )
+    try:
+        await asyncio.to_thread(
+            ref.set,
+            {
+                "idempotency_key": idempotency_key,
+                "stage": stage,
+                "error_code": error_code,
+                "http_status": http_status,
+                "detail": detail[:500],
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            merge=True,
+        )
+    except Exception as exc:
+        # The failure record is diagnostics, not control flow; losing it must
+        # not change the user outcome, but it is still logged loudly.
+        logger.error(
+            "notion.write: failure record write failed",
+            {"user_id": uid, "idempotency_key": idempotency_key, "error": str(exc)},
+        )
+
+
+async def _read_receipt(
+    ref: fs.DocumentReference, *, uid: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    """Read the idempotency receipt; a failed read must not look like 'absent'.
+
+    Treating a Firestore outage as "no receipt" would proceed to create a page
+    that may already exist. ReceiptCheckFailed tells the caller the write never
+    started, so retrying is unconditionally safe.
+    """
+    try:
+        return await asyncio.to_thread(lambda: ref.get().to_dict())
+    except Exception as exc:
+        logger.error(
+            "notion.write: receipt read failed before any Notion call",
+            {"user_id": uid, "idempotency_key": idempotency_key, "error": str(exc)},
+        )
+        raise ReceiptCheckFailed(str(exc)) from exc
 
 
 def _normalized(name: str) -> str:
@@ -155,21 +245,36 @@ def _create_page(
     if children:
         body["children"] = children
 
-    response = connector.authorized_request("POST", "/v1/pages", json_body=body)
-    if response.status_code == 429:
-        retry_after = min(
-            float(response.headers.get("Retry-After") or 1.0), _MAX_RETRY_AFTER_S
-        )
-        time.sleep(retry_after)
-        response = connector.authorized_request("POST", "/v1/pages", json_body=body)
+    # idempotent=True is safe for THIS create only because every caller sits
+    # behind the notion_writes receipt: a duplicated send that both landed
+    # would still be resolved to one page by the receipt check on replay, and
+    # in practice the duplicate window is one in-flight request. 429 and
+    # transient 5xx retries (with Retry-After / jittered backoff) happen inside
+    # the connector.
+    response = connector.authorized_request(
+        "POST", "/v1/pages", json_body=body, idempotent=True
+    )
     if response.status_code != 200:
-        detail = ""
-        try:
-            detail = str(response.json().get("code") or "")
-        except Exception:
-            pass
-        raise ValueError(f"Notion page create failed ({response.status_code}): {detail}")
+        raise _rejection_or_transient("Notion page create failed", response)
     return response.json()
+
+
+def _rejection_or_transient(context: str, response: Any) -> ValueError:
+    """Classify a non-200 Notion response into permanent vs transient."""
+    detail = ""
+    try:
+        detail = str(response.json().get("code") or "")
+    except Exception:
+        logger.warn(
+            "notion.write: error body was not JSON",
+            {"status": response.status_code, "context": context},
+        )
+    message = f"{context} ({response.status_code}): {detail}"
+    if 400 <= response.status_code < 500 and response.status_code not in (401, 429):
+        return NotionRequestRejected(
+            message, status_code=response.status_code, code=detail
+        )
+    return ValueError(message)
 
 
 async def write_capture(
@@ -184,7 +289,7 @@ async def write_capture(
 ) -> WriteResult:
     """One record into one bound data source; retries converge on the receipt."""
     ref = _receipt_ref(uid, idempotency_key)
-    existing = await asyncio.to_thread(lambda: ref.get().to_dict())
+    existing = await _read_receipt(ref, uid=uid, idempotency_key=idempotency_key)
     if existing and not existing.get("undone_at"):
         return WriteResult(
             ok=True,
@@ -321,7 +426,7 @@ async def write_research_brief(
     """
     idempotency_key = research_delivery_key(uid, run_id)
     ref = _receipt_ref(uid, idempotency_key)
-    existing = await asyncio.to_thread(lambda: ref.get().to_dict())
+    existing = await _read_receipt(ref, uid=uid, idempotency_key=idempotency_key)
     if existing and not existing.get("undone_at"):
         return WriteResult(
             ok=True,
@@ -401,14 +506,12 @@ def _create_database_sync(connector: NotionConnector, name: str) -> tuple[str, s
             }
         },
     }
+    # idempotent=False (the default for POST): this create has NO receipt, so
+    # a duplicated send would mint two databases. 429s still retry inside the
+    # connector; transient 5xx does not.
     response = connector.authorized_request("POST", "/v1/databases", json_body=body)
     if response.status_code != 200:
-        detail = ""
-        try:
-            detail = str(response.json().get("code") or "")
-        except Exception:
-            pass
-        raise ValueError(f"Notion database create failed ({response.status_code}): {detail}")
+        raise _rejection_or_transient("Notion database create failed", response)
     payload = response.json()
     data_sources = payload.get("data_sources") or []
     if not data_sources or not data_sources[0].get("id"):
@@ -435,11 +538,15 @@ async def undo_write(*, uid: str, idempotency_key: str) -> bool:
         return False
 
     connector = NotionConnector(uid)
+    # Archiving to archived=True is naturally idempotent, so transient 5xx may
+    # retry inside the connector alongside 429.
     response = await asyncio.to_thread(
-        connector.authorized_request,
-        "PATCH",
-        f"/v1/pages/{page_id}",
-        json_body={"archived": True},
+        lambda: connector.authorized_request(
+            "PATCH",
+            f"/v1/pages/{page_id}",
+            json_body={"archived": True},
+            idempotent=True,
+        )
     )
     if response.status_code != 200:
         logger.warn(

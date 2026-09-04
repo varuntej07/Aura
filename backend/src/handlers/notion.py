@@ -9,6 +9,12 @@ Cloud-Tasks/OIDC namespace.
 Firebreak note: these routes never see screen bytes. Extraction happens
 worker-side; /notion/write receives an already-typed CaptureRecord, and
 /notion/resolve receives only the user's spoken destination words.
+
+Error discipline: every failure returns a distinct machine code (the worker
+picks the spoken line from it), logs with the idempotency key where one
+exists, and — for the write/undo paths, which carry a key — leaves a durable
+failure record in Firestore via record_write_failure so a root cause never
+requires Cloud Logging alone.
 """
 
 from __future__ import annotations
@@ -21,10 +27,16 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ..lib.logger import logger
 from ..services.notion.extract import CaptureRecord
-from ..services.notion.resolve import resolve_destination
-from ..services.notion.schema import data_source_schema
-from ..services.notion.resolve import invalidate_cache
-from ..services.notion.write import create_database, undo_write, write_capture
+from ..services.notion.resolve import invalidate_cache, resolve_destination
+from ..services.notion.schema import data_source_schema, invalidate_schema_cache
+from ..services.notion.write import (
+    NotionRequestRejected,
+    ReceiptCheckFailed,
+    create_database,
+    record_write_failure,
+    undo_write,
+    write_capture,
+)
 from ..services.notion_connector import NotionReauthorizationRequired
 from .request_guards import require_user
 
@@ -103,8 +115,37 @@ async def handle_notion_write(request: Request) -> JSONResponse:
     except (ValidationError, ValueError):
         return JSONResponse(status_code=400, content={"error": "invalid_write_body"})
 
+    async def _fail(
+        stage: str, error_code: str, *, http_status: int | None = None, detail: str = ""
+    ) -> JSONResponse:
+        await record_write_failure(
+            uid=user_id,
+            idempotency_key=body.idempotency_key,
+            stage=stage,
+            error_code=error_code,
+            http_status=http_status,
+            detail=detail,
+        )
+        return JSONResponse(status_code=502, content={"error": error_code})
+
+    # Schema fetch and page write are separate failure surfaces on purpose: a
+    # schema failure guarantees no page exists; after a write failure one might.
     try:
         schema = await data_source_schema(user_id, body.data_source_id)
+    except NotionReauthorizationRequired:
+        return _reauthorization_required()
+    except Exception as exc:
+        logger.warn(
+            "Notion: write-path schema fetch failed",
+            {
+                "user_id": user_id,
+                "idempotency_key": body.idempotency_key,
+                "error": str(exc),
+            },
+        )
+        return await _fail("schema", "schema_failed", detail=str(exc))
+
+    try:
         result = await write_capture(
             uid=user_id,
             data_source_id=body.data_source_id,
@@ -116,14 +157,35 @@ async def handle_notion_write(request: Request) -> JSONResponse:
         )
     except NotionReauthorizationRequired:
         return _reauthorization_required()
+    except ReceiptCheckFailed as exc:
+        # The write never started; retrying is unconditionally safe.
+        return await _fail("receipt_check", "receipt_check_failed", detail=str(exc))
+    except NotionRequestRejected as exc:
+        logger.error(
+            "Notion: write rejected as invalid",
+            {
+                "user_id": user_id,
+                "idempotency_key": body.idempotency_key,
+                "status": exc.status_code,
+                "code": exc.code,
+            },
+        )
+        return await _fail(
+            "page_create", "write_rejected", http_status=exc.status_code, detail=exc.code
+        )
     except Exception as exc:
-        logger.warn("Notion: write failed", {"user_id": user_id, "error": str(exc)})
-        return JSONResponse(status_code=502, content={"error": "write_failed"})
+        logger.warn(
+            "Notion: write failed",
+            {
+                "user_id": user_id,
+                "idempotency_key": body.idempotency_key,
+                "error": str(exc),
+            },
+        )
+        return await _fail("page_create", "write_failed", detail=str(exc))
 
     if not result.ok:
-        return JSONResponse(
-            status_code=502, content={"error": result.error or "write_failed"}
-        )
+        return await _fail("receipt", result.error or "write_failed")
     return JSONResponse(
         status_code=200,
         content={
@@ -156,8 +218,10 @@ async def handle_notion_create_database(request: Request) -> JSONResponse:
         )
         return JSONResponse(status_code=502, content={"error": "create_failed"})
 
-    # The new database must be findable next resolve, not 15 minutes from now.
+    # The new database must be findable next resolve, not 15 minutes from now,
+    # and no stale schema may shadow the fresh one.
     invalidate_cache(user_id)
+    invalidate_schema_cache(user_id)
     return JSONResponse(
         status_code=200,
         content={"data_source_id": data_source_id, "database_name": database_name},
@@ -176,6 +240,20 @@ async def handle_notion_undo(request: Request) -> JSONResponse:
     except NotionReauthorizationRequired:
         return _reauthorization_required()
     except Exception as exc:
-        logger.warn("Notion: undo failed", {"user_id": user_id, "error": str(exc)})
+        logger.warn(
+            "Notion: undo failed",
+            {
+                "user_id": user_id,
+                "idempotency_key": body.idempotency_key,
+                "error": str(exc),
+            },
+        )
+        await record_write_failure(
+            uid=user_id,
+            idempotency_key=body.idempotency_key,
+            stage="undo",
+            error_code="undo_failed",
+            detail=str(exc),
+        )
         return JSONResponse(status_code=502, content={"error": "undo_failed"})
     return JSONResponse(status_code=200, content={"ok": undone})

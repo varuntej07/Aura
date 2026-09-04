@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ....lib.logger import logger
-from ...notion.write import write_research_brief
+from ...notion.write import NotionRequestRejected, write_research_brief
 from ...notion_connector import NotionReauthorizationRequired
 from .. import fields as F
 from .base import NextJob, StageContext, StageResult, StageResultKind
@@ -106,15 +106,60 @@ async def run(ctx: StageContext) -> StageResult:
             delivery_result={"failed": F.FAIL_DELIVERY_REAUTH, "database_name": database_name},
             outputs={"delivered": False, "reason": "reauthorization_required"},
         )
+    except NotionRequestRejected as exc:
+        # Notion rejected the body as invalid (schema mapping drift, payload
+        # cap). Permanent by definition: the identical retry would burn the
+        # attempt cap on the identical 400. Complete with a distinct code so
+        # the audit trail separates "our request was wrong" from "Notion was
+        # down".
+        logger.error(
+            "research.notion_deliver: delivery rejected as invalid",
+            {
+                "user_id": ctx.uid,
+                "run_id": ctx.run_id,
+                "status": exc.status_code,
+                "code": exc.code,
+            },
+        )
+        return _result(
+            ctx,
+            delivery_result={
+                "failed": F.FAIL_DELIVERY_REJECTED,
+                "database_name": database_name,
+            },
+            outputs={"delivered": False, "reason": "request_rejected", "code": exc.code},
+        )
     # Anything else (Notion 5xx, network, schema fetch failure) propagates:
     # the engine retries under STAGE_ATTEMPT_CAP, and the receipt-first
     # idempotency inside write_research_brief makes the retry converge on one
     # page. At the cap, fail_stage's terminal notify path reports honestly.
 
+    if not write_result.ok and write_result.error == "receipt_failed":
+        if ctx.attempt >= store.STAGE_ATTEMPT_CAP:
+            # Final attempt: the page provably landed (create succeeded) but
+            # its receipt write failed every time. Raising again would report
+            # "saving failed" over a real page in the user's database — a lie
+            # in the harmful direction. Record the honest middle state; the
+            # notification says saved-with-caveat instead of failure.
+            logger.error(
+                "research.notion_deliver: page delivered but receipt "
+                "unrecordable at attempt cap",
+                {"user_id": ctx.uid, "run_id": ctx.run_id, "attempt": ctx.attempt},
+            )
+            return _result(
+                ctx,
+                delivery_result={
+                    "delivered_unreceipted": True,
+                    "database_name": database_name,
+                    "delivered_at": datetime.now(UTC).isoformat(),
+                },
+                outputs={"delivered": True, "receipted": False},
+            )
+        # Page may exist without its receipt. Raising lets the retry find the
+        # receipt path again; write_research_brief re-reads the receipt first,
+        # so a converged retry returns already_saved.
+        raise RuntimeError(f"notion_deliver: write failed ({write_result.error})")
     if not write_result.ok:
-        # Page may exist without its receipt (receipt_failed). Raising lets
-        # the retry find the receipt path again; write_research_brief re-reads
-        # the receipt first, so a converged retry returns already_saved.
         raise RuntimeError(f"notion_deliver: write failed ({write_result.error})")
 
     return _result(

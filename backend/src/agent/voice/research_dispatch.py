@@ -20,20 +20,31 @@ proactive nudge must never become a spoken apology.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from dataclasses import dataclass, field
 
 import httpx
 
-from ...config.settings import settings
 from ...lib.logger import logger
+from ...services.research.run_identity import client_run_id_for, retry_salted
 from ..voice.interview.models import buddy_owns_conversation
+from .notion_backend import (
+    DestinationCopy,
+    ReauthorizationRequired,
+    create_database_backend,
+    decide_destination,
+    request_backend,
+    resolve_spoken_destination,
+)
 from .transport import await_turn_boundary
 
 _DISPATCH_TIMEOUT_S = 20.0
 _POLL_TIMEOUT_S = 10.0
 _POLL_INTERVAL_S = 10.0
+# A 404 is authoritative quickly (the run doc is gone); other failures get a
+# longer leash for transient backend blips before the run is dropped.
+_POLL_404_EVICT_AFTER = 2
+_POLL_ERROR_EVICT_AFTER = 6
 # Coalescing floor between spoken progress updates. Terminal and question
 # events bypass it: those are the two things the user is actually waiting on.
 _MIN_NARRATION_GAP_S = 20.0
@@ -65,11 +76,15 @@ class ResearchDispatchResult:
     proposed_create_name: str | None = None
 
 
-def _headers(firebase_id_token: str, session_id: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {firebase_id_token}",
-        "X-Aura-Voice-Session": session_id,
-    }
+# The spoken halves of the ask/propose outcomes; the decision tree itself is
+# shared with notion_capture via notion_backend.decide_destination.
+_DESTINATION_COPY = DestinationCopy(
+    ask_format="Which database - {titles}?",
+    propose_format=(
+        "I don't see a database like that in your Notion. "
+        "Want me to create one called {name} for the results?"
+    ),
+)
 
 
 async def _backend_request(
@@ -81,11 +96,14 @@ async def _backend_request(
     json_body: dict | None = None,
     timeout_s: float = _DISPATCH_TIMEOUT_S,
 ) -> httpx.Response:
-    url = f"{settings.BACKEND_INTERNAL_URL.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
-        return await client.request(
-            method, url, json=json_body, headers=_headers(firebase_id_token, session_id)
-        )
+    return await request_backend(
+        method,
+        path,
+        firebase_id_token=firebase_id_token,
+        session_id=session_id,
+        json_body=json_body,
+        timeout_s=timeout_s,
+    )
 
 
 async def dispatch_research_to_notion(
@@ -104,72 +122,74 @@ async def dispatch_research_to_notion(
     if not cleaned_request or len(cleaned_request) > 2_000:
         return ResearchDispatchResult(spoken_confirmation=_FAILURE_LINE)
 
-    data_source_id = confirmed_data_source_id
-    database_name = confirmed_database_name
-
     if create_database_named:
-        response = await _backend_request(
-            "POST",
-            "/notion/create-database",
-            firebase_id_token=firebase_id_token,
-            session_id=session_id,
-            json_body={"name": create_database_named},
-        )
-        if response.status_code == 409:
+        try:
+            data_source_id, database_name = await create_database_backend(
+                name=create_database_named,
+                firebase_id_token=firebase_id_token,
+                session_id=session_id,
+                timeout_s=_DISPATCH_TIMEOUT_S,
+            )
+        except ReauthorizationRequired:
             return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
-        if response.status_code != 200:
+        except Exception as exc:
+            logger.warn(
+                "research_dispatch: database create failed",
+                {"user_id": uid, "session_id": session_id, "error": str(exc)},
+            )
             return ResearchDispatchResult(
                 spoken_confirmation="I couldn't create that database in Notion - try again?"
             )
-        created = response.json()
-        data_source_id = str(created.get("data_source_id") or "")
-        database_name = str(created.get("database_name") or create_database_named)
-    elif not data_source_id:
-        response = await _backend_request(
-            "POST",
-            "/notion/resolve",
-            firebase_id_token=firebase_id_token,
-            session_id=session_id,
-            json_body={"spoken_destination": destination},
+    else:
+        resolved: dict | None = None
+        if not confirmed_data_source_id:
+            try:
+                resolved = await resolve_spoken_destination(
+                    destination=destination,
+                    firebase_id_token=firebase_id_token,
+                    session_id=session_id,
+                    timeout_s=_DISPATCH_TIMEOUT_S,
+                )
+            except ReauthorizationRequired:
+                return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
+            except Exception as exc:
+                logger.warn(
+                    "research_dispatch: destination resolve failed",
+                    {"user_id": uid, "session_id": session_id, "error": str(exc)},
+                )
+                return ResearchDispatchResult(spoken_confirmation=_FAILURE_LINE)
+        decision = decide_destination(
+            resolved,
+            destination=destination,
+            confirmed_data_source_id=confirmed_data_source_id,
+            confirmed_database_name=confirmed_database_name,
+            copy=_DESTINATION_COPY,
         )
-        if response.status_code == 409:
-            return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
-        if response.status_code != 200:
-            return ResearchDispatchResult(spoken_confirmation=_FAILURE_LINE)
-        resolved = response.json()
-        outcome = str(resolved.get("outcome") or "")
-        if outcome == "bind":
-            data_source_id = str(resolved.get("data_source_id") or "")
-            database_name = str(resolved.get("title") or destination)
-        elif outcome == "ask":
-            candidates = [
-                (str(item.get("data_source_id") or ""), str(item.get("title") or ""))
-                for item in resolved.get("candidates", [])
-                if item.get("data_source_id")
-            ]
-            titles = " or ".join(title for _, title in candidates[:2])
+        if decision.question is not None:
             return ResearchDispatchResult(
-                spoken_confirmation=f"Which database - {titles}?",
-                candidates=candidates,
+                spoken_confirmation=decision.question,
+                candidates=decision.candidates,
+                proposed_create_name=decision.proposed_create_name,
             )
-        else:
-            name = " ".join(destination.split())[:80]
-            return ResearchDispatchResult(
-                spoken_confirmation=(
-                    f"I don't see a database like that in your Notion. "
-                    f"Want me to create one called {name} for the results?"
-                ),
-                proposed_create_name=name,
-            )
+        data_source_id = decision.data_source_id
+        database_name = decision.database_name
 
     if not data_source_id:
         return ResearchDispatchResult(spoken_confirmation=_FAILURE_LINE)
 
-    # Salted run identity, mirroring tool_executor's fix: constant per session
-    # so an identical retry replays, distinct per request so two topics in one
-    # call never collapse onto one run doc.
-    request_digest = hashlib.sha256(cleaned_request.casefold().encode("utf-8")).hexdigest()[:16]
-    client_run_id = f"voice:{session_id}:{request_digest}"
+    # Run identity via the shared helper: the tool name is part of the id so
+    # the same request text spoken to start_research and research_to_notion in
+    # one session can never collapse onto one run doc (that collision silently
+    # dropped the delivery binding). An identical retry of THIS tool replays.
+    client_run_id = client_run_id_for(
+        scope=f"voice:{session_id}",
+        tool_name="research_to_notion",
+        request_text=cleaned_request,
+    )
+    delivery_binding = {
+        "data_source_id": data_source_id,
+        "database_name": database_name or "Notion",
+    }
 
     response = await _backend_request(
         "POST",
@@ -181,12 +201,45 @@ async def dispatch_research_to_notion(
             "depth": "quick",
             "client_run_id": client_run_id,
             "origin_surface": "voice",
-            "delivery": {
-                "data_source_id": data_source_id,
-                "database_name": database_name or "Notion",
-            },
+            "delivery": delivery_binding,
         },
     )
+    if response.status_code == 200:
+        # 200 (not 202) means the deterministic id REPLAYED an existing run.
+        # A replay is only acceptable when that run is alive and bound to the
+        # same destination; a terminal run or one missing this delivery
+        # binding must restart under a salted id, or Buddy says "on it" while
+        # nothing will ever deliver.
+        payload = response.json()
+        replayed_state = str(payload.get("state") or "")
+        replayed_delivery = dict(payload.get("delivery") or {})
+        if (
+            replayed_state in ("failed", "cancelled")
+            or replayed_delivery.get("data_source_id") != data_source_id
+        ):
+            logger.info(
+                "research_dispatch: replayed run unusable, restarting salted",
+                {
+                    "user_id": uid,
+                    "session_id": session_id,
+                    "replayed_state": replayed_state,
+                    "delivery_bound": bool(replayed_delivery.get("data_source_id")),
+                },
+            )
+            response = await _backend_request(
+                "POST",
+                "/research",
+                firebase_id_token=firebase_id_token,
+                session_id=session_id,
+                json_body={
+                    "request": cleaned_request,
+                    "depth": "quick",
+                    "client_run_id": retry_salted(client_run_id),
+                    "origin_surface": "voice",
+                    "delivery": delivery_binding,
+                },
+            )
+
     if response.status_code in (200, 202):
         payload = response.json()
         return ResearchDispatchResult(
@@ -203,7 +256,15 @@ async def dispatch_research_to_notion(
     try:
         detail = dict(response.json().get("detail") or {})
     except Exception:
-        pass
+        logger.warn(
+            "research_dispatch: refusal body was not JSON",
+            {
+                "user_id": uid,
+                "session_id": session_id,
+                "status": response.status_code,
+                "body_prefix": response.text[:200],
+            },
+        )
     code = str(detail.get("code") or "")
     if code == "research_cap_reached":
         spoken = "You've used up today's research runs - I can do this one tomorrow."
@@ -223,13 +284,22 @@ async def dispatch_research_to_notion(
 async def cancel_research_run(
     *, session_id: str, firebase_id_token: str, run_id: str
 ) -> bool:
-    response = await _backend_request(
-        "POST",
-        f"/research/{run_id}/cancel",
-        firebase_id_token=firebase_id_token,
-        session_id=session_id,
-        json_body={"correlation_id": f"voice:{session_id}"},
-    )
+    """False on any failure, network included: the voice tool speaks
+    "I couldn't cancel it just now", never an agent-level stack trace."""
+    try:
+        response = await _backend_request(
+            "POST",
+            f"/research/{run_id}/cancel",
+            firebase_id_token=firebase_id_token,
+            session_id=session_id,
+            json_body={"correlation_id": f"voice:{session_id}"},
+        )
+    except Exception as exc:
+        logger.warn(
+            "research_dispatch: cancel request failed",
+            {"session_id": session_id, "run_id": run_id, "error": str(exc)},
+        )
+        return False
     return response.status_code == 200
 
 
@@ -241,17 +311,26 @@ async def answer_research_run(
     question_id: str,
     answer_text: str,
 ) -> bool:
-    response = await _backend_request(
-        "POST",
-        f"/research/{run_id}/answer",
-        firebase_id_token=firebase_id_token,
-        session_id=session_id,
-        json_body={
-            "question_id": question_id,
-            "answer": {"text": answer_text, "via": "voice"},
-            "correlation_id": f"voice:{session_id}",
-        },
-    )
+    """False on any failure, network included; the pending question stays set
+    so the narrator re-offers it instead of the answer silently vanishing."""
+    try:
+        response = await _backend_request(
+            "POST",
+            f"/research/{run_id}/answer",
+            firebase_id_token=firebase_id_token,
+            session_id=session_id,
+            json_body={
+                "question_id": question_id,
+                "answer": {"text": answer_text, "via": "voice"},
+                "correlation_id": f"voice:{session_id}",
+            },
+        )
+    except Exception as exc:
+        logger.warn(
+            "research_dispatch: answer request failed",
+            {"session_id": session_id, "run_id": run_id, "error": str(exc)},
+        )
+        return False
     return response.status_code == 200
 
 
@@ -289,6 +368,9 @@ class RunNarrator:
         # run_id -> last narrated state_revision
         self._revisions: dict[str, int] = {}
         self._active_runs: dict[str, str] = {}  # run_id -> database_name
+        # run_id -> consecutive failed polls; a run that never answers is
+        # evicted so a corpse does not get polled every 10s for the session.
+        self._poll_failures: dict[str, int] = {}
         self._last_spoken_at = 0.0
         self.pending_question: PendingVoiceQuestion | None = None
 
@@ -309,6 +391,7 @@ class RunNarrator:
 
     def forget(self, run_id: str) -> None:
         self._active_runs.pop(run_id, None)
+        self._poll_failures.pop(run_id, None)
         if self.pending_question and self.pending_question.run_id == run_id:
             self.pending_question = None
 
@@ -351,7 +434,34 @@ class RunNarrator:
                 timeout_s=_POLL_TIMEOUT_S,
             )
             if response.status_code != 200:
+                failures = self._poll_failures.get(run_id, 0) + 1
+                self._poll_failures[run_id] = failures
+                cap = (
+                    _POLL_404_EVICT_AFTER
+                    if response.status_code == 404
+                    else _POLL_ERROR_EVICT_AFTER
+                )
+                logger.warn(
+                    "research_narrator: run poll returned non-200",
+                    {
+                        "session_id": self._session_id,
+                        "run_id": run_id,
+                        "status": response.status_code,
+                        "consecutive_failures": failures,
+                    },
+                )
+                if failures >= cap:
+                    logger.warn(
+                        "research_narrator: evicting unpollable run",
+                        {
+                            "session_id": self._session_id,
+                            "run_id": run_id,
+                            "last_status": response.status_code,
+                        },
+                    )
+                    self.forget(run_id)
                 continue
+            self._poll_failures.pop(run_id, None)
             projection = response.json()
             revision = int(projection.get("state_revision") or 0)
             if revision <= self._revisions.get(run_id, -1):
@@ -402,6 +512,14 @@ class RunNarrator:
                 )
             elif state == "failed":
                 line = "The background research could not be completed. The details are in the app."
+            elif not delivery_result:
+                # No delivery receipt AND no failure entry: the run went
+                # terminal on a path that never reached the deliver stage
+                # (e.g. a fail-derived partial). Saying "saving failed" here
+                # would blame Notion for an attempt that never happened.
+                line = (
+                    "The research finished with partial results - the brief is in the app."
+                )
             else:
                 line = (
                     "The research finished, but saving it to Notion failed - "

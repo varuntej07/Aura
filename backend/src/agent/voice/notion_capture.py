@@ -20,23 +20,37 @@ import asyncio
 import base64
 from dataclasses import dataclass, field
 
-import httpx
-
-from ...config.settings import settings
 from ...lib.logger import logger
 from ...services.notion.extract import (
     CaptureRecord,
     extract_from_frame,
     extract_from_structured_text,
 )
+from .notion_backend import (
+    DestinationCopy,
+    ReauthorizationRequired as _ReauthorizationRequired,
+    create_database_backend,
+    decide_destination,
+    post_backend,
+    resolve_spoken_destination,
+)
+from .screen_context_control import spoken_no_screen_line
 from .screen_saves import capture_item_id
 from .transport import current_room, publish_client_event
 
-_RESOLVE_TIMEOUT_S = 15.0
-_WRITE_TIMEOUT_S = 25.0
+_RESOLVE_TIMEOUT_S = 20.0
+# Must exceed the backend's worst honest case: schema fetch plus a page create
+# that rides the connector's full retry discipline (up to 3 sends with
+# Retry-After sleeps capped at 5s each). 25s sat exactly at that boundary and
+# timed out on pages that were landing.
+_WRITE_TIMEOUT_S = 45.0
+# Hard ceiling on the extract+resolve phase as a whole. The extraction model
+# call is otherwise bounded only by model_provider's per-attempt timeout times
+# its retries (minutes), and this runs behind a live voice turn: past this,
+# the user hears the failure line instead of silence.
+_CAPTURE_PHASE_WALL_CLOCK_S = 30.0
 
 _FAILURE_LINE = "Something went wrong saving that to Notion - try again?"
-_NO_SCREEN_LINE = "I can't see your screen right now, so there's nothing to save."
 _RECONNECT_LINE = "Your Notion connection needs a refresh - reconnect it from the dashboard and I'll save this."
 
 
@@ -55,6 +69,9 @@ class SaveToNotionResult:
     page_url: str | None = None
     database_name: str | None = None
     idempotency_key: str | None = None
+    # Machine-readable failure cause, populated on every failure path so the
+    # voice action receipt records WHY, not just the spoken line.
+    error_code: str | None = None
     dropped_fields: list[str] = field(default_factory=list)
     already_saved: bool = False
     # Set when the turn ends in a question instead of a write: the model asks
@@ -63,39 +80,15 @@ class SaveToNotionResult:
     proposed_create_name: str | None = None
 
 
-class _ReauthorizationRequired(Exception):
-    pass
-
-
-class _BackendCallFailed(Exception):
-    pass
-
-
-def _headers(firebase_id_token: str, session_id: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {firebase_id_token}",
-        "X-Aura-Voice-Session": session_id,
-    }
-
-
-async def _post_backend(
-    path: str,
-    body: dict,
-    *,
-    firebase_id_token: str,
-    session_id: str,
-    timeout_s: float,
-) -> dict:
-    url = f"{settings.BACKEND_INTERNAL_URL.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
-        response = await client.post(
-            url, json=body, headers=_headers(firebase_id_token, session_id)
-        )
-    if response.status_code == 409:
-        raise _ReauthorizationRequired()
-    if response.status_code != 200:
-        raise _BackendCallFailed(f"{path} -> {response.status_code}")
-    return response.json()
+# The spoken halves of the ask/propose outcomes; the decision tree itself is
+# shared with research_dispatch via notion_backend.decide_destination.
+_DESTINATION_COPY = DestinationCopy(
+    ask_format="Did you mean {titles}?",
+    propose_format=(
+        "I don't see a database like that in your Notion. "
+        "Want me to create one called {name}?"
+    ),
+)
 
 
 async def execute_notion_capture(
@@ -113,6 +106,7 @@ async def execute_notion_capture(
     structured_snapshot_id: str,
     jpeg_bytes: bytes | None,
     frame_id: str,
+    screen_unavailable_reason: str = "",
 ) -> SaveToNotionResult:
     """One authorized capture into one Notion destination.
 
@@ -122,9 +116,21 @@ async def execute_notion_capture(
     question instead and write nothing.
     """
     if not uid or not session_id or not finalized_message_id or not firebase_id_token:
-        return SaveToNotionResult(spoken_confirmation=_FAILURE_LINE)
+        return SaveToNotionResult(
+            spoken_confirmation=_FAILURE_LINE, error_code="invalid_arguments"
+        )
     if not structured_text and not jpeg_bytes:
-        return SaveToNotionResult(spoken_confirmation=_NO_SCREEN_LINE)
+        # The desktop's screen_context.unavailable signal (when one arrived
+        # this turn) turns the generic "can't see your screen" into the actual
+        # reason plus the user's next step; see screen_context_control.
+        return SaveToNotionResult(
+            spoken_confirmation=spoken_no_screen_line(screen_unavailable_reason),
+            error_code=(
+                f"no_screen:{screen_unavailable_reason}"
+                if screen_unavailable_reason
+                else "no_screen_available"
+            ),
+        )
 
     snapshot_id = structured_snapshot_id if structured_text else frame_id
     idempotency_key = capture_item_id(
@@ -148,91 +154,145 @@ async def execute_notion_capture(
     async def _resolve() -> dict | None:
         if confirmed_data_source_id or create_database_named:
             return None
-        return await _post_backend(
-            "/notion/resolve",
-            {"spoken_destination": destination},
+        return await resolve_spoken_destination(
+            destination=destination,
             firebase_id_token=firebase_id_token,
             session_id=session_id,
             timeout_s=_RESOLVE_TIMEOUT_S,
         )
 
+    # Extraction and resolution fail differently and must be told apart in the
+    # logs: "the model couldn't read the screen" and "the backend refused the
+    # resolve" are different root causes wearing the same spoken line.
     try:
-        record, resolved = await asyncio.gather(_extract(), _resolve())
-    except _ReauthorizationRequired:
-        return SaveToNotionResult(spoken_confirmation=_RECONNECT_LINE)
-    except Exception as exc:
-        logger.warn(
-            "notion_capture: extract/resolve failed",
-            {"user_id": uid, "session_id": session_id, "error": str(exc)},
+        record_outcome, resolve_outcome = await asyncio.wait_for(
+            asyncio.gather(_extract(), _resolve(), return_exceptions=True),
+            timeout=_CAPTURE_PHASE_WALL_CLOCK_S,
         )
-        return SaveToNotionResult(spoken_confirmation=_FAILURE_LINE)
+    except TimeoutError:
+        logger.warn(
+            "notion_capture: extract/resolve exceeded wall clock",
+            {
+                "user_id": uid,
+                "session_id": session_id,
+                "idempotency_key": idempotency_key,
+                "wall_clock_s": _CAPTURE_PHASE_WALL_CLOCK_S,
+            },
+        )
+        return SaveToNotionResult(
+            spoken_confirmation=_FAILURE_LINE,
+            error_code="capture_wall_clock_expired",
+            idempotency_key=idempotency_key,
+        )
+
+    if isinstance(resolve_outcome, _ReauthorizationRequired):
+        return SaveToNotionResult(
+            spoken_confirmation=_RECONNECT_LINE,
+            error_code="reauthorization_required",
+            idempotency_key=idempotency_key,
+        )
+    if isinstance(resolve_outcome, BaseException):
+        logger.warn(
+            "notion_capture: destination resolve failed",
+            {
+                "user_id": uid,
+                "session_id": session_id,
+                "idempotency_key": idempotency_key,
+                "error": str(resolve_outcome),
+            },
+        )
+        return SaveToNotionResult(
+            spoken_confirmation=_FAILURE_LINE,
+            error_code="resolve_failed",
+            idempotency_key=idempotency_key,
+        )
+    if isinstance(record_outcome, BaseException):
+        logger.warn(
+            "notion_capture: extraction failed",
+            {
+                "user_id": uid,
+                "session_id": session_id,
+                "idempotency_key": idempotency_key,
+                "error": str(record_outcome),
+            },
+        )
+        return SaveToNotionResult(
+            spoken_confirmation=_FAILURE_LINE,
+            error_code="extraction_failed",
+            idempotency_key=idempotency_key,
+        )
+    record, resolved = record_outcome, resolve_outcome
 
     if record is None:
         return SaveToNotionResult(
             spoken_confirmation=(
                 "I couldn't make out anything on the screen worth saving - try again?"
-            )
+            ),
+            error_code="nothing_extracted",
+            idempotency_key=idempotency_key,
         )
 
-    # Bind the destination. Only the user's words (or their confirmed choice)
-    # ever decide this; nothing screen-derived is a candidate input.
-    data_source_id = confirmed_data_source_id
-    database_name = confirmed_database_name
+    # Bind the destination via the shared decision tree. Only the user's words
+    # (or their confirmed choice) ever decide this; nothing screen-derived is
+    # a candidate input.
     if create_database_named:
         try:
-            created = await _post_backend(
-                "/notion/create-database",
-                {"name": create_database_named},
+            data_source_id, database_name = await create_database_backend(
+                name=create_database_named,
                 firebase_id_token=firebase_id_token,
                 session_id=session_id,
                 timeout_s=_WRITE_TIMEOUT_S,
             )
         except _ReauthorizationRequired:
-            return SaveToNotionResult(spoken_confirmation=_RECONNECT_LINE)
+            return SaveToNotionResult(
+                spoken_confirmation=_RECONNECT_LINE,
+                error_code="reauthorization_required",
+                idempotency_key=idempotency_key,
+            )
         except Exception as exc:
             logger.warn(
                 "notion_capture: database create failed",
-                {"user_id": uid, "session_id": session_id, "error": str(exc)},
+                {
+                    "user_id": uid,
+                    "session_id": session_id,
+                    "idempotency_key": idempotency_key,
+                    "error": str(exc),
+                },
             )
             return SaveToNotionResult(
-                spoken_confirmation="I couldn't create that database in Notion - try again?"
+                spoken_confirmation="I couldn't create that database in Notion - try again?",
+                error_code="database_create_failed",
+                idempotency_key=idempotency_key,
             )
-        data_source_id = str(created.get("data_source_id") or "")
-        database_name = str(created.get("database_name") or create_database_named)
-    elif not data_source_id and resolved is not None:
-        outcome = str(resolved.get("outcome") or "")
-        if outcome == "bind":
-            data_source_id = str(resolved.get("data_source_id") or "")
-            database_name = str(resolved.get("title") or destination)
-        elif outcome == "ask":
-            candidates = [
-                NotionCandidate(
-                    data_source_id=str(candidate.get("data_source_id") or ""),
-                    title=str(candidate.get("title") or ""),
-                )
-                for candidate in resolved.get("candidates", [])
-                if candidate.get("data_source_id")
-            ]
-            titles = " or ".join(candidate.title for candidate in candidates[:2])
+    else:
+        decision = decide_destination(
+            resolved,
+            destination=destination,
+            confirmed_data_source_id=confirmed_data_source_id,
+            confirmed_database_name=confirmed_database_name,
+            copy=_DESTINATION_COPY,
+        )
+        if decision.question is not None:
             return SaveToNotionResult(
-                spoken_confirmation=f"Did you mean {titles}?",
-                candidates=candidates,
+                spoken_confirmation=decision.question,
+                candidates=[
+                    NotionCandidate(data_source_id=candidate_id, title=title)
+                    for candidate_id, title in decision.candidates
+                ],
+                proposed_create_name=decision.proposed_create_name,
             )
-        elif outcome in ("propose_create", "no_databases"):
-            name = " ".join(destination.split())[:80]
-            return SaveToNotionResult(
-                spoken_confirmation=(
-                    f"I don't see a database like that in your Notion. "
-                    f"Want me to create one called {name}?"
-                ),
-                proposed_create_name=name,
-            )
+        data_source_id = decision.data_source_id
+        database_name = decision.database_name
 
     if not data_source_id:
-        return SaveToNotionResult(spoken_confirmation=_FAILURE_LINE)
+        return SaveToNotionResult(
+            spoken_confirmation=_FAILURE_LINE,
+            error_code="unresolved_destination",
+            idempotency_key=idempotency_key,
+        )
 
     try:
-        written = await _post_backend(
+        written = await post_backend(
             "/notion/write",
             {
                 "data_source_id": data_source_id,
@@ -246,7 +306,11 @@ async def execute_notion_capture(
             timeout_s=_WRITE_TIMEOUT_S,
         )
     except _ReauthorizationRequired:
-        return SaveToNotionResult(spoken_confirmation=_RECONNECT_LINE)
+        return SaveToNotionResult(
+            spoken_confirmation=_RECONNECT_LINE,
+            error_code="reauthorization_required",
+            idempotency_key=idempotency_key,
+        )
     except Exception as exc:
         logger.error(
             "notion_capture: write failed",
@@ -257,7 +321,11 @@ async def execute_notion_capture(
                 "error": str(exc),
             },
         )
-        return SaveToNotionResult(spoken_confirmation=_FAILURE_LINE)
+        return SaveToNotionResult(
+            spoken_confirmation=_FAILURE_LINE,
+            error_code="write_failed",
+            idempotency_key=idempotency_key,
+        )
 
     saved_name = str(written.get("database_name") or database_name or "Notion")
     dropped = [str(name) for name in written.get("dropped_fields", [])]
@@ -309,7 +377,7 @@ async def execute_notion_undo(
     idempotency_key: str,
 ) -> bool:
     try:
-        result = await _post_backend(
+        result = await post_backend(
             "/notion/undo",
             {"idempotency_key": idempotency_key},
             firebase_id_token=firebase_id_token,

@@ -121,6 +121,10 @@ from .voice.draft_outbound import (
 from .voice.emotion_tags import convert_audio_cue_stream
 from .voice.greeting import resolve_opener
 from .voice.guide_control import SPOKEN_GUIDE_REQUEST_FAILED, request_guide_mode
+from .voice.screen_context_control import (
+    SPOKEN_ENABLE_REQUEST_FAILED,
+    request_screen_context,
+)
 from .voice.interview import InterviewSupervisorAgent, VoiceSessionState
 from .voice.point_tag import PointTarget, filter_point_tags, publish_element_point
 from .voice.screen_context_stream import (
@@ -1915,6 +1919,42 @@ class BuddyAgent(agents.Agent):
             ),
         )
 
+    @function_tool
+    async def enable_screen_context(self) -> dict[str, object]:
+        """Ask the Aura desktop app to turn screen sharing on, when the user
+        wants Buddy to see their screen and screen sharing is currently off
+        (e.g. after Buddy said it can't see the screen and the user agrees to
+        enable it). The desktop shows the user a confirmation prompt; only
+        their click enables anything, so this call is a request, never the
+        change itself.
+
+        Do NOT call it when the user merely asks whether Buddy can see the
+        screen, or when screen sharing is already working this session.
+        The returned confirmation is the exact wording to speak.
+        """
+        span = start_tool_span(
+            tool_name="enable_screen_context", source="voice", uid=self._user_id
+        )
+        try:
+            spoken_reply = await request_screen_context(
+                user_id=self._user_id, session_id=self._session_id
+            )
+        except Exception as exc:
+            span.finish(success=False, error_type=type(exc).__name__)
+            raise
+        span.finish()
+        return action_truth_envelope(
+            ok=spoken_reply != SPOKEN_ENABLE_REQUEST_FAILED,
+            say=spoken_reply,
+            render_mode="verbatim",
+            render_channel="voice",
+            then=(
+                "Speak only `say`. This confirms a request to the desktop, not "
+                "that screen sharing is already on; the user still has to "
+                "approve the prompt."
+            ),
+        )
+
     def _refresh_tool_catalog(self, tools: list) -> ToolCatalog:
         candidate = ToolCatalog.from_livekit_tools(tools)
         if self._tool_catalog is None or candidate.fingerprint != self._tool_catalog.fingerprint:
@@ -2382,6 +2422,84 @@ class BuddyAgent(agents.Agent):
             "render": {"mode": "verbatim", "channel": "voice"},
         }
 
+    async def _run_finalized_notion_action(
+        self,
+        finalized_message_id: str,
+        *,
+        lock: asyncio.Lock,
+        cache: dict,
+        tool_name: str,
+        call_id_prefix: str,
+        coro_factory,
+        success_of,
+        fallback_factory,
+        on_result,
+        recorder_payload,
+    ):
+        """The exactly-once skeleton both deterministic Notion actions share.
+
+        Lock + per-finalized-message cache (bounded LRU), telemetry emit, tool
+        span, a shielded task that survives speech-generation cancellation (a
+        write authorized at final STT must complete and keep its receipt), the
+        action-telemetry execution record, the voice action receipt, and the
+        CancelledError re-raise. Everything action-specific arrives as a
+        callback, so a fix to this ordering can never again apply to one tool
+        and miss the other.
+        """
+        async with lock:
+            cached = cache.get(finalized_message_id)
+            if cached is not None:
+                return cached
+
+            self._action_telemetry.emitted(tool_name, "deterministic_finalized_speech")
+            span = start_tool_span(tool_name=tool_name, source="voice", uid=self._user_id)
+            action_task = asyncio.create_task(
+                coro_factory(),
+                name=f"{call_id_prefix}-{self._session_id[:8]}",
+            )
+            generation_cancelled = False
+            try:
+                try:
+                    result = await asyncio.shield(action_task)
+                except asyncio.CancelledError:
+                    generation_cancelled = True
+                    result = await action_task
+            except Exception as exc:
+                span.finish(success=False, error_type=type(exc).__name__)
+                logger.error(
+                    f"VoiceSession: {tool_name} failed",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                result = fallback_factory()
+            else:
+                span.finish(success=success_of(result))
+
+            on_result(result)
+
+            latency_ms = self._action_telemetry.execution(
+                tool_name, success=success_of(result)
+            )
+            cache[finalized_message_id] = result
+            while len(cache) > 16:
+                cache.pop(next(iter(cache)))
+            recorder = self._direct_action_recorder
+            if recorder is not None:
+                recorder(
+                    name=tool_name,
+                    call_id=f"{call_id_prefix}:{finalized_message_id}",
+                    success=success_of(result),
+                    result=recorder_payload(result),
+                    latency_ms=latency_ms,
+                )
+            if generation_cancelled:
+                raise asyncio.CancelledError()
+            return result
+
     async def _execute_research_dispatch(
         self,
         finalized_message_id: str,
@@ -2392,62 +2510,13 @@ class BuddyAgent(agents.Agent):
         create_confirmed: bool,
     ) -> ResearchDispatchResult:
         """Dispatch one authorized research run exactly once per finalized message."""
-        async with self._research_dispatch_lock:
-            cached = self._research_dispatch_results.get(finalized_message_id)
-            if cached is not None:
-                return cached
+        confirmed_name = ""
+        if confirmed_database_id:
+            confirmed_name = self._research_candidates.get(confirmed_database_id, "")
+            if not confirmed_name:
+                confirmed_database_id = ""
 
-            self._action_telemetry.emitted(
-                "research_to_notion", "deterministic_finalized_speech"
-            )
-            confirmed_name = ""
-            if confirmed_database_id:
-                confirmed_name = self._research_candidates.get(confirmed_database_id, "")
-                if not confirmed_name:
-                    confirmed_database_id = ""
-
-            span = start_tool_span(
-                tool_name="research_to_notion", source="voice", uid=self._user_id
-            )
-            dispatch_task = asyncio.create_task(
-                dispatch_research_to_notion(
-                    uid=self._user_id,
-                    session_id=self._session_id,
-                    firebase_id_token=self._firebase_id_token,
-                    request=request,
-                    destination=destination,
-                    confirmed_data_source_id=confirmed_database_id,
-                    confirmed_database_name=confirmed_name,
-                    create_database_named=(destination if create_confirmed else ""),
-                ),
-                name=f"research-dispatch-{self._session_id[:8]}",
-            )
-            generation_cancelled = False
-            try:
-                try:
-                    result = await asyncio.shield(dispatch_task)
-                except asyncio.CancelledError:
-                    # A dispatch authorized at final STT must complete even if
-                    # the speech generation is interrupted.
-                    generation_cancelled = True
-                    result = await dispatch_task
-            except Exception as exc:
-                span.finish(success=False, error_type=type(exc).__name__)
-                logger.error(
-                    "VoiceSession: research dispatch failed",
-                    {
-                        "session_id": self._session_id,
-                        "user_id": self._user_id,
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                result = ResearchDispatchResult(
-                    spoken_confirmation="I couldn't start that research - try again?"
-                )
-            else:
-                span.finish(success=result.dispatched)
-
+        def _on_result(result: ResearchDispatchResult) -> None:
             if result.candidates:
                 self._research_candidates = dict(result.candidates)
             if result.dispatched and result.run_id:
@@ -2463,33 +2532,36 @@ class BuddyAgent(agents.Agent):
                     self._research_narrator = narrator
                 narrator.track(result.run_id, result.database_name or "your Notion")
 
-            latency_ms = self._action_telemetry.execution(
-                "research_to_notion", success=result.dispatched
-            )
-            self._research_dispatch_results[finalized_message_id] = result
-            while len(self._research_dispatch_results) > 16:
-                self._research_dispatch_results.pop(
-                    next(iter(self._research_dispatch_results))
-                )
-            recorder = self._direct_action_recorder
-            if recorder is not None:
-                recorder(
-                    name="research_to_notion",
-                    call_id=f"research-dispatch:{finalized_message_id}",
-                    success=result.dispatched,
-                    result={
-                        "run_id": result.run_id,
-                        "database_name": result.database_name,
-                        "asked_question": bool(
-                            result.candidates or result.proposed_create_name
-                        ),
-                        "say": result.spoken_confirmation,
-                    },
-                    latency_ms=latency_ms,
-                )
-            if generation_cancelled:
-                raise asyncio.CancelledError()
-            return result
+        return await self._run_finalized_notion_action(
+            finalized_message_id,
+            lock=self._research_dispatch_lock,
+            cache=self._research_dispatch_results,
+            tool_name="research_to_notion",
+            call_id_prefix="research-dispatch",
+            coro_factory=lambda: dispatch_research_to_notion(
+                uid=self._user_id,
+                session_id=self._session_id,
+                firebase_id_token=self._firebase_id_token,
+                request=request,
+                destination=destination,
+                confirmed_data_source_id=confirmed_database_id,
+                confirmed_database_name=confirmed_name,
+                create_database_named=(destination if create_confirmed else ""),
+            ),
+            success_of=lambda result: result.dispatched,
+            fallback_factory=lambda: ResearchDispatchResult(
+                spoken_confirmation="I couldn't start that research - try again?"
+            ),
+            on_result=_on_result,
+            recorder_payload=lambda result: {
+                "run_id": result.run_id,
+                "database_name": result.database_name,
+                "asked_question": bool(
+                    result.candidates or result.proposed_create_name
+                ),
+                "say": result.spoken_confirmation,
+            },
+        )
 
     async def close_research_narrator(self) -> None:
         """Entrypoint-shutdown hook, called next to guide.close()."""
@@ -2507,95 +2579,51 @@ class BuddyAgent(agents.Agent):
         create_confirmed: bool,
     ) -> SaveToNotionResult:
         """Execute one authorized Notion capture exactly once per finalized message."""
-        async with self._notion_capture_lock:
-            cached = self._notion_capture_results.get(finalized_message_id)
-            if cached is not None:
-                return cached
-
-            self._action_telemetry.emitted("save_to_notion", "deterministic_finalized_speech")
-
-            # Screen input: structured tree first (redacted values already
-            # withheld upstream), JPEG fallback otherwise (A4: honest scoping).
-            structured_text: str | None = None
-            structured_snapshot_id = ""
-            if self._screen_context is not None:
-                try:
-                    context = self._screen_context.latest_for_save()
-                except Exception:
-                    context = None
-                if context is not None and getattr(context, "rendered", ""):
-                    structured_text = context.rendered
-                    structured_snapshot_id = context.turn_context_id
-            frame = None
-            if structured_text is None and self._screen_frames is not None:
-                try:
-                    frame = await self._screen_frames.latest_for_save()
-                except Exception as exc:
-                    logger.warn(
-                        "VoiceSession: retained frame lookup failed for notion capture",
-                        {
-                            "session_id": self._session_id,
-                            "user_id": self._user_id,
-                            "error": str(exc),
-                        },
-                    )
-
-            # The confirmed id must be one this session actually offered; a
-            # hallucinated or stale id has no receipt-side meaning.
-            confirmed_name = ""
-            if confirmed_database_id:
-                confirmed_name = self._notion_candidates.get(confirmed_database_id, "")
-                if not confirmed_name:
-                    confirmed_database_id = ""
-
-            span = start_tool_span(
-                tool_name="save_to_notion", source="voice", uid=self._user_id
-            )
-            capture_task = asyncio.create_task(
-                execute_notion_capture(
-                    uid=self._user_id,
-                    session_id=self._session_id,
-                    finalized_message_id=finalized_message_id,
-                    firebase_id_token=self._firebase_id_token,
-                    intent=intent,
-                    destination=destination,
-                    confirmed_data_source_id=confirmed_database_id,
-                    confirmed_database_name=confirmed_name,
-                    create_database_named=(destination if create_confirmed else ""),
-                    structured_text=structured_text,
-                    structured_snapshot_id=structured_snapshot_id,
-                    jpeg_bytes=frame.jpeg_bytes if frame is not None else None,
-                    frame_id=frame.frame_id if frame is not None else "",
-                ),
-                name=f"notion-save-{self._session_id[:8]}",
-            )
-            generation_cancelled = False
+        # Screen input: structured tree first (redacted values already
+        # withheld upstream), JPEG fallback otherwise (A4: honest scoping).
+        structured_text: str | None = None
+        structured_snapshot_id = ""
+        if self._screen_context is not None:
             try:
-                try:
-                    result = await asyncio.shield(capture_task)
-                except asyncio.CancelledError:
-                    # An interruption may cancel the speech generation, but a
-                    # write authorized at final STT must still complete and
-                    # keep its receipt.
-                    generation_cancelled = True
-                    result = await capture_task
+                context = self._screen_context.latest_for_save()
             except Exception as exc:
-                span.finish(success=False, error_type=type(exc).__name__)
-                logger.error(
-                    "VoiceSession: notion capture failed",
+                context = None
+                # Silently degrading to the JPEG path (or "I can't see your
+                # screen") without a trace made this store unfalsifiable.
+                logger.warn(
+                    "VoiceSession: structured context lookup failed for notion capture",
                     {
                         "session_id": self._session_id,
                         "user_id": self._user_id,
                         "error": str(exc),
-                        "error_type": type(exc).__name__,
                     },
                 )
-                result = SaveToNotionResult(
-                    spoken_confirmation="Something went wrong saving that to Notion - try again?"
+            if context is not None and getattr(context, "rendered", ""):
+                structured_text = context.rendered
+                structured_snapshot_id = context.turn_context_id
+        frame = None
+        if structured_text is None and self._screen_frames is not None:
+            try:
+                frame = await self._screen_frames.latest_for_save()
+            except Exception as exc:
+                logger.warn(
+                    "VoiceSession: retained frame lookup failed for notion capture",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "error": str(exc),
+                    },
                 )
-            else:
-                span.finish(success=result.saved)
 
+        # The confirmed id must be one this session actually offered; a
+        # hallucinated or stale id has no receipt-side meaning.
+        confirmed_name = ""
+        if confirmed_database_id:
+            confirmed_name = self._notion_candidates.get(confirmed_database_id, "")
+            if not confirmed_name:
+                confirmed_database_id = ""
+
+        def _on_result(result: SaveToNotionResult) -> None:
             if result.candidates:
                 self._notion_candidates = {
                     candidate.data_source_id: candidate.title
@@ -2604,34 +2632,50 @@ class BuddyAgent(agents.Agent):
             if result.saved and result.idempotency_key:
                 self._last_notion_receipt_key = result.idempotency_key
 
-            latency_ms = self._action_telemetry.execution(
-                "save_to_notion", success=result.saved
-            )
-            self._notion_capture_results[finalized_message_id] = result
-            while len(self._notion_capture_results) > 16:
-                self._notion_capture_results.pop(next(iter(self._notion_capture_results)))
-            recorder = self._direct_action_recorder
-            if recorder is not None:
-                recorder(
-                    name="save_to_notion",
-                    call_id=f"notion-capture:{finalized_message_id}",
-                    success=result.saved,
-                    result={
-                        "database_name": result.database_name,
-                        "page_url": result.page_url,
-                        "idempotency_key": result.idempotency_key,
-                        "dropped_fields": result.dropped_fields,
-                        "already_saved": result.already_saved,
-                        "asked_question": bool(
-                            result.candidates or result.proposed_create_name
-                        ),
-                        "say": result.spoken_confirmation,
-                    },
-                    latency_ms=latency_ms,
-                )
-            if generation_cancelled:
-                raise asyncio.CancelledError()
-            return result
+        return await self._run_finalized_notion_action(
+            finalized_message_id,
+            lock=self._notion_capture_lock,
+            cache=self._notion_capture_results,
+            tool_name="save_to_notion",
+            call_id_prefix="notion-capture",
+            coro_factory=lambda: execute_notion_capture(
+                uid=self._user_id,
+                session_id=self._session_id,
+                finalized_message_id=finalized_message_id,
+                firebase_id_token=self._firebase_id_token,
+                intent=intent,
+                destination=destination,
+                confirmed_data_source_id=confirmed_database_id,
+                confirmed_database_name=confirmed_name,
+                create_database_named=(destination if create_confirmed else ""),
+                structured_text=structured_text,
+                structured_snapshot_id=structured_snapshot_id,
+                jpeg_bytes=frame.jpeg_bytes if frame is not None else None,
+                frame_id=frame.frame_id if frame is not None else "",
+                screen_unavailable_reason=(
+                    self._screen_context.unavailable_reason()
+                    if self._screen_context is not None
+                    else ""
+                ),
+            ),
+            success_of=lambda result: result.saved,
+            fallback_factory=lambda: SaveToNotionResult(
+                spoken_confirmation="Something went wrong saving that to Notion - try again?"
+            ),
+            on_result=_on_result,
+            recorder_payload=lambda result: {
+                "database_name": result.database_name,
+                "page_url": result.page_url,
+                "idempotency_key": result.idempotency_key,
+                "error_code": result.error_code,
+                "dropped_fields": result.dropped_fields,
+                "already_saved": result.already_saved,
+                "asked_question": bool(
+                    result.candidates or result.proposed_create_name
+                ),
+                "say": result.spoken_confirmation,
+            },
+        )
 
     async def llm_node(
         self,

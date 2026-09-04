@@ -381,6 +381,10 @@ FAIL_PROVIDER_UNAVAILABLE = "provider_unavailable"
 # the brief exists and the user keeps it; only the delivery is what failed.
 FAIL_DELIVERY_FAILED = "delivery_failed"
 FAIL_DELIVERY_REAUTH = "delivery_reauthorization_required"
+# Notion rejected the delivery request body as invalid (4xx other than auth or
+# rate limit). Permanent: the identical retry gets the identical rejection, so
+# the deliver stage completes with this code instead of burning its attempts.
+FAIL_DELIVERY_REJECTED = "delivery_rejected"
 
 # --- machine codes the desktop client matches on -------------------------------
 # Mirrors the existing meeting cap contract shape: an HTTP status plus

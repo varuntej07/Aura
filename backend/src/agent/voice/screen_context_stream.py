@@ -366,6 +366,9 @@ class StructuredContextStore:
         self._assembly_tasks = AssemblyTasks()
         self._context_listener: Callable[[StructuredContext], None] | None = None
         self._received_count = 0
+        # Freshest client-reported capture-unavailable signal, as
+        # (received_at_monotonic, reason). See screen_context_control.
+        self._unavailable: tuple[float, str] | None = None
 
     @property
     def received_count(self) -> int:
@@ -509,3 +512,29 @@ class StructuredContextStore:
         """Record that a turn already carries this snapshot, so no later turn
         re-attaches the same one."""
         self._consumed.remember(turn_context_id)
+
+    def note_unavailable(self, reason: str) -> None:
+        """Record the client's capture-skipped signal for this turn window."""
+        from .screen_context_control import normalize_reason
+
+        normalized = normalize_reason(str(reason or ""))
+        self._unavailable = (time.monotonic(), normalized)
+        logger.info(
+            "VoiceSession: screen context reported unavailable",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "reason": normalized,
+            },
+        )
+
+    def unavailable_reason(self, max_age_s: float = 30.0) -> str:
+        """The freshest client-reported skip reason, or "" when none is
+        current. Bounded slightly wider than one spoken turn: the signal is
+        sent at turn start and consulted when a save tool runs."""
+        if self._unavailable is None:
+            return ""
+        received_at, reason = self._unavailable
+        if (time.monotonic() - received_at) > max_age_s:
+            return ""
+        return reason

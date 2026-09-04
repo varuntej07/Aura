@@ -96,6 +96,22 @@ async def run(ctx: StageContext) -> StageResult:
                 if database_name
                 else "Saved to your Notion."
             )
+        elif delivery_result.get("delivered_unreceipted"):
+            # The page provably landed but its receipt write failed at the
+            # attempt cap. Claiming failure would be a lie over a real page;
+            # claiming a clean save would overstate what is proven.
+            body = (
+                f"Saved to {database_name} in your Notion."
+                if database_name
+                else "Saved to your Notion."
+            ) + " Open Aura if anything looks off."
+        elif not delivery_result:
+            # The run went terminal on a path that never reached the deliver
+            # stage (fail_stage's generic terminal mints notify directly, and
+            # only finalize routes through notion_deliver). Blaming Notion for
+            # an attempt that never happened is a false failure claim; the
+            # generic state copy above already says what is true.
+            pass
         else:
             body = (
                 "Research finished, but saving to Notion failed. "

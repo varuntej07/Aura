@@ -356,6 +356,20 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             concurrent=False,
         ),
         _tool(
+            # Requests the desktop to turn screen-context sharing on, mirroring
+            # set_guide_mode's shape: SESSION_CONTROL, desktop is the sole
+            # authority (it shows an explicit consent prompt; only the user's
+            # click flips the setting). Exposed so Buddy's "I can't see your
+            # screen because sharing is off" line has a real next step behind
+            # it instead of a settings scavenger hunt.
+            "enable_screen_context",
+            Capability.SCREEN_SAVE,
+            ToolEffect.SESSION_CONTROL,
+            namespace="desktop.screen",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+        ),
+        _tool(
             # Saves what is on screen as a structured record in the user's own
             # Notion, when the utterance names or implies a Notion destination.
             # Like save_screen_item, no fresh frame is required: the capture

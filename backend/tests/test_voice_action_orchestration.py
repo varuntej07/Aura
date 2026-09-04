@@ -375,6 +375,7 @@ def test_every_current_voice_tool_has_registry_metadata():
         "save_screen_item",
         "save_to_notion",
         "undo_notion_save",
+        "enable_screen_context",
         "research_to_notion",
         "answer_research_question",
         "cancel_research",

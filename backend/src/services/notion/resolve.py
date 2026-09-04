@@ -24,13 +24,16 @@ from dataclasses import dataclass, field
 
 from ...lib.logger import logger
 from ..notion_connector import NotionConnector
-from ..signal_engine.embedder import embed_text
+from ..signal_engine.embedder import embed_text, embed_texts
+from .cache_policy import CACHE_TTL_S as _CACHE_TTL_S
+from .cache_policy import evict_oldest_if_full
 
 BIND_THRESHOLD = 0.90
 ASK_THRESHOLD = 0.70
-_CACHE_TTL_S = 15 * 60
+# One /v1/search page. Deliberately also the total cap: a workspace with more
+# than 100 databases gets its first 100 by Notion's own relevance order, and
+# the resolve thresholds keep a wrong bind from being silent.
 _MAX_DATA_SOURCES = 100
-_SEARCH_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,32 +69,28 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _fetch_data_sources(connector: NotionConnector) -> list[tuple[str, str]]:
-    """All (data_source_id, title) pairs the integration can see."""
+    """The first _MAX_DATA_SOURCES (data_source_id, title) pairs, one search page.
+
+    /v1/search is a read: idempotent=True opts it into the connector's
+    transient-5xx retry alongside the always-on 429 handling.
+    """
+    body: dict = {
+        "filter": {"property": "object", "value": "data_source"},
+        "page_size": _MAX_DATA_SOURCES,
+    }
+    response = connector.authorized_request(
+        "POST", "/v1/search", json_body=body, idempotent=True
+    )
+    if response.status_code != 200:
+        raise ValueError(f"Notion search failed ({response.status_code})")
     results: list[tuple[str, str]] = []
-    cursor: str | None = None
-    while len(results) < _MAX_DATA_SOURCES:
-        body: dict = {
-            "filter": {"property": "object", "value": "data_source"},
-            "page_size": _SEARCH_PAGE_SIZE,
-        }
-        if cursor:
-            body["start_cursor"] = cursor
-        response = connector.authorized_request("POST", "/v1/search", json_body=body)
-        if response.status_code != 200:
-            raise ValueError(f"Notion search failed ({response.status_code})")
-        payload = response.json()
-        for item in payload.get("results", []) or []:
-            title = "".join(
-                str(part.get("plain_text") or "") for part in item.get("title", []) or []
-            ).strip()
-            item_id = str(item.get("id") or "")
-            if item_id and title:
-                results.append((item_id, title))
-        if not payload.get("has_more"):
-            break
-        cursor = payload.get("next_cursor")
-        if not cursor:
-            break
+    for item in response.json().get("results", []) or []:
+        title = "".join(
+            str(part.get("plain_text") or "") for part in item.get("title", []) or []
+        ).strip()
+        item_id = str(item.get("id") or "")
+        if item_id and title:
+            results.append((item_id, title))
     return results[:_MAX_DATA_SOURCES]
 
 
@@ -103,10 +102,16 @@ async def _titles_with_embeddings(
         return cached[1]
 
     pairs = await asyncio.to_thread(_fetch_data_sources, connector)
-    entries: list[tuple[str, str, list[float]]] = []
-    for data_source_id, title in pairs:
-        entries.append((data_source_id, title, await embed_text(title)))
+    # ONE batch embed call for every title. Sequential per-title embedding here
+    # once cost up to len(pairs) round trips inside the voice worker's 15s
+    # resolve budget, which made a cold cache unusable past ~30 databases.
+    vectors = await embed_texts([title for _, title in pairs])
+    entries = [
+        (data_source_id, title, vector)
+        for (data_source_id, title), vector in zip(pairs, vectors)
+    ]
     _TITLE_CACHE[uid] = (time.monotonic(), entries)
+    evict_oldest_if_full(_TITLE_CACHE)
     return entries
 
 

@@ -58,6 +58,10 @@ class SweepReport:
     stale_stages_recovered: int = 0
     stale_stages_terminal: int = 0
     clarifications_expired: int = 0
+    # Split from clarifications_expired on purpose: "cancelled on timeout" and
+    # "resumed on stated defaults" are opposite user outcomes and conflating
+    # them made the sweep metric unreadable.
+    clarifications_resumed_default: int = 0
     coords_collapsed: int = 0
     deletions_advanced: int = 0
     deletions_completed: int = 0
@@ -70,6 +74,7 @@ class SweepReport:
             "stale_stages_recovered": self.stale_stages_recovered,
             "stale_stages_terminal": self.stale_stages_terminal,
             "clarifications_expired": self.clarifications_expired,
+            "clarifications_resumed_default": self.clarifications_resumed_default,
             "coords_collapsed": self.coords_collapsed,
             "deletions_advanced": self.deletions_advanced,
             "deletions_completed": self.deletions_completed,
@@ -466,13 +471,24 @@ async def _pass_clarification_expiry(report: SweepReport, now: datetime) -> None
             try:
                 uid = snap.reference.parent.parent.id
             except Exception:
+                # A row whose path cannot yield a uid would be skipped by this
+                # sweep FOREVER; that is an error, not routine, and zero-rows
+                # and broken-rows must never look identical.
+                rows.append(("", str(snap.reference.path)))
                 continue
             rows.append((uid, str(data.get(F.RUN_ID, snap.id))))
         return rows
 
     for uid, run_id in await asyncio.to_thread(_query):
+        if not uid:
+            report.errors += 1
+            logger.error(
+                "research.sweep: clarification row has no derivable uid",
+                {"doc_path": run_id},
+            )
+            continue
         try:
-            expired = await _expire_clarification(uid, run_id, now_iso)
+            outcome = await _expire_clarification(uid, run_id, now_iso)
         except Exception as exc:
             report.errors += 1
             logger.error(
@@ -480,7 +496,9 @@ async def _pass_clarification_expiry(report: SweepReport, now: datetime) -> None
                 {"run_id": run_id, "error": str(exc)},
             )
             continue
-        if expired:
+        if outcome == "resumed":
+            report.clarifications_resumed_default += 1
+        elif outcome == "cancelled":
             report.clarifications_expired += 1
 
 
@@ -490,6 +508,12 @@ async def _apply_default_answer(uid: str, run_id: str, run: dict[str, Any]) -> b
     Routed through engine.signal("answer") - the identical path a spoken or
     typed answer takes - so the idempotent state checks and the inline resume
     delivery are the same machinery, not a sweep-only copy of it.
+
+    Note the intended interaction with the round cap: the resumed answer
+    appends to clarification_answers, so classify_plan's round counter
+    advances, and a resumed run that would immediately ask AGAIN instead hits
+    MAX_CLARIFICATION_ROUNDS and proceeds on its stated defaults. An expired
+    question can therefore never loop.
     """
     pending = dict(run.get(F.PENDING_QUESTION) or {})
     question_id = str(pending.get("question_id") or "")
@@ -514,12 +538,15 @@ async def _apply_default_answer(uid: str, run_id: str, run: dict[str, Any]) -> b
     return str(getattr(status, "state", "")) != F.STATE_AWAITING_CLARIFICATION
 
 
-async def _expire_clarification(uid: str, run_id: str, now_iso: str) -> bool:
-    # Defaults first: the classifier guarantees every question ships with
-    # default_assumptions, so the resume path is the normal outcome and the
-    # cancel below survives only for malformed questions. answer_clarification
-    # is transactional and re-checks state, so a user answering in this exact
-    # window wins harmlessly.
+async def _expire_clarification(uid: str, run_id: str, now_iso: str) -> str:
+    """Returns "resumed", "cancelled", or "" (nothing to do).
+
+    Defaults first: the classifier guarantees every question ships with
+    default_assumptions, so the resume path is the normal outcome and the
+    cancel below survives only for malformed questions. answer_clarification
+    is transactional and re-checks state, so a user answering in this exact
+    window wins harmlessly.
+    """
     run_doc = await store.get_run(uid, run_id) or {}
     if run_doc.get(F.STATE) == F.STATE_AWAITING_CLARIFICATION:
         try:
@@ -528,7 +555,7 @@ async def _expire_clarification(uid: str, run_id: str, now_iso: str) -> bool:
                     "research.sweep: expired clarification resumed on defaults",
                     {"run_id": run_id},
                 )
-                return True
+                return "resumed"
         except Exception as exc:
             logger.warn(
                 "research.sweep: default-answer resume failed, cancelling",
@@ -580,7 +607,8 @@ async def _expire_clarification(uid: str, run_id: str, now_iso: str) -> bool:
 
         return _execute(transaction)
 
-    return await asyncio.to_thread(_run)
+    cancelled = await asyncio.to_thread(_run)
+    return "cancelled" if cancelled else ""
 
 
 async def _pass_stuck_fanout(report: SweepReport, now: datetime) -> None:

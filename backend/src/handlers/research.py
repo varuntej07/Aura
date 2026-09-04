@@ -13,8 +13,9 @@ instruction:
   the recovery path, not the retry.
 * **200 on a terminal or cancelled run.** Late tasks are expected and harmless. Terminal
   research states are absorbing, so the stage does no provider work.
-* **500 only when a retry could genuinely help**, because the queue's maxAttempts is 3
-  and each attempt can spend real provider budget.
+* **500 only when a retry could genuinely help**, because the queue's maxAttempts is 2
+  (deploy.sh pins it, matching store.STAGE_ATTEMPT_CAP) and each attempt can spend real
+  provider budget.
 """
 
 from __future__ import annotations

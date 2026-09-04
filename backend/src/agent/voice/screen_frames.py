@@ -48,6 +48,11 @@ _MAX_FRAME_BYTES = 2_000_000
 # never injected. The client captures per turn, so a fresh frame normally exists.
 _FRAME_MAX_AGE_S = 15.0
 
+# Save-path staleness bound, looser than injection on purpose: an explicit
+# "save this" may reach back a couple of spoken turns, but never to a screen
+# from minutes ago (see latest_for_save).
+_SAVE_MAX_AGE_S = 60.0
+
 # Long-edge cap applied HERE rather than trusting the client to have done it.
 # Desktop is supposed to send a 1280-long-edge JPEG, but a real session was
 # observed shipping 2880x1800, which is ~2.5k vision tokens on every single turn
@@ -432,9 +437,28 @@ class ScreenFrameStore:
         bytes remain the last screen Buddy actually saw and may be persisted when
         the user explicitly asks. The cache is memory-only and is cleared at
         session shutdown.
+
+        Save availability is still AGE-bounded, more loosely than injection:
+        "add this to Notion" minutes after the relevant screen was replaced
+        must not silently persist the older screen (the only path on macOS,
+        where pixels are the sole capture). Mirrors the structured store's
+        latest_for_save bound.
         """
         await self._wait_for_inflight_frame()
-        return self._latest
+        frame = self._latest
+        if frame is None:
+            return None
+        if frame.age_seconds > _SAVE_MAX_AGE_S:
+            logger.info(
+                "VoiceSession: screen frame too stale for save",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "age_s": round(frame.age_seconds, 1),
+                },
+            )
+            return None
+        return frame
 
     async def _wait_for_inflight_frame(self) -> None:
         if self._inflight_count <= 0:
