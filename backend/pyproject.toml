@@ -11,6 +11,11 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
 
+    # Apple In-App Purchase — verifies the signed JWS payloads StoreKit and the
+    # App Store server send. Apple's own library rather than hand-rolled x5c
+    # chain walking, because a forged payload here is a free subscription.
+    "app-store-server-library>=3.1.2",
+
     # Validation & config
     "pydantic>=2.11",
     "pydantic-settings>=2.7",

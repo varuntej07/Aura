@@ -156,13 +156,25 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
 - **GDPR gate:** `user_aura_extractor.py` reads `users/{uid}.aura_consent_granted`
   before every extraction. Explicit `false` blocks it; an absent field (legacy
   accounts) does not.
-- **Payments are web checkout only, in every country.** Dodo Payments is the
-  merchant of record; there is no IAP and no storefront or country gating of the
-  paywall. Never add a country branch, blocklist, or `STEERING_*`-style config
-  that can decide who may buy: sanctions and local tax are the merchant of
-  record's job, and a Dodo decline is the correct outcome. The only thing that
-  suppresses purchase UI is `checkout_available` (Dodo credentials present) and
-  the 45-day trial. Plan and price constants live in `subscription_plan.dart`.
+- **Payments split by platform, never by country.** iOS sells through StoreKit
+  In-App Purchase because Guideline 3.1.1 leaves no other durable option; every
+  other surface sells through Dodo web checkout, where Dodo is the merchant of
+  record. **Platform is the only permitted branch.** Never add a country branch,
+  blocklist, storefront check, or `STEERING_*`-style config that can decide who
+  may buy: sanctions and local tax are the merchant of record's job, and a Dodo
+  decline is the correct outcome.
+  - On iOS the paywall renders StoreKit products at the store-localized price and
+    must not show a price constant, a web checkout button, or any pointer to
+    auravoiceapp.com for buying. Restore Purchases and Manage Subscription are
+    required there.
+  - Everywhere else the only things that suppress purchase UI are
+    `checkout_available` (Dodo credentials present) and the 45-day trial.
+  - Both paths write the same `users/{uid}/entitlement/current` doc and are told
+    apart by its `source` field (`web` or `apple`). Neither may expire or
+    downgrade a subscription the other owns, so every staleness and terminal-state
+    decision in `services/billing.py` reads `source` first.
+  - Plan and price constants live in `subscription_plan.dart` and remain the
+    source of truth for the non-iOS surfaces only.
 - **Never state a cost is negligible.** Reason about scaling to hundreds of
   users, not today's dollar amount.
 

@@ -73,8 +73,27 @@ class SubscriptionService extends ChangeNotifier {
 
   bool get hasFeatureAccess => _entitlement?.hasFeatureAccess ?? false;
 
+  /// Whether this surface may offer the Dodo web checkout at all.
+  ///
+  /// False on iOS, always. App Store Guideline 3.1.1 forbids sending users to an
+  /// outside payment page for digital content. The carve-out that currently
+  /// permits it applies only to the United States storefront, exists because of
+  /// the Epic injunction, and is still under Supreme Court review. Aura ships to
+  /// every storefront, so the path cannot exist here at all. iOS sells through
+  /// StoreKit instead.
+  ///
+  /// This is a PLATFORM branch and must never become a country or storefront
+  /// branch. Sanctions and local tax are the merchant of record's job, and a
+  /// Dodo decline is the correct outcome.
+  ///
+  /// It lives here rather than in the UI so that [openCheckout] inherits it: a
+  /// future screen cannot reintroduce the link-out by forgetting a check.
+  static bool get webCheckoutSupportedOnPlatform =>
+      kIsWeb || defaultTargetPlatform != TargetPlatform.iOS;
+
   bool get canPurchaseSubscription =>
-      _entitlement?.canPurchaseSubscription ?? false;
+      webCheckoutSupportedOnPlatform &&
+      (_entitlement?.canPurchaseSubscription ?? false);
 
   /// Whether the backend can actually create a checkout session. Serving this
   /// from the backend is what lets payments be switched on by configuration

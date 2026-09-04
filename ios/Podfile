@@ -1,6 +1,15 @@
-platform :ios, '13.0'
+platform :ios, '15.0'
 
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+# No ad attribution ships in this app. The default FirebaseAnalytics pod resolves
+# GoogleAppMeasurement/Default, whose iOS dependencies are GoogleAdsOnDeviceConversion
+# and GoogleAppMeasurement/IdentitySupport - the IDFA path. Linking those obliges an
+# App Tracking Transparency prompt for a capability the product does not use, and the
+# developer is answerable for a linked SDK's tracking behaviour even without calling
+# the API. This global is FlutterFire's supported switch: firebase_analytics.podspec
+# reads it and depends on FirebaseAnalytics/Core instead, which pulls neither.
+$FirebaseAnalyticsWithoutAdIdSupport = true
 
 project 'Runner', {
   'Debug' => :debug,
@@ -32,6 +41,11 @@ require File.expand_path(
 flutter_ios_podfile_setup
 
 target 'Runner' do
+  # Required by livekit_client: it is a Swift pod that depends on flutter_webrtc,
+  # which does not define modules. Matches the livekit_client example Podfile.
+  use_frameworks!
+  use_modular_headers!
+
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
   target 'RunnerTests' do
@@ -39,8 +53,42 @@ target 'Runner' do
   end
 end
 
+# Every permission handler except the one the app actually uses. Keep this list in
+# sync with `grep -r "Permission\." lib/` — today that is Permission.microphone and
+# nothing else. Camera and photo access go through image_picker, which needs only the
+# Info.plist purpose strings, not these handlers.
+PERMISSION_MACROS = %w[
+  PERMISSION_APP_TRACKING_TRANSPARENCY
+  PERMISSION_ASSISTANT
+  PERMISSION_BLUETOOTH
+  PERMISSION_CAMERA
+  PERMISSION_CONTACTS
+  PERMISSION_CRITICAL_ALERTS
+  PERMISSION_EVENTS
+  PERMISSION_EVENTS_FULL_ACCESS
+  PERMISSION_LOCATION
+  PERMISSION_LOCATION_ALWAYS
+  PERMISSION_LOCATION_WHENINUSE
+  PERMISSION_MEDIA_LIBRARY
+  PERMISSION_NOTIFICATIONS
+  PERMISSION_PHOTOS
+  PERMISSION_PHOTOS_ADD_ONLY
+  PERMISSION_REMINDERS
+  PERMISSION_SENSORS
+  PERMISSION_SPEECH_RECOGNIZER
+].freeze
+
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    target.build_configurations.each do |config|
+      existing = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS']
+      defs = Array(existing.is_a?(String) ? existing.split : existing)
+      defs = ['$(inherited)'] if defs.empty?
+      defs << 'PERMISSION_MICROPHONE=1'
+      PERMISSION_MACROS.each { |macro| defs << "#{macro}=0" }
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = defs.uniq
+    end
   end
 end

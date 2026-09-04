@@ -129,3 +129,4 @@ Desktop.ini
 .claude/settings.local.json
 .claude/agents/senior-code-reviewer.md
 .claude/agents/ui-engineer.md
+backend/.venv/

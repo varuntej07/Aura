@@ -513,6 +513,46 @@ class Settings(BaseSettings):
     # ships with Aura-Web (deep link back into the app + a plain fallback line).
     DODO_CHECKOUT_RETURN_URL: str = "https://auravoiceapp.com/checkout/success"
 
+    # Apple In-App Purchase — the iOS seller, and the only one there.
+    # App Store Guideline 3.1.1 forbids sending users to an outside payment page
+    # for digital content, so the Dodo web checkout is switched off on iOS in the
+    # client and StoreKit sells instead. Both write the same entitlement doc and
+    # are told apart by its `source` field.
+    #
+    # Nothing here is a secret. Apple's payloads are signed JWS verified against
+    # the Apple Root CA G3 certificate committed at src/resources/apple, so there
+    # is no shared secret to leak and no API key needed for this path.
+    #
+    # APPLE_IAP_APP_APPLE_ID is the numeric App Store id, issued when the app
+    # record is created. Apple's verifier requires it for the production
+    # environment, so production stays unconfigured until it is set, and the
+    # routes answer 503 rather than trusting an unverified payload.
+    APPLE_IAP_BUNDLE_ID: str = "com.varundevs.aura"
+    APPLE_IAP_ENVIRONMENT: str = "Production"
+    APPLE_IAP_APP_APPLE_ID: int = 0
+    # Product IDs are chosen by us and are immutable once created in App Store
+    # Connect, so unlike the Dodo IDs they are defaults rather than env config.
+    APPLE_PRODUCT_COMPANION_MONTHLY: str = "com.varundevs.aura.companion.monthly"
+    APPLE_PRODUCT_COMPANION_YEARLY: str = "com.varundevs.aura.companion.yearly"
+    APPLE_PRODUCT_PRO_MONTHLY: str = "com.varundevs.aura.pro.monthly"
+    APPLE_PRODUCT_PRO_YEARLY: str = "com.varundevs.aura.pro.yearly"
+
+    @property
+    def apple_iap_sandbox(self) -> bool:
+        return self.APPLE_IAP_ENVIRONMENT.strip().lower() == "sandbox"
+
+    @property
+    def apple_iap_configured(self) -> bool:
+        """True when Apple payloads can actually be verified.
+
+        Sandbox needs nothing but the bundle ID. Production additionally needs
+        the numeric app id, because Apple's verifier checks it and a payload we
+        cannot fully verify must never be applied to an entitlement.
+        """
+        if not self.APPLE_IAP_BUNDLE_ID:
+            return False
+        return self.apple_iap_sandbox or self.APPLE_IAP_APP_APPLE_ID > 0
+
     @property
     def dodo_configured(self) -> bool:
         """True when checkout can be created: API key plus all four product IDs."""

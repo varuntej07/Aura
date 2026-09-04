@@ -35,17 +35,21 @@ class SubscriptionViewModel extends SafeChangeNotifier {
   bool get isOnFreePlan =>
       currentTier == SubscriptionTier.free && !isTrialActive;
   bool get isPaid => _subscriptionService.entitlement?.isPaid ?? false;
-  /// Whether to render purchase UI at all. Two conditions, and both must hold:
+  /// Whether to render purchase UI at all. Three conditions, all must hold:
+  ///   * the platform allows a web checkout path at all. False on iOS, where
+  ///     Guideline 3.1.1 rules it out. The rule lives in [SubscriptionService]
+  ///     so that openCheckout enforces it too.
   ///   * [checkoutAvailable] — the backend can actually create a session.
   ///     Without this the app happily drew an Upgrade button while
   ///     POST /billing/checkout refused every request.
   ///   * the account is past its trial and not already paying.
-  ///
-  /// Country and storefront are deliberately absent: web checkout is offered
-  /// everywhere, and Dodo as merchant of record is what declines a payment it
-  /// may not accept.
   bool get canPurchaseSubscription =>
       checkoutAvailable && _subscriptionService.canPurchaseSubscription;
+
+  /// True where buying is not handled in this app, so the UI must describe plan
+  /// status rather than offer a way to purchase, cancel, or a website to do it on.
+  bool get purchaseHandledOffPlatform =>
+      !SubscriptionService.webCheckoutSupportedOnPlatform;
 
   bool get checkoutAvailable => _subscriptionService.checkoutAvailable;
 

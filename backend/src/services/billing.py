@@ -42,7 +42,13 @@ import httpx
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from .entitlement import entitlement_doc_ref, has_active_paid_subscription, normalize_status
+from .entitlement import (
+    SOURCE_WEB,
+    entitlement_doc_ref,
+    has_active_paid_subscription,
+    normalize_status,
+    source_may_apply_non_activating,
+)
 from .firebase import admin_auth
 
 _DODO_TIMEOUT_S = 15.0
@@ -511,6 +517,10 @@ def _is_stale(
          is idempotent); events with no parsable timestamp always apply.
       2. Superseded subscription: a subscription-scoped state event for a
          subscription the doc no longer tracks -> stale.
+
+    Ownership by a rival seller is deliberately NOT decided here: whether a write
+    grants or revokes access is a property of the computed write, not of the
+    event name, so that guard lives in [_apply_webhook_txn].
     """
     last = ent.get("last_billing_event_at")
     if occurred_at is not None and isinstance(last, datetime):
@@ -557,6 +567,21 @@ def _apply_webhook_txn(
         ent = ent_ref.get(transaction=txn).to_dict() or {}
         stale = _is_stale(ent, event_type, occurred_at, payload_subscription_id)
 
+        # Rival-seller guard. iOS sells through StoreKit, so this document may be
+        # owned by Apple. A write that GRANTS access may always land and takes
+        # ownership; a write that revokes or degrades it describes the web
+        # subscription only, and must not touch an entitlement Apple owns.
+        # Judged on the write, not the event name: `subscription.updated` can
+        # mean either, and blocking it wholesale would leave a live web
+        # subscriber on the free tier after their old App Store plan lapsed.
+        if (
+            not stale
+            and write is not None
+            and write.get("status") != "active"
+            and not source_may_apply_non_activating(ent, SOURCE_WEB)
+        ):
+            stale = True
+
         # A stale event still writes its claim: staleness is a final verdict,
         # a redelivery must not reprocess it.
         txn.set(claim_ref, {
@@ -569,6 +594,7 @@ def _apply_webhook_txn(
             txn.set(db.collection(collection).document(doc_id), doc, merge=True)
         if stale:
             return "stale"
+
         if write is not None:
             merged = dict(write)
             if occurred_at is not None:

@@ -31,6 +31,7 @@ import '../data/services/notification_service.dart';
 import '../data/services/posthog_analytics_service.dart';
 import '../data/services/voice_session_service.dart';
 import '../data/services/wake_word_service.dart';
+import '../data/services/store_purchase_service.dart';
 import '../data/services/subscription_service.dart';
 import '../presentation/viewmodels/auth_viewmodel.dart';
 import '../presentation/viewmodels/connectors_viewmodel.dart';
@@ -106,6 +107,14 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     apiClient: apiClient,
   );
 
+  // StoreKit is the seller on iOS, because Guideline 3.1.1 rules out the web
+  // checkout there. Inert on every other platform: initialize() returns
+  // immediately and no products are ever loaded.
+  final storePurchaseService = StorePurchaseService(
+    apiClient: apiClient,
+    onEntitlementChanged: subscriptionService.refreshEntitlement,
+  );
+
   // Domain repositories
   final authRepository = AuthRepository(
     authService: firebaseAuthService,
@@ -157,6 +166,9 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     ChangeNotifierProvider<SubscriptionService>.value(
       value: subscriptionService,
     ),
+    ChangeNotifierProvider<StorePurchaseService>.value(
+      value: storePurchaseService,
+    ),
 
     // Domain repositories
     Provider<AuthRepository>.value(value: authRepository),
@@ -174,6 +186,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
         notificationService: notificationService,
         backendApiService: backendApiService,
         subscriptionService: subscriptionService,
+        storePurchaseService: storePurchaseService,
         postHogAnalyticsService: postHogAnalyticsService,
       ),
     ),

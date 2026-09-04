@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/glass_card.dart';
@@ -9,6 +10,7 @@ import '../../../data/models/subscription_plan.dart';
 import '../../../data/services/app_feedback_service.dart';
 import '../../../data/services/notification_service.dart';
 import '../../../data/services/posthog_analytics_service.dart';
+import '../../../data/services/store_purchase_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/subscription_viewmodel.dart';
 
@@ -80,7 +82,13 @@ class _PaywallScreenState extends State<PaywallScreen>
 
   @override
   Widget build(BuildContext context) {
-    final activePricing = _pricingForPlan(_activePlan);
+    // On iOS StoreKit is the seller and the App Store's own localized price is
+    // what must be displayed, so the USD constants are used only off-iOS.
+    final store = context.watch<StorePurchaseService>();
+    final storePricing = StorePurchaseService.isStorePlatform
+        ? _storePricingForPlan(store, _activePlan)
+        : null;
+    final activePricing = storePricing ?? _pricingForPlan(_activePlan);
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -107,6 +115,8 @@ class _PaywallScreenState extends State<PaywallScreen>
                   padding: const EdgeInsets.fromLTRB(24, 4, 24, 32),
                   child: Consumer<SubscriptionViewModel>(
                     builder: (context, vm, _) {
+                      final storeCanPurchase =
+                          storePricing != null && store.isAvailable && !vm.isPaid;
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
@@ -165,10 +175,14 @@ class _PaywallScreenState extends State<PaywallScreen>
                           ),
                           const SizedBox(height: 24),
 
-                          // Purchase UI appears once the free trial has ended
-                          // and Dodo is configured, in every country. Trial and
-                          // paid accounts see plan status only.
-                          if (vm.canPurchaseSubscription) ...[
+                          // Two sellers, one screen. Off iOS, purchase UI
+                          // appears once the trial has ended and Dodo is
+                          // configured, in every country. On iOS StoreKit sells
+                          // and the products must stay reachable during the
+                          // trial too, because App Review has to be able to
+                          // exercise the in-app purchase to approve it.
+                          if (vm.canPurchaseSubscription ||
+                              storeCanPurchase) ...[
                             // Side-by-side billing cards
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -209,16 +223,37 @@ class _PaywallScreenState extends State<PaywallScreen>
                             ),
                             const SizedBox(height: 28),
 
-                            // CTA: checkout happens on the web, in the system
-                            // browser. This device unlocks by push or refetch.
+                            // CTA. On iOS this is a StoreKit purchase sheet;
+                            // everywhere else checkout happens in the system
+                            // browser and the device unlocks by push or refetch.
                             if (_activePlan != _PlanToggle.free) ...[
                               _CtaButton(
-                                label: _activePlan == _PlanToggle.pro
-                                    ? 'Upgrade on the web · Pro'
-                                    : 'Upgrade on the web · Companion',
-                                isLoading: vm.isLoading,
-                                onTap: () => _onSubscribe(context, vm),
+                                label: _ctaLabel(
+                                  onStore: storeCanPurchase,
+                                  plan: _activePlan,
+                                ),
+                                isLoading: vm.isLoading || store.isPurchasing,
+                                onTap: () => storeCanPurchase
+                                    ? _onStoreSubscribe(context, store)
+                                    : _onSubscribe(context, vm),
                               ),
+                              // Both are required by App Review on any screen
+                              // that sells a subscription: someone who
+                              // reinstalled needs their plan back without
+                              // paying twice, and a subscriber must be able to
+                              // reach Apple's own cancel and manage sheet.
+                              if (storeCanPurchase) ...[
+                                const SizedBox(height: 12),
+                                _GhostButton(
+                                  label: 'Restore Purchases',
+                                  onTap: () => _onRestore(context, store),
+                                ),
+                                const SizedBox(height: 8),
+                                _GhostButton(
+                                  label: 'Manage Subscription',
+                                  onTap: _openManageSubscriptions,
+                                ),
+                              ],
                             ] else ...[
                               _GhostButton(
                                 label: 'Continue with Free',
@@ -236,6 +271,17 @@ class _PaywallScreenState extends State<PaywallScreen>
                               _UpgradeInterestButton(
                                 registered: _interestRegistered,
                                 onTap: () => _registerUpgradeInterest(context),
+                              ),
+                              const SizedBox(height: 12),
+                            ],
+                            // A subscriber must always be able to reach
+                            // Apple's cancel and manage sheet, including from
+                            // the paid state where there is nothing to buy.
+                            if (StorePurchaseService.isStorePlatform &&
+                                vm.isPaid) ...[
+                              _GhostButton(
+                                label: 'Manage Subscription',
+                                onTap: _openManageSubscriptions,
                               ),
                               const SizedBox(height: 12),
                             ],
@@ -300,6 +346,81 @@ class _PaywallScreenState extends State<PaywallScreen>
         },
       ),
     );
+  }
+
+  static String _ctaLabel({required bool onStore, required _PlanToggle plan}) {
+    final tier = plan == _PlanToggle.pro ? 'Pro' : 'Companion';
+    // Off iOS the label says where payment happens, because the app is about to
+    // hand the user to a browser. On iOS it must not, both because the sheet is
+    // right here and because naming an outside destination is what App Review
+    // reads as steering.
+    return onStore ? 'Subscribe · $tier' : 'Upgrade on the web · $tier';
+  }
+
+  /// Apple's own subscription management sheet. The only outbound link allowed
+  /// on this screen, and the one App Review expects to find.
+  Future<void> _openManageSubscriptions() async {
+    await launchUrl(
+      Uri.parse('https://apps.apple.com/account/subscriptions'),
+      mode: LaunchMode.externalApplication,
+    );
+  }
+
+  Future<void> _onStoreSubscribe(
+    BuildContext context,
+    StorePurchaseService store,
+  ) async {
+    final tier = _activePlan == _PlanToggle.pro
+        ? SubscriptionTier.pro
+        : SubscriptionTier.companion;
+    final annual = _billingPeriod == _BillingPeriod.annual;
+    final product = store.productFor(tier, annual: annual);
+    if (product == null) {
+      _showMessage(context, "That plan isn't available right now.");
+      return;
+    }
+
+    unawaited(
+      context.read<PostHogAnalyticsService>().trackEvent(
+        'checkout_opened',
+        properties: {
+          'tier': tier.name,
+          'billing_period': annual ? 'yearly' : 'monthly',
+          'seller': 'apple',
+        },
+      ),
+    );
+
+    // Everything after this arrives on the purchase stream, including the
+    // backend verification and the entitlement refetch, so there is nothing to
+    // await here beyond StoreKit accepting the request.
+    await store.buy(product);
+    if (!context.mounted) return;
+    final error = store.errorMessage;
+    if (error != null) _showMessage(context, error);
+  }
+
+  Future<void> _onRestore(
+    BuildContext context,
+    StorePurchaseService store,
+  ) async {
+    await store.restore();
+    if (!context.mounted) return;
+    // Restoring finds nothing far more often than it fails, so say what
+    // happened rather than leaving the button looking broken.
+    _showMessage(
+      context,
+      store.errorMessage ??
+          (context.read<SubscriptionViewModel>().isPaid
+              ? 'Your plan is back.'
+              : 'No previous purchase found on this Apple ID.'),
+    );
+  }
+
+  void _showMessage(BuildContext context, String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _onSubscribe(
@@ -380,6 +501,30 @@ const _proPricing = _PlanPricing(
 _PlanPricing _pricingForPlan(_PlanToggle plan) {
   if (plan == _PlanToggle.pro) return _proPricing;
   return _companionPricing;
+}
+
+/// Prices as the App Store reports them for this user's storefront, or null
+/// when the products have not loaded.
+///
+/// Apple requires the store's own localized price to be what is displayed, so
+/// the hardcoded USD constants above must never reach an iOS screen: a buyer in
+/// India would be shown dollars and charged rupees. `symbol` is deliberately
+/// empty because [ProductDetails.price] is already a fully formatted string.
+_PlanPricing? _storePricingForPlan(StorePurchaseService store, _PlanToggle plan) {
+  final tier =
+      plan == _PlanToggle.pro ? SubscriptionTier.pro : SubscriptionTier.companion;
+  final monthly = store.productFor(tier, annual: false);
+  final annual = store.productFor(tier, annual: true);
+  if (monthly == null || annual == null) return null;
+  return _PlanPricing(
+    symbol: '',
+    monthly: monthly.price,
+    annual: annual.price,
+    // Derived from the raw amount rather than parsed out of the formatted
+    // string, which varies by locale in separator, symbol and position.
+    monthlyEquivalent:
+        '${annual.currencySymbol}${(annual.rawPrice / 12).toStringAsFixed(2)}',
+  );
 }
 
 // Free / Companion / Pro toggle
@@ -952,6 +1097,12 @@ class _PlanStatusCard extends StatelessWidget {
     if (vm.isPaid) {
       if (vm.entitlement?.cancelAtPeriodEnd == true) {
         return 'Your plan stays active until the end of this billing period.';
+      }
+      // Naming the website is a purchase-adjacent pointer, and App Store review
+      // reads those as steering to outside payment. Where the purchase is not
+      // handled in-app, confirm the state and stop there.
+      if (vm.purchaseHandledOffPlatform) {
+        return "You're all set. Everything is unlocked.";
       }
       return "You're all set. Manage your plan anytime at auravoiceapp.com.";
     }

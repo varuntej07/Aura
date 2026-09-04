@@ -8,6 +8,7 @@ import '../../data/models/user_model.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/services/backend_api_service.dart';
 import '../../data/services/notification_service.dart';
+import '../../data/services/store_purchase_service.dart';
 import '../../data/services/subscription_service.dart';
 import '../../core/analytics/analytics_client.dart';
 import 'view_state.dart';
@@ -21,6 +22,9 @@ class AuthViewModel extends SafeChangeNotifier {
   // Nullable: the desktop DI graph excludes the subscription service entirely
   // (no paywall/entitlement surface there), so it never supplies this.
   final SubscriptionService? _subscriptionService;
+  // Nullable for the same reason, and null on every non-iOS surface where
+  // StoreKit is not the seller.
+  final StorePurchaseService? _storePurchaseService;
   final AnalyticsClient _postHogAnalyticsService;
   StreamSubscription<UserModel?>? _authSubscription;
   StreamSubscription<EntitlementUpdatedPayload>? _entitlementUpdatedSub;
@@ -30,11 +34,13 @@ class AuthViewModel extends SafeChangeNotifier {
     required NotificationService notificationService,
     required BackendApiService backendApiService,
     SubscriptionService? subscriptionService,
+    StorePurchaseService? storePurchaseService,
     required AnalyticsClient postHogAnalyticsService,
   }) : _authRepository = authRepository,
        _notificationService = notificationService,
        _backendApiService = backendApiService,
        _subscriptionService = subscriptionService,
+       _storePurchaseService = storePurchaseService,
        _postHogAnalyticsService = postHogAnalyticsService {
     // The billing webhook's sync push: refetch entitlement so this device
     // unlocks (or downgrades) within seconds of the payment event landing.
@@ -93,6 +99,12 @@ class AuthViewModel extends SafeChangeNotifier {
           if (_subscriptionService != null) {
             unawaited(_subscriptionService.refreshEntitlement());
           }
+          // Attach the StoreKit listener as soon as there is an account to
+          // attribute a purchase to. It must run at launch and not only when
+          // the paywall opens: a purchase that completed while the app was
+          // being killed is replayed on this stream, and dropping it would
+          // take someone's money without granting access.
+          unawaited(_storePurchaseService?.initialize() ?? Future.value());
           unawaited(_postHogAnalyticsService.identifyUser(user.uid));
         } else {
           _notificationService.clearUser();

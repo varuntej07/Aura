@@ -41,6 +41,10 @@ from .handlers.aura import (
     handle_get_memory,
     handle_wipe_memory,
 )
+from .handlers.apple_iap import (
+    handle_apple_notification,
+    handle_apple_transaction,
+)
 from .handlers.billing import (
     handle_billing_checkout,
     handle_billing_portal,
@@ -1096,6 +1100,19 @@ async def billing_webhook_endpoint(request: Request) -> JSONResponse:
 @app.get("/billing/portal")
 async def billing_portal_endpoint(request: Request) -> JSONResponse:
     return await handle_billing_portal(request)
+
+
+# iOS sells through StoreKit, because Guideline 3.1.1 rules out the web checkout
+# there. Both paths write the same entitlement document.
+@app.post("/billing/apple/transaction")
+async def apple_transaction_endpoint(request: Request) -> JSONResponse:
+    return await handle_apple_transaction(request)
+
+
+# No Firebase auth here: Apple's JWS signature is the auth (handler).
+@app.post("/billing/apple/notifications")
+async def apple_notifications_endpoint(request: Request) -> JSONResponse:
+    return await handle_apple_notification(request)
 
 
 @app.get("/desktop/notifications")

@@ -1,10 +1,67 @@
 # Changelog
 
 All notable production release changes are recorded here. The current release
-version is `2.4.0+16`.
+version is `2.5.0+17`.
 
 Every version bump in `pubspec.yaml` gets an entry here in the same commit,
 including the exact text uploaded to the Play Console release notes field.
+
+## 2.5.0+17 - 2026-09-03
+
+The first iOS release. Nothing in this entry changes the Android app's
+behaviour, so the Play notes below are deliberately thin: this version exists to
+put Aura on the App Store.
+
+### Play Store release notes
+
+```text
+What's new
+
+• Stability and performance improvements under the hood.
+```
+
+### Added (iOS)
+
+- **Aura is on the App Store.** iPhone only for this release; the iPad layout
+  has not been exercised and the target now declares iPhone alone.
+- **In-App Purchase.** iOS sells Companion and Pro through StoreKit, at the
+  App Store's own localized price, with Restore Purchases and a link to Apple's
+  subscription management sheet. `lib/data/services/store_purchase_service.dart`.
+- Privacy manifest, a real launch image, and an App Store preflight script
+  (`tool/ios_release_preflight.sh`).
+
+### Changed
+
+- **Payments are now split by platform, never by country.** iOS uses StoreKit
+  because App Store Guideline 3.1.1 forbids sending users to an outside payment
+  page for digital content; every other surface still uses Dodo web checkout.
+  The iOS build shows no price constant, no checkout button, and no pointer to
+  the website for buying. The rule lives in `SubscriptionService` so the
+  checkout call itself is gated, not only the UI.
+- One entitlement document, two sellers, told apart by its `source` field.
+  Neither may cancel or expire a subscription the other owns, so a Dodo
+  `subscription.expired` for an abandoned web plan can no longer drop a paying
+  App Store subscriber to the free tier.
+- Firebase Analytics now uses the ad-id-free variant. The default pulled
+  ad-attribution and IDFA pods, which would have obliged an App Tracking
+  Transparency prompt for something the product does not do.
+- Only the microphone permission handler is compiled in. The rest were linking
+  Contacts, EventKit, CoreLocation and Speech with no purpose strings.
+
+### Backend only, no mobile surface
+
+- `POST /billing/apple/transaction` and `POST /billing/apple/notifications`.
+  Apple's signed payloads are verified against the Apple Root CA G3 certificate
+  committed at `backend/src/resources/apple`, using Apple's own library rather
+  than hand-rolled certificate-chain checking.
+
+### Not yet verified
+
+- No sandbox purchase has been made. The StoreKit path is written and compiles,
+  and the backend's verification and entitlement logic were exercised directly,
+  but no real transaction has gone through end to end. It cannot until the Paid
+  Applications agreement is active and the four products exist in App Store
+  Connect.
 
 ## 2.4.0+16 - 2026-08-28
 

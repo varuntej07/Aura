@@ -38,11 +38,42 @@ PAID_TIERS = ("companion", "pro", "starter")
 RENEWAL_GRACE = timedelta(days=3)
 
 # The single entitlement doc: users/{uid}/entitlement/current. Its backend
-# writers are the billing webhooks (services/billing.py), the first-contact
-# trial stamp below, and the trial notification markers
-# (services/entitlement_notifications.py).
+# writers are the billing webhooks (services/billing.py for Dodo web checkout,
+# services/apple_iap.py for StoreKit), the first-contact trial stamp below, and
+# the trial notification markers (services/entitlement_notifications.py).
 ENTITLEMENT_COLLECTION = "entitlement"
 ENTITLEMENT_DOC_ID = "current"
+
+# Which seller owns a paid entitlement. One document, two possible sellers:
+# iOS must sell through StoreKit because Guideline 3.1.1 rules out the web
+# checkout there, every other surface sells through Dodo.
+SOURCE_WEB = "web"
+SOURCE_APPLE = "apple"
+
+
+def entitlement_source(data: dict) -> str:
+    """The seller that owns this entitlement.
+
+    Documents written before the field existed were all web checkout, so an
+    absent value reads as web rather than as unknown.
+    """
+    return (str(data.get("source") or SOURCE_WEB)).strip().lower() or SOURCE_WEB
+
+
+def source_may_apply_non_activating(data: dict, source: str) -> bool:
+    """Whether an event from `source` may apply a NON-activating change.
+
+    A new paid activation always wins and takes ownership of the document.
+    Everything else - cancellation, dunning, expiry, refund, revocation -
+    describes one seller's subscription, and applying it to an entitlement the
+    other seller now owns would revoke access somebody is still paying for.
+
+    The concrete failure this prevents: a user subscribes on the web, later
+    resubscribes on iPhone through the App Store, and Dodo then delivers the
+    `subscription.expired` for the abandoned web plan. Without this guard that
+    event drops a paying App Store subscriber to the free tier.
+    """
+    return entitlement_source(data) == source
 
 FIELD_TIER = "tier"
 FIELD_TRIAL_END_DATE = "trial_end_date"

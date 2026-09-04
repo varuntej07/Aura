@@ -2,7 +2,7 @@ name: aura
 description: "Aura - Voice-first personal AI companion"
 publish_to: 'none'
 
-version: 2.4.0+16
+version: 2.5.0+17
 
 environment:
   sdk: ^3.10.7
@@ -44,6 +44,7 @@ dependencies:
   device_info_plus: 12.3.0  # sign-in device metadata; must match the release-build pin in dependency_overrides below
   app_links:  # aura://voice deep link (Voice Launcher: Siri / widgets / external links)
   just_audio:  # voice-picker previews only; live call audio is livekit_client's
+  in_app_purchase: ^3.3.0
 
 dev_dependencies:
   flutter_test:
@@ -64,7 +65,7 @@ dev_dependencies:
 dependency_overrides:
   livekit_client: 2.7.0
   device_info_plus: 12.3.0
-  shared_preferences_android: 2.4.25
+  shared_preferences_android: 2.4.23
   # 1.4.1 ships the UTF-8 device-name sanitize fix (flutter-webrtc#2021); 1.4.0
   # crashes getUserMedia on non-ASCII device names. Remove once livekit_client
   # resolves >=1.4.1 on its own.

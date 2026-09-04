@@ -21,4 +21,9 @@ class ApiEndpoints {
   // URLs above, which belong to callers that build their own requests).
   static const String entitlement = '/entitlement';
   static const String billingCheckout = '/billing/checkout';
+
+  /// Where the app posts a StoreKit transaction JWS after an iOS purchase or
+  /// restore. The backend verifies Apple's signature and writes the
+  /// entitlement; the device is never the authority on what was paid for.
+  static const String appleTransaction = '/billing/apple/transaction';
 }
