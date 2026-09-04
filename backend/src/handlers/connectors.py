@@ -16,6 +16,7 @@ from ..services.connector_oauth import resolve_watch_url
 from ..services.gmail_connector import GmailConnector
 from ..services.google_calendar_connector import GoogleCalendarConnector
 from ..services.google_connector_base import ReauthorizationRequired
+from ..services.notion_connector import NotionConnector
 from ..services.request_auth import resolve_user_id_from_request
 
 
@@ -66,6 +67,7 @@ async def get_connectors(request: Request) -> JSONResponse:
         return {
             "google_calendar": GoogleCalendarConnector(user_id).get_status(),
             "gmail": GmailConnector(user_id).get_status(),
+            "notion": NotionConnector(user_id).get_status(),
         }
 
     catalog = await asyncio.to_thread(_load)
@@ -272,6 +274,43 @@ async def disable_gmail(request: Request) -> JSONResponse:
         return JSONResponse(status_code=200, content=status)
     except Exception as exc:
         logger.exception("Gmail disable failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse(status_code=500, content={"error": "disable_failed"})
+
+
+async def enable_notion(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    try:
+        status = await asyncio.to_thread(NotionConnector(user_id).enable)
+        return JSONResponse(status_code=200, content=status)
+    except ReauthorizationRequired:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "reauthorization_required"},
+        )
+    except Exception as exc:
+        logger.exception("Notion enable failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse(status_code=500, content={"error": "enable_failed"})
+
+
+async def disable_notion(request: Request) -> JSONResponse:
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return _unauthorized()
+
+    try:
+        status = await asyncio.to_thread(NotionConnector(user_id).disable)
+        return JSONResponse(status_code=200, content=status)
+    except Exception as exc:
+        logger.exception("Notion disable failed", {
             "user_id": user_id,
             "error": str(exc),
         })

@@ -373,6 +373,8 @@ def test_every_current_voice_tool_has_registry_metadata():
         "draft_outbound_message",
         "present_visible_artifact",
         "save_screen_item",
+        "save_to_notion",
+        "undo_notion_save",
         "set_guide_mode",
         "speak_only",
         "start_research",

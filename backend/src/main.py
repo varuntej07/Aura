@@ -67,10 +67,12 @@ from .handlers.connectors import (
     connect_google_calendar,
     disable_gmail,
     disable_google_calendar,
+    disable_notion,
     disconnect_gmail,
     disconnect_google_calendar,
     enable_gmail,
     enable_google_calendar,
+    enable_notion,
     get_connectors,
     google_calendar_webhook,
     sync_google_calendar,
@@ -78,6 +80,12 @@ from .handlers.connectors import (
 from .handlers.connector_oauth import (
     complete_connector_oauth,
     start_connector_oauth,
+)
+from .handlers.notion import (
+    handle_notion_create_database,
+    handle_notion_resolve,
+    handle_notion_undo,
+    handle_notion_write,
 )
 from .handlers.daily_notification import handle_send_nudge
 from .handlers.desktop_dashboard import (
@@ -1031,6 +1039,13 @@ async def connectors_oauth_callback_endpoint(request: Request):
     return await complete_connector_oauth(request)
 
 
+# Same connector-agnostic handler (it reads the connector from the stored
+# attempt); Notion just needs its own registered redirect URI.
+@app.get("/connectors/oauth/notion/callback")
+async def connectors_oauth_notion_callback_endpoint(request: Request):
+    return await complete_connector_oauth(request)
+
+
 @app.post("/connectors/google-calendar/connect")
 async def connectors_google_calendar_connect_endpoint(request: Request) -> JSONResponse:
     return await connect_google_calendar(request)
@@ -1074,6 +1089,36 @@ async def connectors_gmail_enable_endpoint(request: Request) -> JSONResponse:
 @app.post("/connectors/gmail/disable")
 async def connectors_gmail_disable_endpoint(request: Request) -> JSONResponse:
     return await disable_gmail(request)
+
+
+@app.post("/connectors/notion/enable")
+async def connectors_notion_enable_endpoint(request: Request) -> JSONResponse:
+    return await enable_notion(request)
+
+
+@app.post("/connectors/notion/disable")
+async def connectors_notion_disable_endpoint(request: Request) -> JSONResponse:
+    return await disable_notion(request)
+
+
+@app.post("/notion/resolve")
+async def notion_resolve_endpoint(request: Request) -> JSONResponse:
+    return await handle_notion_resolve(request)
+
+
+@app.post("/notion/write")
+async def notion_write_endpoint(request: Request) -> JSONResponse:
+    return await handle_notion_write(request)
+
+
+@app.post("/notion/undo")
+async def notion_undo_endpoint(request: Request) -> JSONResponse:
+    return await handle_notion_undo(request)
+
+
+@app.post("/notion/create-database")
+async def notion_create_database_endpoint(request: Request) -> JSONResponse:
+    return await handle_notion_create_database(request)
 
 
 @app.post("/integrations/google-calendar/webhook", name="google_calendar_webhook")

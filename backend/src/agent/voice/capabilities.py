@@ -83,6 +83,7 @@ class Capability(StrEnum):
     FEEDBACK_WRITE = "feedback_write"
     TRACKING_WRITE = "tracking_write"
     SCREEN_SAVE = "screen_save"
+    NOTION_CAPTURE = "notion_capture"
     OUTBOUND_DRAFT = "outbound_draft"
     VISIBLE_ARTIFACT = "visible_artifact"
     GUIDE_CONTROL = "guide_control"
@@ -353,6 +354,36 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             namespace="desktop.screen",
             surfaces=DESKTOP_ONLY,
             concurrent=False,
+        ),
+        _tool(
+            # Saves what is on screen as a structured record in the user's own
+            # Notion, when the utterance names or implies a Notion destination.
+            # Like save_screen_item, no fresh frame is required: the capture
+            # path reads the most recent retained payload (structured tree
+            # first, JPEG fallback). Gated on the notion connector being
+            # enabled; disambiguation and propose-create round-trips return a
+            # spoken question instead of a write.
+            "save_to_notion",
+            Capability.NOTION_CAPTURE,
+            ToolEffect.WRITE,
+            namespace="desktop.notion",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
+            latency=ToolLatency.HIGH,
+            required=("intent", "destination"),
+        ),
+        _tool(
+            # Archives the session's most recent Notion save (reversible from
+            # Notion's trash). A WRITE: it changes external state and deserves
+            # the finalized-turn and STT gates.
+            "undo_notion_save",
+            Capability.NOTION_CAPTURE,
+            ToolEffect.WRITE,
+            namespace="desktop.notion",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
         ),
         _tool(
             # Requests the desktop to arm Guide Mode. Like Interview Mode, this is

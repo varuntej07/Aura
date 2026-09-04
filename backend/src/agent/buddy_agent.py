@@ -130,6 +130,11 @@ from .voice.screen_context_stream import (
     live_context_message_present,
 )
 from .voice.screen_frames import ScreenFrameStore, attach_screen_frame_to_turn
+from .voice.notion_capture import (
+    SaveToNotionResult,
+    execute_notion_capture,
+    execute_notion_undo,
+)
 from .voice.screen_saves import SaveScreenItemResult, save_screen_capture
 from .voice.speculation import SpeculationDecision, TurnMutations, decide, is_reusable
 from .voice.spoken_action_guard import (
@@ -319,6 +324,7 @@ class BuddyAgent(agents.Agent):
         text_output: bool = False,
         turn_metrics: VoiceTurnMetrics | None = None,
         opener_task: "asyncio.Task[str] | None" = None,
+        firebase_id_token: str = "",
     ) -> None:
         voice_surface = VoiceSurface(launch_surface)
         # Per-tool selection guidance is NOT assembled here. It lives in each tool's
@@ -405,6 +411,16 @@ class BuddyAgent(agents.Agent):
         self._recent_screen_capture: tuple[
             str, float, SaveScreenItemResult
         ] | None = None
+        # Notion capture state. The session's Firebase ID token authenticates
+        # the worker's /notion/* calls (uid-scoped, same credential the MCP
+        # connection uses). Candidate map remembers the last disambiguation
+        # question's id->title pairs so a confirmed id resolves its display
+        # name from Notion's own data, never from the model's retelling.
+        self._firebase_id_token = firebase_id_token
+        self._notion_capture_results: dict[str, SaveToNotionResult] = {}
+        self._notion_capture_lock = asyncio.Lock()
+        self._notion_candidates: dict[str, str] = {}
+        self._last_notion_receipt_key = ""
         self._direct_action_recorder: Callable[..., None] | None = None
         self._typed_text_observer: Callable[[str], None] | None = None
         # Buddy Drafts session state (the one live draft + tier for metering).
@@ -2142,6 +2158,220 @@ class BuddyAgent(agents.Agent):
             },
             latency_ms=latency_ms,
         )
+
+    @function_tool
+    async def save_to_notion(
+        self,
+        intent: str,
+        destination: str,
+        confirmed_database_id: str = "",
+        create_confirmed: bool = False,
+    ) -> dict[str, object]:
+        """Save what is on the user's screen as a structured record in THEIR
+        Notion, when they name or clearly imply a Notion destination ("put this
+        in my recruiting CRM", "save this to Notion", "add her to my
+        pipeline").
+
+        Do NOT call it for a bare "save this" with no destination - that is
+        save_screen_item. Do NOT call it when the user asks how the feature
+        works, quotes someone, or says NOT to save.
+
+        intent: what the user wants captured, in their words.
+        destination: the database they named, in their words.
+        confirmed_database_id: ONLY on a follow-up turn, after this tool asked
+        a disambiguation question and the user picked one of the offered
+        databases - pass that candidate's id.
+        create_confirmed: ONLY after this tool proposed creating a new database
+        and the user explicitly said yes.
+
+        The returned confirmation is the exact wording to speak. If it is a
+        question, ask it and wait for the user's answer before calling again.
+        """
+        result = await self._execute_notion_capture(
+            self._finalized_message_id or f"tool:{self._action_telemetry.turn_index}",
+            intent=intent,
+            destination=destination,
+            confirmed_database_id=confirmed_database_id,
+            create_confirmed=create_confirmed,
+        )
+        return {
+            "ok": result.saved or bool(result.candidates or result.proposed_create_name),
+            "say": result.spoken_confirmation,
+            "candidates": [
+                {"database_id": candidate.data_source_id, "title": candidate.title}
+                for candidate in result.candidates
+            ],
+            "proposed_create_name": result.proposed_create_name,
+            "render": {"mode": "verbatim", "channel": "voice"},
+        }
+
+    @function_tool
+    async def undo_notion_save(self) -> dict[str, object]:
+        """Undo the most recent Notion save from this session by archiving the
+        created page. Call when the user asks to undo, remove, or take back
+        something just saved to Notion. Archiving is reversible from Notion's
+        own trash. The returned confirmation is the exact wording to speak.
+        """
+        receipt_key = self._last_notion_receipt_key
+        if not receipt_key:
+            return {
+                "ok": False,
+                "say": "There's nothing saved to Notion this session to undo.",
+                "render": {"mode": "verbatim", "channel": "voice"},
+            }
+        undone = await execute_notion_undo(
+            uid=self._user_id,
+            session_id=self._session_id,
+            firebase_id_token=self._firebase_id_token,
+            idempotency_key=receipt_key,
+        )
+        if undone:
+            self._last_notion_receipt_key = ""
+        return {
+            "ok": undone,
+            "say": (
+                "Undone - I archived that page."
+                if undone
+                else "I couldn't undo that one - the page may already be gone."
+            ),
+            "render": {"mode": "verbatim", "channel": "voice"},
+        }
+
+    async def _execute_notion_capture(
+        self,
+        finalized_message_id: str,
+        *,
+        intent: str,
+        destination: str,
+        confirmed_database_id: str,
+        create_confirmed: bool,
+    ) -> SaveToNotionResult:
+        """Execute one authorized Notion capture exactly once per finalized message."""
+        async with self._notion_capture_lock:
+            cached = self._notion_capture_results.get(finalized_message_id)
+            if cached is not None:
+                return cached
+
+            self._action_telemetry.emitted("save_to_notion", "deterministic_finalized_speech")
+
+            # Screen input: structured tree first (redacted values already
+            # withheld upstream), JPEG fallback otherwise (A4: honest scoping).
+            structured_text: str | None = None
+            structured_snapshot_id = ""
+            if self._screen_context is not None:
+                try:
+                    context = self._screen_context.latest_for_save()
+                except Exception:
+                    context = None
+                if context is not None and getattr(context, "rendered", ""):
+                    structured_text = context.rendered
+                    structured_snapshot_id = context.turn_context_id
+            frame = None
+            if structured_text is None and self._screen_frames is not None:
+                try:
+                    frame = await self._screen_frames.latest_for_save()
+                except Exception as exc:
+                    logger.warn(
+                        "VoiceSession: retained frame lookup failed for notion capture",
+                        {
+                            "session_id": self._session_id,
+                            "user_id": self._user_id,
+                            "error": str(exc),
+                        },
+                    )
+
+            # The confirmed id must be one this session actually offered; a
+            # hallucinated or stale id has no receipt-side meaning.
+            confirmed_name = ""
+            if confirmed_database_id:
+                confirmed_name = self._notion_candidates.get(confirmed_database_id, "")
+                if not confirmed_name:
+                    confirmed_database_id = ""
+
+            span = start_tool_span(
+                tool_name="save_to_notion", source="voice", uid=self._user_id
+            )
+            capture_task = asyncio.create_task(
+                execute_notion_capture(
+                    uid=self._user_id,
+                    session_id=self._session_id,
+                    finalized_message_id=finalized_message_id,
+                    firebase_id_token=self._firebase_id_token,
+                    intent=intent,
+                    destination=destination,
+                    confirmed_data_source_id=confirmed_database_id,
+                    confirmed_database_name=confirmed_name,
+                    create_database_named=(destination if create_confirmed else ""),
+                    structured_text=structured_text,
+                    structured_snapshot_id=structured_snapshot_id,
+                    jpeg_bytes=frame.jpeg_bytes if frame is not None else None,
+                    frame_id=frame.frame_id if frame is not None else "",
+                ),
+                name=f"notion-save-{self._session_id[:8]}",
+            )
+            generation_cancelled = False
+            try:
+                try:
+                    result = await asyncio.shield(capture_task)
+                except asyncio.CancelledError:
+                    # An interruption may cancel the speech generation, but a
+                    # write authorized at final STT must still complete and
+                    # keep its receipt.
+                    generation_cancelled = True
+                    result = await capture_task
+            except Exception as exc:
+                span.finish(success=False, error_type=type(exc).__name__)
+                logger.error(
+                    "VoiceSession: notion capture failed",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                result = SaveToNotionResult(
+                    spoken_confirmation="Something went wrong saving that to Notion - try again?"
+                )
+            else:
+                span.finish(success=result.saved)
+
+            if result.candidates:
+                self._notion_candidates = {
+                    candidate.data_source_id: candidate.title
+                    for candidate in result.candidates
+                }
+            if result.saved and result.idempotency_key:
+                self._last_notion_receipt_key = result.idempotency_key
+
+            latency_ms = self._action_telemetry.execution(
+                "save_to_notion", success=result.saved
+            )
+            self._notion_capture_results[finalized_message_id] = result
+            while len(self._notion_capture_results) > 16:
+                self._notion_capture_results.pop(next(iter(self._notion_capture_results)))
+            recorder = self._direct_action_recorder
+            if recorder is not None:
+                recorder(
+                    name="save_to_notion",
+                    call_id=f"notion-capture:{finalized_message_id}",
+                    success=result.saved,
+                    result={
+                        "database_name": result.database_name,
+                        "page_url": result.page_url,
+                        "idempotency_key": result.idempotency_key,
+                        "dropped_fields": result.dropped_fields,
+                        "already_saved": result.already_saved,
+                        "asked_question": bool(
+                            result.candidates or result.proposed_create_name
+                        ),
+                        "say": result.spoken_confirmation,
+                    },
+                    latency_ms=latency_ms,
+                )
+            if generation_cancelled:
+                raise asyncio.CancelledError()
+            return result
 
     async def llm_node(
         self,

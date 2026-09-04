@@ -232,6 +232,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="ANTHROPIC_VOICE_MODEL=claude-haiku-4-5" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
   --set-env-vars="GOOGLE_REDIRECT_URI=${STABLE_SERVICE_URL}/connectors/oauth/google/callback" \
+  --set-env-vars="NOTION_REDIRECT_URI=${STABLE_SERVICE_URL}/connectors/oauth/notion/callback" \
   --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
   --set-env-vars="SCHEDULER_OIDC_AUDIENCES=${ACCEPTED_AUDIENCES}" \
   --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
@@ -244,6 +245,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="CARTESIA_API_KEY=cartesia-api-key:latest" \
   --set-secrets="GOOGLE_CLIENT_ID=juno-google-client-id:latest" \
   --set-secrets="GOOGLE_CLIENT_SECRET=juno-google-client-secret:latest" \
+  --set-secrets="NOTION_CLIENT_ID=juno-notion-client-id:latest" \
+  --set-secrets="NOTION_CLIENT_SECRET=juno-notion-client-secret:latest" \
   --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
   --set-secrets="BRAVE_API_KEY=juno-brave-api-key:latest" \
   --set-secrets="NEWSDATA_API_KEY=juno-newsdata-api-key:latest" \

@@ -494,6 +494,17 @@ class StructuredContextStore:
             return None
         return context
 
+    def latest_for_save(self) -> StructuredContext | None:
+        """The newest snapshot for an explicit save, even when a turn already
+        attached it. Mirrors ScreenFrameStore.latest_for_save: LLM freshness
+        and save availability are intentionally different things. Still
+        age-bounded, because a stale tree describes a screen the user left.
+        """
+        context = self._latest
+        if context is None or context.age_seconds > _CONTEXT_MAX_AGE_S:
+            return None
+        return context
+
     def mark_consumed(self, turn_context_id: str) -> None:
         """Record that a turn already carries this snapshot, so no later turn
         re-attaches the same one."""

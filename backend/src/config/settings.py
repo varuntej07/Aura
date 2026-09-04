@@ -180,6 +180,13 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_CHANNEL_RENEWAL_LEAD_SECONDS: int = 21600
     CALENDAR_SYNC_STALE_MINUTES: int = 5
 
+    # Notion connector (voice screen capture into the user's Notion). Client
+    # credentials come from Secret Manager via deploy.sh; the redirect URI is
+    # the backend's own /connectors/oauth/notion/callback.
+    NOTION_CLIENT_ID: str = ""
+    NOTION_CLIENT_SECRET: str = ""
+    NOTION_REDIRECT_URI: str = ""
+
     # Brave Search API (real-time chat + voice web_surf tool)
     BRAVE_API_KEY: str = ""
 

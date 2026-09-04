@@ -692,6 +692,7 @@ async def entrypoint(ctx: JobContext) -> None:
             bridged=bridged,
             text_output=output_mode == "text",
             turn_metrics=turn_metrics,
+            firebase_id_token=firebase_id_token,
         )
 
         async def _resume_buddy(
