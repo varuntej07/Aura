@@ -717,8 +717,14 @@ async def create_run(
     preset: str = str(Preset.QUICK),
     origin_surface: str = "dashboard",
     correlation_id: str = "",
+    delivery: dict[str, str] | None = None,
 ) -> RunCreation:
     """Create a draft run and its scope-check job, idempotently. Debits NO credit.
+
+    ``delivery`` binds a Notion destination at creation, from the user's own
+    spoken words, and is immutable afterwards: changing the destination is a
+    new run, never an edit. finalize routes a run holding it through the
+    notion_deliver stage instead of straight to notify_result.
 
     Draft creation deliberately runs entitlement-free and credit-free. It exists so the
     user gets an acknowledgement in under a second and so the scope check itself
@@ -758,6 +764,7 @@ async def create_run(
                     F.REQUEST_TEXT: request_text,
                     F.PRESET: preset,
                     F.ORIGIN_SURFACE: origin_surface,
+                    **({F.DELIVERY: dict(delivery)} if delivery else {}),
                     F.REQUEST_REVISION: 0,
                     F.CURRENT_PLAN_VERSION: 0,
                     F.ADMITTED_PLAN_VERSION: 0,
@@ -1895,6 +1902,7 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
             next_state = result.next_state or str(run.get(F.STATE, ""))
             if result.next_state:
                 run_updates[F.STATE] = result.next_state
+            clarify_notify_created: list[str] = []
             if result.kind is StageResultKind.CLARIFY:
                 question = dict(result.questions[0])
                 run_updates[F.STATE] = F.STATE_AWAITING_CLARIFICATION
@@ -1902,10 +1910,36 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
                 run_updates[F.PENDING_QUESTION_EXPIRES_AT] = (
                     now + timedelta(seconds=CLARIFICATION_TTL_S)
                 ).isoformat()
-                run_updates[F.CLARIFICATION_ROUNDS] = (
-                    int(run.get(F.CLARIFICATION_ROUNDS, 0)) + 1
-                )
+                rounds = int(run.get(F.CLARIFICATION_ROUNDS, 0)) + 1
+                run_updates[F.CLARIFICATION_ROUNDS] = rounds
                 next_state = F.STATE_AWAITING_CLARIFICATION
+                # CLARIFY forbids next_jobs (a parked run holds no paid-work
+                # reservation), so without this the park was silent: the copy,
+                # action, and _NOTIFIABLE_STATES membership for
+                # awaiting_clarification all existed while nothing ever created
+                # the notify job. The ordinal carries the round so a second
+                # question cannot collide with the first round's job.
+                clarify_notify_id = stage_id_for(
+                    F.STAGE_NOTIFY_RESULT, lease.run_id, lease.wave, f"clarify{rounds}"
+                )
+                _create_job_triplet(
+                    txn,
+                    uid=lease.uid,
+                    run_id=lease.run_id,
+                    stage_id=clarify_notify_id,
+                    stage_kind=F.STAGE_NOTIFY_RESULT,
+                    wave=lease.wave,
+                    ordinal=f"clarify{rounds}",
+                    payload={
+                        "terminal_state": F.STATE_AWAITING_CLARIFICATION,
+                        "plan_version": lease.admitted_plan_version,
+                    },
+                    now_iso=now_iso,
+                    expires_at=expires_at,
+                    correlation_id=lease.correlation_id,
+                    causation_id=lease.stage_id,
+                )
+                clarify_notify_created.append(clarify_notify_id)
             if result.kind is StageResultKind.TERMINAL:
                 run_updates[F.FAILURE_CODE] = result.failure_code
                 next_state = result.next_state or F.STATE_FAILED
@@ -1968,7 +2002,7 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
                     },
                 )
 
-            created: list[str] = []
+            created: list[str] = list(clarify_notify_created)
             for job in result.next_jobs:
                 next_stage_id = stage_id_for(
                     job.stage_kind, lease.run_id, job.wave, job.ordinal
@@ -2410,6 +2444,32 @@ async def fail_stage(
                 )
                 outcome = "delivery_failed"
                 created = ()
+                # notion_deliver chains notify_result on success, so its
+                # exhaustion would otherwise leave the run finished and the
+                # user never told. Minting the terminal notify here is safe for
+                # any delivery kind EXCEPT notify_result itself (whose own id
+                # is the one create_terminal_notify_job would derive - the
+                # collision described above). notify_result reads the absent
+                # DELIVERY_RESULT receipt and reports the failure honestly.
+                if lease.stage_kind != F.STAGE_NOTIFY_RESULT:
+                    notifiable = may_run_post_terminal(
+                        F.STAGE_NOTIFY_RESULT, run, deletion_active=deletion_active
+                    )
+                    if notifiable:
+                        created = (
+                            create_terminal_notify_job(
+                                txn,
+                                uid=lease.uid,
+                                run_id=lease.run_id,
+                                terminal_state=str(run.get(F.STATE) or ""),
+                                wave=lease.wave,
+                                now_iso=now_iso,
+                                expires_at=expires_at,
+                                correlation_id=lease.correlation_id,
+                                causation_id=lease.stage_id,
+                                plan_version=lease.admitted_plan_version,
+                            ),
+                        )
             else:
                 has_evidence = int(run.get(F.CLAIM_COUNT, 0)) > 0 or int(
                     run.get(F.SOURCE_COUNT, 0)

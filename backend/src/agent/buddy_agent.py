@@ -135,6 +135,13 @@ from .voice.notion_capture import (
     execute_notion_capture,
     execute_notion_undo,
 )
+from .voice.research_dispatch import (
+    ResearchDispatchResult,
+    RunNarrator,
+    answer_research_run,
+    cancel_research_run,
+    dispatch_research_to_notion,
+)
 from .voice.screen_saves import SaveScreenItemResult, save_screen_capture
 from .voice.speculation import SpeculationDecision, TurnMutations, decide, is_reusable
 from .voice.spoken_action_guard import (
@@ -421,6 +428,14 @@ class BuddyAgent(agents.Agent):
         self._notion_capture_lock = asyncio.Lock()
         self._notion_candidates: dict[str, str] = {}
         self._last_notion_receipt_key = ""
+        # Background research narration. Built lazily on first dispatch (the
+        # session only exists once the agent is active) and closed by the
+        # entrypoint's finally via close_research_narrator.
+        self._research_narrator: RunNarrator | None = None
+        self._research_dispatch_lock = asyncio.Lock()
+        self._research_dispatch_results: dict[str, ResearchDispatchResult] = {}
+        self._research_candidates: dict[str, str] = {}
+        self._last_research_run_id = ""
         self._direct_action_recorder: Callable[..., None] | None = None
         self._typed_text_observer: Callable[[str], None] | None = None
         # Buddy Drafts session state (the one live draft + tier for metering).
@@ -2236,6 +2251,251 @@ class BuddyAgent(agents.Agent):
             ),
             "render": {"mode": "verbatim", "channel": "voice"},
         }
+
+    @function_tool
+    async def research_to_notion(
+        self,
+        request: str,
+        destination: str,
+        confirmed_database_id: str = "",
+        create_confirmed: bool = False,
+    ) -> dict[str, object]:
+        """Start durable background research whose results are saved into the
+        user's Notion, when they ask you to research, investigate, or look
+        into something AND name a Notion destination ("research these
+        companies into my CRM"). The run keeps working after the call ends.
+
+        Do NOT call it to save what is already on screen (save_to_notion), for
+        research with no Notion destination named (start_research), or for a
+        quick factual question (web_surf).
+
+        request: what to research, in the user's words.
+        destination: the database they named, in their words.
+        confirmed_database_id: ONLY on a follow-up turn after this tool asked
+        which database and the user picked one - pass that candidate's id.
+        create_confirmed: ONLY after this tool proposed creating a database
+        and the user explicitly said yes.
+
+        The returned confirmation is the exact wording to speak. If it is a
+        question, ask it and wait for the answer before calling again.
+        """
+        result = await self._execute_research_dispatch(
+            self._finalized_message_id or f"tool:{self._action_telemetry.turn_index}",
+            request=request,
+            destination=destination,
+            confirmed_database_id=confirmed_database_id,
+            create_confirmed=create_confirmed,
+        )
+        return {
+            "ok": result.dispatched or bool(result.candidates or result.proposed_create_name),
+            "say": result.spoken_confirmation,
+            "candidates": [
+                {"database_id": database_id, "title": title}
+                for database_id, title in result.candidates
+            ],
+            "proposed_create_name": result.proposed_create_name,
+            "render": {"mode": "verbatim", "channel": "voice"},
+        }
+
+    @function_tool
+    async def answer_research_question(self, answer: str) -> dict[str, object]:
+        """Answer the question a paused background research run asked. Call
+        ONLY after Buddy relayed a research question and the user replied.
+        Pass the substance of their choice: the option they picked (its text
+        or number), or "use your best judgment" if they deferred.
+
+        The returned confirmation is the exact wording to speak.
+        """
+        narrator = self._research_narrator
+        pending = narrator.pending_question if narrator else None
+        if pending is None:
+            return {
+                "ok": False,
+                "say": "There's no research question waiting right now.",
+                "render": {"mode": "verbatim", "channel": "voice"},
+            }
+        # Map a spoken option number onto the question's own declared choice
+        # so the stage receives a selection among options it itself offered.
+        cleaned = " ".join((answer or "").split())[:300]
+        stripped = cleaned.strip(".! ").lower()
+        for index, choice in enumerate(pending.choices):
+            if stripped in (str(index + 1), f"option {index + 1}"):
+                cleaned = choice
+                break
+        if not cleaned:
+            return {
+                "ok": False,
+                "say": "I didn't catch the answer - which option?",
+                "render": {"mode": "verbatim", "channel": "voice"},
+            }
+        accepted = await answer_research_run(
+            session_id=self._session_id,
+            firebase_id_token=self._firebase_id_token,
+            run_id=pending.run_id,
+            question_id=pending.question_id,
+            answer_text=cleaned,
+        )
+        if accepted and narrator is not None:
+            narrator.pending_question = None
+        return {
+            "ok": accepted,
+            "say": (
+                "Got it - the research is moving again."
+                if accepted
+                else "That answer didn't go through - the run may have moved on already."
+            ),
+            "render": {"mode": "verbatim", "channel": "voice"},
+        }
+
+    @function_tool
+    async def cancel_research(self) -> dict[str, object]:
+        """Cancel the background research run this session started. Call when
+        the user asks to stop, cancel, or abandon the research. The returned
+        confirmation is the exact wording to speak.
+        """
+        narrator = self._research_narrator
+        run_id = ""
+        if narrator is not None and narrator.active_run_ids:
+            run_id = narrator.active_run_ids[0]
+        elif self._last_research_run_id:
+            run_id = self._last_research_run_id
+        if not run_id:
+            return {
+                "ok": False,
+                "say": "There's no research running from this session.",
+                "render": {"mode": "verbatim", "channel": "voice"},
+            }
+        cancelled = await cancel_research_run(
+            session_id=self._session_id,
+            firebase_id_token=self._firebase_id_token,
+            run_id=run_id,
+        )
+        if cancelled and narrator is not None:
+            narrator.forget(run_id)
+        return {
+            "ok": cancelled,
+            "say": (
+                "Cancelled - it stops at the next step."
+                if cancelled
+                else "I couldn't cancel it just now - it may already be finished."
+            ),
+            "render": {"mode": "verbatim", "channel": "voice"},
+        }
+
+    async def _execute_research_dispatch(
+        self,
+        finalized_message_id: str,
+        *,
+        request: str,
+        destination: str,
+        confirmed_database_id: str,
+        create_confirmed: bool,
+    ) -> ResearchDispatchResult:
+        """Dispatch one authorized research run exactly once per finalized message."""
+        async with self._research_dispatch_lock:
+            cached = self._research_dispatch_results.get(finalized_message_id)
+            if cached is not None:
+                return cached
+
+            self._action_telemetry.emitted(
+                "research_to_notion", "deterministic_finalized_speech"
+            )
+            confirmed_name = ""
+            if confirmed_database_id:
+                confirmed_name = self._research_candidates.get(confirmed_database_id, "")
+                if not confirmed_name:
+                    confirmed_database_id = ""
+
+            span = start_tool_span(
+                tool_name="research_to_notion", source="voice", uid=self._user_id
+            )
+            dispatch_task = asyncio.create_task(
+                dispatch_research_to_notion(
+                    uid=self._user_id,
+                    session_id=self._session_id,
+                    firebase_id_token=self._firebase_id_token,
+                    request=request,
+                    destination=destination,
+                    confirmed_data_source_id=confirmed_database_id,
+                    confirmed_database_name=confirmed_name,
+                    create_database_named=(destination if create_confirmed else ""),
+                ),
+                name=f"research-dispatch-{self._session_id[:8]}",
+            )
+            generation_cancelled = False
+            try:
+                try:
+                    result = await asyncio.shield(dispatch_task)
+                except asyncio.CancelledError:
+                    # A dispatch authorized at final STT must complete even if
+                    # the speech generation is interrupted.
+                    generation_cancelled = True
+                    result = await dispatch_task
+            except Exception as exc:
+                span.finish(success=False, error_type=type(exc).__name__)
+                logger.error(
+                    "VoiceSession: research dispatch failed",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                result = ResearchDispatchResult(
+                    spoken_confirmation="I couldn't start that research - try again?"
+                )
+            else:
+                span.finish(success=result.dispatched)
+
+            if result.candidates:
+                self._research_candidates = dict(result.candidates)
+            if result.dispatched and result.run_id:
+                self._last_research_run_id = result.run_id
+                narrator = self._research_narrator
+                if narrator is None:
+                    narrator = RunNarrator(
+                        session=self.session,
+                        session_id=self._session_id,
+                        user_id=self._user_id,
+                        firebase_id_token=self._firebase_id_token,
+                    )
+                    self._research_narrator = narrator
+                narrator.track(result.run_id, result.database_name or "your Notion")
+
+            latency_ms = self._action_telemetry.execution(
+                "research_to_notion", success=result.dispatched
+            )
+            self._research_dispatch_results[finalized_message_id] = result
+            while len(self._research_dispatch_results) > 16:
+                self._research_dispatch_results.pop(
+                    next(iter(self._research_dispatch_results))
+                )
+            recorder = self._direct_action_recorder
+            if recorder is not None:
+                recorder(
+                    name="research_to_notion",
+                    call_id=f"research-dispatch:{finalized_message_id}",
+                    success=result.dispatched,
+                    result={
+                        "run_id": result.run_id,
+                        "database_name": result.database_name,
+                        "asked_question": bool(
+                            result.candidates or result.proposed_create_name
+                        ),
+                        "say": result.spoken_confirmation,
+                    },
+                    latency_ms=latency_ms,
+                )
+            if generation_cancelled:
+                raise asyncio.CancelledError()
+            return result
+
+    async def close_research_narrator(self) -> None:
+        """Entrypoint-shutdown hook, called next to guide.close()."""
+        if self._research_narrator is not None:
+            await self._research_narrator.close()
+            self._research_narrator = None
 
     async def _execute_notion_capture(
         self,

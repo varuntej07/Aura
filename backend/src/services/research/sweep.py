@@ -440,10 +440,15 @@ def stale_recovery_transition(attempt: int) -> dict[str, Any]:
 
 
 async def _pass_clarification_expiry(report: SweepReport, now: datetime) -> None:
-    """C. Terminate runs parked on an unanswered question past its 24-hour TTL.
+    """C. Resolve runs parked on an unanswered question past its 24-hour TTL.
 
-    Cancelled, not failed, and crucially with NO credit consumed: the run never reached
-    admission, so there is nothing to refund and nothing to charge.
+    Every classifier question declares default_assumptions, so an expired
+    question RESUMES on those defaults through the same idempotent
+    answer_clarification path a spoken or typed answer takes - the run the
+    user asked for still happens, just on the stated assumptions. A question
+    that somehow carries no defaults is cancelled as before, with NO credit
+    consumed: a parked run never reached admission, so there is nothing to
+    refund and nothing to charge.
     """
     now_iso = now.isoformat()
 
@@ -479,7 +484,57 @@ async def _pass_clarification_expiry(report: SweepReport, now: datetime) -> None
             report.clarifications_expired += 1
 
 
+async def _apply_default_answer(uid: str, run_id: str, run: dict[str, Any]) -> bool:
+    """Resume an expired question on its declared defaults. False = cancel instead.
+
+    Routed through engine.signal("answer") - the identical path a spoken or
+    typed answer takes - so the idempotent state checks and the inline resume
+    delivery are the same machinery, not a sweep-only copy of it.
+    """
+    pending = dict(run.get(F.PENDING_QUESTION) or {})
+    question_id = str(pending.get("question_id") or "")
+    defaults = [str(item) for item in (pending.get("default_assumptions") or []) if str(item)]
+    if not question_id or not defaults:
+        return False
+    from .engine import get_research_engine
+
+    status = await get_research_engine().signal(
+        uid,
+        run_id,
+        {
+            "kind": "answer",
+            "question_id": question_id,
+            "answer": {"text": "; ".join(defaults), "via": "expiry_default"},
+            "correlation_id": f"sweep-expiry:{run_id}",
+        },
+    )
+    # A resumed run re-enters planning; any state other than the parked one
+    # means the question is no longer pending (resumed here or answered
+    # concurrently), so cancelling would be wrong either way.
+    return str(getattr(status, "state", "")) != F.STATE_AWAITING_CLARIFICATION
+
+
 async def _expire_clarification(uid: str, run_id: str, now_iso: str) -> bool:
+    # Defaults first: the classifier guarantees every question ships with
+    # default_assumptions, so the resume path is the normal outcome and the
+    # cancel below survives only for malformed questions. answer_clarification
+    # is transactional and re-checks state, so a user answering in this exact
+    # window wins harmlessly.
+    run_doc = await store.get_run(uid, run_id) or {}
+    if run_doc.get(F.STATE) == F.STATE_AWAITING_CLARIFICATION:
+        try:
+            if await _apply_default_answer(uid, run_id, run_doc):
+                logger.info(
+                    "research.sweep: expired clarification resumed on defaults",
+                    {"run_id": run_id},
+                )
+                return True
+        except Exception as exc:
+            logger.warn(
+                "research.sweep: default-answer resume failed, cancelling",
+                {"run_id": run_id, "error": str(exc)},
+            )
+
     def _run() -> bool:
         db = admin_firestore()
         run_ref = store._run_ref(uid, run_id)

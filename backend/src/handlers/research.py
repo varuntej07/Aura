@@ -63,6 +63,10 @@ def _projection(detail: dict[str, Any]) -> dict[str, Any]:
         "admitted_plan_version": int(run.get(F.ADMITTED_PLAN_VERSION, 0)),
         "auto_admit_requested": bool(run.get(F.AUTO_ADMIT_REQUESTED)),
         "brief": dict(run.get(F.BRIEF) or {}),
+        # Delivery binding + receipt (no findings). The voice narrator reads
+        # these to speak a truthful "saved to X" only after the page exists.
+        "delivery": dict(run.get(F.DELIVERY) or {}),
+        "delivery_result": dict(run.get(F.DELIVERY_RESULT) or {}),
         "gaps": list(run.get(F.GAPS) or []),
         "source_count": int(run.get(F.SOURCE_COUNT, 0)),
         "claim_count": int(run.get(F.CLAIM_COUNT, 0)),
@@ -127,13 +131,27 @@ async def handle_create(request: Request) -> JSONResponse:
         return JSONResponse(
             {"detail": {"code": F.RESEARCH_DEPTH_CODE}}, status_code=400
         )
+    # Optional Notion delivery binding (voice-dispatched runs). Validated to a
+    # closed two-field shape: the destination was resolved from the user's own
+    # words by /notion/resolve before this call, and it is immutable on the run.
+    delivery: dict[str, str] | None = None
+    raw_delivery = body.get("delivery")
+    if isinstance(raw_delivery, dict):
+        data_source_id = str(raw_delivery.get("data_source_id") or "").strip()
+        database_name = str(raw_delivery.get("database_name") or "").strip()
+        if not data_source_id or len(data_source_id) > 64 or len(database_name) > 300:
+            return JSONResponse({"error": "Invalid delivery binding."}, status_code=400)
+        delivery = {"data_source_id": data_source_id, "database_name": database_name}
+    spec: dict[str, object] = {
+        "request": text,
+        "preset": preset,
+        "origin_surface": str(body.get("origin_surface") or "dashboard"),
+    }
+    if delivery:
+        spec["delivery"] = delivery
     handle = await get_research_engine().start(
         uid,
-        {
-            "request": text,
-            "preset": preset,
-            "origin_surface": str(body.get("origin_surface") or "dashboard"),
-        },
+        spec,
         client_run_id=client_run_id,
     )
     detail = await get_research_engine().detail(uid, handle.run_id)

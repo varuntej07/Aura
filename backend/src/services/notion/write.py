@@ -11,6 +11,7 @@ Notion confirms the page (write the cache after the side effect succeeds).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,6 +65,14 @@ def _paragraph(text: str) -> dict[str, Any]:
         "object": "block",
         "type": "paragraph",
         "paragraph": {"rich_text": _text_value(text)},
+    }
+
+
+def _heading(text: str) -> dict[str, Any]:
+    return {
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {"rich_text": _text_value(text)},
     }
 
 
@@ -237,6 +246,139 @@ async def write_capture(
         page_url=page_url,
         database_name=database_name,
         dropped_fields=dropped,
+    )
+
+
+# Notion caps a create at 1000 blocks; a brief is single-digit KB but the cap
+# is enforced anyway so a pathological run degrades to a truncated page, never
+# a failed delivery.
+_MAX_BRIEF_BLOCKS = 950
+
+
+def map_brief_to_blocks(request_text: str, brief: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pure mapping from a synthesized research brief to Notion child blocks.
+
+    Deterministic and model-free: statement text is already claim-qualified by
+    the synthesize stage, and nothing here rephrases, summarizes, or invents.
+    """
+    children: list[dict[str, Any]] = []
+    summary = str(brief.get("executive_summary") or "").strip()
+    if summary:
+        children.append(_paragraph(summary))
+    for section in brief.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        heading = str(section.get("heading") or "").strip()
+        if heading:
+            children.append(_heading(heading))
+        for statement in section.get("statements") or []:
+            if not isinstance(statement, dict):
+                continue
+            text = str(statement.get("text") or "").strip()
+            if text:
+                children.append(_paragraph(text))
+    gaps = [gap for gap in (brief.get("gaps") or []) if isinstance(gap, dict)]
+    if gaps:
+        children.append(_heading("Gaps"))
+        for gap in gaps:
+            detail = str(gap.get("detail") or gap.get("reason") or "").strip()
+            if detail:
+                children.append(_paragraph(detail))
+    disagreements = [str(item) for item in (brief.get("disagreements") or []) if str(item).strip()]
+    if disagreements:
+        children.append(_heading("Disagreements"))
+        for item in disagreements:
+            children.append(_paragraph(item))
+    for disclaimer in brief.get("disclaimers") or []:
+        text = str(disclaimer).strip()
+        if text:
+            children.append(_paragraph(text))
+    if not children:
+        children.append(_paragraph(f"Research request: {request_text}".strip()))
+    return children[:_MAX_BRIEF_BLOCKS]
+
+
+def research_delivery_key(uid: str, run_id: str) -> str:
+    """Stable receipt key for one run's Notion delivery; retries converge."""
+    material = "\x1f".join((uid, run_id, "notion_deliver"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+async def write_research_brief(
+    *,
+    uid: str,
+    data_source_id: str,
+    database_name: str,
+    request_text: str,
+    brief: dict[str, Any],
+    run_id: str,
+    schema: dict[str, str],
+) -> WriteResult:
+    """One research brief into the bound data source as ONE page.
+
+    Same receipt store and ordering discipline as write_capture: receipt-first
+    idempotency, page create, receipt only after Notion confirms.
+    """
+    idempotency_key = research_delivery_key(uid, run_id)
+    ref = _receipt_ref(uid, idempotency_key)
+    existing = await asyncio.to_thread(lambda: ref.get().to_dict())
+    if existing and not existing.get("undone_at"):
+        return WriteResult(
+            ok=True,
+            page_id=existing.get("page_id"),
+            page_url=existing.get("page_url"),
+            database_name=existing.get("database_name") or database_name,
+            already_saved=True,
+        )
+
+    properties: dict[str, Any] = {}
+    title_property = next((name for name, ptype in schema.items() if ptype == "title"), None)
+    title_text = " ".join((request_text or "Research brief").split())[:200]
+    if title_property:
+        properties[title_property] = {"title": _text_value(title_text)}
+    children = map_brief_to_blocks(request_text, brief)
+
+    connector = NotionConnector(uid)
+    page = await asyncio.to_thread(
+        _create_page,
+        connector,
+        data_source_id=data_source_id,
+        properties=properties,
+        children=children,
+    )
+    page_id = str(page.get("id") or "")
+    page_url = str(page.get("url") or "")
+
+    try:
+        await asyncio.to_thread(
+            ref.set,
+            {
+                "data_source_id": data_source_id,
+                "database_name": database_name,
+                "page_id": page_id,
+                "page_url": page_url,
+                "idempotency_key": idempotency_key,
+                "session_id": f"research:{run_id}",
+                "created_at": datetime.now(UTC).isoformat(),
+                "undone_at": None,
+            },
+        )
+    except Exception as exc:
+        logger.error(
+            "notion.write: research receipt write failed after page create",
+            {"user_id": uid, "run_id": run_id, "page_id": page_id, "error": str(exc)},
+        )
+        return WriteResult(ok=False, error="receipt_failed")
+
+    logger.info(
+        "notion.write: research brief delivered",
+        {"user_id": uid, "run_id": run_id, "page_id": page_id, "block_count": len(children)},
+    )
+    return WriteResult(
+        ok=True,
+        page_id=page_id,
+        page_url=page_url,
+        database_name=database_name,
     )
 
 

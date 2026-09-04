@@ -156,6 +156,14 @@ EXPIRES_AT = "expires_at"
 
 CREDIT_RECEIPT = "credit_receipt"
 CREDIT_WEIGHT = "credit_weight"
+# Voice-dispatched Notion delivery. DELIVERY is bound at create time from the
+# user's spoken destination and never mutated afterwards ("change the
+# destination" is a new run, not an edit). DELIVERY_RESULT is the deliver
+# stage's receipt: {page_id, page_url, database_name, delivered_at} on
+# success, {failed: <FAIL_* code>} otherwise. Narration and notify copy read
+# the receipt, never the intent, so "saved" is only ever claimed after proof.
+DELIVERY = "delivery"
+DELIVERY_RESULT = "delivery_result"
 BRIEF = "brief"
 GAPS = "gaps"
 EVIDENCE_AS_OF = "evidence_as_of"
@@ -343,6 +351,7 @@ STAGE_VERIFY = "verify"
 STAGE_SYNTHESIZE = "synthesize"
 STAGE_FINALIZE = "finalize"
 STAGE_NOTIFY_RESULT = "notify_result"
+STAGE_NOTION_DELIVER = "notion_deliver"
 STAGE_DELETE_RUN = "delete_run"
 
 # --- safe failure codes (a stable enum, NEVER a provider exception string) ------
@@ -367,6 +376,11 @@ FAIL_ENTITY_BINDING = "entity_binding_unverified"
 FAIL_SOURCE_POLICY_UNMET = "source_policy_unmet"
 FAIL_DEPTH_NOT_AVAILABLE = "depth_not_available"
 FAIL_PROVIDER_UNAVAILABLE = "provider_unavailable"
+# Research finished but the Notion delivery could not land (dead token, schema
+# refusal, repeated provider failure). The run's terminal state is unchanged -
+# the brief exists and the user keeps it; only the delivery is what failed.
+FAIL_DELIVERY_FAILED = "delivery_failed"
+FAIL_DELIVERY_REAUTH = "delivery_reauthorization_required"
 
 # --- machine codes the desktop client matches on -------------------------------
 # Mirrors the existing meeting cap contract shape: an HTTP status plus

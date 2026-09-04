@@ -17,7 +17,7 @@ Do not update it for internal refactors, UI changes, or anything that stays insi
 | Repo | Path (this machine) | GitHub remote | Stack | Deploy mechanism | Role |
 |---|---|---|---|---|---|
 | **Aura** (this repo) | `MobileApps/Aura` | `varuntej07/juno` (repo renamed Aura, remote URL still says juno) | Flutter mobile client (Android release target; iOS source exists but is not distributed) + FastAPI (`backend/`) | Product is in beta. Mobile: Android through Play Store / manual `.aab`; no iOS release. Backend: `docker build` straight from local disk (`backend/deploy.sh`), no git trigger, Cloud Run `juno-2ea45`/`us-central1` | Primary client (full API surface) and the shared backend every other repo talks to |
-| **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` + `latest.json`) | Current live Windows companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
+| **Aura-Desktop** | `MobileApps/Aura-Desktop` | `AuraVoice/Aura-Desktop` | Tauri v2 (Rust) + React 19 (TypeScript) | GitHub Releases (tagged build produces `.msi`/`.exe` + universal `.dmg` + `latest.json`) | Current live Windows and macOS companion client, a from-scratch rewrite of the legacy Flutter desktop overlay below |
 | **Aura-Web** | `MobileApps/Aura-Web` | `varuntej07/aura-web` | Next.js (App Router) + React + Framer Motion | Git-triggered deploy to Vercel (push to main auto-builds) | Marketing site (`auravoiceapp.com`), hosts the Google sign-in browser leg, and serves as the download page for Aura-Desktop |
 
 A legacy Flutter Windows client was deleted from this repo on 2026-07-11 (code, `windows/` tree, and its GCS-hosted installers). Aura-Desktop is the only Windows client. This repo still owns the backend contracts that client consumes: pairing, web-auth, connector OAuth, draft-outbound, voice screen-sight, and screen saves.
@@ -327,11 +327,11 @@ so an alarm currently degrades to a generic desktop notification. Adding it mean
 a new outbox type plus a local timer driven by `GET /reminders/alarms`, since the
 outbox poll cadence cannot ring at an exact minute.
 
-### 6. Windows desktop distribution and auto-update
+### 6. Desktop distribution and auto-update (Windows + macOS)
 
 Two independent consumers of the same Aura-Desktop GitHub release, not one shared mechanism:
 
-- **Aura-Web's download page** (`src/lib/windows-release.ts`) calls the public GitHub Releases API (`GET /repos/AuraVoice/Aura-Desktop/releases/latest`) at request time (cached 15 min), picks the `.msi` asset, and shows its version/size. No redeploy needed when a new Aura-Desktop version ships; the page just reflects whatever is tagged `latest` on GitHub.
+- **Aura-Web's download page** (`src/lib/windows-release.ts`) calls the public GitHub Releases API (`GET /repos/AuraVoice/Aura-Desktop/releases/latest`) at request time (cached 15 min), picks the `.msi` asset for Windows and the universal `.dmg` asset for macOS, and shows each version/size. Downloads go through the stable redirect routes `/api/download/windows` and `/api/download/mac`, which resolve the live asset URL at click time. No redeploy needed when a new Aura-Desktop version ships; the page just reflects whatever is tagged `latest` on GitHub. A release missing either asset silently drops that platform's download button back to its disabled/waitlist state, so every release must ship both the `.msi` and the `.dmg`.
 - **Aura-Desktop's own in-app updater** (`src-tauri/src/updater.rs`, Tauri's updater plugin) checks `https://github.com/AuraVoice/Aura-Desktop/releases/latest/download/latest.json` directly at startup, independent of Aura-Web entirely. Signed with a minisign keypair (`pubkey` in `tauri.conf.json`).
 
 So: publishing a new Aura-Desktop GitHub release is a single action that both the download page and the in-app auto-updater pick up on their own, with no manual step in Aura-Web. This replaced the older mechanism (see "Known gaps" below).
@@ -381,6 +381,8 @@ When Desktop receives `reauthorization_required`, it calls authenticated `POST /
 ### 7d. Notion capture (voice-triggered save into the user's Notion)
 
 Added 2026-09-03. The `notion` connector rides contract 7c's control plane: `GET /connectors` gains a `notion` block (`enabled`, `can_reconnect`, `workspace_name`, `connected_at`, `last_error`), plus `POST /connectors/notion/{enable,disable}` with the same 409 reauthorization contract. Notion issues expiring access tokens with rotating refresh tokens; juno-backend refreshes reactively on 401 and owns the pair at `users/{uid}/integrations/notion`. Tokens never reach any client.
+
+Voice can also dispatch a durable background research run bound to a Notion destination: `POST /research` accepts an optional `delivery: {data_source_id, database_name}` block, the engine's `notion_deliver` stage writes the finished brief as one page after finalize, and the completion notification (existing `research_*` types and actions, no new client contract) reports from the delivery receipt. The run projection (`GET /research/{run_id}`) now carries `delivery`/`delivery_result`, which the worker's narration poller and the desktop Research page both read. The desktop now also calls the pre-existing `POST /research/{run_id}/answer` route (clarification answers).
 
 The capture itself is voice-only and desktop-only. The LiveKit worker's `save_to_notion` tool extracts a typed record worker-side (screen bytes never leave worker RAM except into one tool-free model call) and calls juno-backend `POST /notion/resolve`, `POST /notion/write`, `POST /notion/undo`, and `POST /notion/create-database`, authenticated with the session's per-user Firebase ID token (the same credential as `/mcp`, deliberately NOT under `/internal/*`). Write receipts live at `UserAura/{uid}/notion_writes/{idempotency_key}`; account deletion already enumerates the `UserAura` root. After a durable write the worker publishes the data-channel event `notion.saved` with `{database_name, page_url, page_id}`; Aura-Desktop validates it in `agentData.ts` and shows a caption. Old desktop builds ignore the unknown event type safely (it is a caption, not an actionable notification, so the outbox type-drop hazard from contract 5d does not apply).
 

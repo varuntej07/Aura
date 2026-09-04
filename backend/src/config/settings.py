@@ -224,7 +224,8 @@ class Settings(BaseSettings):
     # runs at 500 dispatches/s with maxAttempts 100; inheriting 100 retries on stages
     # that each spend Brave queries, Firecrawl credits and model tokens is the failure
     # this separation exists to prevent. juno-research is 10/s, 20 concurrent, and
-    # maxAttempts 3 to match store.STAGE_ATTEMPT_CAP.
+    # maxAttempts 2 to match store.STAGE_ATTEMPT_CAP; deploy.sh provisions and
+    # pins that config on every deploy.
     CLOUD_TASKS_RESEARCH_QUEUE: str = "juno-research"
     # Set EXPLICITLY per task. No other caller in this repo sets dispatch_deadline, so
     # everything else rides the 10-minute HTTP default. 600s sits comfortably above the

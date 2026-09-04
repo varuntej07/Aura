@@ -1207,6 +1207,9 @@ async def entrypoint(ctx: JobContext) -> None:
             raise
         finally:
             await guide.close()
+            # Stops the research narration poller; the run itself is durable
+            # on the backend and the desktop outbox picks up its outcome.
+            await buddy.close_research_narrator()
             await typed_messages.close()
             if voice_limit_task is not None:
                 voice_limit_task.cancel()

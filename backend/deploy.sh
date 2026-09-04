@@ -36,7 +36,11 @@
 #
 # Cloud Tasks prerequisite (one-time, already provisioned): the juno-engagement
 #   queue (settings.CLOUD_TASKS_QUEUE) carries the engagement, chat-completion,
-#   AND the ingest-triggered signal-scoring tasks; no new queue is needed.
+#   AND the ingest-triggered signal-scoring tasks. The juno-research queue
+#   (settings.CLOUD_TASKS_RESEARCH_QUEUE) is provisioned and PINNED by this
+#   script below: research stages must never inherit Cloud Tasks' defaults
+#   (maxAttempts 100), because each redelivery spends provider credits on work
+#   the engine already declared terminal.
 #
 # Usage:
 #   bash backend/deploy.sh juno-2ea45 us-central1
@@ -96,6 +100,25 @@ gcloud iam service-accounts add-iam-policy-binding \
   --project="${PROJECT_ID}" \
   --member="serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
   --role="roles/iam.serviceAccountUser" \
+  --quiet >/dev/null
+
+# Provision and PIN the research queue (idempotent). maxAttempts=2 matches
+# store.STAGE_ATTEMPT_CAP; without this pin a new environment silently gets
+# Cloud Tasks' defaults (maxAttempts 100, 500 dispatches/s) and every failed
+# stage re-spends Brave/Firecrawl/model budget up to 100 times.
+echo "▶ Provisioning juno-research Cloud Tasks queue..."
+if ! gcloud tasks queues describe juno-research \
+  --location="${REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud tasks queues create juno-research \
+    --location="${REGION}" --project="${PROJECT_ID}" --quiet >/dev/null
+fi
+gcloud tasks queues update juno-research \
+  --location="${REGION}" --project="${PROJECT_ID}" \
+  --max-attempts=2 \
+  --max-dispatches-per-second=10 \
+  --max-concurrent-dispatches=20 \
+  --min-backoff=10s \
+  --max-backoff=300s \
   --quiet >/dev/null
 
 # Build & push image

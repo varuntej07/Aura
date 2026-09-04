@@ -386,6 +386,44 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             connectors=("notion",),
         ),
         _tool(
+            # Dispatches a durable background research run whose brief is
+            # delivered into the user's Notion. The turn only binds the spoken
+            # destination and creates the run doc; execution is Cloud Tasks on
+            # the backend, so the run survives hang-up by construction.
+            "research_to_notion",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
+            latency=ToolLatency.HIGH,
+            required=("request", "destination"),
+        ),
+        _tool(
+            # Relays the user's answer to a parked research run's question.
+            # No notion connector requirement: a run must stay answerable even
+            # if the user disconnects Notion mid-run. The tool validates the
+            # answer against options the run itself declared.
+            "answer_research_question",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            required=("answer",),
+        ),
+        _tool(
+            # Cancels the session's background research run. Same
+            # no-connector reasoning as answering.
+            "cancel_research",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+        ),
+        _tool(
             # Requests the desktop to arm Guide Mode. Like Interview Mode, this is
             # model-selected session control rather than a persistent write or a
             # phrase-gated action. The desktop stays the sole arming authority: it

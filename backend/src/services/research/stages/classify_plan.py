@@ -19,6 +19,7 @@ from typing import cast
 from ....lib.logger import logger
 from ...model_provider import get_model_provider
 from .. import fields as F
+from ..budget import MAX_CLARIFICATION_ROUNDS
 from .. import policy as policy_mod
 from ..llm_models import ClassificationResult, ClassifiedSubQuestion
 from ..metering import (
@@ -175,9 +176,43 @@ async def run(ctx: StageContext) -> StageResult:
     }
 
     if parsed.needs_clarification and parsed.question:
-        # A chat or voice turn must resolve essential ambiguity before it calls the tool.
-        # A dashboard submission is already explicit authorization, so it proceeds on the
-        # classifier's stated defaults and makes those assumptions visible in the result.
+        # Park and ask, up to budget.MAX_CLARIFICATION_ROUNDS (this is the only
+        # enforcement of that cap: store.advance increments CLARIFICATION_ROUNDS
+        # but never reads it). Past the cap, or when the question is unusable,
+        # proceed on the classifier's stated defaults exactly as before, with
+        # those assumptions visible in the result.
+        question_text = plain_text(parsed.question.text, max_chars=400)
+        if round_index < MAX_CLARIFICATION_ROUNDS and question_text:
+            question = {
+                "question_id": plain_text(parsed.question.question_id, max_chars=64)
+                or f"q{round_index + 1}",
+                "text": question_text,
+                "choices": [
+                    plain_text(item, max_chars=200)
+                    for item in parsed.question.choices
+                    if plain_text(item, max_chars=200)
+                ][:6],
+                "default_assumptions": [
+                    plain_text(item, max_chars=300)
+                    for item in parsed.question.default_assumptions
+                    if plain_text(item, max_chars=300)
+                ][:3],
+            }
+            logger.info(
+                "research.classify_plan: parking for clarification",
+                {"run_id": ctx.run_id, "round": round_index + 1},
+            )
+            return StageResult(
+                kind=StageResultKind.CLARIFY,
+                questions=(question,),
+                stage_outputs={
+                    "clarification_round": round_index + 1,
+                    "profile_ids": list(resolved_ids),
+                },
+                actuals=meter.as_actuals(),
+                cost_microusd=meter.cost_microusd,
+                cost_known=not meter.cost_incomplete,
+            )
         defaults = [
             plain_text(item, max_chars=300)
             for item in parsed.question.default_assumptions
