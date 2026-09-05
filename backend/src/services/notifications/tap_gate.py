@@ -171,7 +171,9 @@ async def passes(proposal: NotificationProposal) -> tuple[bool, str]:
         )
     except Exception as exc:
         logger.error("tap_gate: judge unavailable, holding for the next drain", {
-            "source": proposal.source, "error": str(exc),
+            "source": proposal.source,
+            "error": str(exc) or type(exc).__name__,
+            "error_type": type(exc).__name__,
         })
         return False, REASON_GATE_UNAVAILABLE
     return _parse(str(raw))
