@@ -1,6 +1,8 @@
 import 'dart:io' show Platform;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
@@ -1183,6 +1185,7 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
   final TextEditingController _controller = TextEditingController();
   String _selectedCategory = _feedbackCategories.first.value;
   bool _isSubmitting = false;
+  bool _sent = false;
   bool _hasText = false;
   String? _errorMessage;
 
@@ -1209,6 +1212,16 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
     final error = await widget.onSubmit(_controller.text, _selectedCategory);
     if (!mounted) return;
     if (error == null) {
+      // The write already succeeded, so this delay costs the user nothing but
+      // gives the tick time to draw. Popping on the frame the future resolves
+      // is what made a successful send feel like the sheet had simply vanished.
+      setState(() {
+        _isSubmitting = false;
+        _sent = true;
+      });
+      HapticFeedback.mediumImpact();
+      await Future<void>.delayed(const Duration(milliseconds: 1150));
+      if (!mounted) return;
       Navigator.pop(context, true);
       return;
     }
@@ -1248,13 +1261,15 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                 ),
               ),
               const SizedBox(height: 18),
-              const Text(
-                "What's on your mind?",
-                style: TextStyle(
-                  color: AppColors.textPrimary,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.3,
+              const Center(
+                child: Text(
+                  "What's on your mind?",
+                  style: TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.3,
+                  ),
                 ),
               ),
               const SizedBox(height: 16),
@@ -1266,8 +1281,11 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                     _CategoryChip(
                       label: category.label,
                       selected: _selectedCategory == category.value,
-                      onTap: () =>
-                          setState(() => _selectedCategory = category.value),
+                      onTap: _isSubmitting || _sent
+                          ? null
+                          : () => setState(
+                              () => _selectedCategory = category.value,
+                            ),
                     ),
                 ],
               ),
@@ -1275,7 +1293,7 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
               FauxGlassCard.section(
                 child: TextField(
                   controller: _controller,
-                  enabled: !_isSubmitting,
+                  enabled: !_isSubmitting && !_sent,
                   maxLines: 5,
                   maxLength: 1000,
                   style: const TextStyle(
@@ -1311,8 +1329,9 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
               ],
               const SizedBox(height: 16),
               _FeedbackSubmitButton(
-                enabled: _hasText && !_isSubmitting,
+                enabled: _hasText && !_isSubmitting && !_sent,
                 isSubmitting: _isSubmitting,
+                sent: _sent,
                 onTap: _submit,
               ),
             ],
@@ -1326,7 +1345,10 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
 class _CategoryChip extends StatelessWidget {
   final String label;
   final bool selected;
-  final VoidCallback onTap;
+
+  /// Null once the feedback is sent, so the chips freeze with the rest of the
+  /// form while the confirmation plays.
+  final VoidCallback? onTap;
 
   const _CategoryChip({
     required this.label,
@@ -1377,14 +1399,21 @@ class _CategoryChip extends StatelessWidget {
   }
 }
 
+/// The send button, which doubles as the success confirmation.
+///
+/// The tick is drawn with a [CustomPainter] rather than a Lottie or Rive asset:
+/// it inherits [AppColors.accent] directly, so it stays correct if the accent
+/// ever changes, and it adds no package or bundled asset for one 500ms flourish.
 class _FeedbackSubmitButton extends StatelessWidget {
   final bool enabled;
   final bool isSubmitting;
+  final bool sent;
   final VoidCallback onTap;
 
   const _FeedbackSubmitButton({
     required this.enabled,
     required this.isSubmitting,
+    required this.sent,
     required this.onTap,
   });
 
@@ -1393,38 +1422,197 @@ class _FeedbackSubmitButton extends StatelessWidget {
     return GestureDetector(
       onTap: enabled ? onTap : null,
       child: Opacity(
-        opacity: enabled || isSubmitting ? 1.0 : 0.4,
-        child: FauxGlassCard(
-          borderRadius: 16,
-          padding: const EdgeInsets.symmetric(vertical: 15),
-          borderColor: AppColors.accent.withValues(alpha: 0.35),
-          gradient: LinearGradient(
-            colors: [
-              AppColors.accent.withValues(alpha: 0.22),
-              AppColors.accent.withValues(alpha: 0.10),
-            ],
+        opacity: enabled || isSubmitting || sent ? 1.0 : 0.4,
+        // Deepens the fill as the tick lands, so the button reads as resolved
+        // rather than merely swapping its label.
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: sent ? 1 : 0),
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOut,
+          builder: (context, t, child) => FauxGlassCard(
+            borderRadius: 30,
+            padding: const EdgeInsets.symmetric(vertical: 15),
+            borderColor: AppColors.accent.withValues(alpha: 0.35 + 0.30 * t),
+            gradient: LinearGradient(
+              colors: [
+                AppColors.accent.withValues(alpha: 0.22 + 0.20 * t),
+                AppColors.accent.withValues(alpha: 0.10 + 0.18 * t),
+              ],
+            ),
+            child: child!,
           ),
-          child: Center(
-            child: isSubmitting
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: AppColors.accent,
-                    ),
-                  )
-                : const Text(
-                    'Send',
-                    style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                    ),
+          child: SizedBox(
+            height: 22,
+            child: Center(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 260),
+                switchInCurve: Curves.easeOutBack,
+                switchOutCurve: Curves.easeIn,
+                transitionBuilder: (child, animation) => FadeTransition(
+                  opacity: animation,
+                  child: ScaleTransition(
+                    scale: Tween<double>(begin: 0.82, end: 1).animate(animation),
+                    child: child,
                   ),
+                ),
+                child: _label(),
+              ),
+            ),
           ),
         ),
       ),
     );
   }
+
+  Widget _label() {
+    if (sent) {
+      return Row(
+        key: const ValueKey('sent'),
+        mainAxisSize: MainAxisSize.min,
+        children: const [
+          _AnimatedCheck(size: 20, color: AppColors.accent),
+          SizedBox(width: 8),
+          Text(
+            'Sent',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      );
+    }
+    if (isSubmitting) {
+      return const SizedBox(
+        key: ValueKey('submitting'),
+        width: 18,
+        height: 18,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: AppColors.accent,
+        ),
+      );
+    }
+    return const Text(
+      'Send',
+      key: ValueKey('idle'),
+      style: TextStyle(
+        color: AppColors.textPrimary,
+        fontSize: 16,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+}
+
+/// A tick that sweeps a ring, then strokes itself in. Plays once, on insert —
+/// which is why it is only ever built in the sent state.
+class _AnimatedCheck extends StatefulWidget {
+  final double size;
+  final Color color;
+
+  const _AnimatedCheck({required this.size, required this.color});
+
+  @override
+  State<_AnimatedCheck> createState() => _AnimatedCheckState();
+}
+
+class _AnimatedCheckState extends State<_AnimatedCheck>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 560),
+  );
+
+  // The two strokes overlap deliberately: the tick starts before the ring
+  // closes, which reads as one gesture instead of two queued ones.
+  late final Animation<double> _ring = CurvedAnimation(
+    parent: _controller,
+    curve: const Interval(0.0, 0.62, curve: Curves.easeOutCubic),
+  );
+  late final Animation<double> _tick = CurvedAnimation(
+    parent: _controller,
+    curve: const Interval(0.34, 1.0, curve: Curves.easeOutCubic),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => CustomPaint(
+        size: Size.square(widget.size),
+        painter: _CheckPainter(
+          ring: _ring.value,
+          tick: _tick.value,
+          color: widget.color,
+        ),
+      ),
+    );
+  }
+}
+
+class _CheckPainter extends CustomPainter {
+  /// Both 0 to 1: the fraction of the ring swept and of the tick stroked.
+  final double ring;
+  final double tick;
+  final Color color;
+
+  const _CheckPainter({
+    required this.ring,
+    required this.tick,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final strokeWidth = size.width * 0.11;
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    if (ring > 0) {
+      canvas.drawArc(
+        Rect.fromCircle(
+          center: Offset(size.width / 2, size.height / 2),
+          radius: size.width / 2 - strokeWidth / 2,
+        ),
+        -math.pi / 2,
+        ring * 2 * math.pi,
+        false,
+        paint,
+      );
+    }
+
+    if (tick <= 0) return;
+    final path = Path()
+      ..moveTo(size.width * 0.28, size.height * 0.52)
+      ..lineTo(size.width * 0.44, size.height * 0.68)
+      ..lineTo(size.width * 0.73, size.height * 0.35);
+    // One connected contour, so a single metric covers the whole tick.
+    for (final metric in path.computeMetrics()) {
+      canvas.drawPath(metric.extractPath(0, metric.length * tick), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CheckPainter oldDelegate) =>
+      oldDelegate.ring != ring ||
+      oldDelegate.tick != tick ||
+      oldDelegate.color != color;
 }
