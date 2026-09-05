@@ -451,23 +451,49 @@ class VoiceSessionService {
       // the room resets the buffer automatically on disconnect. A real
       // connect failure inside the operation still propagates to the catch below.
       LocalTrackPublication? micPublication;
-      await _room!.withPreConnectAudio(
-        () async {
-          await _room!.connect(
-            lkUrl,
-            lkToken,
-            connectOptions: const ConnectOptions(autoSubscribe: true),
-          );
-          micPublication = await _room!.localParticipant
-              ?.setMicrophoneEnabled(true);
-        },
-        timeout: const Duration(seconds: 25),
-        onError: (e) => AppLogger.warning(
-          'Preconnect audio buffer error',
+      var connectStarted = false;
+      Future<void> connectAndPublish() async {
+        connectStarted = true;
+        await _room!.connect(
+          lkUrl,
+          lkToken,
+          connectOptions: const ConnectOptions(autoSubscribe: true),
+        );
+        micPublication = await _room!.localParticipant?.setMicrophoneEnabled(
+          true,
+        );
+      }
+
+      try {
+        await _room!.withPreConnectAudio(
+          connectAndPublish,
+          timeout: const Duration(seconds: 25),
+          onError: (e) => AppLogger.warning(
+            'Preconnect audio buffer error',
+            tag: _tag,
+            metadata: {'error': e.toString()},
+          ),
+        );
+      } catch (e) {
+        // withPreConnectAudio starts the recorder BEFORE it runs the operation,
+        // so a native audio-device failure there (the iOS Simulator's ADM
+        // returns -1) throws with the room never connected at all. `connectStarted`
+        // tells the two apart structurally: still false means nothing was
+        // attempted, so retry without the buffer instead of losing the session.
+        // A real connect or publish failure has it true and falls through to the
+        // outer catch, which owns the user-facing copy.
+        if (connectStarted) rethrow;
+        AppLogger.warning(
+          'Preconnect audio unavailable, connecting without buffer',
           tag: _tag,
           metadata: {'error': e.toString()},
-        ),
-      );
+        );
+        unawaited(
+          _postHogAnalyticsService.trackEvent('voice_preconnect_unavailable'),
+        );
+        await _releasePreConnectBuffer(_room!);
+        await connectAndPublish();
+      }
 
       // The return value used to be discarded and success logged unconditionally.
       // A connected room with no published track is the worst possible state: the
@@ -857,6 +883,38 @@ class VoiceSessionService {
         );
       }),
     );
+  }
+
+  /// Wind down a pre-connect buffer that failed to start, before the room is
+  /// connected without it.
+  ///
+  /// Load-bearing, not hygiene. `Room` adopts and publishes
+  /// `preConnectAudioBuffer.localTrack` during connect whenever the buffer says
+  /// it is recording, and a failed `startRecording` leaves that flag true with a
+  /// dead track behind it. Connecting on top of that publishes the dead track:
+  /// a call that looks perfectly healthy and carries no audio at all. Never
+  /// throws — a cleanup hiccup must not swallow the retry.
+  Future<void> _releasePreConnectBuffer(Room room) async {
+    try {
+      // The buffer is package-internal, but it is the only handle on a failed
+      // start and livekit_client is pinned to 2.7.0 in pubspec.yaml. Re-check
+      // this against the package source on any LiveKit bump.
+      // ignore: invalid_use_of_internal_member
+      final buffer = room.preConnectAudioBuffer;
+      // Grab the track first: reset() nulls the reference without stopping it,
+      // because the room normally owns it by then. Here it was never published,
+      // so nothing else will ever release the microphone.
+      final orphanTrack = buffer.localTrack;
+      await buffer.reset();
+      await orphanTrack?.stop();
+      await orphanTrack?.dispose();
+    } catch (e) {
+      AppLogger.warning(
+        'Preconnect buffer release failed',
+        tag: _tag,
+        metadata: {'error': e.toString()},
+      );
+    }
   }
 
   /// Tear down local session state AND leave the room.

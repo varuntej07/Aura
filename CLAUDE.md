@@ -147,6 +147,19 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
 - **No feature flags.** Features ship unconditionally on. Never add a
   `*_ENABLED` setting or boolean gate. If a feature isn't ready for everyone,
   don't merge it.
+- **A platform-specific fix must not change any other platform's code path.**
+  One Flutter codebase ships Android and iOS; one backend serves the phone, the
+  keyboard and Aura-Desktop. When a bug reproduces on one platform only (a
+  Simulator audio device, a StoreKit rule, an Android foreground-service limit,
+  a desktop-only route), the working platforms keep running exactly the path
+  they run today: the fix is an added branch for the broken case, never a
+  rewrite of the shared one. Branch on the structural fact that actually failed
+  (the native call threw, the capability is absent, the entitlement is missing)
+  rather than `Platform.isX`, so a real device that hits the same condition is
+  covered too; branch on the platform itself only when the difference *is* the
+  platform's policy (StoreKit vs Dodo, above). This holds for UI, backend logic
+  and native plugins alike. Say which platforms you actually ran it on: a fix
+  seen working on the Simulator is unverified on the phone, and vice versa.
 - **This is production.** Every change defaults to scalability, maintainability,
   and robustness, with a bird's-eye view of downstream impact: data integrity,
   other users, deploy safety, and backward compatibility with already-released
@@ -177,6 +190,11 @@ Full write-ups in `lessons-learnt.text`. These are agent mistakes, not code fact
     source of truth for the non-iOS surfaces only.
 - **Never state a cost is negligible.** Reason about scaling to hundreds of
   users, not today's dollar amount.
+- **Commit messages: a subject line and one paragraph, 60 words at most.**
+  Plain prose saying what changed and why. No bullet lists, no section-by-section
+  walkthrough; the diff carries the detail. Never append a Claude Code signature,
+  a `Co-Authored-By` trailer, or a session link — every commit here is authored
+  by Varun alone.
 
 ## Run
 
