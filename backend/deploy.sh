@@ -251,7 +251,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="ENV=production" \
   --set-env-vars="PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD=${PROJECT_RESEARCH_DAILY_COST_CAP_MICROUSD}" \
   --set-env-vars="REALTIME_BRIDGE_ENABLED=false" \
-  --set-env-vars="ANTHROPIC_CHAT_MODEL=claude-sonnet-4-6" \
+  --set-env-vars="ANTHROPIC_CHAT_MODEL=claude-sonnet-5" \
   --set-env-vars="ANTHROPIC_VOICE_MODEL=claude-haiku-4-5" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
   --set-env-vars="GOOGLE_REDIRECT_URI=${STABLE_SERVICE_URL}/connectors/oauth/google/callback" \

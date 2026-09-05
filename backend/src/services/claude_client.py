@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -52,6 +53,49 @@ EXCLUDED_TOOLS_FOR_AGENT_CHAT: set[str] = set()
 # Text Claude generates before a tool call is typically a brief narration sentence.
 # Anything longer than this is almost certainly the start of a final response, not narration.
 _NARRATION_MAX_CHARS = 80
+
+# Time bound on the same buffer. Narration before a tool call arrives in one quick
+# burst, so if text has been buffering this long it is a final response being held
+# hostage, not narration: commit and stream it. Without this a reply shorter than
+# the char cap was invisible until end_turn, which read as the whole turn's latency.
+_NARRATION_FLUSH_S = 0.3
+
+# The prompt forbids em/en dashes in chat copy but the model occasionally slips, so
+# this is the deterministic guarantee, the chat twin of
+# signal_engine.notification_framer.strip_long_dashes (same regex; that function's
+# leading/trailing trims would eat legitimate whitespace on a streamed chunk, hence
+# the stream-aware filter below instead of a direct reuse).
+_LONG_DASH_RUN = re.compile(r"\s*[—–]+\s*")
+_DASH_HOLDBACK = re.compile(r"[\s—–]+$")
+
+
+class _StreamDashFilter:
+    """Streaming-safe long-dash removal for text deltas.
+
+    A trailing run of whitespace/dashes is held back one chunk so a dash run
+    straddling two deltas is never emitted raw; feed() returns the emit-safe
+    prefix with every complete dash run rewritten to ", ".
+    """
+
+    def __init__(self) -> None:
+        self._held = ""
+
+    def feed(self, chunk: str) -> str:
+        text = self._held + chunk
+        match = _DASH_HOLDBACK.search(text)
+        if match:
+            self._held = text[match.start():]
+            text = text[: match.start()]
+        else:
+            self._held = ""
+        return _LONG_DASH_RUN.sub(", ", text)
+
+    def flush(self) -> str:
+        held, self._held = self._held, ""
+        if "—" in held or "–" in held:
+            # A dash run at the end of the text run has nothing to join to; drop it.
+            return ""
+        return held
 
 
 class ClaudeClient:
@@ -333,6 +377,53 @@ class ClaudeClient:
         extra_excluded_tools: frozenset[str] = frozenset(),
         contract_version: int = 1,
     ) -> AsyncIterator[dict[str, Any]]:
+        """The inner stream with the no-long-dashes guarantee applied.
+
+        Filtering lives here, on the one choke point every consumer shares (the
+        live /chat handler, the durable background completion, and the Gemini
+        fallback, which yields through the inner generator). Handlers rebuild the
+        persisted transcript from these deltas, so the stored answer is filtered
+        for free.
+        """
+        dash_filter = _StreamDashFilter()
+        async for event in self._send_text_turn_stream(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            history=history,
+            is_agent=is_agent,
+            extra_excluded_tools=extra_excluded_tools,
+            contract_version=contract_version,
+        ):
+            if event.get("type") == "text_delta":
+                cleaned = dash_filter.feed(str(event.get("delta", "")))
+                if cleaned:
+                    yield {**event, "delta": cleaned}
+                continue
+            # A non-text frame ends the contiguous text run: release any held
+            # tail first so frame ordering is preserved.
+            tail = dash_filter.flush()
+            if tail:
+                yield {"type": "text_delta", "delta": tail}
+            if event.get("type") == "tool_thinking":
+                # Narration is user-visible copy under the same voice rule, and
+                # arrives whole, so a plain substitution is safe here.
+                yield {
+                    **event,
+                    "message": _LONG_DASH_RUN.sub(", ", str(event.get("message", ""))),
+                }
+                continue
+            yield event
+
+    async def _send_text_turn_stream(
+        self,
+        *,
+        system_prompt: str | list[dict[str, Any]],
+        user_content: str | list[dict[str, Any]],
+        history: list[dict[str, Any]] | None = None,
+        is_agent: bool = False,
+        extra_excluded_tools: frozenset[str] = frozenset(),
+        contract_version: int = 1,
+    ) -> AsyncIterator[dict[str, Any]]:
         """
         Streaming version of send_text_turn. Yields SSE-compatible event dicts:
           {"type": "text_delta",      "delta": str}
@@ -435,6 +526,7 @@ class ClaudeClient:
                             # _NARRATION_MAX_CHARS we commit to streaming as text_delta.
                             turn_text_buffer: list[str] = []
                             buffered_chars = 0
+                            buffer_started_at: float | None = None
                             committed_to_streaming = False
                             in_thinking = False
 
@@ -499,9 +591,15 @@ class ClaudeClient:
                                             text_started = True
                                             yield {"type": "text_delta", "delta": chunk}
                                         else:
+                                            if buffer_started_at is None:
+                                                buffer_started_at = time.monotonic()
                                             turn_text_buffer.append(chunk)
                                             buffered_chars += len(chunk)
-                                            if buffered_chars >= _NARRATION_MAX_CHARS:
+                                            if (
+                                                buffered_chars >= _NARRATION_MAX_CHARS
+                                                or time.monotonic() - buffer_started_at
+                                                >= _NARRATION_FLUSH_S
+                                            ):
                                                 committed_to_streaming = True
                                                 for c in turn_text_buffer:
                                                     text_started = True

@@ -481,7 +481,9 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
         surface, contract_version=contract_version
     )
 
-    user_id = _resolve_user_id(event, body)
+    # verify_id_token does blocking crypto (and a cert refetch when Google's
+    # signing keys rotate), so keep it off the event loop the stream shares.
+    user_id = await asyncio.to_thread(_resolve_user_id, event, body)
     if not user_id:
         logger.warn("Chat: rejected, missing user_id")
         return _sse_error_response(
@@ -792,22 +794,30 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     # Durable background completion: record this turn and enqueue a delayed Cloud Task so
     # that if the phone disconnects mid-stream (the generator below is cancelled and the
     # answer is lost), the turn still finishes server-side and pushes the reply. 
-    completion_task_name: str | None = None
+    completion_setup: asyncio.Task[str | None] | None = None
     if client_message_id:
-        turn_recorded = await turn_store.start_turn(
-            user_id,
-            client_message_id,
-            session_id=session_id,
-            message=message,
-            history=history,
-            has_attachments=bool(validated_attachments),
-            tier=effective_tier,
-            notification_reason=notification_reason,
-            surface=surface,
-        )
-        if turn_recorded:
+        async def _record_turn_for_recovery() -> str | None:
+            # Runs concurrently with the model stream: both halves are fail-open
+            # (start_turn never raises, the enqueue is caught here), so nothing a
+            # failure could do changes, it just no longer sits serially between
+            # the request and the first model token. The enqueued task is delayed
+            # by CHAT_COMPLETION_DELAY_SECONDS, so recording it a beat later is
+            # immaterial to recovery.
+            turn_recorded = await turn_store.start_turn(
+                user_id,
+                client_message_id,
+                session_id=session_id,
+                message=message,
+                history=history,
+                has_attachments=bool(validated_attachments),
+                tier=effective_tier,
+                notification_reason=notification_reason,
+                surface=surface,
+            )
+            if not turn_recorded:
+                return None
             try:
-                completion_task_name = await asyncio.to_thread(
+                return await asyncio.to_thread(
                     get_task_scheduler().schedule_chat_completion,
                     user_id,
                     client_message_id,
@@ -818,6 +828,12 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 logger.warn("Chat: completion task enqueue failed (backstop sweep covers it)", {
                     "user_id": user_id, "cmid": client_message_id, "error": str(exc),
                 })
+                return None
+
+        completion_setup = asyncio.create_task(
+            _record_turn_for_recovery(),
+            name=f"chat-turn-record-{client_message_id[:8]}",
+        )
 
     async def _generate() -> AsyncGenerator[str, None]:
         trace_token = bind_trace_context(
@@ -910,6 +926,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             answer_parts: list[str] = []
             done_metadata: dict[str, Any] = {}
             stream_error_seen = False
+            # Server-side TTFT: request received -> first text delta actually sent
+            # to the client. Logged with the completion line so a slow client
+            # ttft_ms can be split into server vs network without guessing.
+            first_text_at_ms: int | None = None
             async for sse_event in claude.send_text_turn_stream(
                 system_prompt=effective_system_prompt_blocks,
                 user_content=user_content,
@@ -969,11 +989,15 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                             ),
                         }]
                     for buffered_event in buffered_text_events:
+                        if first_text_at_ms is None:
+                            first_text_at_ms = int((time.monotonic() - start_ts) * 1000)
                         answer_parts.append(str(buffered_event.get("delta", "")))
                         yield f"data: {json.dumps(buffered_event)}\n\n"
                     buffered_text_events = []
                 event_type = sse_event.get("type")
                 if event_type == "text_delta":
+                    if first_text_at_ms is None:
+                        first_text_at_ms = int((time.monotonic() - start_ts) * 1000)
                     answer_parts.append(str(sse_event.get("delta", "")))
                 elif event_type == "done":
                     done_metadata = sse_event.get("metadata") or {}
@@ -986,6 +1010,9 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 {
                     "user_id": user_id,
                     "duration_ms": duration_ms,
+                    # None means no text was ever emitted (pure-error turn, or the
+                    # reminder-receipt guard swallowed the stream until done).
+                    "ttft_ms": first_text_at_ms,
                 },
             )
             # Log-only, after delivery: did Buddy just tell this user Aura cannot do
@@ -1050,6 +1077,12 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     mobile_compaction.maybe_compact(user_id, session_id),
                     name=f"chat-mobile-compact-{session_id[:8]}",
                 )
+            # By stream end the recording task has long finished; awaiting it here
+            # (before mark_client_complete) also guarantees the turn doc exists
+            # before it is marked complete.
+            completion_task_name: str | None = None
+            if completion_setup is not None:
+                completion_task_name = await completion_setup
             if client_message_id and release_recovery:
                 await turn_store.mark_client_complete(user_id, client_message_id)
             if completion_task_name and release_recovery:

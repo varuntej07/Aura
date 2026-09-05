@@ -1,6 +1,11 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'buddy_markdown_style.dart';
 
 /// Shown while a streaming SSE response is in progress.
 ///
@@ -11,8 +16,11 @@ import 'package:flutter/material.dart';
 ///     ([thinkingMessage] non-null): renders that narration as an italic label
 ///     with a pulsing dot. Thinking *phrases* only appear for real tool calls.
 ///   - Once text starts streaming: renders [streamingText] directly on the
-///     canvas (no bubble) with a blinking ▍ cursor appended.
-///   - When [isLoading] becomes false the cursor stops blinking (stream done).
+///     canvas (no bubble) as live markdown, with the same stylesheet the
+///     finalized BuddyResponseBubble uses, so there is no reflow jump when the
+///     persisted message replaces this slot. Re-parses are coalesced to one per
+///     ~90ms; the growing text itself is the streaming affordance (no cursor,
+///     matching the desktop client).
 class StreamingMessageBubble extends StatefulWidget {
   final String streamingText;
   final String? thinkingMessage;
@@ -32,6 +40,15 @@ class StreamingMessageBubble extends StatefulWidget {
 class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
     with SingleTickerProviderStateMixin {
   late AnimationController _cursorController;
+
+  // Markdown re-parse coalescing: deltas arrive many times per second and each
+  // MarkdownBody build re-parses the whole accumulated text, so parses are
+  // capped to one per interval and the previous parse is shown in between.
+  static const _markdownParseInterval = Duration(milliseconds: 90);
+  String _renderedText = '';
+  Widget? _renderedMarkdown;
+  DateTime _lastParseAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _pendingParse;
 
   @override
   void initState() {
@@ -54,6 +71,7 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
 
   @override
   void dispose() {
+    _pendingParse?.cancel();
     _cursorController.dispose();
     super.dispose();
   }
@@ -123,32 +141,33 @@ class _StreamingMessageBubbleState extends State<StreamingMessageBubble>
   }
 
   Widget _buildStreamingText(ThemeData theme) {
-    return AnimatedBuilder(
-      animation: _cursorController,
-      builder: (context, _) {
-        final showCursor = widget.isLoading && _cursorController.value > 0.5;
-        return Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(
-                text: widget.streamingText,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurface,
-                ),
-              ),
-              if (showCursor)
-                TextSpan(
-                  text: '▍',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-            ],
-          ),
+    final text = widget.streamingText;
+    if (_renderedMarkdown == null || text != _renderedText) {
+      final now = DateTime.now();
+      // Once the stream ends, parse unconditionally so the final text is shown
+      // before the persisted bubble replaces this slot.
+      if (!widget.isLoading ||
+          now.difference(_lastParseAt) >= _markdownParseInterval) {
+        _renderedText = text;
+        _lastParseAt = now;
+        _renderedMarkdown = MarkdownBody(
+          data: text,
+          selectable: false,
+          onTapLink: (text, href, title) {
+            if (href != null) {
+              launchUrl(Uri.parse(href), mode: LaunchMode.externalApplication);
+            }
+          },
+          styleSheet: buddyMarkdownStyleSheet(),
         );
-      },
-    );
+      } else {
+        _pendingParse ??= Timer(_markdownParseInterval, () {
+          _pendingParse = null;
+          if (mounted) setState(() {});
+        });
+      }
+    }
+    return _renderedMarkdown!;
   }
 }
 

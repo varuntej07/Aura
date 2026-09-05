@@ -158,12 +158,12 @@ class ChatMessageModel {
       if (att.type == ChatAttachmentType.image) {
         blocks.add({
           'type': 'image',
-          'source': {'type': 'base64', 'media_type': att.mimeType, 'data': base64Encode(att.bytes)},
+          'source': {'type': 'base64', 'media_type': att.mimeType, 'data': att.encodedData},
         });
       } else {
         blocks.add({
           'type': 'document',
-          'source': {'type': 'base64', 'media_type': att.mimeType, 'data': base64Encode(att.bytes)},
+          'source': {'type': 'base64', 'media_type': att.mimeType, 'data': att.encodedData},
         });
       }
     }

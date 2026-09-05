@@ -120,7 +120,9 @@ class Settings(BaseSettings):
 
     # Anthropic
     ANTHROPIC_API_KEY: str = ""
-    ANTHROPIC_CHAT_MODEL: str = "claude-sonnet-4-6"
+    # Sonnet 5: same $3/$15 pricing as the 4.6 it replaced, same SDK contract
+    # (adaptive thinking, effort, no temperature/prefill), newer generation.
+    ANTHROPIC_CHAT_MODEL: str = "claude-sonnet-5"
     # Main text-chat fallback. If Sonnet 429s / is down BEFORE any token has streamed,
     # claude_client retries the turn on Haiku (same SDK, tool schema, and streaming
     # events). A total-Anthropic outage falls further to Gemini via gemini_chat_fallback.

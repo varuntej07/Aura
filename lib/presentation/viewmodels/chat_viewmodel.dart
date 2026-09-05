@@ -771,11 +771,11 @@ abstract class ChatViewModel extends SafeChangeNotifier {
 
   // Private helpers
 
-  void _streamResponse(
+  Future<void> _streamResponse(
     String text,
     ChatMessageModel userMsg, {
     String? notificationReason,
-  }) {
+  }) async {
     _isStreaming = true;
     _streamingOutput.value = StreamingSnapshot.empty;
     _streamSub?.cancel();
@@ -794,6 +794,34 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     // not a connection/status/tool event. Total is stamped on DoneEvent.
     final turnStopwatch = Stopwatch()..start();
     int? firstVisibleTokenElapsedMs;
+
+    // One emitter for every way a turn can end, so the latency percentiles see
+    // failed and pending turns too instead of the success-only view they had
+    // (a slow turn that died was invisible, flattering the tail). `outcome`
+    // lets the ops query keep a done-only cut when comparing to old data.
+    void trackTurnLatency(String outcome) {
+      unawaited(
+        postHogAnalytics.trackEvent(
+          'chat_e2e_latency',
+          properties: {
+            'ttft_ms':
+                firstVisibleTokenElapsedMs ?? turnStopwatch.elapsedMilliseconds,
+            'total_ms': turnStopwatch.elapsedMilliseconds,
+            'agent_type': agentId ?? 'general',
+            'outcome': outcome,
+          },
+        ),
+      );
+    }
+
+    // Pre-encode this turn's attachments off the UI isolate; toRequestPayload
+    // and toHistoryTurn then hit the memoized value instead of base64-encoding
+    // megabytes on the main isolate mid-send. Counted by the stopwatch above on
+    // purpose: the encode is real latency the user waits through.
+    final pendingAttachments = userMsg.attachments;
+    if (pendingAttachments != null && pendingAttachments.isNotEmpty) {
+      await Future.wait(pendingAttachments.map((a) => a.encodeOffIsolate()));
+    }
 
     _streamSub = _backendService
         .sendMessageStream(
@@ -894,22 +922,12 @@ abstract class ChatViewModel extends SafeChangeNotifier {
                     properties: {'agent_type': agentId ?? 'general'},
                   ),
                 );
-                unawaited(
-                  postHogAnalytics.trackEvent(
-                    'chat_e2e_latency',
-                    properties: {
-                      'ttft_ms':
-                          firstVisibleTokenElapsedMs ??
-                          turnStopwatch.elapsedMilliseconds,
-                      'total_ms': turnStopwatch.elapsedMilliseconds,
-                      'agent_type': agentId ?? 'general',
-                    },
-                  ),
-                );
+                trackTurnLatency('done');
 
               case ChatLimitReachedEvent(:final message):
                 _isStreaming = false;
                 _streamingOutput.value = StreamingSnapshot.empty;
+                trackTurnLatency('limit');
 
                 // Show the backend's copy, which is already written in Buddy's
                 // voice for exactly this moment, the same way a server-emitted
@@ -941,6 +959,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
               case ErrorStreamEvent(:final message, :final code):
                 _isStreaming = false;
                 _streamingOutput.value = StreamingSnapshot.empty;
+                trackTurnLatency('error');
 
                 // A server-emitted error event (code == null) carries copy the backend
                 // already wrote in Buddy's voice for this exact failure - show it verbatim.
@@ -982,6 +1001,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
             // nothing received (the request likely never reached the server, so no turn was
             // recorded) is a real dead-end the user should retry.
             final recoverable = streamStarted || partial.trim().isNotEmpty;
+            trackTurnLatency(recoverable ? 'pending' : 'transport_error');
             if (recoverable) {
               final pendingMsg = ChatMessageModel(
                 id: replyId,
