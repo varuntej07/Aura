@@ -121,26 +121,9 @@ class FirebaseAuthService {
       }
       return Result.failure(AppException.authFailed(e, st));
     } on FirebaseAuthException catch (e, st) {
-      // Credential exchange (signInWithCredential) can fail on connectivity loss
-      // with the official network-request-failed code — surface that honestly.
-      AppLogger.error(
-        'Google sign-in credential exchange failed',
-        error: e,
-        stackTrace: st,
-        tag: 'FirebaseAuthService',
+      return Result.failure(
+        _mapFederatedSignInError(e, st, provider: 'Google'),
       );
-      if (e.code == 'network-request-failed') {
-        return Result.failure(
-          AppException(
-            code: ErrorCode.authFailed,
-            message:
-                "Looks like you're offline. Check your connection and try again.",
-            originalError: e,
-            stackTrace: st,
-          ),
-        );
-      }
-      return Result.failure(AppException.authFailed(e, st));
     } catch (e, st) {
       AppLogger.error(
         'Google sign-in failed',
@@ -183,40 +166,7 @@ class FirebaseAuthService {
       );
       return Result.success(user);
     } on FirebaseAuthException catch (e, st) {
-      final code = e.code.toLowerCase();
-      const cancellationCodes = {
-        'canceled',
-        'cancelled',
-        'popup-closed-by-user',
-        'web-context-canceled',
-        'web-context-cancelled',
-      };
-      if (cancellationCodes.contains(code)) {
-        AppLogger.info(
-          'Apple sign-in cancelled by user',
-          tag: 'FirebaseAuthService',
-        );
-        return Result.failure(AppException.authCancelled());
-      }
-
-      AppLogger.error(
-        'Apple sign-in failed',
-        error: e,
-        stackTrace: st,
-        tag: 'FirebaseAuthService',
-      );
-      if (code == 'network-request-failed') {
-        return Result.failure(
-          AppException(
-            code: ErrorCode.authFailed,
-            message:
-                "Looks like you're offline. Check your connection and try again.",
-            originalError: e,
-            stackTrace: st,
-          ),
-        );
-      }
-      return Result.failure(AppException.authFailed(e, st));
+      return Result.failure(_mapFederatedSignInError(e, st, provider: 'Apple'));
     } catch (e, st) {
       AppLogger.error(
         'Apple sign-in failed',
@@ -226,6 +176,89 @@ class FirebaseAuthService {
       );
       return Result.failure(AppException.authFailed(e, st));
     }
+  }
+
+  /// Maps the [FirebaseAuthException]s a federated credential exchange can
+  /// raise. Apple and Google hit the identical set, so this lives in one place:
+  /// the two providers previously carried separate copies of this mapping and
+  /// neither handled the account-collision case below.
+  ///
+  /// Codes arrive already normalised by firebase_auth_platform_interface, which
+  /// applies `replaceAll('ERROR_', '').toLowerCase().replaceAll('_', '-')`.
+  /// That folds Android's raw `ERROR_SCREAMING_SNAKE` codes and iOS's
+  /// already-kebab-case codes into the same spelling, so matching the kebab form
+  /// covers both platforms.
+  AppException _mapFederatedSignInError(
+    FirebaseAuthException e,
+    StackTrace st, {
+    required String provider,
+  }) {
+    final code = e.code.toLowerCase();
+
+    const cancellationCodes = {
+      'canceled',
+      'cancelled',
+      'popup-closed-by-user',
+      'web-context-canceled',
+      'web-context-cancelled',
+    };
+    if (cancellationCodes.contains(code)) {
+      // Backing out of the provider sheet is a normal action, not a crash, so
+      // it is logged as info and never reaches Crashlytics.
+      AppLogger.info(
+        '$provider sign-in cancelled by user',
+        tag: 'FirebaseAuthService',
+      );
+      return AppException.authCancelled();
+    }
+
+    AppLogger.error(
+      '$provider sign-in credential exchange failed',
+      error: e,
+      stackTrace: st,
+      tag: 'FirebaseAuthService',
+    );
+
+    // Firebase defaults to one account per email address, so a user who first
+    // signed up with one provider and later taps another with the same email
+    // lands here. Retrying the same button can never succeed, which is exactly
+    // what the generic "Sign-in didn't work. Please try again." told them to do.
+    // The plural spelling is what the Windows plugin emits
+    // (firebase_auth/windows/firebase_auth_plugin.cpp), kept so a desktop caller
+    // gets the same copy.
+    if (code == 'account-exists-with-different-credential' ||
+        code == 'account-exists-with-different-credentials') {
+      // Firebase does not report WHICH provider owns the account, and
+      // fetchSignInMethodsForEmail is inert under email-enumeration protection,
+      // so the copy must not name one. [FirebaseAuthException.email] is
+      // populated on both iOS and Android for this code, but is still optional.
+      final email = e.email;
+      final subject = email == null || email.isEmpty
+          ? 'You already have an Aura account with this email.'
+          : 'You already have an Aura account for $email.';
+      return AppException(
+        code: ErrorCode.authFailed,
+        message:
+            '$subject Sign in the way you did the first time — Google, Apple, '
+            'or email — and everything will be right where you left it.',
+        originalError: e,
+        stackTrace: st,
+      );
+    }
+
+    if (code == 'network-request-failed') {
+      // Official Firebase code for connectivity loss during the credential
+      // exchange — surface that honestly rather than blaming the provider.
+      return AppException(
+        code: ErrorCode.authFailed,
+        message:
+            "Looks like you're offline. Check your connection and try again.",
+        originalError: e,
+        stackTrace: st,
+      );
+    }
+
+    return AppException.authFailed(e, st);
   }
 
   Future<Result<String>> requestServerAuthCode(List<String> scopes) async {
