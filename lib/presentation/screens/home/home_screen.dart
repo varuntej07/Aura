@@ -1090,7 +1090,12 @@ class _VoiceFeedbackDialogState extends State<_VoiceFeedbackDialog> {
       backgroundColor: AppColors.surface,
       title: Text(
         widget.liked ? 'What worked?' : 'What went wrong?',
-        style: const TextStyle(color: AppColors.textPrimary, fontSize: 18),
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          color: AppColors.textPrimary,
+          fontSize: 20,
+          fontWeight: FontWeight.bold,
+        ),
       ),
       content: SingleChildScrollView(
         child: Column(
@@ -1121,17 +1126,17 @@ class _VoiceFeedbackDialogState extends State<_VoiceFeedbackDialog> {
                 hintText: 'Anything else? (optional)',
                 hintStyle: const TextStyle(color: AppColors.textTertiary),
                 filled: true,
-                fillColor: AppColors.surfaceVariant,
+                fillColor: AppColors.background,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(30),
                   borderSide: BorderSide.none,
                 ),
                 enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(30),
                   borderSide: BorderSide.none,
                 ),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(30),
                   borderSide: BorderSide.none,
                 ),
               ),
@@ -1144,7 +1149,14 @@ class _VoiceFeedbackDialogState extends State<_VoiceFeedbackDialog> {
           onPressed: () => Navigator.of(context).pop(
             (reasons: _selected.toList(), note: _noteController.text.trim()),
           ),
-          child: const Text('Submit', style: TextStyle(color: AppColors.accent)),
+          child: const Text(
+            'Submit',
+            style: TextStyle(
+              color: AppColors.accent,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
         ),
       ],
     );

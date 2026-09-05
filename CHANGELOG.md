@@ -1,10 +1,28 @@
 # Changelog
 
 All notable production release changes are recorded here. The current release
-version is `2.5.0+17`.
+version is `2.5.0+18`.
 
 Every version bump in `pubspec.yaml` gets an entry here in the same commit,
 including the exact text uploaded to the Play Console release notes field.
+
+## 2.5.0+18 - 2026-09-04
+
+Supersedes 2.5.0+17, which was uploaded but never released. Same version string,
+so the App Store Connect metadata, screenshots and support URL already entered
+against 2.5.0 carry over; only the build number changes. The Play notes from
+2.5.0+17 stand unchanged — nothing here alters Android behaviour.
+
+### Fixed
+
+- **The voice picker played the wrong clip when you tapped through it quickly.**
+  Previews ran unserialized against one shared `AudioPlayer`, so two taps in
+  close succession called `setAsset` concurrently and whichever load finished
+  last decided what you heard — auditioning the grid at speed replayed one
+  voice and made all eight sound identical. Each preview now claims a request
+  token and abandons quietly once a later tap supersedes it.
+- Voice feedback dialog restyled: centred bold title, pill-shaped note field,
+  bolder submit action.
 
 ## 2.5.0+17 - 2026-09-03
 

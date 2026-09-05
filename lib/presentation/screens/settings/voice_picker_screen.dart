@@ -33,6 +33,16 @@ class _VoicePickerScreenState extends State<VoicePickerScreen> {
   final AudioPlayer _player = AudioPlayer();
   String? _playingSlug;
 
+  /// Guards the one shared [_player] against overlapping taps.
+  ///
+  /// Each preview claims the next number and re-checks it after every await,
+  /// abandoning quietly the moment a later tap takes over. Without this, two
+  /// taps in quick succession call setAsset concurrently on the same player and
+  /// which clip is loaded when play() fires comes down to load timing — so the
+  /// voice you hear is not the card you pressed, and auditioning the grid at
+  /// speed replays whichever clip loaded first.
+  int _previewRequest = 0;
+
   /// Survives the clip ending, so the ambient tint fades out from the colour it
   /// was rather than snapping back to teal the moment the voice stops.
   Color _ambientTint = kBuddyVoices.first.tint;
@@ -44,11 +54,17 @@ class _VoicePickerScreenState extends State<VoicePickerScreen> {
   }
 
   Future<void> _preview(BuddyVoice voice) async {
+    // Claimed before the first await, so any preview already in flight sees
+    // itself superseded and stops touching the player.
+    final request = ++_previewRequest;
+
     // Tapping the voice that is already talking stops it. Restarting the same
     // clip is never what that tap means.
     if (_playingSlug == voice.slug) {
       await _player.stop();
-      if (mounted) setState(() => _playingSlug = null);
+      if (mounted && request == _previewRequest) {
+        setState(() => _playingSlug = null);
+      }
       return;
     }
 
@@ -61,7 +77,9 @@ class _VoicePickerScreenState extends State<VoicePickerScreen> {
     });
     try {
       await _player.stop();
+      if (request != _previewRequest) return;
       await _player.setAsset(voice.previewAsset);
+      if (request != _previewRequest) return;
       await _player.play();
     } catch (e, st) {
       // A missing or corrupt asset must not look like a voice that simply has
@@ -78,7 +96,11 @@ class _VoicePickerScreenState extends State<VoicePickerScreen> {
         );
       }
     } finally {
-      if (mounted && _playingSlug == voice.slug) {
+      // A superseded preview owns nothing any more: clearing here would wipe
+      // the tint and play state the newer tap has already set.
+      if (mounted &&
+          request == _previewRequest &&
+          _playingSlug == voice.slug) {
         setState(() => _playingSlug = null);
       }
     }
