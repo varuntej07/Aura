@@ -258,6 +258,24 @@ class FirebaseAuthService {
       );
     }
 
+    // The provider is not enabled on the Firebase project, so the backend
+    // rejected an otherwise valid credential ("The identity provider
+    // configuration is not found"). The native sheet has already succeeded by
+    // this point, so the user did nothing wrong and retrying cannot help —
+    // point them at a provider that does work. The email handlers below have
+    // always mapped this code; the federated path had not, which is how a
+    // console misconfiguration reached a user as "Please try again."
+    if (code == 'operation-not-allowed') {
+      return AppException(
+        code: ErrorCode.authFailed,
+        message:
+            '$provider sign-in is unavailable right now. Try another way to '
+            'sign in.',
+        originalError: e,
+        stackTrace: st,
+      );
+    }
+
     return AppException.authFailed(e, st);
   }
 
