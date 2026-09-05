@@ -39,6 +39,7 @@ async def run(ctx: StageContext) -> StageResult:
     # once it commits, nothing reopens the run, so a wrong READY is permanent and a
     # zero-evidence one contradicts the single promise the artifact makes.
     downgraded = False
+    run_doc: dict | None = None
     if terminal_state == F.STATE_READY:
         run_doc = await store.get_run(ctx.uid, ctx.run_id) or {}
         brief = dict(run_doc.get(F.BRIEF) or {})
@@ -46,12 +47,24 @@ async def run(ctx: StageContext) -> StageResult:
             terminal_state = F.STATE_PARTIAL
             downgraded = True
 
+    # A run bound to a Notion destination delivers FIRST and notifies from the
+    # deliver stage's receipt, so the notification (and the spoken line built
+    # from the same fields) can truthfully say "saved" or "saving failed"
+    # instead of racing the write. Runs without a delivery keep today's path.
+    if run_doc is None:
+        run_doc = await store.get_run(ctx.uid, ctx.run_id) or {}
+    successor_kind = (
+        F.STAGE_NOTION_DELIVER
+        if run_doc.get(F.DELIVERY)
+        else F.STAGE_NOTIFY_RESULT
+    )
+
     return StageResult(
         kind=StageResultKind.TERMINAL,
         next_state=terminal_state,
         next_jobs=(
             NextJob(
-                stage_kind=F.STAGE_NOTIFY_RESULT,
+                stage_kind=successor_kind,
                 wave=ctx.wave,
                 payload={"terminal_state": terminal_state},
             ),

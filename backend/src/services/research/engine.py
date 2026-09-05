@@ -308,6 +308,7 @@ class FirestoreResearchEngine:
     async def start(
         self, uid: str, spec: dict[str, Any], *, client_run_id: str
     ) -> RunHandle:
+        delivery_spec = spec.get("delivery")
         creation = await store.create_run(
             uid,
             client_run_id=client_run_id,
@@ -315,6 +316,7 @@ class FirestoreResearchEngine:
             preset=str(spec.get("preset", Preset.QUICK)),
             origin_surface=str(spec.get("origin_surface", "dashboard")),
             correlation_id=str(spec.get("correlation_id", "")),
+            delivery=dict(delivery_spec) if isinstance(delivery_spec, dict) else None,
         )
         # A replayed creation has already been delivered once; re-dispatching is safe
         # (dispatch_job skips a fresh in-flight row) but pointless, so skip it.

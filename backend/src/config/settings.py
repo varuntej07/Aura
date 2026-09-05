@@ -180,6 +180,13 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_CHANNEL_RENEWAL_LEAD_SECONDS: int = 21600
     CALENDAR_SYNC_STALE_MINUTES: int = 5
 
+    # Notion connector (voice screen capture into the user's Notion). Client
+    # credentials come from Secret Manager via deploy.sh; the redirect URI is
+    # the backend's own /connectors/oauth/notion/callback.
+    NOTION_CLIENT_ID: str = ""
+    NOTION_CLIENT_SECRET: str = ""
+    NOTION_REDIRECT_URI: str = ""
+
     # Brave Search API (real-time chat + voice web_surf tool)
     BRAVE_API_KEY: str = ""
 
@@ -217,7 +224,8 @@ class Settings(BaseSettings):
     # runs at 500 dispatches/s with maxAttempts 100; inheriting 100 retries on stages
     # that each spend Brave queries, Firecrawl credits and model tokens is the failure
     # this separation exists to prevent. juno-research is 10/s, 20 concurrent, and
-    # maxAttempts 3 to match store.STAGE_ATTEMPT_CAP.
+    # maxAttempts 2 to match store.STAGE_ATTEMPT_CAP; deploy.sh provisions and
+    # pins that config on every deploy.
     CLOUD_TASKS_RESEARCH_QUEUE: str = "juno-research"
     # Set EXPLICITLY per task. No other caller in this repo sets dispatch_deadline, so
     # everything else rides the 10-minute HTTP default. 600s sits comfortably above the

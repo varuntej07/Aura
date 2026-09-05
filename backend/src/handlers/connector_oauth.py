@@ -103,7 +103,14 @@ async def start_connector_oauth(request: Request) -> JSONResponse:
     except (ValidationError, ValueError):
         return JSONResponse(status_code=400, content={"error": "invalid_connector"})
 
-    if not (
+    if body.connector == "notion":
+        if not (
+            settings.NOTION_CLIENT_ID
+            and settings.NOTION_CLIENT_SECRET
+            and settings.NOTION_REDIRECT_URI
+        ):
+            return JSONResponse(status_code=503, content={"error": "notion_oauth_not_configured"})
+    elif not (
         settings.GOOGLE_CLIENT_ID
         and settings.GOOGLE_CLIENT_SECRET
         and settings.GOOGLE_REDIRECT_URI

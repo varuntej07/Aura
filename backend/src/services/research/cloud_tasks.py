@@ -7,7 +7,8 @@ ignorant of it, so swapping the execution substrate touches this file and nothin
 Three properties are load bearing and each has a comment where it is implemented:
 
 * **A separate queue.** ``juno-research`` runs at 10 dispatches/second with maxAttempts
-  **3**, matching ``store.STAGE_ATTEMPT_CAP``. The shared ``juno-engagement`` queue runs
+  **2**, matching ``store.STAGE_ATTEMPT_CAP``, and is provisioned/pinned by
+  backend/deploy.sh. The shared ``juno-engagement`` queue runs
   at 500/s with maxAttempts **100**; inheriting that would let Cloud Tasks redeliver a
   stage 100 times, each attempt spending Brave queries, Firecrawl credits and model
   tokens on work the engine has already declared terminal.

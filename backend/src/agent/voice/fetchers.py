@@ -81,7 +81,7 @@ async def fetch_connector_states(user_id: str) -> dict[str, bool]:
             .document(user_id)
             .collection("integrations")
         )
-        states = {"google_calendar": False, "gmail": False}
+        states = {"google_calendar": False, "gmail": False, "notion": False}
         for connector in states:
             snapshot = integrations.document(connector).get()
             if snapshot.exists:

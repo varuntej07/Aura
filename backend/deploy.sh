@@ -36,7 +36,11 @@
 #
 # Cloud Tasks prerequisite (one-time, already provisioned): the juno-engagement
 #   queue (settings.CLOUD_TASKS_QUEUE) carries the engagement, chat-completion,
-#   AND the ingest-triggered signal-scoring tasks; no new queue is needed.
+#   AND the ingest-triggered signal-scoring tasks. The juno-research queue
+#   (settings.CLOUD_TASKS_RESEARCH_QUEUE) is provisioned and PINNED by this
+#   script below: research stages must never inherit Cloud Tasks' defaults
+#   (maxAttempts 100), because each redelivery spends provider credits on work
+#   the engine already declared terminal.
 #
 # Usage:
 #   bash backend/deploy.sh juno-2ea45 us-central1
@@ -96,6 +100,25 @@ gcloud iam service-accounts add-iam-policy-binding \
   --project="${PROJECT_ID}" \
   --member="serviceAccount:${MEETING_STORAGE_SERVICE_ACCOUNT}" \
   --role="roles/iam.serviceAccountUser" \
+  --quiet >/dev/null
+
+# Provision and PIN the research queue (idempotent). maxAttempts=2 matches
+# store.STAGE_ATTEMPT_CAP; without this pin a new environment silently gets
+# Cloud Tasks' defaults (maxAttempts 100, 500 dispatches/s) and every failed
+# stage re-spends Brave/Firecrawl/model budget up to 100 times.
+echo "▶ Provisioning juno-research Cloud Tasks queue..."
+if ! gcloud tasks queues describe juno-research \
+  --location="${REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud tasks queues create juno-research \
+    --location="${REGION}" --project="${PROJECT_ID}" --quiet >/dev/null
+fi
+gcloud tasks queues update juno-research \
+  --location="${REGION}" --project="${PROJECT_ID}" \
+  --max-attempts=2 \
+  --max-dispatches-per-second=10 \
+  --max-concurrent-dispatches=20 \
+  --min-backoff=10s \
+  --max-backoff=300s \
   --quiet >/dev/null
 
 # Build & push image
@@ -232,6 +255,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="ANTHROPIC_VOICE_MODEL=claude-haiku-4-5" \
   --set-env-vars="ANTHROPIC_MAX_TOKENS=8096" \
   --set-env-vars="GOOGLE_REDIRECT_URI=${STABLE_SERVICE_URL}/connectors/oauth/google/callback" \
+  --set-env-vars="NOTION_REDIRECT_URI=${STABLE_SERVICE_URL}/connectors/oauth/notion/callback" \
   --set-env-vars="BACKEND_INTERNAL_URL=${STABLE_SERVICE_URL}" \
   --set-env-vars="SCHEDULER_OIDC_AUDIENCES=${ACCEPTED_AUDIENCES}" \
   --set-secrets="ANTHROPIC_API_KEY=juno-anthropic-api-key:latest" \
@@ -244,6 +268,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="CARTESIA_API_KEY=cartesia-api-key:latest" \
   --set-secrets="GOOGLE_CLIENT_ID=juno-google-client-id:latest" \
   --set-secrets="GOOGLE_CLIENT_SECRET=juno-google-client-secret:latest" \
+  --set-secrets="NOTION_CLIENT_ID=juno-notion-client-id:latest" \
+  --set-secrets="NOTION_CLIENT_SECRET=juno-notion-client-secret:latest" \
   --set-secrets="GEMINI_API_KEY=juno-gemini-api-key:latest" \
   --set-secrets="BRAVE_API_KEY=juno-brave-api-key:latest" \
   --set-secrets="NEWSDATA_API_KEY=juno-newsdata-api-key:latest" \

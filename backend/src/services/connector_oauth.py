@@ -23,18 +23,20 @@ from ..config.settings import settings
 from .firebase import admin_firestore
 from .gmail_connector import GMAIL_SCOPES, GmailConnector
 from .google_calendar_connector import CALENDAR_SCOPE, GoogleCalendarConnector
+from .notion_connector import NotionConnector
 
 ATTEMPTS_COLLECTION = "connector_oauth_attempts"
 ATTEMPT_TTL_SECONDS = 10 * 60
 GMAIL_SCOPE = " ".join(GMAIL_SCOPES)
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+NOTION_AUTHORIZATION_ENDPOINT = "https://api.notion.com/v1/oauth/authorize"
 
 ATTEMPT_ID_TOKEN_BYTES = 32
 # Derived once from the generator below so the callback's state-length check
 # can never drift from what secrets.token_urlsafe(ATTEMPT_ID_TOKEN_BYTES) emits.
 ATTEMPT_ID_LENGTH = len(secrets.token_urlsafe(ATTEMPT_ID_TOKEN_BYTES))
 
-ConnectorName = Literal["google_calendar", "gmail"]
+ConnectorName = Literal["google_calendar", "gmail", "notion"]
 
 
 def _utc_now() -> datetime:
@@ -58,6 +60,20 @@ def _authorization_url(
     state: str,
     code_challenge: str,
 ) -> str:
+    if connector == "notion":
+        # Notion's OAuth does not support PKCE; the code_verifier stays stored
+        # on the attempt but is never sent. owner=user scopes the grant to the
+        # authorizing member's accessible pages.
+        query = urllib.parse.urlencode(
+            {
+                "client_id": settings.NOTION_CLIENT_ID,
+                "redirect_uri": settings.NOTION_REDIRECT_URI,
+                "response_type": "code",
+                "owner": "user",
+                "state": state,
+            }
+        )
+        return f"{NOTION_AUTHORIZATION_ENDPOINT}?{query}"
     query = urllib.parse.urlencode(
         {
             "client_id": settings.GOOGLE_CLIENT_ID,
@@ -172,6 +188,11 @@ def complete_connection(
             code,
             redirect_uri=settings.GOOGLE_REDIRECT_URI,
             code_verifier=code_verifier,
+        )
+    elif connector == "notion":
+        NotionConnector(uid).connect(
+            code,
+            redirect_uri=settings.NOTION_REDIRECT_URI,
         )
     else:
         raise ValueError("invalid connector")

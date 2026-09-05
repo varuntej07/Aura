@@ -1629,19 +1629,26 @@ class ToolExecutor:
                     "research run."
                 ),
             }
-        # The run identity must vary with the request content. On voice,
-        # _client_message_id is "voice:{session_id}" — constant for the whole
-        # call — so using it alone mapped EVERY research request in one voice
-        # session to the same run doc, and a second, different topic silently
-        # replayed the first run (observed replaying a FAILED run as "started").
-        # Salting with the request hash gives distinct topics distinct runs
-        # while a retried identical request still replays, mirroring the outer
-        # receipt key in chat_completion/tool_idempotency.py (cmid + args hash).
+        # The run identity must vary with the request content AND the tool.
+        # Shared helper (research/run_identity.py): the request digest keeps
+        # distinct topics on distinct runs while an identical retry replays,
+        # and the tool name keeps this id disjoint from research_to_notion's
+        # for the same words in the same session (a collision there silently
+        # dropped the Notion delivery binding).
+        from .research.run_identity import (
+            client_run_id_for,
+            random_client_run_id,
+            retry_salted,
+        )
+
         if self._client_message_id:
-            request_digest = hashlib.sha256(request.casefold().encode("utf-8")).hexdigest()[:16]
-            client_run_id = f"{self._client_message_id}:{request_digest}"
+            client_run_id = client_run_id_for(
+                scope=self._client_message_id,
+                tool_name="start_research",
+                request_text=request,
+            )
         else:
-            client_run_id = str(uuid4())
+            client_run_id = random_client_run_id()
         engine = get_research_engine()
         spec = {"request": request, "preset": depth, "origin_surface": self._created_via}
         handle = await engine.start(self._user_id, spec, client_run_id=client_run_id)
@@ -1656,7 +1663,7 @@ class ToolExecutor:
             # identical args in the same turn are already absorbed by the outer
             # tool receipt before reaching this method.
             handle = await engine.start(
-                self._user_id, spec, client_run_id=f"{client_run_id}:retry:{uuid4()}"
+                self._user_id, spec, client_run_id=retry_salted(client_run_id)
             )
 
         if handle.replayed and handle.state in (

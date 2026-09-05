@@ -83,6 +83,7 @@ class Capability(StrEnum):
     FEEDBACK_WRITE = "feedback_write"
     TRACKING_WRITE = "tracking_write"
     SCREEN_SAVE = "screen_save"
+    NOTION_CAPTURE = "notion_capture"
     OUTBOUND_DRAFT = "outbound_draft"
     VISIBLE_ARTIFACT = "visible_artifact"
     GUIDE_CONTROL = "guide_control"
@@ -351,6 +352,88 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             Capability.SCREEN_SAVE,
             ToolEffect.WRITE,
             namespace="desktop.screen",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+        ),
+        _tool(
+            # Requests the desktop to turn screen-context sharing on, mirroring
+            # set_guide_mode's shape: SESSION_CONTROL, desktop is the sole
+            # authority (it shows an explicit consent prompt; only the user's
+            # click flips the setting). Exposed so Buddy's "I can't see your
+            # screen because sharing is off" line has a real next step behind
+            # it instead of a settings scavenger hunt.
+            "enable_screen_context",
+            Capability.SCREEN_SAVE,
+            ToolEffect.SESSION_CONTROL,
+            namespace="desktop.screen",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+        ),
+        _tool(
+            # Saves what is on screen as a structured record in the user's own
+            # Notion, when the utterance names or implies a Notion destination.
+            # Like save_screen_item, no fresh frame is required: the capture
+            # path reads the most recent retained payload (structured tree
+            # first, JPEG fallback). Gated on the notion connector being
+            # enabled; disambiguation and propose-create round-trips return a
+            # spoken question instead of a write.
+            "save_to_notion",
+            Capability.NOTION_CAPTURE,
+            ToolEffect.WRITE,
+            namespace="desktop.notion",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
+            latency=ToolLatency.HIGH,
+            required=("intent", "destination"),
+        ),
+        _tool(
+            # Archives the session's most recent Notion save (reversible from
+            # Notion's trash). A WRITE: it changes external state and deserves
+            # the finalized-turn and STT gates.
+            "undo_notion_save",
+            Capability.NOTION_CAPTURE,
+            ToolEffect.WRITE,
+            namespace="desktop.notion",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
+        ),
+        _tool(
+            # Dispatches a durable background research run whose brief is
+            # delivered into the user's Notion. The turn only binds the spoken
+            # destination and creates the run doc; execution is Cloud Tasks on
+            # the backend, so the run survives hang-up by construction.
+            "research_to_notion",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
+            latency=ToolLatency.HIGH,
+            required=("request", "destination"),
+        ),
+        _tool(
+            # Relays the user's answer to a parked research run's question.
+            # No notion connector requirement: a run must stay answerable even
+            # if the user disconnects Notion mid-run. The tool validates the
+            # answer against options the run itself declared.
+            "answer_research_question",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            required=("answer",),
+        ),
+        _tool(
+            # Cancels the session's background research run. Same
+            # no-connector reasoning as answering.
+            "cancel_research",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
             surfaces=DESKTOP_ONLY,
             concurrent=False,
         ),

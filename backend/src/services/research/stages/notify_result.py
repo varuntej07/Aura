@@ -82,6 +82,42 @@ async def run(ctx: StageContext) -> StageResult:
         )
 
     notification_type, title, body, severity = copy
+    # A run bound to a Notion destination notifies AFTER the deliver stage, so
+    # the body can state what actually happened. It reads the RECEIPT, never
+    # the intent: "saved" is only claimed once the page provably exists. The
+    # database name is the user's own destination, not a research finding, so
+    # naming it here does not leak the run's subject.
+    if run_doc.get(F.DELIVERY) and state in (F.STATE_READY, F.STATE_PARTIAL):
+        delivery_result = dict(run_doc.get(F.DELIVERY_RESULT) or {})
+        database_name = str(delivery_result.get("database_name") or "").strip()
+        if delivery_result.get("page_id"):
+            body = (
+                f"Saved to {database_name} in your Notion."
+                if database_name
+                else "Saved to your Notion."
+            )
+        elif delivery_result.get("delivered_unreceipted"):
+            # The page provably landed but its receipt write failed at the
+            # attempt cap. Claiming failure would be a lie over a real page;
+            # claiming a clean save would overstate what is proven.
+            body = (
+                f"Saved to {database_name} in your Notion."
+                if database_name
+                else "Saved to your Notion."
+            ) + " Open Aura if anything looks off."
+        elif not delivery_result:
+            # The run went terminal on a path that never reached the deliver
+            # stage (fail_stage's generic terminal mints notify directly, and
+            # only finalize routes through notion_deliver). Blaming Notion for
+            # an attempt that never happened is a false failure claim; the
+            # generic state copy above already says what is true.
+            pass
+        else:
+            body = (
+                "Research finished, but saving to Notion failed. "
+                "Open Aura to read the brief."
+            )
+            severity = "warning"
     action = (
         "answer_research_question"
         if state == F.STATE_AWAITING_CLARIFICATION

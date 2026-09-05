@@ -25,6 +25,7 @@ from . import (
     delete_run,
     finalize,
     notify_result,
+    notion_deliver,
     read_join,
     read_source,
     search_wave,
@@ -86,13 +87,14 @@ REGISTRY: dict[str, StageFn] = {
     # Delivery kinds. These may legitimately act AFTER a run is result-terminal, under
     # their own idempotent receipts, and can never reopen research work.
     F.STAGE_NOTIFY_RESULT: notify_result.run,
+    F.STAGE_NOTION_DELIVER: notion_deliver.run,
     F.STAGE_DELETE_RUN: delete_run.run,
 }
 
 # Kinds that MAY run once the run has reached a terminal result state. Membership here is
 # necessary and not sufficient: what each one is actually allowed to do is decided by
 # ``may_run_post_terminal`` below, per kind.
-POST_TERMINAL_KINDS = (F.STAGE_NOTIFY_RESULT, F.STAGE_DELETE_RUN)
+POST_TERMINAL_KINDS = (F.STAGE_NOTIFY_RESULT, F.STAGE_NOTION_DELIVER, F.STAGE_DELETE_RUN)
 
 # Result states a notification has copy for. A cancelled run is deliberately absent: the
 # user performed the cancellation, so telling them about it is noise, not news.
@@ -129,6 +131,15 @@ def may_run_post_terminal(
         if str(run.get(F.DELETION_STATE) or "") or deletion_active:
             return False
         return str(run.get(F.STATE) or "") in _NOTIFIABLE_STATES
+    if stage_kind == F.STAGE_NOTION_DELIVER:
+        # A delivery needs a result worth writing: READY or PARTIAL, with the
+        # run neither cancelled nor being deleted. A FAILED run has no brief
+        # worth mirroring; the notify path reports it instead.
+        if run.get(F.CANCEL_REQUESTED_AT):
+            return False
+        if str(run.get(F.DELETION_STATE) or "") or deletion_active:
+            return False
+        return str(run.get(F.STATE) or "") in (F.STATE_READY, F.STATE_PARTIAL)
     if stage_kind == F.STAGE_DELETE_RUN:
         # An active receipt is the ONLY authority to delete. Terminality is not one.
         return bool(deletion_active)

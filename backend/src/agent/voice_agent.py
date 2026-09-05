@@ -88,6 +88,7 @@ from .voice.pipelines import (
 )
 from .voice.recorder import VoiceSessionRecorder
 from .voice.revision import worker_revision_fields
+from .voice.screen_context_control import SCREEN_CONTEXT_UNAVAILABLE_TYPE
 from .voice.screen_context import (
     CLIENT_EVENTS_TOPIC,
     OCR_CONTEXT_TYPE,
@@ -692,6 +693,7 @@ async def entrypoint(ctx: JobContext) -> None:
             bridged=bridged,
             text_output=output_mode == "text",
             turn_metrics=turn_metrics,
+            firebase_id_token=firebase_id_token,
         )
 
         async def _resume_buddy(
@@ -956,6 +958,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             )
 
+        def _handle_screen_context_unavailable(
+            msg: dict, participant_identity: str, topic: str
+        ) -> None:
+            del topic
+            if participant_identity != user_id:
+                return
+            screen_context.note_unavailable(str(msg.get("reason") or ""))
+
         def _handle_ocr_context(msg: dict, participant_identity: str, topic: str) -> None:
             del participant_identity, topic
             if _ambient_context_suspended(OCR_CONTEXT_TYPE):
@@ -1018,6 +1028,7 @@ async def entrypoint(ctx: JobContext) -> None:
             GUIDE_MODE_TYPE: _handle_guide_mode,
             GUIDE_HEARTBEAT_TYPE: _handle_guide_heartbeat,
             SCREEN_CONTEXT_TYPE: _handle_screen_context,
+            SCREEN_CONTEXT_UNAVAILABLE_TYPE: _handle_screen_context_unavailable,
             OCR_CONTEXT_TYPE: _handle_ocr_context,
             TEXT_INPUT_TYPE: _handle_text_input,
             **{control: _handle_bridge for control in BRIDGE_CONTROL_TYPES},
@@ -1206,6 +1217,9 @@ async def entrypoint(ctx: JobContext) -> None:
             raise
         finally:
             await guide.close()
+            # Stops the research narration poller; the run itself is durable
+            # on the backend and the desktop outbox picks up its outcome.
+            await buddy.close_research_narrator()
             await typed_messages.close()
             if voice_limit_task is not None:
                 voice_limit_task.cancel()
