@@ -1,0 +1,34 @@
+{
+  "katie": {
+    "line": "Hey, it's me. I was just thinking about what you said yesterday.",
+    "speed": 0.92
+  },
+  "dallas": {
+    "line": "Alright, I'm here. Take your time, I'm not going anywhere.",
+    "speed": 0.92
+  },
+  "tessa": {
+    "line": "There you are. I was hoping you'd call tonight.",
+    "speed": 0.92
+  },
+  "kira": {
+    "line": "Okay. Just tell me what happened, and we'll figure it out.",
+    "speed": 0.92
+  },
+  "layla": {
+    "line": "No rush. We can sit with this one for a minute.",
+    "speed": 0.92
+  },
+  "jolene": {
+    "line": "Well, hey you. Come on now, tell me everything.",
+    "speed": 0.92
+  },
+  "kyle": {
+    "line": "Oh, this is going to be good. Go on, I'm listening.",
+    "speed": 0.92
+  },
+  "archie": {
+    "line": "Right then. Shall we get into it, or are we pretending everything's fine?",
+    "speed": 0.92
+  }
+}
