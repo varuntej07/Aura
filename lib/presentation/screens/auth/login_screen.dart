@@ -12,7 +12,7 @@ import '../../widgets/loading_indicator.dart';
 
 // ── Screen ────────────────────────────────────────────────────────────────────
 
-enum _EmailFormMode { none, signIn, signUp }
+enum _EmailFormMode { none, signIn, signUp, resetPassword }
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -71,11 +71,44 @@ class _LoginScreenState extends State<LoginScreen>
     _nameController.clear();
     _emailController.clear();
     _passwordController.clear();
-    context.read<AuthViewModel>().clearError();
+    final vm = context.read<AuthViewModel>();
+    vm.clearError();
+    vm.clearPasswordResetNotice();
     setState(() {
       _formMode = _EmailFormMode.none;
       _obscurePassword = true;
     });
+  }
+
+  /// Moves to the reset form, keeping whatever address was already typed so the
+  /// user does not retype it just to recover the account.
+  void _goToPasswordReset(BuildContext context) {
+    final vm = context.read<AuthViewModel>();
+    vm.clearError();
+    vm.clearPasswordResetNotice();
+    _passwordController.clear();
+    setState(() {
+      _formMode = _EmailFormMode.resetPassword;
+      _obscurePassword = true;
+    });
+  }
+
+  void _goBackToSignIn(BuildContext context) {
+    final vm = context.read<AuthViewModel>();
+    vm.clearError();
+    vm.clearPasswordResetNotice();
+    setState(() => _formMode = _EmailFormMode.signIn);
+  }
+
+  void _submitPasswordReset(BuildContext context) {
+    final vm = context.read<AuthViewModel>();
+    // Guarded here rather than by disabling the button so the keyboard's
+    // done-action cannot fire a second request either. Firebase rate-limits
+    // resets, and a burst would spend that budget on duplicates.
+    if (vm.passwordResetInFlight) return;
+    final email = _emailController.text.trim();
+    if (email.isEmpty) return;
+    vm.sendPasswordResetEmail(email);
   }
 
   void _submitSignIn(BuildContext context) {
@@ -270,6 +303,108 @@ class _LoginScreenState extends State<LoginScreen>
                                   filled: true,
                                   onTap: () => _submitSignIn(context),
                                 ),
+                                const SizedBox(height: 14),
+                                Center(
+                                  child: GestureDetector(
+                                    behavior: HitTestBehavior.opaque,
+                                    onTap: () => _goToPasswordReset(context),
+                                    child: const Padding(
+                                      padding: EdgeInsets.symmetric(
+                                        vertical: 4,
+                                        horizontal: 8,
+                                      ),
+                                      child: Text(
+                                        'Forgot password?',
+                                        style: TextStyle(
+                                          color: AppColors.textSecondary,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+
+                                // ── Password reset form ────────────────────────────
+                              ] else if (_formMode ==
+                                  _EmailFormMode.resetPassword) ...[
+                                _BackLink(
+                                  onTap: () => _goBackToSignIn(context),
+                                ),
+                                const SizedBox(height: 16),
+                                if (vm.passwordResetNotice != null) ...[
+                                  // Shown whether or not an account exists, so
+                                  // the form never becomes a way to test which
+                                  // addresses are registered.
+                                  Container(
+                                    padding: const EdgeInsets.all(16),
+                                    decoration: BoxDecoration(
+                                      color: AppColors.surface,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: AppColors.glassBorderDim,
+                                        width: 0.5,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const Icon(
+                                          Icons.mark_email_read_outlined,
+                                          color: AppColors.textSecondary,
+                                          size: 20,
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Text(
+                                            vm.passwordResetNotice!,
+                                            style: const TextStyle(
+                                              color: AppColors.textPrimary,
+                                              fontSize: 14,
+                                              height: 1.4,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  _EmailActionButton(
+                                    label: 'Back to sign in',
+                                    filled: false,
+                                    onTap: () => _goBackToSignIn(context),
+                                  ),
+                                ] else ...[
+                                  const Text(
+                                    'Enter your email and we’ll send you a link '
+                                    'to set a new password.',
+                                    style: TextStyle(
+                                      color: AppColors.textSecondary,
+                                      fontSize: 13,
+                                      height: 1.4,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  _LoginTextField(
+                                    controller: _emailController,
+                                    hint: 'Email address',
+                                    keyboardType: TextInputType.emailAddress,
+                                    textInputAction: TextInputAction.done,
+                                    onSubmitted: (_) =>
+                                        _submitPasswordReset(context),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  _EmailActionButton(
+                                    label: vm.passwordResetInFlight
+                                        ? 'Sending…'
+                                        : 'Send reset link',
+                                    icon: vm.passwordResetInFlight
+                                        ? null
+                                        : Icons.arrow_forward,
+                                    filled: true,
+                                    onTap: () => _submitPasswordReset(context),
+                                  ),
+                                ],
 
                                 // ── Create account form ────────────────────────────
                               ] else ...[

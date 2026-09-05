@@ -1043,13 +1043,17 @@ class _AccountActionsSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 14),
-            const Text(
-              'Manage account',
-              style: TextStyle(
-                color: AppColors.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.3,
+            // Centred like the grab handle above it; the enclosing Column is
+            // crossAxisAlignment.start for the action card below.
+            const Center(
+              child: Text(
+                'Manage account',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.3,
+                ),
               ),
             ),
             const SizedBox(height: 14),
@@ -1112,6 +1116,11 @@ class _AccountActionRow extends StatelessWidget {
             const SizedBox(width: 14),
             Expanded(
               child: Column(
+                // Centre the text block against the icon and chevron, which the
+                // Row already centres. Without this the Column filled the tile
+                // height and top-aligned, leaving the title sitting above the
+                // icon. Matches _GlassNavTile, which centres the same way.
+                mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
@@ -1120,7 +1129,7 @@ class _AccountActionRow extends StatelessWidget {
                       color: destructive
                           ? AppColors.error
                           : AppColors.textPrimary,
-                      fontSize: 15,
+                      fontSize: 17,
                       fontWeight: FontWeight.w600,
                       height: 1.2,
                     ),

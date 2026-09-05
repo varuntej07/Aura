@@ -427,6 +427,99 @@ class FirebaseAuthService {
     }
   }
 
+  /// Asks Firebase to email a password reset link.
+  ///
+  /// The email address is never verified by us, and deliberately so: the link
+  /// itself IS the proof of ownership, because only someone who controls that
+  /// inbox can open it. There is nothing to pre-check.
+  ///
+  /// Consequently this MUST NOT tell the caller whether an account exists.
+  /// `user-not-found` is mapped to success so the UI shows one message either
+  /// way — otherwise the reset form becomes an oracle for "is this person on
+  /// Aura?", which is exactly the account-enumeration leak the Identity
+  /// Platform's email enumeration protection exists to close. That protection
+  /// already suppresses the error server-side ("there are no specific error
+  /// messages indicating when emails aren't sent"), so this mapping is defence
+  /// in depth for the case where it is ever switched off on the project.
+  ///
+  /// Format and transport problems ARE surfaced, since a malformed address or a
+  /// dead connection discloses nothing about who has an account.
+  Future<Result<void>> sendPasswordResetEmail(String email) async {
+    final auth = _auth;
+    if (auth == null) {
+      return Result.failure(
+        AppException.unexpected('Firebase not configured.'),
+      );
+    }
+    try {
+      await auth.sendPasswordResetEmail(email: email);
+      AppLogger.info(
+        'Password reset email requested',
+        tag: 'FirebaseAuthService',
+      );
+      return const Result.success(null);
+    } on FirebaseAuthException catch (e, st) {
+      if (e.code == 'user-not-found') {
+        // Deliberately indistinguishable from success. Logged at info with no
+        // address so the event is traceable without recording who was probed.
+        AppLogger.info(
+          'Password reset requested for an address with no account',
+          tag: 'FirebaseAuthService',
+        );
+        return const Result.success(null);
+      }
+      AppLogger.error(
+        'Password reset request failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
+      return Result.failure(_mapPasswordResetError(e, st));
+    } catch (e, st) {
+      AppLogger.error(
+        'Password reset request failed',
+        error: e,
+        stackTrace: st,
+        tag: 'FirebaseAuthService',
+      );
+      return Result.failure(AppException.authFailed(e, st));
+    }
+  }
+
+  AppException _mapPasswordResetError(FirebaseAuthException e, StackTrace st) {
+    switch (e.code) {
+      case 'invalid-email':
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: 'Enter a valid email address.',
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'too-many-requests':
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: 'Too many attempts. Try again in a few minutes.',
+          originalError: e,
+          stackTrace: st,
+        );
+      case 'network-request-failed':
+        return AppException(
+          code: ErrorCode.authFailed,
+          message:
+              "Looks like you're offline. Check your connection and try again.",
+          originalError: e,
+          stackTrace: st,
+        );
+      default:
+        return AppException(
+          code: ErrorCode.authFailed,
+          message: "Couldn't send the reset link. Please try again.",
+          originalError: e,
+          stackTrace: st,
+        );
+    }
+  }
+
   AppException _mapSignInError(FirebaseAuthException e, StackTrace st) {
     switch (e.code) {
       case 'user-not-found':
