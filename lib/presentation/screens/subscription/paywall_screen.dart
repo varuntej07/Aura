@@ -13,6 +13,7 @@ import '../../../data/services/posthog_analytics_service.dart';
 import '../../../data/services/store_purchase_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/subscription_viewmodel.dart';
+import '../../widgets/shimmer_sweep.dart';
 
 enum _PlanToggle { free, companion, pro }
 
@@ -71,13 +72,34 @@ class _PaywallScreenState extends State<PaywallScreen>
     }
   }
 
+  /// The tier the account actually PAYS for, or null when nothing is owned.
+  ///
+  /// Deliberately NOT [SubscriptionViewModel.currentTier]: that is the
+  /// backend's *effective* tier, which resolves to pro for the whole free
+  /// trial, so every trial user would be marked as owning Pro. The
+  /// `effectiveTier == tier` check additionally drops lapsed subscribers,
+  /// whose purchased tier is still pro while their access has already
+  /// resolved to free.
+  _PlanToggle? _ownedPlan(SubscriptionViewModel vm) {
+    final entitlement = vm.entitlement;
+    if (entitlement == null || vm.isTrialActive) return null;
+    if (!entitlement.isPaid || entitlement.effectiveTier != entitlement.tier) {
+      return null;
+    }
+    return switch (entitlement.tier) {
+      SubscriptionTier.pro => _PlanToggle.pro,
+      SubscriptionTier.companion => _PlanToggle.companion,
+      SubscriptionTier.free => null,
+    };
+  }
+
   /// Warm, contextual subtitle when arriving from a trial-lifecycle notification
   /// tap, otherwise the generic entry-point copy.
   String get _subtitle => switch (widget.trialReason?.variant) {
     '3d_warning' => "Your trial wraps up in 3 days. Let's keep this going.",
     'expired' =>
       "Your trial's over, but Buddy's not going anywhere. Pick back up anytime.",
-    _ => '$kTrialDurationDays-day free trial. No card required.',
+    _ => "$kTrialDurationDays days free while we're in beta",
   };
 
   @override
@@ -111,200 +133,255 @@ class _PaywallScreenState extends State<PaywallScreen>
                 ),
               ),
               Expanded(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(24, 4, 24, 32),
-                  child: Consumer<SubscriptionViewModel>(
-                    builder: (context, vm, _) {
-                      final storeCanPurchase =
-                          storePricing != null && store.isAvailable && !vm.isPaid;
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Text(
-                            'Unlock Aura',
-                            style: TextStyle(
-                              color: AppColors.textPrimary,
-                              fontSize: 30,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: -1,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            _subtitle,
-                            style: const TextStyle(
-                              color: AppColors.textTertiary,
-                              fontSize: 14,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 24),
-
-                          // Free / Companion / Pro toggle
-                          _PlanToggleSwitch(
-                            selected: _activePlan,
-                            onChanged: (p) {
-                              setState(() => _activePlan = p);
-                              _togglePageController.animateToPage(
-                                _planIndex(p),
-                                duration: const Duration(milliseconds: 300),
-                                curve: Curves.easeInOut,
-                              );
-                            },
-                          ),
-                          const SizedBox(height: 24),
-
-                          // Feature list driven by the same PageController so
-                          // swiping the content area updates the toggle pill too
-                          SizedBox(
-                            height: 350,
-                            child: PageView(
-                              controller: _togglePageController,
-                              onPageChanged: (index) {
-                                setState(() {
-                                  _activePlan = _planFromIndex(index);
-                                });
-                              },
-                              children: const [
-                                _FeatureList(plan: _PlanToggle.free),
-                                _FeatureList(plan: _PlanToggle.companion),
-                                _FeatureList(plan: _PlanToggle.pro),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 24),
-
-                          // Two sellers, one screen. Off iOS, purchase UI
-                          // appears once the trial has ended and Dodo is
-                          // configured, in every country. On iOS StoreKit sells
-                          // and the products must stay reachable during the
-                          // trial too, because App Review has to be able to
-                          // exercise the in-app purchase to approve it.
-                          if (vm.canPurchaseSubscription ||
-                              storeCanPurchase) ...[
-                            // Side-by-side billing cards
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  child: _BillingCard(
-                                    period: _BillingPeriod.monthly,
-                                    selected:
-                                        _billingPeriod ==
-                                        _BillingPeriod.monthly,
-                                    enabled: _activePlan != _PlanToggle.free,
-                                    pricing: activePricing,
-                                    onTap: _activePlan != _PlanToggle.free
-                                        ? () => setState(
-                                            () => _billingPeriod =
-                                                _BillingPeriod.monthly,
-                                          )
-                                        : null,
-                                  ),
+                // minHeight lets the Column centre itself in the leftover
+                // space when the content is shorter than the screen, while
+                // still scrolling normally when it is not.
+                child: LayoutBuilder(
+                  builder: (context, constraints) => SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 4, 24, 32),
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minHeight: constraints.maxHeight - 36,
+                      ),
+                      child: Consumer<SubscriptionViewModel>(
+                        builder: (context, vm, _) {
+                          final storeCanPurchase =
+                              storePricing != null &&
+                              store.isAvailable &&
+                              !vm.isPaid;
+                          return Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              const Text(
+                                'Unlock Aura',
+                                style: TextStyle(
+                                  color: AppColors.textPrimary,
+                                  fontSize: 30,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: -1,
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: _BillingCard(
-                                    period: _BillingPeriod.annual,
-                                    selected:
-                                        _billingPeriod == _BillingPeriod.annual,
-                                    enabled: _activePlan != _PlanToggle.free,
-                                    pricing: activePricing,
-                                    onTap: _activePlan != _PlanToggle.free
-                                        ? () => setState(
-                                            () => _billingPeriod =
-                                                _BillingPeriod.annual,
-                                          )
-                                        : null,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 28),
-
-                            // CTA. On iOS this is a StoreKit purchase sheet;
-                            // everywhere else checkout happens in the system
-                            // browser and the device unlocks by push or refetch.
-                            if (_activePlan != _PlanToggle.free) ...[
-                              _CtaButton(
-                                label: _ctaLabel(
-                                  onStore: storeCanPurchase,
-                                  plan: _activePlan,
-                                ),
-                                isLoading: vm.isLoading || store.isPurchasing,
-                                onTap: () => storeCanPurchase
-                                    ? _onStoreSubscribe(context, store)
-                                    : _onSubscribe(context, vm),
+                                textAlign: TextAlign.center,
                               ),
-                              // Both are required by App Review on any screen
-                              // that sells a subscription: someone who
-                              // reinstalled needs their plan back without
-                              // paying twice, and a subscriber must be able to
-                              // reach Apple's own cancel and manage sheet.
-                              if (storeCanPurchase) ...[
+                              const SizedBox(height: 6),
+                              Text(
+                                _subtitle,
+                                style: const TextStyle(
+                                  color: AppColors.textTertiary,
+                                  fontSize: 14,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 24),
+
+                              // Free / Companion / Pro toggle. `owned` marks the
+                              // tier the account actually pays for, which is not
+                              // the same thing as the segment being browsed.
+                              _PlanToggleSwitch(
+                                selected: _activePlan,
+                                owned: _ownedPlan(vm),
+                                onChanged: (p) {
+                                  setState(() => _activePlan = p);
+                                  _togglePageController.animateToPage(
+                                    _planIndex(p),
+                                    duration: const Duration(milliseconds: 300),
+                                    curve: Curves.easeInOut,
+                                  );
+                                },
+                              ),
+                              const SizedBox(height: 24),
+
+                              // Feature list driven by the same PageController so
+                              // swiping the content area updates the toggle pill too
+                              Stack(
+                                fit: StackFit.passthrough,
+                                children: [
+                                  // Layout-only ghosts. A Stack sizes to its
+                                  // tallest non-positioned child, so these give the
+                                  // PageView (which cannot shrink-wrap) exactly the
+                                  // height of the longest plan at the current width
+                                  // and text scale. That is what removes the dead
+                                  // space a hardcoded height left under the last
+                                  // row, without a constant that goes stale when a
+                                  // feature is added. Visibility rather than
+                                  // Opacity: it also excludes them from hit testing
+                                  // and from semantics, so the list is not read out
+                                  // three times.
+                                  for (final plan in _PlanToggle.values)
+                                    Visibility(
+                                      visible: false,
+                                      maintainSize: true,
+                                      maintainAnimation: true,
+                                      maintainState: true,
+                                      child: _FeatureList(plan: plan),
+                                    ),
+                                  Positioned.fill(
+                                    child: PageView(
+                                      controller: _togglePageController,
+                                      onPageChanged: (index) {
+                                        setState(() {
+                                          _activePlan = _planFromIndex(index);
+                                        });
+                                      },
+                                      children: const [
+                                        _FeatureList(plan: _PlanToggle.free),
+                                        _FeatureList(
+                                          plan: _PlanToggle.companion,
+                                        ),
+                                        _FeatureList(plan: _PlanToggle.pro),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 24),
+
+                              // Two sellers, one screen. Off iOS, purchase UI
+                              // appears once the trial has ended and Dodo is
+                              // configured, in every country. On iOS StoreKit sells
+                              // and the products must stay reachable during the
+                              // trial too, because App Review has to be able to
+                              // exercise the in-app purchase to approve it.
+                              if (vm.canPurchaseSubscription ||
+                                  storeCanPurchase) ...[
+                                // Side-by-side billing cards
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: _BillingCard(
+                                        period: _BillingPeriod.monthly,
+                                        selected:
+                                            _billingPeriod ==
+                                            _BillingPeriod.monthly,
+                                        enabled:
+                                            _activePlan != _PlanToggle.free,
+                                        pricing: activePricing,
+                                        onTap: _activePlan != _PlanToggle.free
+                                            ? () => setState(
+                                                () => _billingPeriod =
+                                                    _BillingPeriod.monthly,
+                                              )
+                                            : null,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: _BillingCard(
+                                        period: _BillingPeriod.annual,
+                                        selected:
+                                            _billingPeriod ==
+                                            _BillingPeriod.annual,
+                                        enabled:
+                                            _activePlan != _PlanToggle.free,
+                                        pricing: activePricing,
+                                        onTap: _activePlan != _PlanToggle.free
+                                            ? () => setState(
+                                                () => _billingPeriod =
+                                                    _BillingPeriod.annual,
+                                              )
+                                            : null,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 28),
+
+                                // CTA. On iOS this is a StoreKit purchase sheet;
+                                // everywhere else checkout happens in the system
+                                // browser and the device unlocks by push or refetch.
+                                if (_activePlan != _PlanToggle.free) ...[
+                                  _CtaButton(
+                                    label: _ctaLabel(
+                                      onStore: storeCanPurchase,
+                                      plan: _activePlan,
+                                    ),
+                                    isLoading:
+                                        vm.isLoading || store.isPurchasing,
+                                    onTap: () => storeCanPurchase
+                                        ? _onStoreSubscribe(context, store)
+                                        : _onSubscribe(context, vm),
+                                  ),
+                                  // Both are required by App Review on any screen
+                                  // that sells a subscription: someone who
+                                  // reinstalled needs their plan back without
+                                  // paying twice, and a subscriber must be able to
+                                  // reach Apple's own cancel and manage sheet.
+                                  if (storeCanPurchase) ...[
+                                    const SizedBox(height: 12),
+                                    _GhostButton(
+                                      label: 'Restore Purchases',
+                                      onTap: () => _onRestore(context, store),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _GhostButton(
+                                      label: 'Manage Subscription',
+                                      onTap: _openManageSubscriptions,
+                                    ),
+                                  ],
+                                ] else ...[
+                                  _GhostButton(
+                                    label: 'Continue with Free',
+                                    onTap: () => Navigator.pop(context),
+                                  ),
+                                ],
+                              ] else ...[
+                                // Deliberate breathing room. With no purchase
+                                // UI to fill it, the plan card and the bottom
+                                // action sat stacked against each other.
+                                const SizedBox(height: 32),
+                                // "You're all set" told a healthy subscriber
+                                // nothing. The card now renders only when it has
+                                // something to say: a trial countdown, free-tier
+                                // allowances, a pending cancellation, or — off
+                                // iOS — the only pointer to where a subscription
+                                // can be managed.
+                                if (vm.isTrialActive ||
+                                    !vm.isPaid ||
+                                    vm.entitlement?.cancelAtPeriodEnd == true ||
+                                    !vm.purchaseHandledOffPlatform) ...[
+                                  _PlanStatusCard(vm: vm),
+                                  const SizedBox(height: 20),
+                                ],
+                                // No purchase path yet: still inside the trial, or
+                                // checkout is not configured. Capture the demand
+                                // instead of showing a dead end. This is the only
+                                // signal for how many people would pay early.
+                                if (vm.showFreePlanStatus) ...[
+                                  _UpgradeInterestButton(
+                                    registered: _interestRegistered,
+                                    onTap: () =>
+                                        _registerUpgradeInterest(context),
+                                  ),
+                                ],
+                                // A subscriber must always be able to reach
+                                // Apple's cancel and manage sheet, including from
+                                // the paid state where there is nothing to buy.
+                                if (StorePurchaseService.isStorePlatform &&
+                                    vm.isPaid) ...[
+                                  _GhostButton(
+                                    label: 'Manage Subscription',
+                                    onTap: _openManageSubscriptions,
+                                  ),
+                                ],
+                              ],
+
+                              if (vm.errorMessage != null) ...[
                                 const SizedBox(height: 12),
-                                _GhostButton(
-                                  label: 'Restore Purchases',
-                                  onTap: () => _onRestore(context, store),
-                                ),
-                                const SizedBox(height: 8),
-                                _GhostButton(
-                                  label: 'Manage Subscription',
-                                  onTap: _openManageSubscriptions,
+                                Text(
+                                  vm.errorMessage!,
+                                  style: const TextStyle(
+                                    color: AppColors.error,
+                                    fontSize: 13,
+                                  ),
+                                  textAlign: TextAlign.center,
                                 ),
                               ],
-                            ] else ...[
-                              _GhostButton(
-                                label: 'Continue with Free',
-                                onTap: () => Navigator.pop(context),
-                              ),
                             ],
-                          ] else ...[
-                            _PlanStatusCard(vm: vm),
-                            const SizedBox(height: 20),
-                            // No purchase path yet: still inside the trial, or
-                            // checkout is not configured. Capture the demand
-                            // instead of showing a dead end. This is the only
-                            // signal for how many people would pay early.
-                            if (vm.showFreePlanStatus) ...[
-                              _UpgradeInterestButton(
-                                registered: _interestRegistered,
-                                onTap: () => _registerUpgradeInterest(context),
-                              ),
-                              const SizedBox(height: 12),
-                            ],
-                            // A subscriber must always be able to reach
-                            // Apple's cancel and manage sheet, including from
-                            // the paid state where there is nothing to buy.
-                            if (StorePurchaseService.isStorePlatform &&
-                                vm.isPaid) ...[
-                              _GhostButton(
-                                label: 'Manage Subscription',
-                                onTap: _openManageSubscriptions,
-                              ),
-                              const SizedBox(height: 12),
-                            ],
-                            _GhostButton(
-                              label: 'Done',
-                              onTap: () => Navigator.pop(context),
-                            ),
-                          ],
-
-                          if (vm.errorMessage != null) ...[
-                            const SizedBox(height: 12),
-                            Text(
-                              vm.errorMessage!,
-                              style: const TextStyle(
-                                color: AppColors.error,
-                                fontSize: 13,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ],
-                      );
-                    },
+                          );
+                        },
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -510,9 +587,13 @@ _PlanPricing _pricingForPlan(_PlanToggle plan) {
 /// the hardcoded USD constants above must never reach an iOS screen: a buyer in
 /// India would be shown dollars and charged rupees. `symbol` is deliberately
 /// empty because [ProductDetails.price] is already a fully formatted string.
-_PlanPricing? _storePricingForPlan(StorePurchaseService store, _PlanToggle plan) {
-  final tier =
-      plan == _PlanToggle.pro ? SubscriptionTier.pro : SubscriptionTier.companion;
+_PlanPricing? _storePricingForPlan(
+  StorePurchaseService store,
+  _PlanToggle plan,
+) {
+  final tier = plan == _PlanToggle.pro
+      ? SubscriptionTier.pro
+      : SubscriptionTier.companion;
   final monthly = store.productFor(tier, annual: false);
   final annual = store.productFor(tier, annual: true);
   if (monthly == null || annual == null) return null;
@@ -531,9 +612,18 @@ _PlanPricing? _storePricingForPlan(StorePurchaseService store, _PlanToggle plan)
 
 class _PlanToggleSwitch extends StatelessWidget {
   final _PlanToggle selected;
+
+  /// The tier the account pays for, or null when nothing is owned. Rendered
+  /// independently of [selected] so ownership stays visible while browsing.
+  final _PlanToggle? owned;
+
   final ValueChanged<_PlanToggle> onChanged;
 
-  const _PlanToggleSwitch({required this.selected, required this.onChanged});
+  const _PlanToggleSwitch({
+    required this.selected,
+    required this.owned,
+    required this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -550,16 +640,19 @@ class _PlanToggleSwitch extends StatelessWidget {
           _ToggleSegment(
             label: 'Free',
             isSelected: selected == _PlanToggle.free,
+            isOwned: owned == _PlanToggle.free,
             onTap: () => onChanged(_PlanToggle.free),
           ),
           _ToggleSegment(
             label: 'Companion',
             isSelected: selected == _PlanToggle.companion,
+            isOwned: owned == _PlanToggle.companion,
             onTap: () => onChanged(_PlanToggle.companion),
           ),
           _ToggleSegment(
             label: 'Pro',
             isSelected: selected == _PlanToggle.pro,
+            isOwned: owned == _PlanToggle.pro,
             onTap: () => onChanged(_PlanToggle.pro),
           ),
         ],
@@ -571,37 +664,114 @@ class _PlanToggleSwitch extends StatelessWidget {
 class _ToggleSegment extends StatelessWidget {
   final String label;
   final bool isSelected;
+
+  /// The account pays for this tier. Independent of [isSelected]: the toggle
+  /// is a browser, so a Pro subscriber reading the Free column must still see
+  /// Pro marked. The segment itself keeps its normal fill; ownership is a
+  /// badge pinned over its top-right corner.
+  final bool isOwned;
+
   final VoidCallback onTap;
 
   const _ToggleSegment({
     required this.label,
     required this.isSelected,
+    required this.isOwned,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOut,
-          decoration: BoxDecoration(
-            color: isSelected ? AppColors.accent : Colors.transparent,
-            borderRadius: BorderRadius.circular(22),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: isSelected ? Colors.white : AppColors.textTertiary,
-              fontSize: 14,
-              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-            ),
-          ),
+    final segment = AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+      decoration: BoxDecoration(
+        color: isSelected ? AppColors.accent : Colors.transparent,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        label,
+        style: TextStyle(
+          color: isSelected ? Colors.white : AppColors.textTertiary,
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
         ),
       ),
+    );
+
+    return Expanded(
+      child: Semantics(
+        selected: isSelected,
+        label: isOwned ? '$label, your current plan' : label,
+        child: GestureDetector(
+          onTap: onTap,
+          child: isOwned
+              // Clip.none so the badge can straddle the corner and break the
+              // toggle's outline, which is what makes it read as applied on
+              // top rather than as another segment state. The Stack takes its
+              // size from the segment, so the badge costs no layout.
+              ? Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    segment,
+                    const Positioned(top: -11, right: -8, child: _OwnedBadge()),
+                  ],
+                )
+              : segment,
+        ),
+      ),
+    );
+  }
+}
+
+/// The "YOUR PLAN" tag that sits over the owned tier, shaped like the BETA
+/// badge on the Aura-Desktop download button: a small light pill lifted off
+/// the surface it marks.
+class _OwnedBadge extends StatelessWidget {
+  const _OwnedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final badge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.premium,
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: AppColors.surface, width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.textPrimary.withValues(alpha: 0.16),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: const Text(
+        'YOUR PLAN',
+        style: TextStyle(
+          // Dark on gold is 6.6:1; white on it would be 2.2:1.
+          color: AppColors.textPrimary,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.6,
+          height: 1.1,
+        ),
+      ),
+    );
+
+    // A looping flash is exactly what Reduce Motion exists to suppress, and
+    // the badge says everything it needs to without moving.
+    if (MediaQuery.disableAnimationsOf(context)) return badge;
+    return ShimmerSweep(
+      begin: Alignment.bottomLeft,
+      end: Alignment.topRight,
+      repeat: true,
+      duration: const Duration(milliseconds: 2000),
+      // Narrower than the default, which is tuned for a ~300px card stack and
+      // would light this whole badge at once as a wash rather than a streak.
+      bandHalfWidth: 0.16,
+      child: badge,
     );
   }
 }
@@ -723,11 +893,11 @@ class _FeatureList extends StatelessWidget {
       child: Column(
         children: [
           for (int i = 0; i < items.length; i++) ...[
-            if (i > 0)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Divider(height: 1, color: AppColors.glassBorderDim),
-              ),
+            // 14 replaces the 10 + 1 + 10 the rules used to occupy. No fixed
+            // row height: the Stack sizer around the PageView reads these rows'
+            // intrinsic height, and pinning it is what would clip a label that
+            // wraps at large text sizes.
+            if (i > 0) const SizedBox(height: 14),
             _FeatureRow(item: items[i]),
           ],
         ],
@@ -745,19 +915,14 @@ class _FeatureRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Container(
-          width: 32,
-          height: 32,
-          decoration: BoxDecoration(
-            color: item.included
-                ? AppColors.accent.withValues(alpha: 0.12)
-                : AppColors.glassWhiteFill,
-            borderRadius: BorderRadius.circular(9),
-          ),
+        // Bare icon, no tile behind it. The fixed width keeps the labels on
+        // a common left edge now that there is no box setting the rhythm.
+        SizedBox(
+          width: 28,
           child: Icon(
             item.icon,
             color: item.included ? AppColors.accent : AppColors.textDisabled,
-            size: 16,
+            size: 18,
           ),
         ),
         const SizedBox(width: 12),
@@ -768,7 +933,7 @@ class _FeatureRow extends StatelessWidget {
               color: item.included
                   ? AppColors.textSecondary
                   : AppColors.textDisabled,
-              fontSize: 14,
+              fontSize: 16,
             ),
           ),
         ),
@@ -950,7 +1115,7 @@ class _CtaButton extends StatelessWidget {
             gradient: LinearGradient(
               colors: [AppColors.accent, AppColors.accentDark],
             ),
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(30),
             boxShadow: [
               BoxShadow(
                 color: AppColors.accent.withValues(alpha: 0.38),
@@ -999,7 +1164,7 @@ class _GhostButton extends StatelessWidget {
       child: Container(
         height: 54,
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(30),
           border: Border.all(color: AppColors.glassBorderLight),
         ),
         child: Center(
@@ -1037,7 +1202,7 @@ class _UpgradeInterestButton extends StatelessWidget {
       child: Container(
         height: 54,
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(22),
+          borderRadius: BorderRadius.circular(30),
           border: Border.all(
             color: registered
                 ? AppColors.glassBorderLight
@@ -1081,12 +1246,6 @@ class _PlanStatusCard extends StatelessWidget {
 
   const _PlanStatusCard({required this.vm});
 
-  String get _planLabel => switch (vm.currentTier) {
-    SubscriptionTier.pro => 'Pro',
-    SubscriptionTier.companion => 'Companion',
-    SubscriptionTier.free => 'Free',
-  };
-
   String get _statusLine {
     if (vm.isTrialActive) {
       final days = vm.daysLeftInTrial;
@@ -1099,12 +1258,10 @@ class _PlanStatusCard extends StatelessWidget {
         return 'Your plan stays active until the end of this billing period.';
       }
       // Naming the website is a purchase-adjacent pointer, and App Store review
-      // reads those as steering to outside payment. Where the purchase is not
-      // handled in-app, confirm the state and stop there.
-      if (vm.purchaseHandledOffPlatform) {
-        return "You're all set. Everything is unlocked.";
-      }
-      return "You're all set. Manage your plan anytime at auravoiceapp.com.";
+      // reads those as steering to outside payment — so on iOS this card is not
+      // rendered at all rather than saying something empty in its place. The
+      // gold segment in the toggle above is what confirms the plan now.
+      return 'Manage your plan anytime at auravoiceapp.com.';
     }
     // Trial over and nothing to buy. Say so plainly and immediately follow it
     // with what they DO still have (the usage rows below). This screen is
@@ -1123,7 +1280,9 @@ class _PlanStatusCard extends StatelessWidget {
     final rows = <Widget>[];
     void add(String label, UsageCounter? counter, {bool isDuration = false}) {
       if (counter == null) return;
-      rows.add(_UsageRow(label: label, counter: counter, isDuration: isDuration));
+      rows.add(
+        _UsageRow(label: label, counter: counter, isDuration: isDuration),
+      );
     }
 
     add('Messages', usage.chat);
@@ -1151,15 +1310,9 @@ class _PlanStatusCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Current plan: $_planLabel',
-            style: const TextStyle(
-              color: AppColors.textPrimary,
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 6),
+          // The plan name is deliberately absent: the gold segment in the
+          // toggle above is the single place it is stated. This card carries
+          // what that cannot — renewal state, trial countdown, allowances.
           Text(
             _statusLine,
             style: const TextStyle(
@@ -1226,9 +1379,7 @@ class _UsageRow extends StatelessWidget {
               Text(
                 _valueText,
                 style: TextStyle(
-                  color: isExhausted
-                      ? AppColors.error
-                      : AppColors.textPrimary,
+                  color: isExhausted ? AppColors.error : AppColors.textPrimary,
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
