@@ -332,6 +332,13 @@ class AuthRepository {
     );
   }
 
+  /// Requests a password reset link. Pure passthrough: there is no user doc to
+  /// touch, and deliberately no Firestore existence check — see
+  /// [FirebaseAuthService.sendPasswordResetEmail] for why the caller must not
+  /// learn whether the address has an account.
+  Future<Result<void>> sendPasswordResetEmail(String email) =>
+      _authService.sendPasswordResetEmail(email);
+
   Future<Result<UserModel>> createAccountWithEmail(
     String email,
     String password,

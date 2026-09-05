@@ -12,6 +12,13 @@ class AppColors {
   // Only accentLight/accentDark/accentGlow are getters, not const.
   static const accent = accentBase;
   static const onAccent = Color(0xFFFFFFFF);
+
+  /// Marks a tier the account actually owns, on the paywall toggle.
+  /// Deliberately not `warning` (0xFFD68A1F), which means "running low"
+  /// everywhere else in the app. This is the amber documented above as the
+  /// alternate accent.
+  static const premium = Color(0xFFE8A020);
+  static const onPremium = Color(0xFFFFFFFF);
   // Slightly calmer teal for the larger, more persistent alarm surfaces.
   static const alarmAccent = Color(0xFF20B7A3);
   static Color get accentLight => Color.lerp(accentBase, Colors.white, 0.20)!;

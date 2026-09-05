@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/glass_card.dart';
+import 'shimmer_sweep.dart';
 
 /// Centered empty-state starters for the Buddy chat. Renders up to 3 thin,
 /// full-width tappable cards in the middle of the screen. 
@@ -25,7 +26,7 @@ class ChatSuggestionPills extends StatelessWidget {
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
-        child: _ShimmerSweep(
+        child: ShimmerSweep(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -66,74 +67,6 @@ class ChatSuggestionPills extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// Runs a single left-to-right light sweep across its child once, when the
-/// pills first appear. One controller drives the whole stack so the band
-/// glides over all the cards as one continuous flash (not per-card). The
-/// `srcATop` blend paints the highlight only where the cards already have
-/// pixels, so the gaps between cards stay dark and the streak reads as light
-/// passing over glass.
-class _ShimmerSweep extends StatefulWidget {
-  const _ShimmerSweep({required this.child});
-
-  final Widget child;
-
-  @override
-  State<_ShimmerSweep> createState() => _ShimmerSweepState();
-}
-
-class _ShimmerSweepState extends State<_ShimmerSweep>
-    with SingleTickerProviderStateMixin {
-  // Brighter than AppColors.glassHighlight (0x06FFFFFF is invisible as a flash).
-  static const Color _sweepPeak = Color(0x4DFFFFFF);
-
-  // Half-width of the band as a fraction of the sweep travel. Larger = thicker
-  // flash. 0.28 gives a broad, clearly visible bar rather than a thin line.
-  static const double _bandHalfWidth = 0.28;
-
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 2100),
-  )..forward();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        // -1 -> 2 walks the band from off-left to off-right of the bounds.
-        final t = _controller.value * 3 - 1;
-        return ShaderMask(
-          blendMode: BlendMode.srcATop,
-          shaderCallback: (bounds) {
-            return LinearGradient(
-              begin: Alignment.centerLeft,
-              end: Alignment.centerRight,
-              colors: const [
-                Colors.transparent,
-                _sweepPeak,
-                Colors.transparent,
-              ],
-              stops: [
-                (t - _bandHalfWidth).clamp(0.0, 1.0),
-                t.clamp(0.0, 1.0),
-                (t + _bandHalfWidth).clamp(0.0, 1.0),
-              ],
-            ).createShader(bounds);
-          },
-          child: child,
-        );
-      },
-      child: widget.child,
     );
   }
 }

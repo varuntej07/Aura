@@ -52,11 +52,15 @@ class AuthViewModel extends SafeChangeNotifier {
   UserModel? _user;
   AppException? _error;
   bool _justCompletedOnboarding = false;
+  bool _passwordResetInFlight = false;
+  String? _passwordResetNotice;
 
   ViewState get state => _state;
   UserModel? get user => _user;
   AppException? get error => _error;
   bool get isAuthenticated => _user != null;
+  bool get passwordResetInFlight => _passwordResetInFlight;
+  String? get passwordResetNotice => _passwordResetNotice;
   bool get needsOnboarding => _user != null && !_user!.onboardingComplete;
 
   /// True only when the user has explicitly granted Aura memory. Drives the
@@ -219,6 +223,60 @@ class AuthViewModel extends SafeChangeNotifier {
       );
       _setState(ViewState.error);
     }
+  }
+
+  /// Requests a password reset link.
+  ///
+  /// Deliberately does NOT touch [_state]: the router derives `isReady` from it
+  /// (`state != idle && state != loading`), and the login screen swaps itself
+  /// for a full-screen "Signing in…" loader on [ViewState.loading]. A reset
+  /// request is a side channel that neither authenticates nor navigates, so it
+  /// carries its own in-flight and notice fields instead.
+  Future<void> sendPasswordResetEmail(String email) async {
+    AppLogger.info('sendPasswordResetEmail: starting', tag: 'AuthVM');
+    _passwordResetInFlight = true;
+    _passwordResetNotice = null;
+    _error = null;
+    safeNotifyListeners();
+    try {
+      final result = await _authRepository.sendPasswordResetEmail(email);
+      result.when(
+        success: (_) {
+          AppLogger.info('sendPasswordResetEmail: request accepted',
+              tag: 'AuthVM');
+          // One message whether or not an account exists — the service maps
+          // user-not-found to success on purpose, so this branch must stay the
+          // only place a confirmation is produced.
+          _passwordResetNotice =
+              "If there's an Aura account for $email, a reset link is on its "
+              "way. Check your inbox, and your spam folder just in case.";
+        },
+        failure: (error) {
+          AppLogger.error(
+            'sendPasswordResetEmail: failed',
+            error: error,
+            tag: 'AuthVM',
+          );
+          _error = error;
+        },
+      );
+    } catch (e, st) {
+      ErrorHandler.handle(e, st);
+      _error = AppException.unexpected(
+        'Something went wrong. Try again in a moment.',
+        error: e,
+      );
+    } finally {
+      _passwordResetInFlight = false;
+      safeNotifyListeners();
+    }
+  }
+
+  /// Clears the reset notice so the form does not reappear already-confirmed.
+  void clearPasswordResetNotice() {
+    if (_passwordResetNotice == null) return;
+    _passwordResetNotice = null;
+    safeNotifyListeners();
   }
 
   Future<void> signInWithEmail(String email, String password) async {
