@@ -2444,13 +2444,37 @@ async def fail_stage(
                 )
                 outcome = "delivery_failed"
                 created = ()
+                if lease.stage_kind == F.STAGE_NOTION_DELIVER:
+                    # The exhausted DELIVERY is itself a user outcome, unlike
+                    # an exhausted toast. Without a failed receipt here,
+                    # notify_result's absent-DELIVERY_RESULT branch reads as
+                    # "delivery never attempted" and ships generic success
+                    # copy over a save that provably failed, and the voice
+                    # narrator does the same. Writing only DELIVERY_RESULT
+                    # keeps the branch's contract: the run's result state is
+                    # untouched. The revision bump wakes the narrator's poll
+                    # cursor so it speaks from the receipt.
+                    delivery_binding = dict(run.get(F.DELIVERY) or {})
+                    txn.update(
+                        run_ref,
+                        {
+                            F.DELIVERY_RESULT: {
+                                "failed": F.FAIL_DELIVERY_FAILED,
+                                "database_name": str(
+                                    delivery_binding.get("database_name") or ""
+                                ),
+                            },
+                            F.STATE_REVISION: gcloud_firestore.Increment(1),
+                            F.UPDATED_AT: now_iso,
+                        },
+                    )
                 # notion_deliver chains notify_result on success, so its
                 # exhaustion would otherwise leave the run finished and the
                 # user never told. Minting the terminal notify here is safe for
                 # any delivery kind EXCEPT notify_result itself (whose own id
                 # is the one create_terminal_notify_job would derive - the
-                # collision described above). notify_result reads the absent
-                # DELIVERY_RESULT receipt and reports the failure honestly.
+                # collision described above). notify_result reads the failed
+                # DELIVERY_RESULT receipt written above and reports honestly.
                 if lease.stage_kind != F.STAGE_NOTIFY_RESULT:
                     notifiable = may_run_post_terminal(
                         F.STAGE_NOTIFY_RESULT, run, deletion_active=deletion_active

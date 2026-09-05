@@ -48,6 +48,11 @@ _POLL_ERROR_EVICT_AFTER = 6
 # Coalescing floor between spoken progress updates. Terminal and question
 # events bypass it: those are the two things the user is actually waiting on.
 _MIN_NARRATION_GAP_S = 20.0
+# Polls to keep waiting for notion_deliver's receipt after the run goes
+# result-terminal before narrating without one. 30 x 10s = 5 minutes, which
+# covers the deliver stage's own retry backoff (Cloud Tasks min 10s, max 300s
+# on the second attempt); past it, narrate on what exists rather than never.
+_DELIVERY_RESULT_WAIT_POLLS = 30
 
 _FAILURE_LINE = "I couldn't start that research - try again?"
 _RECONNECT_LINE = "Your Notion connection needs a refresh - reconnect it from the dashboard first."
@@ -371,6 +376,9 @@ class RunNarrator:
         # run_id -> consecutive failed polls; a run that never answers is
         # evicted so a corpse does not get polled every 10s for the session.
         self._poll_failures: dict[str, int] = {}
+        # run_id -> polls spent waiting for DELIVERY_RESULT after the run went
+        # result-terminal; see the wait in _narrate.
+        self._delivery_waits: dict[str, int] = {}
         self._last_spoken_at = 0.0
         self.pending_question: PendingVoiceQuestion | None = None
 
@@ -392,6 +400,7 @@ class RunNarrator:
     def forget(self, run_id: str) -> None:
         self._active_runs.pop(run_id, None)
         self._poll_failures.pop(run_id, None)
+        self._delivery_waits.pop(run_id, None)
         if self.pending_question and self.pending_question.run_id == run_id:
             self.pending_question = None
 
@@ -500,10 +509,28 @@ class RunNarrator:
             return
 
         if state in ("ready", "partial", "failed", "cancelled"):
+            delivery_result = dict(projection.get("delivery_result") or {})
+            if (
+                state in ("ready", "partial")
+                and dict(projection.get("delivery") or {})
+                and not delivery_result
+            ):
+                # finalize goes result-terminal BEFORE notion_deliver writes
+                # its receipt, and every advance bumps state_revision, so a
+                # poll in that window sees ready/partial with no receipt yet.
+                # Speaking now would misreport and evict the run before the
+                # "saved to X" it was tracked for. Rewind the cursor and keep
+                # polling; the deliver stage's own advance (or fail_stage's
+                # failed receipt) bumps the revision again WITH the receipt.
+                # Bounded so registry drift can never poll a run forever.
+                waits = self._delivery_waits.get(run_id, 0) + 1
+                if waits <= _DELIVERY_RESULT_WAIT_POLLS:
+                    self._delivery_waits[run_id] = waits
+                    self._revisions[run_id] -= 1
+                    return
             self.forget(run_id)
             if state == "cancelled":
                 return  # the user did this; telling them is noise
-            delivery_result = dict(projection.get("delivery_result") or {})
             if delivery_result.get("page_id"):
                 line = (
                     f"The research is done and saved to {database_name} in their Notion"

@@ -245,15 +245,14 @@ def _create_page(
     if children:
         body["children"] = children
 
-    # idempotent=True is safe for THIS create only because every caller sits
-    # behind the notion_writes receipt: a duplicated send that both landed
-    # would still be resolved to one page by the receipt check on replay, and
-    # in practice the duplicate window is one in-flight request. 429 and
-    # transient 5xx retries (with Retry-After / jittered backoff) happen inside
-    # the connector.
-    response = connector.authorized_request(
-        "POST", "/v1/pages", json_body=body, idempotent=True
-    )
+    # NOT idempotent: a transient 5xx can arrive AFTER Notion committed the
+    # create, and a blind resend inside the same call would mint a second page
+    # before any receipt exists (the notion_writes receipt dedupes call-level
+    # replays only, never send-level retries). Surfacing the 5xx instead
+    # bounds the damage to at most one ambiguous page per user-visible
+    # failure, rather than one per retried send. 429 still retries inside the
+    # connector: a 429 means the request never executed.
+    response = connector.authorized_request("POST", "/v1/pages", json_body=body)
     if response.status_code != 200:
         raise _rejection_or_transient("Notion page create failed", response)
     return response.json()

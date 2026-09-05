@@ -69,6 +69,15 @@ class NotionReauthorizationRequired(ReauthorizationRequired):
     """Stored Notion credentials can no longer authorize API access."""
 
 
+class NotionTokenEndpointUnavailable(Exception):
+    """The token endpoint answered 5xx; the stored pair is NOT known dead.
+
+    Transient by definition, so it must never mark reauthorization: a routine
+    Notion outage during a reactive refresh would otherwise disable the
+    connector for every user whose token happened to need a refresh in that
+    window, and only a manual reconnect recovers from that."""
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -224,6 +233,13 @@ class NotionConnector:
                 json=body,
                 headers={"Authorization": _basic_auth_header()},
             )
+        if response.status_code >= 500:
+            # The endpoint itself is unhealthy; nothing is known about the
+            # stored pair. Distinct type so _refresh cannot mistake an outage
+            # for a dead credential.
+            raise NotionTokenEndpointUnavailable(
+                f"Notion token endpoint unavailable ({response.status_code})"
+            )
         if response.status_code != 200:
             error_code = ""
             try:
@@ -256,9 +272,12 @@ class NotionConnector:
            dropped and it re-reads the winner's pair).
 
         A residual window remains where two instances both POST the refresh
-        before either persists; Notion rejects the second with invalid_grant
-        and that path marks reauthorization required. That window cannot be
-        closed without a distributed lock and is accepted.
+        before either persists; Notion rejects the second with invalid_grant.
+        That loser re-reads the doc and, when the stored pair has rotated,
+        adopts the winner's pair instead of disabling the connection. Only an
+        invalid_grant with NO concurrent rotation (a genuinely revoked or dead
+        pair) marks reauthorization required, and a token-endpoint 5xx is
+        transient by type and never can.
         """
         with _refresh_lock(self._user_id):
             integration = self._load_integration()
@@ -278,8 +297,28 @@ class NotionConnector:
                     }
                 )
             except ValueError as exc:
-                # invalid_grant = revoked or already-rotated-away; either way the
-                # stored pair is dead and only the user can mint a new one.
+                # 5xx never lands here (NotionTokenEndpointUnavailable
+                # propagates as transient), so this is a definitive 4xx.
+                # invalid_grant has two causes and only one is dead
+                # credentials: another instance's rotation may have consumed
+                # this refresh token between our read and our POST. Re-read
+                # before disabling; if the stored pair rotated, the winner's
+                # pair is live and marking reauth would brick a healthy
+                # connection.
+                current = self._load_integration()
+                current_refresh = str(current.get("refresh_token") or "")
+                current_access = str(current.get("access_token") or "")
+                if (
+                    current_refresh
+                    and current_refresh != str(refresh_token)
+                    and current_access
+                ):
+                    logger.info(
+                        "notion_connector: refresh lost cross-instance race, "
+                        "adopting winner's pair",
+                        {"user_id": self._user_id},
+                    )
+                    return current_access
                 logger.warn(
                     "notion_connector: token refresh failed",
                     {"user_id": self._user_id, "error": str(exc)},
