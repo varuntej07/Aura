@@ -2,6 +2,7 @@ import os
 import re
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env into os.environ FIRST before pydantic-settings instantiates.
@@ -188,6 +189,25 @@ class Settings(BaseSettings):
     NOTION_CLIENT_ID: str = ""
     NOTION_CLIENT_SECRET: str = ""
     NOTION_REDIRECT_URI: str = ""
+
+    @field_validator(
+        "NOTION_CLIENT_ID",
+        "NOTION_CLIENT_SECRET",
+        "NOTION_REDIRECT_URI",
+        mode="before",
+    )
+    @classmethod
+    def _strip_notion_credential(cls, value: object) -> object:
+        # Secret Manager hands the value back as raw bytes, so a trailing newline
+        # from however the secret version was written stays inside the string and
+        # gets percent-encoded straight into the Notion authorize URL. Strip
+        # surrounding whitespace only. Quotes or a stray shell flag mean the
+        # secret holds something other than the credential, and the shape check
+        # in handlers/connector_oauth.py should reject that loudly rather than
+        # have it half-repaired here into a value that still fails at Notion.
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
     # Brave Search API (real-time chat + voice web_surf tool)
     BRAVE_API_KEY: str = ""

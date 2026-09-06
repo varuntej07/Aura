@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import re
 import urllib.parse
 
 from fastapi import Request
@@ -27,6 +28,34 @@ from ..services.request_auth import resolve_user_id_from_request
 
 class ConnectorOAuthStartBody(BaseModel):
     connector: ConnectorName
+
+
+# A Notion client id is a UUID. Checking only that the setting is non-empty is
+# not enough: a secret version written by pasting an `echo -n "..."` command
+# stored the command text verbatim, flag and quotes and CRLF included, which is
+# truthy. urlencode then percent-encoded the whole thing into the authorize URL
+# and the first thing to complain was Notion's own error page.
+_NOTION_CLIENT_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _notion_oauth_config_error() -> str | None:
+    """Name the unusable Notion OAuth setting, or None when the config is sane.
+
+    The return value is safe to log: it names the field and the failure, never
+    any part of the credential.
+    """
+    if not settings.NOTION_CLIENT_ID:
+        return "client_id_missing"
+    if not _NOTION_CLIENT_ID_RE.match(settings.NOTION_CLIENT_ID):
+        return "client_id_malformed"
+    if not settings.NOTION_CLIENT_SECRET:
+        return "client_secret_missing"
+    redirect = urllib.parse.urlparse(settings.NOTION_REDIRECT_URI)
+    if redirect.scheme != "https" or not redirect.netloc:
+        return "redirect_uri_invalid"
+    return None
 
 
 def _watch_url_from_request(request: Request) -> str | None:
@@ -104,11 +133,16 @@ async def start_connector_oauth(request: Request) -> JSONResponse:
         return JSONResponse(status_code=400, content={"error": "invalid_connector"})
 
     if body.connector == "notion":
-        if not (
-            settings.NOTION_CLIENT_ID
-            and settings.NOTION_CLIENT_SECRET
-            and settings.NOTION_REDIRECT_URI
-        ):
+        config_error = _notion_oauth_config_error()
+        if config_error:
+            logger.error(
+                "ConnectorOAuth: notion oauth config unusable",
+                {
+                    "reason": config_error,
+                    "client_id_length": len(settings.NOTION_CLIENT_ID),
+                    "client_secret_length": len(settings.NOTION_CLIENT_SECRET),
+                },
+            )
             return JSONResponse(status_code=503, content={"error": "notion_oauth_not_configured"})
     elif not (
         settings.GOOGLE_CLIENT_ID

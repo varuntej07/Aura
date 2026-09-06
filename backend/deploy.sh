@@ -27,6 +27,16 @@
 #   gcloud secrets create juno-firecrawl-api-key --project=<PROJECT_ID>      # backend: research page reading (services/research)
 #   gcloud secrets create juno-dodo-api-key --project=<PROJECT_ID>           # billing: Dodo Payments API key (checkout + portal)
 #   gcloud secrets create juno-dodo-webhook-secret --project=<PROJECT_ID>    # billing: Dodo webhook signature secret (whsec_...)
+#   gcloud secrets create juno-notion-client-id --project=<PROJECT_ID>       # notion connector: OAuth client id (bare UUID)
+#   gcloud secrets create juno-notion-client-secret --project=<PROJECT_ID>   # notion connector: OAuth client secret (secret_...)
+#
+# Writing a secret VALUE: pipe the bare credential in with no trailing newline
+# and nothing else. Do not paste an `echo -n "..."` line into the value itself,
+# and do not use PowerShell's Set-Content/Out-File (they append CRLF and can add
+# a BOM). Both Notion secrets were once stored as the literal text of the echo
+# command, which is truthy, so every check passed and Notion's own error page was
+# the first thing to complain:
+#   printf '%s' "<value>" | gcloud secrets versions add <secret-name> --data-file=-
 #
 # Cloud Scheduler prerequisite (one-time, NOT created by this script):
 #   The juno-scheduler service account must exist, and the Cloud Scheduler
