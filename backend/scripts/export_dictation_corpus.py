@@ -39,6 +39,35 @@ def _speaker_id(uid: str, key: bytes) -> str:
     return hmac.new(key, uid.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
 
 
+def _v2(trace: dict) -> bool:
+    return int(trace.get("schemaVersion") or 1) >= 2
+
+
+def _asr_text(trace: dict) -> str:
+    """The transcript as ASR produced it, before any correction.
+
+    V1 called this asrText; V2 renamed it rawTranscript and dropped app,
+    fieldRole and modelId entirely. Reading the V1 names unconditionally made
+    every V2 document either KeyError here or, worse, vanish silently at the
+    groundTruth check below, since V2 has no such field.
+    """
+    return trace["rawTranscript"] if _v2(trace) else trace["asrText"]
+
+
+def _training_text(trace: dict) -> str | None:
+    """What the corpus should treat as the label.
+
+    V2 states it directly as trainingText, which the client computed. V1 only
+    has it when the user corrected the text, which is why it can be absent and
+    why an absent value still means "skip", not "use the ASR output".
+    """
+    return trace.get("trainingText") if _v2(trace) else trace.get("groundTruth")
+
+
+def _model_id(trace: dict) -> str:
+    return trace["providerModel"] if _v2(trace) else trace["modelId"]
+
+
 def _edit_line(trace: dict, edit: dict) -> dict[str, Any]:
     return {
         "trace_id": trace[F.TRACE_ID],
@@ -46,10 +75,10 @@ def _edit_line(trace: dict, edit: dict) -> dict[str, Any]:
         "from": edit["from"],
         "to": edit["to"],
         "word_index": edit["wordIndex"],
-        "asr_text": trace["asrText"],
+        "asr_text": _asr_text(trace),
         "inserted_text": trace["insertedText"],
         "final_text": trace["finalText"],
-        "app": trace["app"],
+        "app": trace.get("app"),
     }
 
 
@@ -85,7 +114,7 @@ async def export(output: Path, identity_key: bytes) -> dict[str, int]:
 
         path = trace.get(F.AUDIO_PATH)
         generation = trace.get(F.AUDIO_GENERATION)
-        ground_truth = trace.get("groundTruth")
+        ground_truth = _training_text(trace)
         if not trace.get(F.HAS_AUDIO) or not path or generation is None or not ground_truth:
             skipped += 1
             continue
@@ -126,11 +155,11 @@ async def export(output: Path, identity_key: bytes) -> dict[str, int]:
                     "text": ground_truth,
                     "trace_id": trace_id,
                     "speaker_id": speaker_id,
-                    "asr_text": trace["asrText"],
+                    "asr_text": _asr_text(trace),
                     "inserted_text": trace["insertedText"],
-                    "app": trace["app"],
-                    "field_role": trace["fieldRole"],
-                    "model_id": trace["modelId"],
+                    "app": trace.get("app"),
+                    "field_role": trace.get("fieldRole"),
+                    "model_id": _model_id(trace),
                     "recorded_at_ms": trace["recordedAtMs"],
                     "consent_version": trace["consentVersion"],
                     "verified": True,
