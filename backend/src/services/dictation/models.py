@@ -57,23 +57,6 @@ class TracePayloadBase(BaseModel):
         return hashlib.sha256(canonical).hexdigest()
 
 
-class TracePayloadV1(TracePayloadBase):
-    schema_version: Literal[1] = Field(alias="schemaVersion")
-    model_id: str = Field(alias="modelId", min_length=1, max_length=256)
-    sherpa_version: str = Field(alias="sherpaVersion", min_length=1, max_length=64)
-    app_version: str = Field(alias="appVersion", min_length=1, max_length=64)
-    audio_bytes: int = Field(alias="audioBytes", ge=4, le=F.MAX_AUDIO_BYTES)
-    asr_text: str = Field(alias="asrText", min_length=1, max_length=F.MAX_TEXT_CHARS)
-    inserted_text: str = Field(alias="insertedText", min_length=1, max_length=F.MAX_TEXT_CHARS)
-    final_text: str = Field(alias="finalText", min_length=1, max_length=F.MAX_TEXT_CHARS)
-    ground_truth: str = Field(alias="groundTruth", min_length=1, max_length=F.MAX_TEXT_CHARS)
-    locally_corrected: bool = Field(alias="locallyCorrected")
-    observations: int = Field(ge=0, le=1_000_000)
-    # UI Automation may not expose either value for a valid focused control.
-    app: str = Field(max_length=256)
-    field_role: str = Field(alias="fieldRole", max_length=128)
-    consent_version: Literal[1] = Field(alias="consentVersion")
-
 class TracePayloadV2(TracePayloadBase):
     schema_version: Literal[F.TRACE_SCHEMA_VERSION] = Field(alias="schemaVersion")
     sample_rate_hz: Literal[16_000] = Field(alias="sampleRateHz")
@@ -91,4 +74,6 @@ class TracePayloadV2(TracePayloadBase):
     consent_version: Literal[F.CONSENT_VERSION] = Field(alias="consentVersion")
 
 
-TracePayload: TypeAlias = TracePayloadV1 | TracePayloadV2
+# One schema. V1 was never sent by any client and no V1 document was ever
+# stored, so the union only existed to be tolerated.
+TracePayload: TypeAlias = TracePayloadV2
