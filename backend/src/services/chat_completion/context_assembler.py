@@ -236,6 +236,14 @@ async def assemble_desktop_context(
             "user_id": user_id,
             "conversation_id": conversation_id,
             "source": "firestore",
+            # fetched vs consumed. The page below is capped at MAX_CANONICAL_MESSAGES,
+            # so `fetched_messages` saturating at that cap while `history_messages`
+            # stays far under it is the over-fetch this line exists to size. Read the
+            # ratio across a day of desktop turns before changing the page size:
+            # if history_messages is routinely high, there is nothing to win here.
+            "fetched_messages": len(messages),
+            "page_limit": MAX_CANONICAL_MESSAGES,
+            "has_older_page": bool(older_cursor),
             "history_messages": len(history),
             "estimated_recent_tokens": estimated_tokens,
             "summarized_through_seq": watermark,

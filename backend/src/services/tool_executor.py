@@ -255,8 +255,33 @@ async def _run(fn, *args, **kwargs):
     return await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=TOOL_TIMEOUT_S)
 
 
-async def _get_user_timezone(uid: str) -> str:
-    """Read the IANA timezone written to users/{uid} by the client at sign-in."""
+def _timezone_of(user_doc: dict[str, Any] | None) -> str | None:
+    """Pull a usable IANA timezone out of an already-loaded users/{uid} doc."""
+    if not user_doc:
+        return None
+    value = user_doc.get("timezone")
+    return value.strip() or None if isinstance(value, str) else None
+
+
+async def _get_user_timezone(
+    uid: str, user_doc: dict[str, Any] | None = None
+) -> str:
+    """Read the IANA timezone written to users/{uid} by the client at sign-in.
+
+    ``user_doc`` is the copy of that SAME document the caller already fetched for this
+    turn (handlers/chat.py holds one as ``user_doc``, explicitly to collapse duplicate
+    reads). Using it costs nothing and removes one Firestore read per timezone-consuming
+    tool call. A caller with no doc -- MCP/voice, which builds its executor per request --
+    passes nothing and gets the original fresh read.
+
+    The fallback is deliberate rather than a raise: if the handed doc carries no usable
+    timezone we still re-read, so the "no timezone on file" error below stays grounded in
+    a fresh look at Firestore rather than in a snapshot that may predate a sign-in write.
+    """
+    cached = _timezone_of(user_doc)
+    if cached:
+        return cached
+
     def _fetch() -> str | None:
         snap = admin_firestore().collection("users").document(uid).get()
         data = snap.to_dict() or {}
@@ -323,8 +348,14 @@ class ToolExecutor:
         product_surface: str = "app",
         product_platform: str = "",
         app_version: str = "",
+        user_doc: dict[str, Any] | None = None,
     ) -> None:
         self._user_id = user_id
+        # The turn's already-fetched users/{uid} document, when the caller has one.
+        # Read-only here, and only for fields that cannot change mid-turn (timezone).
+        # None is the honest default: MCP/voice builds an executor per request and
+        # has no turn-scoped doc, so it keeps the original per-call read.
+        self._user_doc = user_doc
         self._created_via = created_via     # How reminders created in this session are tagged
         self._client_message_id = client_message_id
         self._session_id = session_id
@@ -602,7 +633,7 @@ class ToolExecutor:
         if len(message) > 500:
             raise ValueError("message must be 500 characters or fewer")
 
-        timezone_name = await _get_user_timezone(self._user_id)
+        timezone_name = await _get_user_timezone(self._user_id, self._user_doc)
         parsed_time = parse_reminder_when(when, timezone_name)
         trigger_at_dt = parsed_time.utc
         trigger_at = trigger_at_dt.isoformat()
@@ -967,7 +998,7 @@ class ToolExecutor:
             raise ValueError("title must be 500 characters or fewer")
 
         invitees = _normalize_attendee_emails(inp.get("attendees"))
-        timezone_name = await _get_user_timezone(self._user_id)
+        timezone_name = await _get_user_timezone(self._user_id, self._user_doc)
         parsed_time = parse_calendar_when(when, timezone_name)
         start_time = parsed_time.start_utc.isoformat()
         end_time = parsed_time.end_utc.isoformat()
@@ -1091,7 +1122,7 @@ class ToolExecutor:
 
         parsed_time = None
         if when:
-            timezone_name = await _get_user_timezone(self._user_id)
+            timezone_name = await _get_user_timezone(self._user_id, self._user_doc)
             parsed_time = parse_calendar_when(when, timezone_name)
 
         connector = GoogleCalendarConnector(self._user_id)

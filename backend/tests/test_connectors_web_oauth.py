@@ -182,7 +182,9 @@ def test_refreshing_saved_credentials_does_not_optimistically_enable(monkeypatch
     monkeypatch.setattr(
         connector,
         "_credentials_from_integration",
-        lambda: credentials,
+        # _build_api_client now hands in the integration document it already loaded,
+        # instead of making this re-read the same doc. The fake accepts and ignores it.
+        lambda data=None: credentials,
     )
     monkeypatch.setattr(
         connector,

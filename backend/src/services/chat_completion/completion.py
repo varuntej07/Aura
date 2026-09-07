@@ -31,7 +31,7 @@ from ..tool_executor import (
     resolve_chat_surface_allowed_tools,
 )
 from . import context_assembler, tool_idempotency, turn_store
-from .prompt_builder import build_turn_system_blocks, build_user_content
+from .prompt_builder import build_turn_system_blocks, build_user_content, fetch_user_doc
 from .reminder_receipts import reminder_ui_payload
 
 # Tools whose effect cannot be safely reproduced by a fresh, non-deterministic LLM run.
@@ -260,8 +260,13 @@ async def _regenerate(
         history = assembled_context.history
         conversation_summary = assembled_context.conversation_summary
 
+    # One read of users/{uid} for the whole regeneration, shared by the prompt builder
+    # and the tool executor below. Without it the prompt builder fetched it once and
+    # every timezone-consuming tool fetched the same document again.
+    user_doc = await fetch_user_doc(user_id)
+
     system_blocks = await build_turn_system_blocks(
-        user_id, message, notification_reason,
+        user_id, message, notification_reason, user_doc=user_doc,
         conversation_summary=conversation_summary,
     )
     user_content = build_user_content(message, [])
@@ -275,6 +280,7 @@ async def _regenerate(
         blocked_write_reasons=blocked_write_reasons_for_text_turn(message),
         user_tier=tier,
         product_surface=surface,
+        user_doc=user_doc,
     )
     claude = ClaudeClient(tool_executor)
 

@@ -73,8 +73,18 @@ class GoogleConnectorBase:
         doc = self._integration_ref().get()
         return doc.to_dict() or {}
 
-    def _credentials_from_integration(self) -> Credentials | None:
-        data = self._load_integration()
+    def _credentials_from_integration(
+        self, data: dict[str, Any] | None = None
+    ) -> Credentials | None:
+        """``data`` is the integration document when the caller already loaded it.
+
+        _build_api_client reads it on the line above and then called this, which read
+        the SAME document a second time -- two round trips for one document, on every
+        authenticated Google call in the app. Callers without it in hand still pass
+        nothing and get the original read.
+        """
+        if data is None:
+            data = self._load_integration()
         refresh_token = data.get("refresh_token")
         access_token = data.get("access_token")
         if not refresh_token and not access_token:
@@ -129,7 +139,7 @@ class GoogleConnectorBase:
 
     def _build_api_client(self, refresh: bool = True) -> Any:
         integration = self._load_integration()
-        creds = self._credentials_from_integration()
+        creds = self._credentials_from_integration(integration)
         if creds is None:
             raise ValueError(self.NOT_CONNECTED_ERROR)
 

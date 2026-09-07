@@ -16,6 +16,7 @@ tests.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -358,6 +359,7 @@ async def build_turn_system_blocks(
     notification_reason: str = "",
     user_doc: dict[str, Any] | None = None,
     conversation_summary: str = "",
+    query_embedding: Awaitable[list[float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the full system prompt for one chat turn: datetime + aura profile
     suffix + query-relevant long-term memory, in one place so the live handler and
@@ -416,6 +418,9 @@ async def build_turn_system_blocks(
             uid,
             message,
             active_slugs=active_category_slugs(aura_profile),
+            # Started by the caller as soon as consent was known, so its network round
+            # trip has been overlapping the context read rather than following it.
+            query_embedding=query_embedding,
         )
         if relevant_atoms:
             shown_subjects: set[str] = set()

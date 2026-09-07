@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -163,10 +164,47 @@ async def _store_is_nonempty(uid: str) -> bool:
         return False
 
 
+def prefetch_query_embedding(message: str) -> asyncio.Task[list[float]] | None:
+    """Start the query embedding early, so its round trip overlaps other per-turn I/O.
+
+    The embedding depends on nothing but the message text, yet it used to run inside
+    ``retrieve_relevant_memory`` at the very end of prompt assembly, where it was pure
+    additive time-to-first-token (~100-300ms). The chat handler now starts it as soon as
+    it knows the turn is consented, and hands the task in; the embedding then overlaps
+    the canonical context read instead of following it.
+
+    Returns None when this turn would not retrieve anyway, so no embedding is ever paid
+    for speculatively. The CALLER is responsible for the consent check -- this function
+    is deliberately not the place that decides who may be embedded.
+
+    The task never raises: a failure resolves to [] and retrieval re-embeds inline,
+    which is exactly the behaviour that existed before this fast path.
+    """
+    if not should_retrieve_for_message(message) or _circuit_open():
+        return None
+
+    async def _embed() -> list[float]:
+        try:
+            return await embed_text(message)
+        except Exception as exc:
+            logger.warn("memory.retrieval: prefetched embed failed, retrying inline", {
+                "error_type": type(exc).__name__,
+            })
+            return []
+
+    return asyncio.create_task(_embed(), name="memory-embed-prefetch")
+
+
 async def _gather_seed_result(
     uid: str, query: str, k: int, active_slugs: set[str], now: datetime,
+    query_embedding: Awaitable[list[float]] | None = None,
 ) -> tuple[list[float], list[RetrievedAtom]]:
-    query_vector = await embed_text(query)
+    # An empty result from the prefetch means it failed; fall back to embedding here so
+    # a broken fast path degrades to the original serial behaviour rather than to no
+    # memory at all.
+    query_vector: list[float] = await query_embedding if query_embedding is not None else []
+    if not query_vector:
+        query_vector = await embed_text(query)
 
     def _find_nearest() -> list[dict]:
         collection = (
@@ -277,8 +315,11 @@ async def _gather_seed_result(
 
 async def _gather_and_rank(
     uid: str, query: str, k: int, active_slugs: set[str], now: datetime,
+    query_embedding: Awaitable[list[float]] | None = None,
 ) -> list[RetrievedAtom]:
-    _, selected = await _gather_seed_result(uid, query, k, active_slugs, now)
+    _, selected = await _gather_seed_result(
+        uid, query, k, active_slugs, now, query_embedding
+    )
     return selected
 
 
@@ -509,9 +550,15 @@ async def retrieve_relevant_memory(
     k: int | None = None,
     active_slugs: list[str] | None = None,
     now: datetime | None = None,
+    query_embedding: Awaitable[list[float]] | None = None,
 ) -> list[RetrievedAtom]:
     """Return the atoms most relevant to ``query`` for this user, best-first. Fail-open:
-    returns [] on timeout, an open circuit, or any error, never raises into the chat path."""
+    returns [] on timeout, an open circuit, or any error, never raises into the chat path.
+
+    ``query_embedding`` is an in-flight embedding from ``prefetch_query_embedding``, so
+    the round trip it represents has already been running while the caller did other I/O.
+    Awaiting a finished task is free, which leaves the whole retrieval budget for the
+    vector query instead of splitting it with the embed."""
     if not uid or not should_retrieve_for_message(query):
         return []
     if _circuit_open():
@@ -525,7 +572,7 @@ async def retrieve_relevant_memory(
     slugs = set(active_slugs or [])
     try:
         result = await asyncio.wait_for(
-            _gather_and_rank(uid, query, k, slugs, now),
+            _gather_and_rank(uid, query, k, slugs, now, query_embedding),
             timeout=settings.MEMORY_RETRIEVAL_BUDGET_S,
         )
         _record_outcome(True)

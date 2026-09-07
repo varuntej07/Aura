@@ -46,6 +46,7 @@ from ..services.chat_completion.reminder_receipts import reminder_ui_payload
 from ..services.chat_error_copy import CHAT_TEMPORARILY_UNAVAILABLE_MESSAGE
 from ..services.claude_client import ClaudeClient
 from ..services.engagement.task_scheduler import get_task_scheduler
+from ..services.memory.retrieval import prefetch_query_embedding
 from ..services.query_log import log_query
 from ..services.request_auth import resolve_user_id, resolve_user_id_from_request
 from ..services.tool_executor import (
@@ -492,6 +493,19 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             headers=_sse_headers,
         )
 
+    # users/{uid} is needed much further down (datetime, aura consent, the tool
+    # executor's timezone) and depends on nothing but the uid, so start it HERE and
+    # await it at first use. Its round trip then overlaps the entitlement reads, the
+    # request validation and the canonical transcript write below, instead of being a
+    # serial stage after them. On the mobile path, where it used to be a standalone
+    # await, this removes a full Firestore round trip from time-to-first-token.
+    #
+    # fetch_user_doc never raises (it returns {} on any error), so this task can never
+    # surface an unretrieved exception on a path that returns early.
+    user_doc_task = asyncio.create_task(
+        fetch_user_doc(user_id), name=f"chat-user-doc-{user_id[:8]}"
+    )
+
     # effective_tier is always resolved so it can be passed to the
     # Claude client for tool-level gating regardless of environment.
     effective_tier = "pro"
@@ -668,17 +682,28 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                     headers=_sse_headers,
                 )
 
+    # Already in flight since just after authentication, so this await is normally free.
+    user_doc = await user_doc_task
+
+    # Consent is known now, which is the earliest point this may legitimately start:
+    # embedding the message means sending the user's words to the embedding provider,
+    # so it stays behind the same explicit-consent gate that guards the memory block
+    # itself (aura_consent_granted is True; absent or False never embeds). Kicking it
+    # off here lets its round trip overlap the context read below rather than trail it.
+    query_embedding = (
+        prefetch_query_embedding(message)
+        if user_doc.get("aura_consent_granted") is True
+        else None
+    )
+
     conversation_summary = ""
     context_source = "client"
     if desktop_conversation_id and client_message_id:
-        user_doc, assembled_context = await asyncio.gather(
-            fetch_user_doc(user_id),
-            context_assembler.assemble_desktop_context(
-                user_id,
-                desktop_conversation_id,
-                current_message_id=client_message_id,
-                fallback_history=history,
-            ),
+        assembled_context = await context_assembler.assemble_desktop_context(
+            user_id,
+            desktop_conversation_id,
+            current_message_id=client_message_id,
+            fallback_history=history,
         )
         history = assembled_context.history
         conversation_summary = assembled_context.conversation_summary
@@ -686,16 +711,12 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     elif surface == "app" and session_id and len(history) >= settings.CHAT_HISTORY_WINDOW:
         # Mobile with a full verbatim window: anything older fell off the
         # 30-message slice, so the rolling summary (folded post-turn by
-        # mobile_compaction) is what remembers it. Same parallel-gather rule as
-        # desktop — one extra doc read, zero serial latency.
-        user_doc, conversation_summary = await asyncio.gather(
-            fetch_user_doc(user_id),
-            mobile_compaction.load_context_summary(user_id, session_id),
+        # mobile_compaction) is what remembers it.
+        conversation_summary = await mobile_compaction.load_context_summary(
+            user_id, session_id
         )
         if conversation_summary:
             context_source = "client_plus_summary"
-    else:
-        user_doc = await fetch_user_doc(user_id)
 
     prev_buddy_response: str | None = next(
         (h["content"] for h in reversed(history) if h["role"] == "assistant"),
@@ -705,17 +726,20 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
     # Single read of users/{uid} for this turn, shared below instead of 4
     # independent re-fetches (datetime, aura-revoke check, and the two fire-and-
     # forget tasks' own consent checks) -- see firestore_read_audit_20260706 memory.
+    # It now also reaches the tool executor, so a timezone-consuming tool stops
+    # re-reading this same document once per call.
     #
-    # The conversation summary rides along in the SAME gather rather than as a
-    # second sequential await: it is one extra document read, and putting it in
-    # series would add its full round trip to time-to-first-token on every
-    # desktop turn. Non-desktop surfaces resolve it to "" without any read.
+    # That read no longer rides in a gather with the conversation summary: it is
+    # started as a task right after authentication instead, so it overlaps the
+    # entitlement reads and the transcript write as well. Non-desktop surfaces still
+    # resolve the summary to "" without any read.
     # Build the full system prompt (datetime + aura profile suffix + query-relevant
     # long-term memory) via the shared assembler, so the live turn here and the durable
     # background completion (services/chat_completion) construct the EXACT same prompt.
     system_prompt_blocks = await build_turn_system_blocks(
         user_id, message, notification_reason, user_doc=user_doc,
         conversation_summary=conversation_summary,
+        query_embedding=query_embedding,
     )
 
     asyncio.create_task(
@@ -918,6 +942,10 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
                 product_surface=surface,
                 product_platform=request_headers.get("x-aura-platform", ""),
                 app_version=request_headers.get("x-aura-app-version", ""),
+                # Same users/{uid} snapshot the prompt above was built from, so a
+                # reminder or calendar tool reads the turn's timezone instead of
+                # re-fetching this exact document once per call.
+                user_doc=user_doc,
             )
             claude = ClaudeClient(tool_executor)
             buffered_text_events: list[dict[str, Any]] = []
