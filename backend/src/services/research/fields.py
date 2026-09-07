@@ -362,6 +362,10 @@ FAIL_BUDGET_EXHAUSTED = "budget_exhausted"
 FAIL_COST_CAP_REACHED = "cost_cap_reached"
 FAIL_ENTITLEMENT_LAPSED = "entitlement_lapsed"
 FAIL_METER_UNAVAILABLE = "meter_unavailable"
+# Distinct from the meter. A stage could not load the plan it must run against, which is
+# a different subsystem entirely; sharing FAIL_METER_UNAVAILABLE for both sent one
+# investigation at the budget ledger for a run that had simply never been planned.
+FAIL_PLAN_UNAVAILABLE = "plan_unavailable"
 FAIL_ATTEMPT_CAP = "attempt_cap_exceeded"
 FAIL_NO_SOURCE_FOUND = "no_source_found"
 FAIL_EXTRACTION_FAILED = "extraction_failed"

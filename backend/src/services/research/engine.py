@@ -670,7 +670,7 @@ class FirestoreResearchEngine:
             plan = await self._load_plan(uid, run_id, run, lease.stage_kind)
         except PlanReadUnavailable:
             failed = await self._fail_and_deliver(
-                lease, error_code=F.FAIL_METER_UNAVAILABLE, retryable=True
+                lease, error_code=F.FAIL_PLAN_UNAVAILABLE, retryable=True
             )
             return _Admission(
                 refusal=StepOutcome(disposition=failed.outcome, retryable=False)
@@ -686,10 +686,14 @@ class FirestoreResearchEngine:
         now = datetime.now(UTC)
         deadline = str(run.get(F.DEADLINE_AT, ""))
         if deadline and deadline <= now.isoformat():
-            # Exhaustion NEVER produces a failure. Every path out of budget or time
-            # routes through synthesis so the user still gets a sourced partial brief.
+            # Exhaustion never produces a failure for a run that has a plan: every path
+            # out of budget or time routes through synthesis so the user still gets a
+            # sourced partial brief. A run with no plan has nothing to synthesize and
+            # terminates instead - see _degrade_to_partial.
             return _Admission(
-                refusal=await self._degrade_to_partial(lease, F.FAIL_WALL_CLOCK_EXPIRED)
+                refusal=await self._degrade_to_partial(
+                    lease, F.FAIL_WALL_CLOCK_EXPIRED, planned=bool(plan)
+                )
             )
 
         if lease.attempt > store.STAGE_ATTEMPT_CAP:
@@ -710,7 +714,9 @@ class FirestoreResearchEngine:
         if not await credits_mod.entitlement_still_valid(uid):
             # A lapse mid-run stops spending rather than finishing work nobody pays for.
             return _Admission(
-                refusal=await self._degrade_to_partial(lease, F.FAIL_ENTITLEMENT_LAPSED)
+                refusal=await self._degrade_to_partial(
+                    lease, F.FAIL_ENTITLEMENT_LAPSED, planned=bool(plan)
+                )
             )
 
         # The project-day ceiling, checked before the per-run reservation because it is
@@ -748,7 +754,9 @@ class FirestoreResearchEngine:
             )
         if receipt is None:
             return _Admission(
-                refusal=await self._degrade_to_partial(lease, F.FAIL_COST_CAP_REACHED)
+                refusal=await self._degrade_to_partial(
+                    lease, F.FAIL_COST_CAP_REACHED, planned=bool(plan)
+                )
             )
 
         try:
@@ -778,7 +786,9 @@ class FirestoreResearchEngine:
             # The run's own dollar ceiling. Not retryable and not a failure: the user gets
             # the sourced partial brief the evidence so far supports.
             return _Admission(
-                refusal=await self._degrade_to_partial(lease, F.FAIL_COST_CAP_REACHED)
+                refusal=await self._degrade_to_partial(
+                    lease, F.FAIL_COST_CAP_REACHED, planned=bool(plan)
+                )
             )
 
         # A zero grant on a unit the stage CANNOT work without is a refusal, not a smaller
@@ -801,7 +811,9 @@ class FirestoreResearchEngine:
                 )
             # Nothing has been spent yet, so both holds are released rather than retained.
             return _Admission(
-                refusal=await self._degrade_to_partial(lease, F.FAIL_BUDGET_EXHAUSTED)
+                refusal=await self._degrade_to_partial(
+                    lease, F.FAIL_BUDGET_EXHAUSTED, planned=bool(plan)
+                )
             )
 
         return _Admission(grant=grant, run=run, plan=plan, receipt=receipt)
@@ -842,7 +854,7 @@ class FirestoreResearchEngine:
             raise PlanReadUnavailable("persisted research plan read failed") from exc
 
     async def _degrade_to_partial(
-        self, lease: store.StageLease, failure_code: str
+        self, lease: store.StageLease, failure_code: str, *, planned: bool = True
     ) -> StepOutcome:
         """Route an exhausted run into synthesis, not into a failure.
 
@@ -852,14 +864,27 @@ class FirestoreResearchEngine:
 
         Naming the destination state is not enough: without a job to service it the run
         parked in `synthesizing` forever. Which job depends on who is degrading, and the
-        three cases are genuinely different:
+        four cases are genuinely different:
 
           * an ordinary stage buys a partial synthesis;
+          * a stage degrading BEFORE any plan exists cannot buy one. classify_plan is the
+            stage that writes the plan synthesize must run against, so a classify_plan
+            that degrades leaves synthesize nothing to load; it raised PlanReadUnavailable
+            on every attempt and ground to the attempt cap, turning a clean refusal (an
+            entitlement that lapsed between run creation and the first stage) into a run
+            that failed with an unrelated code. There is no evidence and no plan, so this
+            terminates through fail_stage, which already commits FAILED for an
+            evidence-free run and carries the real failure code;
           * synthesize itself cannot buy a second synthesize, so it goes straight to
             finalize, which owns the terminal commit and the notification;
           * a fan-out child must not set next_state at all. Only the join may move the
             run, so a degrading child completes through the join instead and the wave
             reports the shortfall as a gap.
+
+        ``planned`` is whether the caller resolved a plan for this stage, i.e. the truth
+        ``_load_plan`` already computed (admitted version, else current). It is passed in
+        rather than re-derived so the two can never disagree about whether synthesize has
+        something to run against.
         """
         if lease.stage_kind == F.STAGE_READ_SOURCE:
             child = await store.complete_child(
@@ -872,6 +897,21 @@ class FirestoreResearchEngine:
             await self._deliver(lease.uid, child.created_job_ids)
             return StepOutcome(
                 disposition="degraded_to_partial",
+                stage_kind=lease.stage_kind,
+                retryable=False,
+                detail=failure_code,
+            )
+
+        if lease.stage_kind in _DEGRADABLE_TO_SYNTHESIS and not planned:
+            # Nothing to synthesize and nothing to synthesize FROM. fail_stage already
+            # owns this exact judgement - terminal PARTIAL when the run holds evidence,
+            # FAILED when it holds none - and mints the terminal notification, so this
+            # defers to it rather than teaching finalize a third terminal state.
+            failed = await self._fail_and_deliver(
+                lease, error_code=failure_code, retryable=False
+            )
+            return StepOutcome(
+                disposition=failed.outcome,
                 stage_kind=lease.stage_kind,
                 retryable=False,
                 detail=failure_code,

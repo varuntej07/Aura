@@ -27,7 +27,9 @@ from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
 from ..services.request_auth import resolve_user_id_from_request
+from ..services.research import credits as credits_mod
 from ..services.research import fields as F
+from ..services.research.budget import Preset
 from ..services.research.engine import StepRef, get_research_engine
 
 
@@ -143,6 +145,16 @@ async def handle_create(request: Request) -> JSONResponse:
         if not data_source_id or len(data_source_id) > 64 or len(database_name) > 300:
             return JSONResponse({"error": "Invalid delivery binding."}, status_code=400)
         delivery = {"data_source_id": data_source_id, "database_name": database_name}
+    # The entitlement gate belongs HERE, not one stage in. credits.admit() checks it, but
+    # nothing reaches admit until classify_plan has already been created and queued, so a
+    # user whose plan had lapsed got a run, a model call, and then a mid-run refusal that
+    # surfaced as an unrelated failure code. Refusing at creation costs one read and
+    # writes nothing.
+    decision = await credits_mod.resolve_entitlement(uid, Preset(preset))
+    if not decision.allowed:
+        return JSONResponse(
+            {"detail": {"code": decision.code}}, status_code=decision.http_status
+        )
     spec: dict[str, object] = {
         "request": text,
         "preset": preset,
