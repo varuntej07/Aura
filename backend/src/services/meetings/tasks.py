@@ -136,6 +136,33 @@ async def dispatch_job(uid: str, job_id: str) -> bool:
 
     job, outbox = await asyncio.to_thread(_read)
     if not job or not outbox or job.get("state") in (F.JOB_COMPLETE, F.JOB_BLOCKED):
+        # Heal rows written before terminal transitions retired their outbox
+        # row: a terminal job whose row is still inside the sweep's
+        # dispatch_due_at <= now range occupies an oldest-first slot on every
+        # pass, so each sweep encounter retires one more historical row.
+        if (
+            job
+            and outbox
+            and job.get("state") in (F.JOB_COMPLETE, F.JOB_BLOCKED)
+            and str(outbox.get("dispatch_due_at", "")) != F.DISPATCH_NEVER
+        ):
+            def _retire() -> None:
+                refs.outbox_ref(uid).document(job_id).set(
+                    {
+                        "state": F.OUTBOX_DONE,
+                        "dispatch_due_at": F.DISPATCH_NEVER,
+                        "updated_at": now.isoformat(),
+                    },
+                    merge=True,
+                )
+
+            try:
+                await asyncio.to_thread(_retire)
+            except Exception as exc:
+                logger.warn(
+                    "meetings.tasks: outbox retirement failed, next sweep retries",
+                    {"job_id": job_id, "error": str(exc)},
+                )
         return False
     stale_dispatch = (
         outbox.get("state") == "dispatched"

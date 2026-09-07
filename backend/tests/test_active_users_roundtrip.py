@@ -68,6 +68,11 @@ class _Query:
         self._limit = n
         return self
 
+    def select(self, field_paths):
+        # Projection changes payload, not matching; the reader only uses the
+        # doc path, which stream() below always provides.
+        return self
+
     def stream(self):
         out = []
         for path, data in self._store._docs.items():

@@ -1,14 +1,11 @@
 """Crash recovery. Firestore is the truth; every delivery mechanism is a hint.
 
 Five independent passes, each per-run isolated so one poisoned run can never abort
-recovery for everyone else. This is the analogue of ``_run_meeting_job_sweep`` and would
-eventually be registered at the free ``now_minute % 5 == 4`` scheduler slot (0, 1, 2 and
-3 are taken by calendar renewal, the reactive outbox, meetings and chat turns).
-
-**Phase two does not register it.** The function exists and is directly callable for
-inspection; wiring it into ``handlers/scheduler.py`` is phase three work, after the
-queue and indexes exist. Registering it now would mean a deployed revision quietly
-sweeping collections whose indexes have not been created.
+recovery for everyone else. This is the analogue of ``_run_meeting_job_sweep``,
+registered at the ``now_minute % 5 == 4`` scheduler slot (``handlers/scheduler.py``,
+``_run_research_sweep``); the COLLECTION_GROUP indexes its passes filter on exist and
+are READY in the juno-2ea45 project (verified 2026-09-07, they are hand-managed via
+gcloud, not a checked-in firestore.indexes.json).
 
 The passes, and the exact failure each one exists to undo:
 

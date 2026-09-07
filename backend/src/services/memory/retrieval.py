@@ -50,6 +50,9 @@ MAX_HOPS = 2
 MAX_NODES = 24
 FANOUT_CAP = 8
 ADJACENCY_CACHE_TTL_S = 60.0
+# Entries are only ever overwritten, never evicted, so without a cap the dict
+# grows with (users x graph nodes touched) for the life of the process.
+ADJACENCY_CACHE_MAX_ENTRIES = 4096
 GRAPH_PROXIMITY_WEIGHT = 0.20
 VOICE_RETRIEVAL_BUDGET_S = 0.35
 # Budget for retrieval fired while the user is still SPEAKING, which is off the
@@ -424,6 +427,19 @@ async def _read_adjacency(
 
     fetched = await asyncio.to_thread(_read)
     cached_at = time.monotonic()
+    if len(_adjacency_cache) > ADJACENCY_CACHE_MAX_ENTRIES:
+        # Rare sub-ms purge over a few thousand tiny entries; drop what the TTL
+        # already considers dead, and clear outright if live entries alone
+        # exceed the cap (a cold refill is one get_all, not a correctness risk).
+        expired = [
+            key
+            for key, (stored_at, _) in _adjacency_cache.items()
+            if cached_at - stored_at >= ADJACENCY_CACHE_TTL_S
+        ]
+        for key in expired:
+            _adjacency_cache.pop(key, None)
+        if len(_adjacency_cache) > ADJACENCY_CACHE_MAX_ENTRIES:
+            _adjacency_cache.clear()
     for node_id, neighbors in fetched.items():
         bounded = neighbors[:FANOUT_CAP]
         _adjacency_cache[(uid, node_id)] = (cached_at, bounded)

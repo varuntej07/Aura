@@ -239,6 +239,14 @@ JOB_COMPLETE = "complete"
 JOB_FAILED = "failed"
 JOB_BLOCKED = "blocked"
 
+# Written onto the outbox row the moment its job reaches a terminal state. The
+# outbox sweep selects on `dispatch_due_at <= now`, so a finished row has to
+# leave that range or it competes for the sweep's limited slots forever and,
+# oldest-first, eventually masks real stranded work entirely. An empty string
+# will NOT do: "" <= now_iso is true for strings. Mirrors research/store.py.
+OUTBOX_DONE = "done"
+DISPATCH_NEVER = "9999-12-31T00:00:00+00:00"
+
 MEETING_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
 TRANSCRIPT_SCHEMA_VERSION = "meeting-transcript-v2"

@@ -218,10 +218,15 @@ def _query_active_user_ids(inactivity_days: int) -> list[str]:
     from google.cloud.firestore_v1.base_query import FieldFilter
 
     cutoff = (datetime.now(UTC) - timedelta(days=inactivity_days)).isoformat()
+    # select(__name__): only the uid (from the doc path) is read below, so skip
+    # transferring every token doc's payload. Billed reads are unchanged.
+    # Deliberately UNBOUNDED: this is the notification fan-out audience, and a
+    # limit here would silently drop users from delivery.
     docs = (
         admin_firestore()
         .collection_group(_SUBCOLLECTION)
         .where(filter=FieldFilter(FIELD_REGISTERED_AT, ">=", cutoff))
+        .select(["__name__"])
         .stream()
     )
     user_ids: list[str] = []

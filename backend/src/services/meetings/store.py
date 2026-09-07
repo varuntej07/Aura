@@ -52,6 +52,25 @@ _outbox_ref = refs.outbox_ref
 _audit_ref = refs.audit_ref
 
 
+def _retire_outbox_row(txn, uid: str, job_id: str, now_iso: str) -> None:
+    """Take a terminal job's outbox row out of the sweep's due range.
+
+    dispatch_pending selects on dispatch_due_at <= now oldest-first, so a row
+    left due after its job finished occupies a sweep slot on every pass and
+    eventually masks real stranded work. set+merge so a missing row can never
+    fail the caller's transaction; the user-retry path re-arms dispatch_due_at.
+    """
+    txn.set(
+        _outbox_ref(uid).document(job_id),
+        {
+            "state": F.OUTBOX_DONE,
+            "dispatch_due_at": F.DISPATCH_NEVER,
+            "updated_at": now_iso,
+        },
+        merge=True,
+    )
+
+
 class MeetingIntegrityError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -1185,6 +1204,7 @@ async def claim_job(uid: str, job_id: str) -> JobLease | None:
                 F.STATUS_DELETE_COMPLETE,
             ):
                 txn.update(job_ref, {"state": F.JOB_BLOCKED, "updated_at": now.isoformat()})
+                _retire_outbox_row(txn, uid, job_id, now.isoformat())
                 return None
             state = job.get("state")
             lease_expiry = str(job.get("lease_expires_at", ""))
@@ -1203,6 +1223,7 @@ async def claim_job(uid: str, job_id: str) -> JobLease | None:
                         "updated_at": now.isoformat(),
                     },
                 )
+                _retire_outbox_row(txn, uid, job_id, now.isoformat())
                 return None
             attempt = int(job.get("job_attempt", 0)) + 1
             sequence = int(meeting.get(F.AUDIT_SEQUENCE, 0)) + 1
@@ -1726,6 +1747,7 @@ async def publish_v2_result(
                     "updated_at": now.isoformat(),
                 },
             )
+            _retire_outbox_row(transaction, lease.user_id, lease.job_id, now.isoformat())
             _audit_event(
                 transaction,
                 uid=lease.user_id,

@@ -238,7 +238,8 @@ async def list_user_ids_with_pending(*, limit: int = 2000) -> set[str]:
     too and the results are unioned, so a doc the filter would wrongly skip is
     drained within that window rather than silenced until TTL. Requires the
     composite COLLECTION_GROUP index on ``(status, next_eligible_at)``
-    (firestore.indexes.json); if that index is missing the filtered query
+    (hand-managed via gcloud — there is no checked-in firestore.indexes.json;
+    deploy.sh preflights it); if that index is missing the filtered query
     raises and this falls back to the unfiltered query, loudly.
 
     Loud on truncation: if the result hits ``limit`` exactly, more may exist

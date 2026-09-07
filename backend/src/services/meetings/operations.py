@@ -33,9 +33,22 @@ async def reconciliation_snapshot(*, limit: int = 200) -> dict[str, Any]:
             parent = snap.reference.parent.parent
             row["_uid"] = parent.id if parent is not None else ""
             meetings.append(row)
+        # Only active jobs: the repair pass acts on pending/retry rows and the
+        # lease metric on leased rows. The previous unfiltered .limit(limit)
+        # returned an arbitrary sample of every job ever created, so repair
+        # coverage shrank toward zero as the corpus grew past the limit. As a
+        # consequence provider_output_failures now counts failures on ACTIVE
+        # jobs only (the old count over an arbitrary sample was not a
+        # meaningful total either). Requires the meeting_jobs.state
+        # COLLECTION_GROUP field override; deploy.sh preflights it.
         jobs = [
             snap.to_dict() or {}
-            for snap in db.collection_group(F.JOBS_SUBCOLLECTION).limit(limit).stream()
+            for snap in (
+                db.collection_group(F.JOBS_SUBCOLLECTION)
+                .where("state", "in", [F.JOB_PENDING, F.JOB_RETRY, F.JOB_LEASED])
+                .limit(limit)
+                .stream()
+            )
         ]
         stranded_runs = []
         stale_runs_scanned = 0

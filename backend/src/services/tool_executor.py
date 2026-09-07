@@ -1882,20 +1882,46 @@ class ToolExecutor:
 
 
 # Standalone Firestore helpers (used by scheduler)
+
+# The scheduler tick runs every minute, so a backlog deeper than this drains at
+# 500/minute oldest-first instead of one unbounded scan pinning a single tick.
+FETCH_DUE_REMINDERS_LIMIT = 500
+
+
 def fetch_due_reminders() -> list[dict[str, Any]]:
-    """Query all users' pending reminders that are due now.
+    """Query all users' pending reminders that are due now, oldest first.
 
     Intentionally synchronous — called via asyncio.to_thread from the scheduler.
-    """                 
+    Never raises: this rides the scheduler tick's gather, and one failed query
+    (e.g. the reminders (status, trigger_at) COLLECTION_GROUP index going
+    missing) must not take the rest of the tick down with it.
+    """
     db = admin_firestore()
     now_iso = datetime.now(UTC).isoformat()
 
-    docs = (
-        db.collection_group("reminders")
-        .where(filter=FieldFilter("status", "==", "pending"))
-        .where(filter=FieldFilter("trigger_at", "<=", now_iso))
-        .stream()
-    )
+    try:
+        docs = list(
+            db.collection_group("reminders")
+            .where(filter=FieldFilter("status", "==", "pending"))
+            .where(filter=FieldFilter("trigger_at", "<=", now_iso))
+            .order_by("trigger_at")
+            .limit(FETCH_DUE_REMINDERS_LIMIT)
+            .stream()
+        )
+    except Exception as exc:
+        logger.error(
+            "fetch_due_reminders FAILED — no reminders delivered this tick "
+            "(check the reminders (status, trigger_at) COLLECTION_GROUP index)",
+            {"error": str(exc), "error_type": type(exc).__name__, "alert": True},
+        )
+        return []
+
+    if len(docs) >= FETCH_DUE_REMINDERS_LIMIT:
+        logger.warn(
+            "fetch_due_reminders hit its limit; remaining due reminders drain "
+            "on subsequent ticks, oldest first",
+            {"limit": FETCH_DUE_REMINDERS_LIMIT, "alert": True},
+        )
 
     results = []
     for doc in docs:

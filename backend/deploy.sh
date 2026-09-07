@@ -243,6 +243,54 @@ gcloud firestore indexes fields describe audio_expires_at \
   --collection-group=dictation_traces --project="${PROJECT_ID}" --format=json 2>/dev/null \
   | python -c "${REQUIRE_READY_CG_INDEX_PY}" audio_expires_at \
   || { echo "  x dictation_traces.audio_expires_at index preflight failed"; exit 1; }
+gcloud firestore indexes fields describe state \
+  --collection-group=meeting_jobs --project="${PROJECT_ID}" --format=json 2>/dev/null \
+  | python -c "${REQUIRE_READY_CG_INDEX_PY}" state \
+  || { echo "  x meeting_jobs.state index preflight failed. Create it with:"; \
+       echo "    gcloud firestore indexes fields update state --collection-group=meeting_jobs \\"; \
+       echo "      --index=order=ascending,query-scope=COLLECTION_GROUP --project=${PROJECT_ID}"; \
+       exit 1; }
+
+# The every-minute scheduler sweeps each depend on one composite
+# COLLECTION_GROUP index that exists only in the live project (there is no
+# checked-in firestore.indexes.json). All verified READY 2026-09-07; this
+# preflight turns a future index deletion or a project rebuild into a blocked
+# deploy instead of a silent every-minute production failure.
+read -r -d '' REQUIRE_READY_COMPOSITE_PY <<'PY' || true
+import json
+import sys
+
+spec = sys.argv[1]  # collection:field1,field2
+collection, fields_csv = spec.split(":", 1)
+want = fields_csv.split(",")
+rows = json.loads(sys.stdin.read().strip() or "[]")
+for row in rows:
+    name = row.get("name", "")
+    paths = [f.get("fieldPath") for f in row.get("fields", []) if f.get("fieldPath") != "__name__"]
+    if f"/collectionGroups/{collection}/" in name and row.get("queryScope") == "COLLECTION_GROUP" \
+            and row.get("state") == "READY" and paths == want:
+        print(f"  • {collection}({fields_csv}): composite COLLECTION_GROUP index READY")
+        break
+else:
+    sys.exit(
+        f"  x {collection}({fields_csv}): no READY composite COLLECTION_GROUP index.\n"
+        "    Create it in the console or with gcloud firestore indexes composite create,\n"
+        "    wait for READY, then re-run this deploy."
+    )
+PY
+COMPOSITE_INDEXES_JSON="$(gcloud firestore indexes composite list --project="${PROJECT_ID}" --format=json 2>/dev/null)"
+for spec in \
+  "reminders:status,trigger_at" \
+  "reminders:status,processing_at" \
+  "sessions:state,last_activity_at" \
+  "intents:status,fire_at" \
+  "outbox:consumed,ts" \
+  "notif_candidates:state,fire_at" \
+  "notification_queue:status,next_eligible_at" \
+  "chat_turns:status,created_at"; do
+  echo "${COMPOSITE_INDEXES_JSON}" | python -c "${REQUIRE_READY_COMPOSITE_PY}" "${spec}" \
+    || { echo "  x composite index preflight failed for ${spec}"; exit 1; }
+done
 
 # Deploy to Cloud Run
 echo "▶ Deploying to Cloud Run..."
