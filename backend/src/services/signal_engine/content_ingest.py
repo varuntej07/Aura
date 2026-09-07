@@ -1,7 +1,8 @@
 """
 Content ingest — one entry point that fills the shared content pool.
 
-  run_ingest()   every 3 hours (Cloud Scheduler)
+  run_ingest()   every 4 hours (Cloud Scheduler `0 */4 * * *`; must match
+                 generation_store.GENERATION_WINDOW_HOURS)
 
 A tiered, self-healing source strategy fills ONE shared pool; personalisation
 happens later at scoring time, not here. Sources by role:

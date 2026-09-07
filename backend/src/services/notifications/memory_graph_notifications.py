@@ -313,6 +313,16 @@ async def sweep_user(
     return None
 
 
+# The scheduler invokes the sweep hourly (minute :25), but its inputs move far
+# slower: the dormancy window is 5-14 days wide, the deadline horizon 14 days,
+# and graph writes land per conversation, not per hour. Every pass costs up to
+# 25 Firestore reads per active, consented user regardless of whether anything
+# changed, so the sweep self-gates to every 4th hour — plenty inside windows that
+# wide (milestone precision is owned by the per-minute candidate drain via
+# fire_at, not by sweep cadence). Manual dry runs are never gated.
+SWEEP_INTERVAL_HOURS = 4
+
+
 async def run_memory_graph_sweep(
     *, now: datetime | None = None, dry_run: bool = False
 ) -> list[tuple[str, CandidateDraft]]:
@@ -320,6 +330,8 @@ async def run_memory_graph_sweep(
     if not settings.NOTIF_GRAPH:
         return []
     when = now or datetime.now(UTC)
+    if not dry_run and when.hour % SWEEP_INTERVAL_HOURS != 0:
+        return []
     user_ids = await list_active_user_ids()
     if not user_ids:
         return []
@@ -494,16 +506,38 @@ async def run_due_candidates(*, now: datetime | None = None) -> int:
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     for uid, candidate_id, candidate in due:
         grouped[uid].append((candidate_id, candidate))
+
+    # Users are independent (each candidate chain touches only its own user's
+    # docs), so process them concurrently; candidates WITHIN a user stay strictly
+    # sequential because they share the per-user arbitration doc. Serial
+    # processing made a full 100-candidate backlog take several minutes and
+    # overlap the next per-minute tick (the CAS claim kept that correct, just
+    # wasteful).
+    semaphore = asyncio.Semaphore(8)
+
+    async def _one_user(uid: str, candidates: list[tuple[str, dict[str, Any]]]) -> int:
+        async with semaphore:
+            arbitration = await machine.read_arbitration_state(uid)
+            candidates.sort(
+                key=lambda item: _effective_score(item[1], arbitration, when),
+                reverse=True,
+            )
+            for candidate_id, _ in candidates:
+                await process_candidate(uid, candidate_id, now=when)
+            return len(candidates)
+
+    counts = await asyncio.gather(
+        *[_one_user(uid, candidates) for uid, candidates in grouped.items()],
+        return_exceptions=True,
+    )
     processed = 0
-    for uid, candidates in grouped.items():
-        arbitration = await machine.read_arbitration_state(uid)
-        candidates.sort(
-            key=lambda item: _effective_score(item[1], arbitration, when),
-            reverse=True,
-        )
-        for candidate_id, _ in candidates:
-            await process_candidate(uid, candidate_id, now=when)
-            processed += 1
+    for uid, result in zip(grouped, counts):
+        if isinstance(result, BaseException):
+            logger.warn("memory_graph_notifications: per-user drain failed", {
+                "user_id": uid, "error": str(result),
+            })
+        else:
+            processed += result
     return processed
 
 

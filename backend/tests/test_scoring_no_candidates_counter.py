@@ -32,7 +32,7 @@ async def test_empty_find_nearest_increments_no_candidates_counter(monkeypatch):
 
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [], {})
 
     assert summary.users_skipped_no_candidates == 1
     assert summary.notifications_sent == 0

@@ -120,7 +120,7 @@ async def test_successful_send_enqueues_join_keys_then_hook_emits_funnel(
     with patch.object(
         feature_store, "read_state", AsyncMock(return_value=_ready_state())
     ):
-        await scoring_loop._score_one_user("uid-42", models, summary, [])
+        await scoring_loop._score_one_user("uid-42", models, summary, [], {})
 
     # 1. The tick ENQUEUES (no inline send / funnel). The join keys the client tap event
     #    reuses must ride on the proposal so the hook can emit them on delivery.
@@ -166,7 +166,7 @@ async def test_run_tick_warns_when_sends_happen_but_posthog_unconfigured(monkeyp
         AsyncMock(return_value=["uid-1"]),
     )
 
-    async def _fake_score(user_id, models, summary, breaking_candidates):
+    async def _fake_score(user_id, models, summary, breaking_candidates, breaking_frame_cache):
         summary.notifications_sent += 1
 
     monkeypatch.setattr(scoring_loop, "_score_one_user", _fake_score)
@@ -192,7 +192,7 @@ async def test_run_tick_no_warn_when_posthog_configured(monkeypatch):
         AsyncMock(return_value=["uid-1"]),
     )
 
-    async def _fake_score(user_id, models, summary, breaking_candidates):
+    async def _fake_score(user_id, models, summary, breaking_candidates, breaking_frame_cache):
         summary.notifications_sent += 1
 
     monkeypatch.setattr(scoring_loop, "_score_one_user", _fake_score)

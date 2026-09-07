@@ -20,6 +20,7 @@ instruction:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import Request
@@ -170,12 +171,15 @@ async def handle_list(request: Request) -> JSONResponse:
         limit = max(1, min(F.LIST_LIMIT, int(request.query_params.get("limit", F.LIST_LIMIT))))
     except ValueError:
         return JSONResponse({"error": "Invalid limit."}, status_code=400)
-    runs = await get_research_engine().list_runs(uid, limit=limit)
-    items = []
-    for run in runs:
-        detail = await get_research_engine().detail(uid, str(run.get(F.RUN_ID) or ""))
-        if detail:
-            items.append(_projection(detail))
+    engine = get_research_engine()
+    runs = await engine.list_runs(uid, limit=limit)
+    # Each row's run document is already in hand from the listing; passing it into
+    # detail() skips a redundant re-read per row, and the per-row plan/claims reads
+    # are independent, so they need not run serially. gather preserves list order.
+    details = await asyncio.gather(
+        *(engine.detail(uid, str(run.get(F.RUN_ID) or ""), run=run) for run in runs)
+    )
+    items = [_projection(detail) for detail in details if detail]
     return JSONResponse({"items": items})
 
 

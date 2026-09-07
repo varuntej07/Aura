@@ -80,6 +80,18 @@ DEDUP_WINDOW = timedelta(hours=24)
 _QUIET_START_MINUTES = 23 * 60 + 30  # 23:30
 _QUIET_END_MINUTES = 7 * 60          # 07:00
 
+# Hard cap on how far a hold may defer the queue's next drain, no matter what the
+# hold-end computation says. Bounds the blast radius of a wrong eligibility time
+# (a bug here would otherwise silence a user's queue until the queue TTL) to one
+# hour of delay, at the cost of a few extra re-drains across a long hold like the
+# 7.5h quiet-hours night (~8 instead of ~450).
+MAX_HOLD_DEFERRAL = timedelta(hours=1)
+
+# The engagement time-slot grid used by smart timing is 30-minute slots (see
+# _is_preferred_slot); an off-peak hold can therefore not become eligible before
+# the next slot boundary.
+_SMART_TIMING_SLOT_MINUTES = 30
+
 # How far back to check for a recent tracker delivery when deciding whether the user is
 # in the middle of a live tracked event (a match in progress) right now. A live match
 # polls every 15-30 min, so this comfortably bridges consecutive tracker pushes without
@@ -167,7 +179,10 @@ async def drain_user_queue(
         })
         return OrchestratorDecision(Disposition.HOLD, "timezone_unresolved")
     if _is_quiet_hours(local_now):
-        await _hold_all(user_id, survivors, now)
+        await _hold_all(
+            user_id, survivors, now,
+            eligible_until=now + _quiet_hours_remaining(local_now),
+        )
         logger.info("orchestrator: proactive held (quiet hours)", {
             "user_id": user_id, "held": len(survivors),
         })
@@ -221,7 +236,15 @@ async def drain_user_queue(
         and winner.data.get("lane") != "breaking"
         and not await _is_preferred_slot(user_id, local_now)
     ):
-        await _hold_all(user_id, survivors, now)
+        minutes_into_slot = (
+            local_now.hour * 60 + local_now.minute
+        ) % _SMART_TIMING_SLOT_MINUTES
+        await _hold_all(
+            user_id, survivors, now,
+            eligible_until=now + timedelta(
+                minutes=_SMART_TIMING_SLOT_MINUTES - minutes_into_slot
+            ),
+        )
         logger.info("orchestrator: proactive held (off-peak smart timing)", {
             "user_id": user_id, "source": winner.source, "held": len(survivors),
         })
@@ -230,6 +253,32 @@ async def drain_user_queue(
         "preferred_slot" if winner.effective_priority <= SMART_TIMING_MAX_PRIORITY
         else "not_required"
     )
+
+    # Stage 3.35: non-mutating budget precheck. Stage 4's authoritative claim sits
+    # AFTER the two LLM stages below, so before this existed a user already inside
+    # the spacing window or over the daily cap paid one tap-gate (and for threads
+    # one sensitivity) LLM call per minute for the entire hold, judging identical
+    # immutable queued copy — only to be held at stage 4 anyway. The preview runs
+    # the same adaptive limits and the same pure claim evaluation with no write;
+    # it can only short-circuit to the exact HOLD stage 4 would return, never
+    # authorize, and it fails open so a preview error changes nothing.
+    precheck = await notification_budget.preview_proactive_claim(
+        user_id,
+        source=winner.source,
+        user_local_date=local_date,
+        now=now,
+        priority=(winner.source == SOURCE_ICEBREAKER),
+    )
+    if not precheck.allowed and precheck.reason in ("global_spacing", "global_daily_cap"):
+        await _hold_all(
+            user_id, survivors, now,
+            eligible_until=_budget_hold_eligible(precheck, now),
+        )
+        logger.info("orchestrator: proactive held (budget precheck)", {
+            "user_id": user_id, "reason": precheck.reason, "held": len(survivors),
+        })
+        return OrchestratorDecision(Disposition.HOLD, REASON_BUDGET)
+    _policy_checks(winner)["budget_precheck"] = precheck.reason or "passed"
 
     # Stage 3.4: privacy revalidation happens after queue delay and after framing,
     # immediately before any channel is selected. The current thread subject and
@@ -311,7 +360,10 @@ async def drain_user_queue(
         priority=(winner.source == SOURCE_ICEBREAKER),
     )
     if not claim.allowed:
-        await _hold_all(user_id, survivors, now)
+        await _hold_all(
+            user_id, survivors, now,
+            eligible_until=_budget_hold_eligible(claim, now),
+        )
         logger.info("orchestrator: proactive held (budget)", {
             "user_id": user_id, "reason": claim.reason, "held": len(survivors),
         })
@@ -449,8 +501,27 @@ async def _deliver(proposal: NotificationProposal) -> NotificationResult:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 async def _hold_all(
-    user_id: str, pairs: list[tuple[str, NotificationProposal]], now: datetime
+    user_id: str,
+    pairs: list[tuple[str, NotificationProposal]],
+    now: datetime,
+    *,
+    eligible_until: datetime | None = None,
 ) -> None:
+    """Hold a batch. ``eligible_until`` defers the queue's rediscovery when the
+    hold has a computable end (quiet hours, budget spacing/cap, off-peak); it is
+    a deferral of an already-held batch, never an input to sendability — every
+    gate re-runs when the drain does. ``None`` (presence, tap-gate outage,
+    unresolved timezone) keeps the 1-minute retry."""
+    if eligible_until is not None:
+        eligible_until = min(eligible_until, now + MAX_HOLD_DEFERRAL)
+        if eligible_until <= now:
+            eligible_until = None
+        else:
+            logger.info("orchestrator: hold deferred", {
+                "user_id": user_id,
+                "held": len(pairs),
+                "next_eligible_at": eligible_until.isoformat(),
+            })
     for pid, proposal in pairs:
         if proposal.source == SOURCE_MEMORY_GRAPH:
             await queue_store.mark(user_id, pid, queue_store.STATUS_DROPPED, now=now)
@@ -458,7 +529,10 @@ async def _hold_all(
                 proposal, OrchestratorDecision(Disposition.HOLD, "retryable_hold"), now
             )
         else:
-            await queue_store.mark(user_id, pid, queue_store.STATUS_HELD, now=now)
+            await queue_store.mark(
+                user_id, pid, queue_store.STATUS_HELD,
+                now=now, next_eligible_at=eligible_until,
+            )
 
 
 async def _dispatch_candidate_outcome(
@@ -577,6 +651,29 @@ async def _presence_hold(user_id: str, now: datetime) -> tuple[bool, str]:
             "user_id": user_id, "error": str(exc),
         })
         return False, ""
+
+
+def _quiet_hours_remaining(local_now: datetime) -> timedelta:
+    """Time until the quiet window ends (local 07:00). Only meaningful when
+    ``_is_quiet_hours`` is True; ``_hold_all`` caps it at MAX_HOLD_DEFERRAL."""
+    minutes = local_now.hour * 60 + local_now.minute
+    if minutes >= _QUIET_END_MINUTES:  # evening side of the midnight wrap
+        return timedelta(minutes=(24 * 60 - minutes) + _QUIET_END_MINUTES)
+    return timedelta(minutes=_QUIET_END_MINUTES - minutes)
+
+
+def _budget_hold_eligible(
+    decision: "notification_budget.BudgetDecision", now: datetime
+) -> datetime | None:
+    """When may a budget-held batch plausibly become sendable again? Spacing has
+    an exact reopen time; the daily cap resets at local midnight, far beyond the
+    deferral cap, so just defer the maximum. Anything else (budget_unavailable —
+    an infra failure, not a verdict) keeps the 1-minute retry."""
+    if decision.reason == "global_spacing" and decision.retry_at is not None:
+        return decision.retry_at
+    if decision.reason == "global_daily_cap":
+        return now + MAX_HOLD_DEFERRAL
+    return None
 
 
 def _is_quiet_hours(local_now: datetime) -> bool:

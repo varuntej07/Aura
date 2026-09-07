@@ -64,6 +64,12 @@ FIELD_PRIORITY = "priority"
 FIELD_DECISION = "decision"
 FIELD_STATUS = "status"
 FIELD_HOLD_COUNT = "hold_count"
+# Earliest moment this doc should be rediscovered by the per-minute drain. Set to
+# "now" on enqueue and on every hold; a hold with a computable end (quiet hours,
+# budget spacing, off-peak) defers it so a held queue stops being re-read and
+# re-marked 450 times a night. NEVER an input to sendability — every gate still
+# runs when the drain does; this only decides when the drain bothers to look.
+FIELD_NEXT_ELIGIBLE_AT = "next_eligible_at"
 FIELD_CREATED_AT = "created_at"
 FIELD_UPDATED_AT = "updated_at"
 FIELD_EXPIRES_AT = "expires_at"
@@ -119,6 +125,7 @@ def _proposal_to_doc(proposal: NotificationProposal, now: datetime) -> dict[str,
         FIELD_DECISION: dataclasses.asdict(decision) if decision else None,
         FIELD_STATUS: STATUS_PENDING,
         FIELD_HOLD_COUNT: 0,
+        FIELD_NEXT_ELIGIBLE_AT: now,
         FIELD_CREATED_AT: now,
         FIELD_UPDATED_AT: now,
         FIELD_EXPIRES_AT: now + QUEUE_TTL,
@@ -205,6 +212,13 @@ async def list_pending(user_id: str, *, limit: int = 50) -> list[tuple[str, Noti
         return []
 
 
+# How often discovery also runs the unfiltered legacy query alongside the
+# eligibility-filtered one: a backstop so a doc with no / a wrongly-computed
+# ``next_eligible_at`` (pre-stamp legacy rows inside the 30h TTL, or an
+# eligibility bug) is picked up within this many minutes instead of never.
+_DISCOVERY_BACKSTOP_EVERY_MINUTES = 15
+
+
 async def list_user_ids_with_pending(*, limit: int = 2000) -> set[str]:
     """Distinct user_ids with an active (pending/held) proposal queued right now,
     across every user, discovered via ONE collection_group query.
@@ -214,22 +228,27 @@ async def list_user_ids_with_pending(*, limit: int = 2000) -> set[str]:
     queues) to find out who needed draining. This does the same discovery in one
     query instead, so ``drain_user_queue`` (which still runs its own
     ``list_pending`` internally) is only invoked for uids known to have
-    something queued. Requires a COLLECTION_GROUP field override on
-    ``notification_queue.status`` (firestore.indexes.json) — a collection_group
-    query filtered on a field is never auto-indexed.
+    something queued.
+
+    Discovery filters on ``next_eligible_at <= now`` so a queue held with a
+    computable re-eligibility time (quiet hours, budget spacing, off-peak) stops
+    being streamed, re-read and re-marked every single minute of the hold —
+    ~450 pointless read+write cycles per held doc per quiet-hours night. Every
+    ``_DISCOVERY_BACKSTOP_EVERY_MINUTES`` minutes the old unfiltered query runs
+    too and the results are unioned, so a doc the filter would wrongly skip is
+    drained within that window rather than silenced until TTL. Requires the
+    composite COLLECTION_GROUP index on ``(status, next_eligible_at)``
+    (firestore.indexes.json); if that index is missing the filtered query
+    raises and this falls back to the unfiltered query, loudly.
 
     Loud on truncation: if the result hits ``limit`` exactly, more may exist
     that this pass silently drops, so that's logged rather than looking
     identical to "everyone's queue is empty."
     """
-    def _read() -> set[str]:
-        snaps = list(
-            admin_firestore()
-            .collection_group(QUEUE_SUBCOLLECTION)
-            .where(filter=fs.FieldFilter(FIELD_STATUS, "in", _ACTIVE_STATUSES))
-            .limit(limit)
-            .stream()
-        )
+    now = datetime.now(UTC)
+    run_backstop = now.minute % _DISCOVERY_BACKSTOP_EVERY_MINUTES == 0
+
+    def _uids_from(snaps: list) -> set[str]:
         if len(snaps) >= limit:
             logger.warn(
                 "notification queue: list_user_ids_with_pending hit its limit, "
@@ -242,6 +261,32 @@ async def list_user_ids_with_pending(*, limit: int = 2000) -> set[str]:
             user_doc_ref = snap.reference.parent.parent
             if user_doc_ref is not None:
                 uids.add(user_doc_ref.id)
+        return uids
+
+    def _read() -> set[str]:
+        base = (
+            admin_firestore()
+            .collection_group(QUEUE_SUBCOLLECTION)
+            .where(filter=fs.FieldFilter(FIELD_STATUS, "in", _ACTIVE_STATUSES))
+        )
+        try:
+            eligible = base.where(
+                filter=fs.FieldFilter(FIELD_NEXT_ELIGIBLE_AT, "<=", now)
+            )
+            uids = _uids_from(list(eligible.limit(limit).stream()))
+        except Exception as exc:
+            # Almost certainly the composite index has not shipped yet. The old
+            # unfiltered behaviour is correct (just costlier), so degrade to it
+            # rather than draining nobody.
+            logger.error(
+                "notification queue: eligibility-filtered discovery failed, "
+                "falling back to unfiltered (is the (status, next_eligible_at) "
+                "index deployed?)",
+                {"error": str(exc)},
+            )
+            return _uids_from(list(base.limit(limit).stream()))
+        if run_backstop:
+            uids |= _uids_from(list(base.limit(limit).stream()))
         return uids
 
     try:
@@ -281,10 +326,17 @@ async def drop_if_active(user_id: str, proposal_id: str) -> bool:
 
 
 async def mark(
-    user_id: str, proposal_id: str, status: str, *, now: datetime | None = None
+    user_id: str,
+    proposal_id: str,
+    status: str,
+    *,
+    now: datetime | None = None,
+    next_eligible_at: datetime | None = None,
 ) -> None:
     """Set a queue item's terminal/hold status. SENT/DROPPED are terminal; HELD
-    keeps it for the next window and bumps ``hold_count``."""
+    keeps it for the next window and bumps ``hold_count``. A hold always stamps
+    ``next_eligible_at`` (defaulting to "now", i.e. retry next minute), which
+    also migrates any pre-stamp legacy doc the drain touches."""
     when = now or datetime.now(UTC)
 
     def _update() -> None:
@@ -292,6 +344,7 @@ async def mark(
         update: dict[str, Any] = {FIELD_STATUS: status, FIELD_UPDATED_AT: when}
         if status == STATUS_HELD:
             update[FIELD_HOLD_COUNT] = fs.Increment(1)
+            update[FIELD_NEXT_ELIGIBLE_AT] = next_eligible_at or when
         ref.update(update)
 
     try:

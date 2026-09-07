@@ -88,7 +88,7 @@ async def _run(monkeypatch, *, user_doc, candidates):
     )
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [], {})
     return summary
 
 
@@ -144,7 +144,7 @@ async def test_legacy_affinity_key_contributes_via_map(patched, monkeypatch):
     )
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [], {})
     assert summary.notifications_sent == 1
 
 

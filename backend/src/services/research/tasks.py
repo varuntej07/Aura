@@ -299,21 +299,35 @@ async def dispatch_pending(*, limit: int = 50) -> DispatchReport:
         )
         return DispatchReport(failed=1)
 
+    # Rows are independent (dispatch_job touches only its own stage's documents) and
+    # unique per batch, so a backlog burst clears in parallel instead of pinning the
+    # sweep at one enqueue round trip per row. Bounded, so a 100-row batch does not
+    # open 100 simultaneous Cloud Tasks calls.
+    slots = asyncio.Semaphore(8)
+
+    async def _one(uid: str, stage_id: str) -> str:
+        async with slots:
+            return await dispatch_job(uid, stage_id)
+
+    results = await asyncio.gather(
+        *(_one(uid, stage_id) for uid, stage_id in rows), return_exceptions=True
+    )
+
     scanned = dispatched = deferred = skipped = failed = 0
-    for uid, stage_id in rows:
+    for (uid, stage_id), outcome in zip(rows, results):
         scanned += 1
-        try:
-            outcome = await dispatch_job(uid, stage_id)
-        except Exception as exc:
+        if isinstance(outcome, Exception):
             # One bad row must never abort the sweep for everyone else. Leaving it due
             # is the recovery: the next pass tries again.
             failed += 1
             logger.error(
                 "research.tasks: outbox dispatch failed",
-                {"stage_id": stage_id, "error": str(exc),
+                {"stage_id": stage_id, "error": str(outcome),
                  "error_code": "research_outbox_dispatch_failed"},
             )
             continue
+        if isinstance(outcome, BaseException):
+            raise outcome
         if outcome == "dispatched":
             dispatched += 1
         elif outcome == "deferred":

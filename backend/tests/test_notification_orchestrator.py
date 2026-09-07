@@ -428,7 +428,7 @@ def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True, active
     async def _claim_budget(uid, *, source, user_local_date=None, now=None, priority=False):
         return BudgetDecision(budget_ok, None if budget_ok else "global_daily_cap")
 
-    async def _mark(uid, pid, status, *, now=None):
+    async def _mark(uid, pid, status, *, now=None, next_eligible_at=None):
         marks.append((pid, status))
 
     async def _deliver(p):
@@ -456,6 +456,9 @@ def _patch_drain_io(monkeypatch, *, pending, quiet=False, budget_ok=True, active
     monkeypatch.setattr(idempotency, "idempotent", _claim_dedup)
     monkeypatch.setattr(idempotency, "release", _release_dedup)
     monkeypatch.setattr(notification_budget, "try_claim_proactive_slot", _claim_budget)
+    # The stage-3.35 precheck is the same budget seam read-only; give it the same
+    # verdict as the claim so these routing tests keep exercising one budget state.
+    monkeypatch.setattr(notification_budget, "preview_proactive_claim", _claim_budget)
     monkeypatch.setattr(orchestrator, "_user_local", _user_local)
     monkeypatch.setattr(orchestrator, "_deliver", _deliver)
     monkeypatch.setattr(orchestrator, "_has_active_tracker", _active_tracker)

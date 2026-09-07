@@ -13,8 +13,10 @@ Firecrawl twice for the same page is the exact waste that guard exists to preven
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from typing import Any
+from urllib.parse import urlsplit
 
 from ....agents.data_fetchers.brave_search import brave_search
 from ....lib.logger import logger
@@ -34,9 +36,15 @@ from ..metering import (
     provider_cost_microusd,
 )
 from ..policy_table import NON_CORROBORATING_CLASSES, SourceClass
+from ..models import UrlRejectReason, UrlVerdict
 from ..sanitize import plain_text
-from ..url_policy import evaluate_url
+from ..url_policy import canonicalize, evaluate_url
 from .base import NextJob, StageContext, StageResult, StageResultKind
+
+# Concurrent evaluate_url calls per result batch. The only network cost inside is one
+# getaddrinfo, which runs on the loop's default thread pool; eight keeps a burst of 10
+# results from monopolizing that pool while still collapsing the serial DNS wait.
+_URL_CHECK_CONCURRENCY = 8
 
 
 # Brave recency tokens, chosen from the composed policy's max age. A hard-recency policy
@@ -139,6 +147,38 @@ async def run(ctx: StageContext) -> StageResult:
     seen: dict[str, dict[str, Any]] = {}
     rejected = 0
     searches_run = 0
+    # DNS verdicts memoized per hostname for the life of the wave: overlapping queries
+    # resurface the same hosts, and getaddrinfo is the only network cost inside
+    # evaluate_url. False means the host already failed resolve-or-global, which
+    # rejects every URL on it; the wave records only a rejection count, so which
+    # structural reason evaluate_url would have named first is not load bearing.
+    dns_ok: dict[str, bool] = {}
+    url_check_slots = asyncio.Semaphore(_URL_CHECK_CONCURRENCY)
+
+    async def _verdict_for(raw_url: str) -> UrlVerdict:
+        try:
+            host = (urlsplit(raw_url).hostname or "").rstrip(".").lower()
+        except ValueError:
+            host = ""
+        known = dns_ok.get(host) if host else None
+        if known is False:
+            return UrlVerdict(
+                allowed=False,
+                canonical_url=canonicalize(raw_url),
+                reason=UrlRejectReason.DNS_FAILED,
+            )
+        async with url_check_slots:
+            verdict = await evaluate_url(raw_url, resolve_dns=known is not True)
+        if host and known is None:
+            if verdict.allowed:
+                dns_ok[host] = True
+            elif verdict.reason in (
+                UrlRejectReason.DNS_FAILED,
+                UrlRejectReason.PRIVATE_ADDRESS,
+            ):
+                dns_ok[host] = False
+        return verdict
+
     for query in queries[:allowed_searches]:
         # Cancellation is a WRITE, not an interrupt, so a stage checks it between
         # external calls. Without this a cancelled run keeps buying searches until its
@@ -167,11 +207,21 @@ async def run(ctx: StageContext) -> StageResult:
             {F.UNIT_SEARCHES: 1},
             provider_cost_microusd({F.UNIT_SEARCHES: 1}),
         )
+        # Dedupe before any network check: an allowed URL's verdict canonical is
+        # exactly canonicalize() of the raw, so a canonical already in `seen` would
+        # be dropped after evaluation anyway. Everything else is checked concurrently;
+        # the batch stays inside the query loop so the cancellation check above still
+        # interleaves between searches.
+        batch: list[tuple[str, dict[str, Any]]] = []
         for item in result.get("sources") or []:
             raw_url = str(item.get("url") or "").strip()
-            if not raw_url:
+            if not raw_url or canonicalize(raw_url) in seen:
                 continue
-            verdict = await evaluate_url(raw_url)
+            batch.append((raw_url, item))
+        verdicts = await asyncio.gather(
+            *(_verdict_for(raw_url) for raw_url, _ in batch)
+        )
+        for (raw_url, item), verdict in zip(batch, verdicts):
             if not verdict.allowed:
                 # A forbidden URL is rejected BEFORE any provider call, so a private or
                 # credential-bearing target never reaches Firecrawl at all.

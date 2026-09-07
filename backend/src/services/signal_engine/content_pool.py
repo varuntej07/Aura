@@ -41,6 +41,18 @@ EXPIRED_SWEEP_MAX_PER_TICK = 1000
 # Firestore hard cap on operations in a single batched commit.
 _FIRESTORE_BATCH_LIMIT = 500
 
+# Field mask for the scoring-path queries (find_nearest_for_user,
+# list_recent_breaking_candidates). Excludes `embedding` (768 doubles, ~6 KB/doc —
+# at 50 docs x N users per tick that vector dominated the wire payload and no
+# scoring-path caller reads it) and `text` (the title+body duplicate handed to the
+# embedder at write time). get_candidate and list_recent_candidates_full still
+# return the full doc for the callers that DO consume the vector (event_ingester,
+# briefing/candidate_selector).
+_SCORING_FIELD_MASK = [
+    "source", "category", "sub_category", "title", "body", "url",
+    "created_at", "expires_at", "freshness_ts", "extra", "push_eligible", "salience",
+]
+
 
 @dataclass
 class CandidateInput:
@@ -225,7 +237,9 @@ async def find_nearest_for_user(
     """Vector-search candidates closest to user_vector. Excludes expired items.
 
     The cosine_similarity field on the returned ScoredCandidate is derived from
-    Firestore's COSINE distance (similarity = 1 - distance).
+    Firestore's COSINE distance (similarity = 1 - distance). ScoredCandidate
+    .embedding is NOT populated on this path (see _SCORING_FIELD_MASK) — a caller
+    that needs the vector must use get_candidate.
     """
     if not user_vector:
         return []
@@ -234,7 +248,9 @@ async def find_nearest_for_user(
     def _query() -> list[ScoredCandidate]:
         db = admin_firestore()
         collection = db.collection("content_candidates")
-        query = collection.find_nearest(
+        # cosine_distance is included in the mask because Firestore requires the
+        # distance_result_field to appear in an explicit projection to be returned.
+        query = collection.select(_SCORING_FIELD_MASK + ["cosine_distance"]).find_nearest(
             vector_field="embedding",
             query_vector=Vector(user_vector),
             distance_measure=DistanceMeasure.COSINE,
@@ -247,11 +263,6 @@ async def find_nearest_for_user(
             expires_at = data.get("expires_at")
             if isinstance(expires_at, datetime) and expires_at < current_time:
                 continue
-            vec_field = data.get("embedding")
-            if isinstance(vec_field, Vector):
-                embedding = list(vec_field.to_map_value()["value"])  # type: ignore[attr-defined]
-            else:
-                embedding = [float(x) for x in (vec_field or [])]
             distance = float(data.get("cosine_distance", 1.0))
             similarity = max(0.0, 1.0 - distance)
             extra_field = data.get("extra")
@@ -264,7 +275,7 @@ async def find_nearest_for_user(
                 title=str(data.get("title", "")),
                 body=str(data.get("body", "")),
                 url=str(data.get("url", "")),
-                embedding=embedding,
+                embedding=[],
                 freshness_ts=data.get("freshness_ts") or current_time,
                 cosine_similarity=similarity,
                 region=str(extra.get("region", "")),
@@ -388,13 +399,15 @@ async def list_recent_breaking_candidates(
     Orders by ``created_at`` descending only — a single-field order Firestore
     auto-indexes at collection scope, so this needs NO declared composite index
     (same pattern as ``list_recent_candidates``). Returns [] on any error so the
-    breaking lane simply falls through to the personal lane."""
+    breaking lane simply falls through to the personal lane. ScoredCandidate
+    .embedding is NOT populated here (see _SCORING_FIELD_MASK)."""
     current_time = now or datetime.now(UTC)
 
     def _query() -> list[ScoredCandidate]:
         db = admin_firestore()
         snaps = (
             db.collection("content_candidates")
+            .select(_SCORING_FIELD_MASK)
             .order_by("created_at", direction="DESCENDING")
             .limit(max(1, limit))
             .stream()
@@ -413,11 +426,6 @@ async def list_recent_breaking_candidates(
             title = str(data.get("title", "")).strip()
             if not title:
                 continue
-            vec_field = data.get("embedding")
-            if isinstance(vec_field, Vector):
-                embedding = list(vec_field.to_map_value()["value"])  # type: ignore[attr-defined]
-            else:
-                embedding = [float(x) for x in (vec_field or [])]
             extra_field = data.get("extra")
             extra = extra_field if isinstance(extra_field, dict) else {}
             out.append(ScoredCandidate(
@@ -428,7 +436,7 @@ async def list_recent_breaking_candidates(
                 title=title,
                 body=str(data.get("body", "")),
                 url=str(data.get("url", "")),
-                embedding=embedding,
+                embedding=[],
                 freshness_ts=data.get("freshness_ts") or current_time,
                 cosine_similarity=0.0,
                 region=str(extra.get("region", "")),

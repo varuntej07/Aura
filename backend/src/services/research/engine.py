@@ -238,7 +238,9 @@ class ResearchRunEngine(Protocol):
 
     async def list_runs(self, uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, Any]]: ...
 
-    async def detail(self, uid: str, run_id: str) -> dict[str, Any] | None: ...
+    async def detail(
+        self, uid: str, run_id: str, *, run: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None: ...
 
     async def activity(self, uid: str, run_id: str) -> dict[str, Any] | None: ...
 
@@ -259,7 +261,7 @@ class FirestoreResearchEngine:
         minutes against a quick run whose whole wall clock is 240 seconds: the run
         expired before its second stage was ever handed to anyone.
         """
-        for stage_id in stage_ids:
+        async def _one(stage_id: str) -> None:
             try:
                 await tasks_mod.dispatch_job(uid, stage_id)
             except Exception as exc:
@@ -268,6 +270,11 @@ class FirestoreResearchEngine:
                     {"stage_id": stage_id, "error": str(exc),
                      "error_code": "research_inline_dispatch_failed"},
                 )
+
+        # Deliveries are independent (each stage owns its job, outbox and stage docs),
+        # so a fan-out of eight need not pay eight serial enqueue round trips.
+        if stage_ids:
+            await asyncio.gather(*(_one(stage_id) for stage_id in stage_ids))
 
     async def _auto_admit(
         self,
@@ -343,8 +350,12 @@ class FirestoreResearchEngine:
             if task_names:
                 from . import cloud_tasks as cloud_tasks_mod
 
-                for task_name in task_names:
-                    await cloud_tasks_mod.delete_task(task_name)
+                # delete_task never raises and each name is independent; concurrent
+                # deletion keeps a wide fan-out's cancel from paying one RPC per task
+                # serially while the user waits on the status read below.
+                await asyncio.gather(
+                    *(cloud_tasks_mod.delete_task(name) for name in task_names)
+                )
             return await self.status(uid, run_id)
         if kind == "answer":
             accepted, _state, resumed_stage_id = await store.answer_clarification(
@@ -931,13 +942,35 @@ class FirestoreResearchEngine:
     ) -> list[dict[str, Any]]:
         return await store.list_runs(uid, limit=limit)
 
-    async def detail(self, uid: str, run_id: str) -> dict[str, Any] | None:
-        run = await store.get_run(uid, run_id)
+    async def detail(
+        self, uid: str, run_id: str, *, run: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Full projection input for one run.
+
+        ``run`` lets a caller that already holds the run document (the list handler,
+        which otherwise re-reads every row it just listed) skip the run read; both
+        list_runs and get_run hide hidden/deleting runs, so visibility is unchanged.
+        The claims query is skipped when the run's claim_count is zero: the count is
+        written in the same advance transaction that creates the claim documents, so
+        zero is authoritative, and most polls happen before verify has run.
+        """
+        if run is None:
+            run = await store.get_run(uid, run_id)
         if run is None:
             return None
         version = int(run.get(F.CURRENT_PLAN_VERSION, 0))
-        plan = await store.get_plan(uid, run_id, version) if version else None
-        claims = await store.list_documents(uid, run_id, F.CLAIMS_SUBCOLLECTION, limit=200)
+
+        async def _plan() -> dict[str, Any] | None:
+            return await store.get_plan(uid, run_id, version) if version else None
+
+        async def _claims() -> list[dict[str, Any]]:
+            if int(run.get(F.CLAIM_COUNT, 0)) <= 0:
+                return []
+            return await store.list_documents(
+                uid, run_id, F.CLAIMS_SUBCOLLECTION, limit=200
+            )
+
+        plan, claims = await asyncio.gather(_plan(), _claims())
         return {"run": run, "plan": plan or {}, "claims": claims}
 
     async def activity(self, uid: str, run_id: str) -> dict[str, Any] | None:

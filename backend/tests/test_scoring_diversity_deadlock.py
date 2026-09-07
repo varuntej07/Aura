@@ -101,7 +101,7 @@ async def test_same_category_recent_send_does_not_block(patched_scoring_path, mo
 
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-1", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid-1", MagicMock(), summary, [], {})
 
     assert summary.notifications_sent == 1
     assert summary.blocked_below_threshold == 0
@@ -117,7 +117,7 @@ async def test_weak_candidate_still_blocked(patched_scoring_path, monkeypatch):
 
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid-2", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid-2", MagicMock(), summary, [], {})
 
     assert summary.notifications_sent == 0
     assert summary.blocked_below_threshold == 1
@@ -141,7 +141,7 @@ async def test_diversity_prefers_fresh_category_among_sendable(patched_scoring_p
 
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-3", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid-3", MagicMock(), summary, [], {})
 
     assert summary.notifications_sent == 1
     # The chosen candidate now rides in the enqueued proposal (submit's first arg).

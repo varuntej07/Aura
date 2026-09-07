@@ -78,7 +78,7 @@ def _patch_tick_dependencies(monkeypatch):
         AsyncMock(return_value=["uid-1"]),
     )
 
-    async def _no_send(user_id, models, summary):
+    async def _no_send(user_id, models, summary, breaking_candidates, breaking_frame_cache):
         return None  # the tick processes a user but sends nothing
 
     monkeypatch.setattr(scoring_loop, "_score_one_user", _no_send)

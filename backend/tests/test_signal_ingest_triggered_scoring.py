@@ -283,7 +283,7 @@ async def test_personal_lane_knn_limit_stays_50(monkeypatch):
 
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [], {})
 
     find_nearest.assert_awaited_once()
     assert find_nearest.call_args.kwargs["limit"] == 50

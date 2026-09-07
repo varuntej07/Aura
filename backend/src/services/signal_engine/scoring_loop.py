@@ -25,8 +25,8 @@ For each active user:
   7. If the chosen candidate's score clears the threshold AND the daily cap allows,
      call the LLM framer (10s timeout) once and dispatch FCM.
   8. Record a pending outcome row, update sends_today.
-  9. Sweep stale "pending" outcomes older than 6h to "timeout" and apply
-     a small negative signal.
+  9. Sweep stale "pending" outcomes older than 6h to "timeout" in one batched
+     commit (no vector signal — see _sweep_timeouts).
 
 All users run concurrently under a Semaphore(10) cap. Errors per user are
 isolated; a single user blow-up never stops the loop.
@@ -35,6 +35,7 @@ isolated; a single user blow-up never stops the loop.
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
 import statistics
 import uuid
@@ -95,7 +96,6 @@ from .scoring import (
     NOTIFICATION_SCORE_THRESHOLD,
     apply_salience_nudge,
     combine_notification_score,
-    cosine_similarity,
     diversity_penalty,
     fatigue_penalty,
     freshness_decay,
@@ -277,6 +277,13 @@ async def run_tick() -> TickSummary:
         min_salience=BREAKING_SALIENCE_BAR, limit=40,
     )
 
+    # Per-tick memo of breaking-lane framer calls, keyed by (story, coarse framing
+    # context). Without it one breaking story costs one LLM call PER USER in a
+    # single tick even though most users share language/time-band/no-name context.
+    # Holds asyncio.Tasks so concurrent cache misses under the semaphore collapse
+    # into one in-flight call. Lives exactly one tick — no invalidation surface.
+    breaking_frame_cache: dict[tuple, asyncio.Task] = {}
+
     models = get_model_provider()
     semaphore = asyncio.Semaphore(TICK_USER_CONCURRENCY)
 
@@ -284,7 +291,9 @@ async def run_tick() -> TickSummary:
         async with semaphore:
             try:
                 with bind_llm_user(user_id):
-                    await _score_one_user(user_id, models, summary, breaking_candidates)
+                    await _score_one_user(
+                        user_id, models, summary, breaking_candidates, breaking_frame_cache,
+                    )
             except Exception as exc:
                 logger.exception("signal_engine.scoring_loop: per-user failure while scoring concurrently using semaphore", {
                     "user_id": user_id,
@@ -399,8 +408,13 @@ async def _score_one_user(
     models: ModelProvider,
     summary: TickSummary,
     breaking_candidates: list[ScoredCandidate],
+    breaking_frame_cache: dict[tuple, asyncio.Task],
 ) -> None:
     state = await feature_store.read_state(user_id)
+    # Baseline for the skip-unchanged write optimisation in _safe_write_state: most
+    # quiet-hours / no-candidate exits mutate nothing, yet used to rewrite the full
+    # ~10 KB doc (vector + rates + ring buffer) every tick for every user.
+    baseline = copy.deepcopy(state)
 
     # One read of users/{uid} gives timezone (scheduling), locale (region
     # preference + framer language), language (framer output), gender (framer
@@ -430,7 +444,7 @@ async def _score_one_user(
     # also night-gated. Skipped without bumping the no-open counter so nighttime
     # ticks don't trigger exploration drift.
     if not is_within_active_hours(user_local_now.hour, user_local_now.minute):
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         summary.blocked_quiet_hours += 1
         return
 
@@ -456,9 +470,10 @@ async def _score_one_user(
         sent_breaking = await _try_send_breaking(
             user_id, models, state, user_doc, sent_content_ids,
             user_local_now, user_local_date, summary, breaking_candidates,
+            breaking_frame_cache,
         )
         if sent_breaking:
-            await _safe_write_state(user_id, state)
+            await _safe_write_state(user_id, state, baseline)
             return
 
     # Cold start: a user with no vector yet is bootstrapped from their UserAura
@@ -472,7 +487,7 @@ async def _score_one_user(
     # the personal lane has nothing to match on, so skip without spending on
     # scoring. (Breaking was already tried above and is vector-independent.)
     if not _has_any_signal(state):
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         summary.users_skipped_no_state += 1
         return
 
@@ -486,7 +501,7 @@ async def _score_one_user(
         # The user has a vector but vector search returned nothing — pool starved
         # (all candidates expired) or find_nearest is failing. Count it so the tick
         # health line and the 0-send warning name the real cause instead of guessing.
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         summary.users_skipped_no_candidates += 1
         return
     summary.users_scored += 1
@@ -524,8 +539,6 @@ async def _score_one_user(
     scored: list[tuple[float, float, ScoredCandidate, dict[str, float]]] = []
     now_utc = datetime.now(UTC)
     for cand in candidates:
-        if not cand.embedding:
-            continue
         # Push-ineligible items (e.g. bodyless, blanket-tagged stories) may rank in
         # the feed but must never fire a notification — drop them from the
         # notification candidate set before scoring. The feed path is separate.
@@ -534,7 +547,11 @@ async def _score_one_user(
         # Already-sent suppression: never re-send the same story on the personal lane.
         if cand.content_id in sent_content_ids:
             continue
-        cosine = cand.cosine_similarity or cosine_similarity(state.user_vector, cand.embedding)
+        # find_nearest no longer returns the embedding (content_pool field mask);
+        # Firestore's own cosine_distance result is the similarity. The old
+        # `or cosine_similarity(...)` fallback only fired at exactly 0 similarity
+        # and recomputed the same 0 — inert, so it is gone rather than kept.
+        cosine = cand.cosine_similarity
         slot = time_slot_open_score(
             state.time_slot_open_rates,
             user_local_hour=user_local_now.hour,
@@ -560,7 +577,7 @@ async def _score_one_user(
         }))
 
     if not scored:
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         return
 
     def _in_allow_set(cand: ScoredCandidate) -> bool:
@@ -614,7 +631,7 @@ async def _score_one_user(
         # No sendable candidate (below threshold, or no in-interest match this
         # tick). Recover next tick as the pool refreshes — never a permanent mute.
         state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         summary.blocked_below_threshold += 1
         summary.blocked_below_threshold_scores.append(best_score)
         logger.info(
@@ -638,7 +655,7 @@ async def _score_one_user(
     )
     if not allowed:
         state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         if block_reason == "daily_hard_cap":
             summary.blocked_daily_cap += 1
         else:
@@ -699,7 +716,7 @@ async def _score_one_user(
         attempts = remaining
         if not attempts:
             state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-            await _safe_write_state(user_id, state)
+            await _safe_write_state(user_id, state, baseline)
             return
     framed = None
     relevance_reason = ""
@@ -720,7 +737,7 @@ async def _score_one_user(
         # scream so a sustained outage never looks like "nothing was relevant".
         if candidate_framed.relevance_reason == FRAMER_UNAVAILABLE_REASON:
             state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-            await _safe_write_state(user_id, state)
+            await _safe_write_state(user_id, state, baseline)
             summary.blocked_below_threshold += 1
             logger.warn(
                 "signal_engine.scoring_loop: not sending, framer UNAVAILABLE "
@@ -755,7 +772,7 @@ async def _score_one_user(
         # Every attempted candidate failed the relevance gate this tick. Recover next
         # tick as the pool refreshes — never a permanent mute.
         state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state)
+        await _safe_write_state(user_id, state, baseline)
         summary.blocked_below_threshold += 1
         logger.info(
             f"signal_engine.scoring_loop: not sending (relevance gate: all "
@@ -815,7 +832,7 @@ async def _score_one_user(
     # timeout-driven no-open bumps). NOT sends_today — that is a delivery fact the hook
     # owns. Safe from clobber: no other tick runs for this user between enqueue and the
     # within-the-minute drain that re-reads this state.
-    await _safe_write_state(user_id, state)
+    await _safe_write_state(user_id, state, baseline)
     # Counts "handed to the funnel" — the metric the tick-health line + 0-send warning
     # care about (did scoring produce something to send?). The real delivery is logged
     # by the drain and recorded in on_news_delivered.
@@ -838,8 +855,23 @@ async def _score_one_user(
     )
 
 
-async def _safe_write_state(user_id: str, state: feature_store.SignalStoreState) -> None:
-    """Write state, swallowing failures after feature_store already logged them."""
+async def _safe_write_state(
+    user_id: str,
+    state: feature_store.SignalStoreState,
+    baseline: feature_store.SignalStoreState | None = None,
+) -> None:
+    """Write state, swallowing failures after feature_store already logged them.
+
+    When ``baseline`` (a deep copy taken right after the tick's read) is given and
+    the state compares equal to it, the write is skipped: the tick mutated nothing,
+    so rewriting the full ~10 KB doc (768-float vector + 48 rates + ring buffer)
+    for every user on every quiet-hours/no-candidate exit is pure write
+    amplification. Dataclass equality covers every persisted field; comparing
+    against a snapshot (instead of dirty flags) means a forgotten mutation can
+    never be silently dropped. Callers outside the tick (on_news_accepted) pass no
+    baseline and always write."""
+    if baseline is not None and state == baseline:
+        return
     try:
         await feature_store.write_state(user_id, state)
     except Exception:
@@ -1219,6 +1251,7 @@ async def _try_send_breaking(
     user_local_date: str,
     summary: TickSummary,
     breaking_candidates: list[ScoredCandidate],
+    breaking_frame_cache: dict[tuple, asyncio.Task],
 ) -> bool:
     """Lane B: try to send ONE globally-significant breaking story, bypassing the
     personal interest gate. Returns True iff a notification was delivered (the
@@ -1238,10 +1271,32 @@ async def _try_send_breaking(
     # The unified proactive budget is claimed in the DRAIN now (not here).
     aura = await _read_user_aura(user_id)
     user_context = _build_framing_context(aura, user_doc, user_local_now)
-    try:
-        framed = await asyncio.wait_for(
-            frame_notification(models, pick, user_context, breaking_news=True), timeout=10.0
+
+    # Breaking copy is memoized per (story, coarse framing context) for this tick:
+    # this lane frames for EVERY user who hasn't seen the story, so one breaking
+    # story used to cost one framer LLM call per active user. Users sharing
+    # language / time band / name / interest-specificity get the same copy; the
+    # name itself is in the key, so nobody can receive copy addressed to someone
+    # else. Tasks are shared so concurrent misses collapse into one in-flight call,
+    # and a framer timeout is felt once per story, not retried per user.
+    cache_key = (
+        pick.content_id,
+        user_context.language,
+        user_context.user_local_time_band,
+        user_context.name,
+        user_context.has_specific_interests,
+    )
+    frame_task = breaking_frame_cache.get(cache_key)
+    if frame_task is None:
+        frame_task = asyncio.ensure_future(
+            asyncio.wait_for(
+                frame_notification(models, pick, user_context, breaking_news=True),
+                timeout=10.0,
+            )
         )
+        breaking_frame_cache[cache_key] = frame_task
+    try:
+        framed = await asyncio.shield(frame_task)
     except TimeoutError:
         framed = _safe_fallback(pick)
 
@@ -1365,44 +1420,63 @@ def _build_framing_context(
 
 
 async def _sweep_timeouts(user_id: str) -> int:
-    """Find pending outcomes older than OUTCOME_TIMEOUT_HOURS, flip to timeout,
-    and apply a small negative event so the user vector drifts away."""
-    cutoff = datetime.now(UTC) - timedelta(hours=OUTCOME_TIMEOUT_HOURS)
+    """Find pending outcomes older than OUTCOME_TIMEOUT_HOURS and flip them to
+    timeout, all in ONE batched commit (flips + their audit event rows together).
 
-    def _fetch_stale() -> list[tuple[str, str]]:
+    This used to route every stale outcome through resolve_outcome + apply_event
+    individually — k timeouts cost k sequential read-modify-writes of the SAME
+    ~10 KB state doc, even though apply_event has no vector branch for
+    notification_timeout (its -0.2 EVENT_WEIGHT is unreachable: no target
+    embedding is ever resolved for that event type), so each round trip changed
+    nothing but last_updated. The batch preserves exactly that semantic: outcome
+    rows flip, audit event rows land, the user vector does not move. If the
+    timeout weight ever becomes usable, this site and event_ingester's
+    _apply_event_inner must be updated TOGETHER — the timeout path no longer
+    flows through apply_event.
+
+    The query's outcome=="pending" filter is the only pending check (a tap
+    landing in the milliseconds between fetch and commit is overwritten;
+    resolve_outcome's non-transactional read-then-update had the same race with
+    a marginally smaller window)."""
+    cutoff = datetime.now(UTC) - timedelta(hours=OUTCOME_TIMEOUT_HOURS)
+    now = datetime.now(UTC)
+
+    def _sweep() -> int:
         db = admin_firestore()
-        snaps = (
+        state_ref = (
             db.collection("users").document(user_id)
             .collection("signal_store").document("state")
-            .collection("outcomes")
+        )
+        snaps = list(
+            state_ref.collection("outcomes")
             .where(filter=FieldFilter("outcome", "==", "pending"))
             .where(filter=FieldFilter("sent_at", "<", cutoff))
             .limit(20)
             .stream()
         )
-        return [(s.id, str((s.to_dict() or {}).get("content_id", ""))) for s in snaps]
+        if not snaps:
+            return 0
+        batch = db.batch()
+        for snap in snaps:
+            batch.update(snap.reference, {"outcome": "timeout", "outcome_at": now})
+            content_id = str((snap.to_dict() or {}).get("content_id", ""))
+            if content_id:
+                # Same audit row feature_store.append_event wrote per timeout.
+                batch.set(state_ref.collection("events").document(), {
+                    "event_type": "notification_timeout",
+                    "content_id": content_id,
+                    "category": None,
+                    "duration_ms": None,
+                    "timestamp": now,
+                })
+        batch.commit()
+        return len(snaps)
 
     try:
-        stale = await asyncio.wait_for(asyncio.to_thread(_fetch_stale), timeout=5.0)
+        return await asyncio.wait_for(asyncio.to_thread(_sweep), timeout=5.0)
     except (TimeoutError, Exception) as exc:
-        logger.warn("signal_engine.scoring_loop: stale-outcome scan failed", {
+        logger.warn("signal_engine.scoring_loop: stale-outcome sweep failed", {
             "user_id": user_id,
             "error": str(exc),
         })
         return 0
-
-    if not stale:
-        return 0
-
-    count = 0
-    for notif_id, content_id in stale:
-        flipped = await feature_store.resolve_outcome(user_id, notif_id, outcome="timeout")
-        if flipped is not None:
-            count += 1
-            if content_id:
-                await event_ingester.apply_event(
-                    user_id,
-                    event_type="notification_timeout",
-                    content_id=content_id,
-                )
-    return count

@@ -184,6 +184,10 @@ def resolve_account_age_days(user_id: str, now: datetime) -> int | None:
 class BudgetDecision:
     allowed: bool
     reason: str | None = None
+    # For a spacing denial: the earliest moment the spacing window reopens, so the
+    # drain can defer the held queue instead of re-checking every minute. Advisory
+    # only — the transactional claim remains the sole authority on sendability.
+    retry_at: datetime | None = None
 
 
 def _budget_ref(user_id: str) -> fs.DocumentReference:
@@ -227,7 +231,7 @@ def evaluate_proactive_claim(
 
     last = data.get(FIELD_LAST_NOTIFICATION_AT)
     if isinstance(last, datetime) and (now - _aware(last)) < spacing:
-        return BudgetDecision(False, "global_spacing")
+        return BudgetDecision(False, "global_spacing", retry_at=_aware(last) + spacing)
 
     return BudgetDecision(True)
 
@@ -284,6 +288,45 @@ async def _resolve_effective_claim_limits(
             "user_id": user_id, "source": source, "error": str(exc),
         })
     return min(cap, HARD_DAILY_PROACTIVE_CEILING), spacing
+
+
+async def preview_proactive_claim(
+    user_id: str,
+    *,
+    source: str,
+    user_local_date: str | None = None,
+    now: datetime | None = None,
+    priority: bool = False,
+) -> BudgetDecision:
+    """Non-mutating dry run of ``try_claim_proactive_slot``: the same adaptive
+    limits and the same pure ``evaluate_proactive_claim``, against a plain read
+    of the budget doc, with NO write. The drain uses it to skip its per-winner
+    LLM stages when the budget already forbids any send this minute — without it,
+    a user held on spacing burned one tap-gate call per minute for the whole
+    window judging identical, immutable queued copy.
+
+    May only ever short-circuit toward HOLD; it never authorizes. Unlike the
+    claim it therefore fails OPEN: on any read error it answers ``allowed=True``
+    so the authoritative (fail-closed) claim still decides."""
+    now = _aware(now or datetime.now(UTC))
+    try:
+        cap, spacing = await _resolve_effective_claim_limits(user_id, source, now)
+
+        def _read() -> BudgetDecision:
+            local_date = user_local_date or resolve_user_local_date(user_id, now)
+            snap = _budget_ref(user_id).get()
+            data = (snap.to_dict() or {}) if snap.exists else {}
+            return evaluate_proactive_claim(
+                data, local_date=local_date, now=now, priority=priority,
+                cap=cap, spacing=spacing,
+            )
+
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warn("notification_budget: claim preview failed (fail-open)", {
+            "user_id": user_id, "source": source, "error": str(exc),
+        })
+        return BudgetDecision(True, "preview_unavailable")
 
 
 async def try_claim_proactive_slot(

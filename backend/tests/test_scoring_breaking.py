@@ -82,7 +82,7 @@ async def test_breaking_reaches_fresh_user_outside_interests(monkeypatch):
     state.recent_sends_backfilled = True
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-fresh", MagicMock(), summary, breaking_candidates)
+        await scoring_loop._score_one_user("uid-fresh", MagicMock(), summary, breaking_candidates, {})
 
     assert summary.notifications_sent == 1  # enqueued
     submit_mock.assert_awaited_once()
@@ -116,7 +116,7 @@ async def test_breaking_capped_once_per_day(monkeypatch):
     state.sends_today_date = datetime.now(UTC).date().isoformat()
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-capped", MagicMock(), summary, breaking_candidates)
+        await scoring_loop._score_one_user("uid-capped", MagicMock(), summary, breaking_candidates, {})
 
     assert summary.notifications_sent == 0
     submit_mock.assert_not_awaited()  # gate short-circuits before ever trying to send
@@ -137,7 +137,7 @@ async def test_personal_lane_suppresses_already_sent_story(monkeypatch):
     state.user_vector = [0.1] * feature_store.USER_VECTOR_DIMENSION
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=state)):
-        await scoring_loop._score_one_user("uid-dup", MagicMock(), summary, breaking_candidates)
+        await scoring_loop._score_one_user("uid-dup", MagicMock(), summary, breaking_candidates, {})
 
     assert summary.notifications_sent == 0  # only candidate was suppressed
     submit_mock.assert_not_awaited()

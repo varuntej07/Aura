@@ -93,7 +93,7 @@ async def _run(monkeypatch, *, candidates):
     )
     summary = scoring_loop.TickSummary()
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):
-        await scoring_loop._score_one_user("uid", MagicMock(), summary, [])
+        await scoring_loop._score_one_user("uid", MagicMock(), summary, [], {})
     return summary
 
 

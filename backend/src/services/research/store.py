@@ -893,16 +893,22 @@ async def list_runs(uid: str, *, limit: int = F.LIST_LIMIT) -> list[dict[str, An
 
 
 async def count_active_runs(uid: str) -> int:
-    """Active runs, for the one-at-a-time admission bound."""
+    """Active runs, for the one-at-a-time admission bound.
+
+    Bounded by an ``in`` filter on state rather than streaming the whole 90-day run
+    history: the answer only ever has to distinguish "over the one-run bound" from
+    "not". Hidden or deleting runs are excluded in Python exactly as before, so the
+    query limit leaves headroom above the admission bound for such rows.
+    """
 
     def _run() -> int:
+        query = _runs_ref(uid).where(F.STATE, "in", list(F.ACTIVE_STATES)).limit(25)
         total = 0
-        for snap in _runs_ref(uid).stream():
+        for snap in query.stream():
             data = snap.to_dict() or {}
             if data.get(F.HIDDEN_AT) or data.get(F.DELETION_STATE):
                 continue
-            if data.get(F.STATE) in F.ACTIVE_STATES:
-                total += 1
+            total += 1
         return total
 
     return await asyncio.to_thread(_run)
