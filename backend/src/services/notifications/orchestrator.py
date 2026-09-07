@@ -42,6 +42,7 @@ from .proposal import (
     REASON_PRESENCE,
     REASON_QUIET_HOURS,
     REASON_SENSITIVE,
+    REASON_SENSITIVITY_UNAVAILABLE,
     REASON_STALE,
     REASON_SUPERSEDED,
     REASON_TAP_GATE,
@@ -324,6 +325,19 @@ async def drain_user_queue(
         from ..threads.sensitivity import revalidate_thread_proposal
 
         sensitivity = await revalidate_thread_proposal(winner)
+        if not sensitivity.allows_proactive and sensitivity.infrastructure_failure:
+            # The classifier or graph was unreachable — infrastructure, not a privacy
+            # verdict. Nothing sends on this drain (still fail-closed), but HOLD the
+            # whole batch so the next drain (one minute later) re-judges it instead of
+            # destroying a fully generated proposal. Mirrors the tap-gate outage path.
+            logger.error("orchestrator: sensitivity gate unavailable, holding batch", {
+                "user_id": user_id,
+                "thread_id": winner.data.get("thread_id", ""),
+                "sensitivity_source": sensitivity.source,
+                "sensitivity_categories": sensitivity.categories,
+            })
+            await _hold_all(user_id, survivors, now)
+            return OrchestratorDecision(Disposition.HOLD, REASON_SENSITIVITY_UNAVAILABLE)
         if not sensitivity.allows_proactive:
             await queue_store.mark(
                 user_id, winner_pid, queue_store.STATUS_DROPPED, now=now

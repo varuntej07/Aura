@@ -234,6 +234,7 @@ REASON_OK = "ok"
 REASON_SENSITIVE = "sensitive_subject"
 REASON_NOT_RELEVANT = "not_relevant"  # delivery-time framing rejected every candidate
 REASON_FRAMER_UNAVAILABLE = "framer_unavailable"  # framing infra down; batch held, retried
+REASON_SENSITIVITY_UNAVAILABLE = "sensitivity_unavailable"  # sensitivity infra down; batch held, retried
 
 
 @dataclass

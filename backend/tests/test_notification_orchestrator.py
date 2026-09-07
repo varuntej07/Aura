@@ -687,7 +687,12 @@ async def test_thread_sensitivity_outage_fails_closed_before_delivery(monkeypatc
 
     decision = await orchestrator.drain_user_queue("u1", now=NOW)
 
+    # Still fail-closed for this drain (nothing sends), but an unreachable classifier
+    # is infrastructure, not a privacy verdict: the batch is HELD for the next drain
+    # to re-judge instead of terminally dropped.
     assert decision is not None
-    assert decision.reason == proposal.REASON_SENSITIVE
+    assert decision.disposition == Disposition.HOLD
+    assert decision.reason == proposal.REASON_SENSITIVITY_UNAVAILABLE
     assert delivered == []
-    assert ("p_thread", queue_store.STATUS_DROPPED) in marks
+    assert ("p_thread", queue_store.STATUS_DROPPED) not in marks
+    assert ("p_thread", queue_store.STATUS_HELD) in marks

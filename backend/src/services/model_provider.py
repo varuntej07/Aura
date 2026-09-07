@@ -137,6 +137,37 @@ def _attempts_remaining() -> int:
     budget = _attempt_budget.get()
     return 1 << 30 if budget is None else budget["remaining"]
 
+
+# A caller-supplied ceiling on the wall-clock of ONE provider attempt. Same ContextVar
+# shape as _attempt_budget, for the same reason: it threads through the retry and
+# fallback recursion without touching any signature, and it is INERT when unset.
+#
+# It exists because a latency-bounded caller (a delivery-tick gate with a hard outer
+# deadline) needs the fallback chain to actually run inside its window: the default
+# 90s per-attempt budget means one slow primary attempt eats the whole window and the
+# fallbacks never get a turn. When set, each attempt is capped at the override, a
+# timed-out attempt hops straight to the next model instead of retrying the same slow
+# one, and backoff sleeps are bounded so they cannot dominate the deadline.
+_attempt_timeout: ContextVar[float | None] = ContextVar(
+    "model_provider_attempt_timeout", default=None
+)
+
+
+def _attempt_timeout_s(default: float) -> float:
+    """Per-attempt wall-clock cap: the override when set (never above the default), else the default."""
+    override = _attempt_timeout.get()
+    return default if override is None else min(default, max(1.0, override))
+
+
+def _deadline_scoped() -> bool:
+    """Whether the current call runs under a caller-supplied per-attempt deadline."""
+    return _attempt_timeout.get() is not None
+
+
+def _bounded_backoff(delay: float) -> float:
+    """A deadline-scoped caller cannot afford multi-second backoff sleeps."""
+    return min(delay, 1.0) if _deadline_scoped() else delay
+
 # Anthropic strict structured output (``output_config`` json_schema) rejects two
 # things pydantic's ``model_json_schema()`` produces: any ``object`` node without
 # ``additionalProperties: false``, and any JSON Schema validation keyword
@@ -393,11 +424,17 @@ class ModelProvider:
         temperature: float = 0.7,
         model: str | None = None,
         max_output_tokens: int | None = None,
+        attempt_timeout_s: float | None = None,
     ) -> str | T:
         """Cheap and fast. Use for: notification copy, summaries, classification.
         Defaults to Gemini Flash (TIER_CHEAP); pass ``model`` to pin a specific fast model
         for a latency-sensitive caller (e.g. the keyboard uses the lite tier). The same
-        cheap-tier fallbacks still apply, minus whichever model is the chosen primary."""
+        cheap-tier fallbacks still apply, minus whichever model is the chosen primary.
+
+        ``attempt_timeout_s`` caps each provider attempt's wall-clock instead of the
+        default 90s, hops to the next model on an attempt timeout, and bounds backoff
+        sleeps — so a caller with a hard deadline gets the whole fallback chain inside
+        its window. Pair it with ``attempt_budget`` to cap total attempts."""
         model_id = model or settings.TIER_CHEAP
         # Don't list the chosen primary in its own fallback chain (it would just retry the same
         # model before crossing providers); keep the remaining cheap-tier fallbacks in order.
@@ -407,16 +444,25 @@ class ModelProvider:
             if candidate != model_id
         ]
         logger.debug("ModelProvider.cheap", {"model": model_id, "prompt_len": len(prompt)})
-        return await self._call(
-            model_id=model_id,
-            fallback_chain=fallback_chain,
-            caller="cheap",
-            prompt=prompt,
-            system=system,
-            response_model=response_model,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
+        timeout_token = (
+            _attempt_timeout.set(float(attempt_timeout_s))
+            if attempt_timeout_s is not None
+            else None
         )
+        try:
+            return await self._call(
+                model_id=model_id,
+                fallback_chain=fallback_chain,
+                caller="cheap",
+                prompt=prompt,
+                system=system,
+                response_model=response_model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
+        finally:
+            if timeout_token is not None:
+                _attempt_timeout.reset(timeout_token)
 
     async def balanced(
         self,
@@ -1052,6 +1098,7 @@ class ModelProvider:
         # Resolved once per model rather than read from the module constant, so a caller
         # that reserved a bounded envelope gets exactly that envelope.
         max_attempts = _attempt_cap(_MAX_RETRIES)
+        attempt_timeout = _attempt_timeout_s(_TIMEOUT_S)
         for attempt in range(1, max_attempts + 1):
             try:
                 # One telemetry generation per actual API attempt; the inner
@@ -1060,7 +1107,7 @@ class ModelProvider:
                 _spend_attempt()
                 try:
                     result, usage_metadata = await asyncio.wait_for(
-                        asyncio.to_thread(_sync), timeout=_TIMEOUT_S
+                        asyncio.to_thread(_sync), timeout=attempt_timeout
                     )
                 except BaseException as exc:
                     recording.finish(success=False, error_type=type(exc).__name__)
@@ -1085,16 +1132,19 @@ class ModelProvider:
                 return result
             except TimeoutError as exc:
                 last_exc = exc
-                if attempt == max_attempts:
+                # Under a caller-supplied per-attempt deadline, a timed-out model is a slow
+                # model: hop to the fallback immediately rather than betting the remaining
+                # window on the same one.
+                if attempt == max_attempts or _deadline_scoped():
                     if fallback_chain:
                         return await _use_next_in_chain(
                             "timeout after retries",
-                            {"attempt": attempt, "timeout_s": _TIMEOUT_S},
+                            {"attempt": attempt, "timeout_s": attempt_timeout},
                         )
                     logger.exception("ModelProvider: Gemini timeout after retries, no fallback left", {
                         "model": model_id,
                         "attempt": attempt,
-                        "timeout_s": _TIMEOUT_S,
+                        "timeout_s": attempt_timeout,
                     })
                     raise
                 delay = _GEMINI_BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
@@ -1104,7 +1154,7 @@ class ModelProvider:
                     "model": model_id,
                     "attempt": attempt,
                     "delay_s": round(delay, 2),
-                    "timeout_s": _TIMEOUT_S,
+                    "timeout_s": attempt_timeout,
                 })
                 await asyncio.sleep(delay)
             except Exception as exc:
@@ -1168,7 +1218,9 @@ class ModelProvider:
                         "error": str(exc),
                     })
                     raise
-                delay = _GEMINI_BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+                delay = _bounded_backoff(
+                    _GEMINI_BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+                )
                 # Per-attempt backoff is DEBUG (full error preserved for LOG_LEVEL=DEBUG);
                 # the resolution path emits the single visible line for this call.
                 logger.debug("ModelProvider: Gemini retryable error, backing off", {
@@ -1383,6 +1435,7 @@ class ModelProvider:
         # Resolved once per model rather than read from the module constant, so a caller
         # that reserved a bounded envelope gets exactly that envelope.
         max_attempts = _attempt_cap(_MAX_RETRIES)
+        attempt_timeout = _attempt_timeout_s(_TIMEOUT_S)
         for attempt in range(1, max_attempts + 1):
             try:
                 # One telemetry generation per actual API attempt; the inner
@@ -1391,7 +1444,7 @@ class ModelProvider:
                 _spend_attempt()
                 try:
                     response = await asyncio.wait_for(
-                        client.messages.create(**kwargs), timeout=_TIMEOUT_S
+                        client.messages.create(**kwargs), timeout=attempt_timeout
                     )
                 except BaseException as exc:
                     recording.finish(success=False, error_type=type(exc).__name__)
@@ -1447,16 +1500,18 @@ class ModelProvider:
                 })
                 raise
             except TimeoutError:
-                if attempt == max_attempts:
+                # Under a caller-supplied per-attempt deadline, hop instead of retrying
+                # the same slow model (mirrors the Gemini path).
+                if attempt == max_attempts or _deadline_scoped():
                     if fallback_chain:
                         return await _use_next_in_chain(
-                            "timeout after retries", {"attempt": attempt, "timeout_s": _TIMEOUT_S}
+                            "timeout after retries", {"attempt": attempt, "timeout_s": attempt_timeout}
                         )
                     logger.exception("ModelProvider: Anthropic timeout after retries, no fallback left", {
                         "model": model_id,
                         "prompt_len": len(prompt),
                         "attempt": attempt,
-                        "timeout_s": _TIMEOUT_S,
+                        "timeout_s": attempt_timeout,
                     })
                     raise
                 delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
@@ -1497,7 +1552,9 @@ class ModelProvider:
                         "error": str(exc),
                     })
                     raise
-                delay = _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                delay = _bounded_backoff(
+                    _BASE_DELAY_S * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                )
                 logger.warn("ModelProvider: Anthropic retryable error, backing off", {
                     "model": model_id,
                     "attempt": attempt,

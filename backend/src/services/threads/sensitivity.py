@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from ...lib.logger import logger
 from ..firebase import admin_firestore
 from ..memory import graph_fields as GF
-from ..model_provider import get_model_provider
+from ..model_provider import attempt_budget, get_model_provider
 
 if TYPE_CHECKING:
     from ..notifications.proposal import NotificationProposal
@@ -27,8 +27,16 @@ SENSITIVE_CATEGORY_SLUGS = frozenset({
     "trauma_abuse",
 })
 
-# Match the proactive tap gate's cold-model headroom while staying below one scheduler tick.
-_CLASSIFIER_TIMEOUT_S = 15.0
+# Each provider attempt gets a hard 6s cap and a timed-out model hops straight to its
+# fallback, so the whole cheap chain (3 models) resolves in ~20s worst case. The outer
+# timeout is a pure belt over that, still well under the 60s delivery drain tick.
+_CLASSIFIER_TIMEOUT_S = 25.0
+_CLASSIFIER_ATTEMPT_TIMEOUT_S = 6.0
+_CLASSIFIER_ATTEMPTS = 3  # one attempt per model in the cheap chain
+
+# Categories that mean the gate's infrastructure failed, not that a privacy verdict was
+# reached. Delivery treats these as retryable (HOLD) rather than terminal.
+_INFRA_FAILURE_CATEGORIES = frozenset({"classifier_unavailable", "graph_unavailable"})
 _SYSTEM_PROMPT = """You are Aura's privacy classifier for UNSOLICITED proactive outreach.
 Classify the subject semantically, not by matching words. Sensitive includes health and physical
 symptoms, medication or dosing, gender or identity, grief, intimate or family relationships,
@@ -58,6 +66,13 @@ class SensitivityDecision:
     @property
     def allows_proactive(self) -> bool:
         return self.status == "clear"
+
+    @property
+    def infrastructure_failure(self) -> bool:
+        """The gate could not run (classifier or graph unreachable) — not a verdict."""
+        return self.status == "unknown" and bool(
+            _INFRA_FAILURE_CATEGORIES.intersection(self.categories)
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -133,15 +148,17 @@ async def classify_proactive_subject(
     if not subject:
         return _decision("unknown", ["ambiguous_private"], "empty_subject", "missing context")
     try:
-        result = await asyncio.wait_for(
-            get_model_provider().cheap(
-                f"Subject and proposed copy:\n<subject>{subject[:4000]}</subject>",
-                system=_SYSTEM_PROMPT,
-                response_model=_Judgment,
-                temperature=0.0,
-            ),
-            timeout=_CLASSIFIER_TIMEOUT_S,
-        )
+        with attempt_budget(_CLASSIFIER_ATTEMPTS):
+            result = await asyncio.wait_for(
+                get_model_provider().cheap(
+                    f"Subject and proposed copy:\n<subject>{subject[:4000]}</subject>",
+                    system=_SYSTEM_PROMPT,
+                    response_model=_Judgment,
+                    temperature=0.0,
+                    attempt_timeout_s=_CLASSIFIER_ATTEMPT_TIMEOUT_S,
+                ),
+                timeout=_CLASSIFIER_TIMEOUT_S,
+            )
     except Exception as exc:
         logger.error("thread sensitivity classifier unavailable; suppressing proactive outreach", {
             "error_type": type(exc).__name__,
@@ -188,14 +205,24 @@ async def revalidate_thread_proposal(
     try:
         graph_nodes = await read_graph_sensitivity_nodes(proposal.user_id, entity_keys)
     except Exception as exc:
+        # Infrastructure failure, not a verdict: report it without overwriting the
+        # thread's last real classification (a good "clear" decision must survive a
+        # transient Firestore blip, or toast rendering degrades for no reason).
         logger.error("thread sensitivity graph revalidation failed; suppressing outreach", {
             "user_id": proposal.user_id,
             "thread_id": thread.thread_id,
             "error_type": type(exc).__name__,
         })
-        decision = _decision(
+        return _decision(
             "unknown", ["graph_unavailable"], "delivery_revalidation", "fail_closed"
         )
+    decision = await classify_proactive_subject(
+        subject_and_copy,
+        category=thread.category,
+        explicit_sensitive=thread.sensitivity.get("status") == "sensitive",
+        graph_nodes=graph_nodes,
+    )
+    if not decision.infrastructure_failure:
         decision_doc = decision.to_dict()
         if entity_keys:
             decision_doc["entity_keys"] = entity_keys
@@ -203,22 +230,6 @@ async def revalidate_thread_proposal(
             proposal.user_id,
             thread.thread_id,
             decision_doc,
-            suppress=False,
+            suppress=decision.status == "sensitive",
         )
-        return decision
-    decision = await classify_proactive_subject(
-        subject_and_copy,
-        category=thread.category,
-        explicit_sensitive=thread.sensitivity.get("status") == "sensitive",
-        graph_nodes=graph_nodes,
-    )
-    decision_doc = decision.to_dict()
-    if entity_keys:
-        decision_doc["entity_keys"] = entity_keys
-    await thread_store.update_sensitivity(
-        proposal.user_id,
-        thread.thread_id,
-        decision_doc,
-        suppress=decision.status == "sensitive",
-    )
     return decision
