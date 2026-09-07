@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.signal_engine import feature_store, scoring_loop
+from src.services.signal_engine import feature_store, notification_framer, scoring_loop
 from src.services.signal_engine.content_pool import ScoredCandidate
 from src.services.signal_engine.notification_framer import FRAMER_UNAVAILABLE_REASON
 
@@ -110,59 +110,67 @@ async def test_push_ineligible_candidate_never_sends(patched, monkeypatch):
     framer.assert_not_awaited()  # dropped before scoring, never framed
 
 
+async def _frame_at_delivery(patched, monkeypatch, *, framer_result):
+    """Run the tick (which now enqueues UNFRAMED), then run the delivery framer on
+    the enqueued proposal with the given framer verdict. Gate B moved from the tick
+    to frame-at-delivery, so the reason-contract assertions run against the framer's
+    delivery entry point — the same rules, at their new enforcement site."""
+    summary = await _run(monkeypatch, candidates=[_candidate()])
+    assert summary.notifications_sent == 1  # the tick enqueues unframed
+    proposal = patched.await_args.args[0]
+    assert proposal.deferred_framing is not None
+    monkeypatch.setattr(
+        notification_framer, "frame_notification", AsyncMock(return_value=framer_result)
+    )
+    monkeypatch.setattr(
+        notification_framer, "get_candidate", AsyncMock(return_value=_candidate())
+    )
+    verdict = await notification_framer.frame_news_proposal_at_delivery(proposal)
+    return proposal, verdict
+
+
 async def test_empty_reason_blocks_send(patched, monkeypatch):
     """Fail-closed: an is_relevant=true verdict with no named reason does NOT send."""
-    monkeypatch.setattr(
-        scoring_loop, "frame_notification",
-        AsyncMock(return_value=_framer_result(is_relevant=True, relevance_reason="   ")),
+    _, verdict = await _frame_at_delivery(
+        patched, monkeypatch,
+        framer_result=_framer_result(is_relevant=True, relevance_reason="   "),
     )
-    summary = await _run(monkeypatch, candidates=[_candidate()])
-
-    assert summary.notifications_sent == 0
-    patched.assert_not_awaited()
+    assert verdict == "rejected"  # the drain DROPs a rejected winner, never sends it
 
 
 async def test_framer_unavailable_defers_and_warns(patched, monkeypatch):
-    """The framer-outage sentinel suppresses the send AND logs a loud WARNING, so a
-    sustained outage is never mistaken for 'nothing was relevant'."""
-    monkeypatch.setattr(
-        scoring_loop, "frame_notification",
-        AsyncMock(return_value=_framer_result(
+    """The framer-outage sentinel defers (HOLD + retry), so a sustained outage is
+    never mistaken for 'nothing was relevant' (which would be a terminal DROP)."""
+    _, verdict = await _frame_at_delivery(
+        patched, monkeypatch,
+        framer_result=_framer_result(
             is_relevant=False, relevance_reason=FRAMER_UNAVAILABLE_REASON,
-        )),
+        ),
     )
-    warn = MagicMock()
-    monkeypatch.setattr(scoring_loop.logger, "warn", warn)
-
-    summary = await _run(monkeypatch, candidates=[_candidate()])
-
-    assert summary.notifications_sent == 0
-    patched.assert_not_awaited()
-    assert any("framer UNAVAILABLE" in str(c) for c in warn.call_args_list)
+    assert verdict == "unavailable"
+    assert verdict != "rejected"  # infra is a hold, never a relevance verdict
 
 
 async def test_send_records_relevance_reason_on_outcome_and_event(patched, monkeypatch):
-    """A genuine send threads the named reason into the proposal, then on delivery into
-    the outcome doc and the funnel event, so every fired notification is auditable."""
+    """A genuine send threads the named reason into the proposal at delivery framing,
+    then into the outcome doc and the funnel event, so every fired notification is
+    auditable."""
     from src.services.notification_service import NotificationResult
 
-    monkeypatch.setattr(
-        scoring_loop, "frame_notification",
-        AsyncMock(return_value=_framer_result(
+    proposal, verdict = await _frame_at_delivery(
+        patched, monkeypatch,
+        framer_result=_framer_result(
             is_relevant=True, relevance_reason="names your compiler interest",
-        )),
+        ),
     )
+    assert verdict == "framed"
+    assert proposal.decision.relevance_reason == "names your compiler interest"
+    assert proposal.data["notification_reason"] == "names your compiler interest"
+
     outcome_mock = AsyncMock(return_value=None)
     monkeypatch.setattr(feature_store, "write_outcome_pending", outcome_mock)
     capture = AsyncMock()
     monkeypatch.setattr(scoring_loop.posthog_client, "capture_event", capture)
-
-    summary = await _run(monkeypatch, candidates=[_candidate()])
-
-    # The tick enqueues the proposal carrying the reason on its decision.
-    assert summary.notifications_sent == 1
-    proposal = patched.await_args.args[0]
-    assert proposal.decision.relevance_reason == "names your compiler interest"
 
     # On delivery, the hook records that reason on the outcome doc + the funnel event.
     with patch.object(feature_store, "read_state", AsyncMock(return_value=_ready_state())):

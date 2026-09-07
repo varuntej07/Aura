@@ -62,6 +62,9 @@ FIELD_FRESHNESS_MAX_AGE_S = "freshness_max_age_seconds"
 FIELD_VALID_UNTIL = "valid_until"
 FIELD_PRIORITY = "priority"
 FIELD_DECISION = "decision"
+# Frame-at-delivery payload (see proposal.NotificationProposal.deferred_framing).
+# Absent/None for producers that frame at submit.
+FIELD_DEFERRED_FRAMING = "deferred_framing"
 FIELD_STATUS = "status"
 FIELD_HOLD_COUNT = "hold_count"
 # Earliest moment this doc should be rediscovered by the per-minute drain. Set to
@@ -123,6 +126,7 @@ def _proposal_to_doc(proposal: NotificationProposal, now: datetime) -> dict[str,
         FIELD_VALID_UNTIL: proposal.valid_until,
         FIELD_PRIORITY: proposal.effective_priority,
         FIELD_DECISION: dataclasses.asdict(decision) if decision else None,
+        FIELD_DEFERRED_FRAMING: proposal.deferred_framing,
         FIELD_STATUS: STATUS_PENDING,
         FIELD_HOLD_COUNT: 0,
         FIELD_NEXT_ELIGIBLE_AT: now,
@@ -157,6 +161,7 @@ def _doc_to_proposal(data: dict[str, Any]) -> NotificationProposal:
         valid_until=data.get(FIELD_VALID_UNTIL),
         priority=int(data[FIELD_PRIORITY]) if data.get(FIELD_PRIORITY) is not None else None,
         decision=decision,
+        deferred_framing=data.get(FIELD_DEFERRED_FRAMING) or None,
     )
 
 
@@ -238,8 +243,8 @@ async def list_user_ids_with_pending(*, limit: int = 2000) -> set[str]:
     too and the results are unioned, so a doc the filter would wrongly skip is
     drained within that window rather than silenced until TTL. Requires the
     composite COLLECTION_GROUP index on ``(status, next_eligible_at)``
-    (hand-managed via gcloud — there is no checked-in firestore.indexes.json;
-    deploy.sh preflights it); if that index is missing the filtered query
+    (checked into firestore.indexes.json at the repo root, shipped via
+    ``firebase deploy --only firestore:indexes``); if that index is missing the filtered query
     raises and this falls back to the unfiltered query, loudly.
 
     Loud on truncation: if the result hits ``limit`` exactly, more may exist

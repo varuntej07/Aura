@@ -144,9 +144,11 @@ async def test_diversity_prefers_fresh_category_among_sendable(patched_scoring_p
         await scoring_loop._score_one_user("uid-3", MagicMock(), summary, [], {})
 
     assert summary.notifications_sent == 1
-    # The chosen candidate now rides in the enqueued proposal (submit's first arg).
+    # The chosen candidate now leads the deferred-framing attempt chain (the tick
+    # enqueues unframed; delivery framing fills ``data`` from the winning attempt).
     proposal = send_mock.await_args.args[0]
-    assert proposal.data["category"] == "sports"
+    assert proposal.deferred_framing["attempts"][0]["content_id"] == sports.content_id
+    assert proposal.dedup_key == sports.content_id
 
 
 def test_exploration_picks_highest_base_in_target_category():

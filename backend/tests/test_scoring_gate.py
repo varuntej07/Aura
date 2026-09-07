@@ -151,22 +151,33 @@ async def test_legacy_affinity_key_contributes_via_map(patched, monkeypatch):
 # --- Gate B (LLM relevance confirm) -----------------------------------------
 
 async def test_gate_b_not_relevant_blocks_send(patched, monkeypatch):
-    """Even an in-allow-set candidate is dropped if the framer says not relevant."""
-    monkeypatch.setattr(
-        scoring_loop,
-        "frame_notification",
-        AsyncMock(return_value=SimpleNamespace(
-            title="t", body="b", opening_chat_message="hey",
-            is_relevant=False, relevance_reason="off topic", content_kind="read",
-        )),
-    )
+    """Even an in-allow-set candidate is dropped if the framer says not relevant.
+    Gate B now runs at delivery framing (drain stage 3.45): the tick enqueues
+    unframed, and a not-relevant verdict there is a terminal REJECTED, which the
+    drain answers with a DROP — never a send."""
+    from src.services.signal_engine import notification_framer
+
     summary = await _run(
         monkeypatch,
         user_doc={"timezone": "UTC", "onboarding_interests": ["technology_computing"]},
         candidates=[_candidate("tech", cosine=0.9)],
     )
-    assert summary.notifications_sent == 0
-    patched.assert_not_awaited()
+    assert summary.notifications_sent == 1  # enqueued unframed, no LLM yet
+    proposal = patched.await_args.args[0]
+
+    monkeypatch.setattr(
+        notification_framer, "frame_notification",
+        AsyncMock(return_value=SimpleNamespace(
+            title="t", body="b", opening_chat_message="hey",
+            is_relevant=False, relevance_reason="off topic", content_kind="read",
+        )),
+    )
+    monkeypatch.setattr(
+        notification_framer, "get_candidate",
+        AsyncMock(return_value=_candidate("tech", cosine=0.9)),
+    )
+    verdict = await notification_framer.frame_news_proposal_at_delivery(proposal)
+    assert verdict == "rejected"
 
 
 # --- Soft region preference --------------------------------------------------

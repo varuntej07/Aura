@@ -35,6 +35,8 @@ from .proposal import (
     REASON_ACTIVE_TRACKER,
     REASON_BUDGET,
     REASON_DUPLICATE,
+    REASON_FRAMER_UNAVAILABLE,
+    REASON_NOT_RELEVANT,
     REASON_OFF_PEAK,
     REASON_OK,
     REASON_PRESENCE,
@@ -279,6 +281,40 @@ async def drain_user_queue(
         })
         return OrchestratorDecision(Disposition.HOLD, REASON_BUDGET)
     _policy_checks(winner)["budget_precheck"] = precheck.reason or "passed"
+
+    # Stage 3.45: frame-at-delivery. A producer that submitted with
+    # ``deferred_framing`` (news) paid no framing LLM at enqueue; the winner is
+    # framed HERE, after every non-LLM gate has passed, so copy generation costs
+    # O(actual send attempts) instead of O(enqueues). This is also where the
+    # producer's own relevance verdict runs (for news, Gate B rides inside the
+    # framer), so a reject is a terminal DROP exactly like a tap-gate reject,
+    # and an LLM outage is a HOLD exactly like a tap-gate outage — infra is
+    # never a verdict. Runs before the sensitivity/tap-gate stages because both
+    # of those judge the framed copy.
+    if winner.deferred_framing is not None:
+        from . import delivery_framing
+
+        framing_verdict = await delivery_framing.frame_winner(winner)
+        if framing_verdict == delivery_framing.UNAVAILABLE:
+            logger.error("orchestrator: delivery framer unavailable, holding batch", {
+                "user_id": user_id, "source": winner.source,
+            })
+            await _hold_all(user_id, survivors, now)
+            return OrchestratorDecision(Disposition.HOLD, REASON_FRAMER_UNAVAILABLE)
+        if framing_verdict == delivery_framing.REJECTED:
+            await queue_store.mark(
+                user_id, winner_pid, queue_store.STATUS_DROPPED, now=now
+            )
+            _log_drop(winner, REASON_NOT_RELEVANT)
+            await _hold_all(user_id, losers, now)
+            logger.info("orchestrator: proactive dropped (delivery framing)", {
+                "user_id": user_id, "source": winner.source,
+                "held_losers": len(losers),
+            })
+            return OrchestratorDecision(Disposition.DROP, REASON_NOT_RELEVANT)
+        _policy_checks(winner)["delivery_framing"] = "framed"
+    else:
+        _policy_checks(winner)["delivery_framing"] = "not_required"
 
     # Stage 3.4: privacy revalidation happens after queue delay and after framing,
     # immediately before any channel is selected. The current thread subject and

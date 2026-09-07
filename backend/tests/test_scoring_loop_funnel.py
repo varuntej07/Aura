@@ -122,19 +122,33 @@ async def test_successful_send_enqueues_join_keys_then_hook_emits_funnel(
     ):
         await scoring_loop._score_one_user("uid-42", models, summary, [], {})
 
-    # 1. The tick ENQUEUES (no inline send / funnel). The join keys the client tap event
-    #    reuses must ride on the proposal so the hook can emit them on delivery.
+    # 1. The tick ENQUEUES UNFRAMED (no inline send / funnel / LLM). The candidate
+    #    identity rides in the deferred-framing payload; the tap-join keys land on
+    #    ``data`` when the drain frames the winner at delivery.
     assert summary.notifications_sent == 1
     submit_mock.assert_awaited_once()
     proposal = submit_mock.await_args.args[0]
     assert proposal.user_id == "uid-42"
-    assert proposal.data["content_id"] == cand.content_id
+    assert proposal.deferred_framing["attempts"][0]["content_id"] == cand.content_id
     assert proposal.data["notification_id"]
-    assert proposal.data["category"] == cand.category
-    # The Buddy-facing "why I reached out" note rides the payload (mirrors the
-    # framer's relevance_reason) so a tap → chat injects it on the first reply.
-    assert proposal.data["notification_reason"] == "matches your tech interest"
     capture.assert_not_awaited()  # the funnel event has NOT fired yet (not delivered)
+
+    # 1b. Delivery framing (the drain's stage 3.45) fills the join keys + the
+    #     Buddy-facing "why I reached out" note before any send.
+    from src.services.signal_engine import notification_framer
+
+    monkeypatch.setattr(
+        notification_framer, "frame_notification",
+        scoring_loop.frame_notification,  # the fixture's stubbed framer verdict
+    )
+    monkeypatch.setattr(
+        notification_framer, "get_candidate", AsyncMock(return_value=cand)
+    )
+    verdict = await notification_framer.frame_news_proposal_at_delivery(proposal)
+    assert verdict == "framed"
+    assert proposal.data["content_id"] == cand.content_id
+    assert proposal.data["category"] == cand.category
+    assert proposal.data["notification_reason"] == "matches your tech interest"
 
     # 2. On a REAL delivery, on_news_delivered fires the top-of-funnel event with the
     #    exact join keys — if these drift, the PostHog funnel silently flattens.

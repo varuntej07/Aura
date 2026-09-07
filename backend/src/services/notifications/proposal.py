@@ -232,6 +232,8 @@ REASON_PRESENCE = "user_present"  # surface-aware: in the app now / on a dismiss
 REASON_ACTIVE_TRACKER = "active_tracker"  # a tracked event (e.g. a live match) fired recently
 REASON_OK = "ok"
 REASON_SENSITIVE = "sensitive_subject"
+REASON_NOT_RELEVANT = "not_relevant"  # delivery-time framing rejected every candidate
+REASON_FRAMER_UNAVAILABLE = "framer_unavailable"  # framing infra down; batch held, retried
 
 
 @dataclass
@@ -250,6 +252,15 @@ class NotificationProposal:
 
     title: str = ""
     body: str = ""
+    # Frame-at-delivery: when set, ``title``/``body`` are intentionally empty at
+    # submit time and the drain frames the WINNER once, immediately before the
+    # tap gate, via ``delivery_framing.frame_winner``. Producers whose enqueue
+    # cadence exceeds their delivery cadence (news: up to 6 enqueues/day against
+    # a budget of far fewer sends) use this so LLM copy is only ever paid for on
+    # an actual send attempt. The payload shape is owned by the producer's
+    # delivery framer (for news: candidate fall-through list + framing context).
+    # ``None`` (every other producer) means copy was framed at submit, as before.
+    deferred_framing: dict | None = None
     data: dict[str, str] = field(default_factory=dict)
     collapse_key: str | None = None
     notification_type: str = ""      # client routing key; defaults to ``source``

@@ -17,9 +17,10 @@ gets a valid result back; it never has to handle exceptions from here.
 
 from __future__ import annotations
 
+import asyncio
 import re
-from datetime import datetime
-from typing import cast
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel, Field
 
@@ -29,8 +30,11 @@ from ...prompts import (
     SIGNAL_NOTIFICATION_FRAMER_SYSTEM_PROMPT,
     signal_notification_user_prompt,
 )
-from ..model_provider import ModelProvider
-from .content_pool import ScoredCandidate
+from ..model_provider import ModelProvider, get_model_provider
+from .content_pool import ScoredCandidate, get_candidate
+
+if TYPE_CHECKING:  # type-only; the runtime import direction is funnel -> here
+    from ..notifications.proposal import NotificationProposal
 
 # Hard limits enforced after the model returns.
 # The prompt says the same numbers but the LLM occasionally overshoots;
@@ -273,6 +277,149 @@ async def frame_notification(
             "error_type": type(exc).__name__,
         })
         return _safe_fallback(candidate)
+
+
+# Same per-call ceiling the scoring loop used when it framed at tick time.
+_DELIVERY_FRAME_TIMEOUT_S = 10.0
+
+# Verdict strings shared with notifications/delivery_framing (kept as plain
+# literals so this module never imports the funnel at runtime).
+_VERDICT_FRAMED = "framed"
+_VERDICT_REJECTED = "rejected"
+_VERDICT_UNAVAILABLE = "unavailable"
+
+
+def build_deferred_framing_payload(
+    attempts: list[tuple[float, float, ScoredCandidate, dict[str, float]]],
+    user_context: UserFramingContext,
+) -> dict:
+    """Serialize the Gate B fall-through chain for frame-at-delivery.
+
+    ``attempts`` is the scoring loop's ordered attempt list (chosen pick first).
+    Only what delivery framing needs rides along: the candidate ids (the pool doc
+    is re-read at delivery, so copy inputs are never duplicated here), each
+    attempt's score/components for the ledger, and the framing context — which is
+    captured at tick time deliberately: it is built from the UserAura + user doc
+    the tick already read, and re-reading both at delivery would put two reads
+    back on every send for personalization inputs that drift slower than the 30h
+    queue TTL. The time band is refreshed at delivery (it is the one input that
+    genuinely changes while queued)."""
+    return {
+        "version": 1,
+        "attempts": [
+            {
+                "content_id": cand.content_id,
+                "score": score,
+                "components": components,
+                "freshness_ts": (
+                    cand.freshness_ts.isoformat() if cand.freshness_ts else None
+                ),
+            }
+            for score, _, cand, components in attempts
+        ],
+        "user_context": user_context.model_dump(),
+    }
+
+
+async def frame_news_proposal_at_delivery(proposal: NotificationProposal) -> str:
+    """Frame a deferred news winner at delivery time (Gate B included).
+
+    Walks the tick's attempt chain in order and mutates ``proposal`` in place
+    with the first candidate the framer affirms as relevant: copy, tap payload,
+    ledger decision fields, and ``dedup_key``/``content_timestamp`` (the winning
+    attempt may not be the chain's head, and the atomic dedup claim at stage 5
+    must claim the story actually being sent). Returns one of the
+    delivery_framing verdict strings; "unavailable" means infra (LLM outage or
+    timeout), which the drain answers with a HOLD — never a relevance verdict."""
+    payload = proposal.deferred_framing or {}
+    raw_attempts = list(payload.get("attempts") or [])
+    context_doc = dict(payload.get("user_context") or {})
+    if not raw_attempts:
+        logger.error("notification_framer: deferred payload has no attempts", {
+            "user_id": proposal.user_id,
+        })
+        return _VERDICT_REJECTED
+    user_context = UserFramingContext(**context_doc)
+    # The one framing input that truly changes while queued: a proposal enqueued
+    # in the evening may deliver next morning, and the copy should not say
+    # "tonight". The drain stamps the user's local hour on the decision (stage 3)
+    # before framing runs; fall back to the tick-time band when it is absent.
+    local_hour = proposal.decision.local_hour if proposal.decision else None
+    if local_hour is not None:
+        user_context.user_local_time_band = derive_local_time_band(
+            datetime.now(UTC).replace(hour=int(local_hour))
+        )
+
+    now = datetime.now(UTC)
+    max_age = proposal.effective_max_age
+    models = get_model_provider()
+    for attempt in raw_attempts:
+        content_id = str(attempt.get("content_id") or "")
+        if not content_id:
+            continue
+        freshness_raw = attempt.get("freshness_ts")
+        freshness_ts = (
+            datetime.fromisoformat(freshness_raw) if freshness_raw else None
+        )
+        # Per-attempt freshness: the batch passed stage 1 on the chain head's
+        # timestamp; a fallback candidate deeper in the chain ages independently.
+        if max_age is not None and freshness_ts is not None:
+            aged = now - (
+                freshness_ts if freshness_ts.tzinfo else freshness_ts.replace(tzinfo=UTC)
+            )
+            if aged > max_age:
+                continue
+        candidate = await get_candidate(content_id)
+        if candidate is None:  # pool doc expired since enqueue
+            continue
+
+        try:
+            framed = await asyncio.wait_for(
+                frame_notification(models, candidate, user_context),
+                timeout=_DELIVERY_FRAME_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warn("notification_framer: delivery framing timed out", {
+                "user_id": proposal.user_id, "content_id": content_id,
+            })
+            return _VERDICT_UNAVAILABLE
+        if framed.relevance_reason == FRAMER_UNAVAILABLE_REASON:
+            return _VERDICT_UNAVAILABLE
+
+        reason = (framed.relevance_reason or "").strip()
+        if not (framed.is_relevant and reason):
+            # Gate B fail-closed, exactly as the tick-time loop judged it.
+            logger.info("notification_framer: candidate failed relevance at delivery", {
+                "user_id": proposal.user_id, "content_id": content_id,
+            })
+            continue
+
+        proposal.title = framed.title
+        proposal.body = framed.body
+        proposal.data.update({
+            "content_id": candidate.content_id,
+            "category": candidate.category,
+            "sub_category": candidate.sub_category,
+            "source": candidate.source,
+            "url": candidate.url,
+            "content_kind": framed.content_kind,
+            "opening_chat_message": framed.opening_chat_message,
+            "notification_reason": reason,
+        })
+        proposal.dedup_key = candidate.content_id
+        proposal.content_timestamp = candidate.freshness_ts
+        if proposal.decision is not None:
+            proposal.decision.score = float(attempt.get("score") or 0.0)
+            proposal.decision.components = {
+                k: float(v) for k, v in dict(attempt.get("components") or {}).items()
+            }
+            proposal.decision.matched_interest_slug = candidate.category
+            proposal.decision.relevance_reason = reason
+            proposal.decision.framer_prompt_version = FRAMER_PROMPT_VERSION
+        proposal.deferred_framing = None
+        return _VERDICT_FRAMED
+
+    return _VERDICT_REJECTED
 
 
 def derive_local_time_band(local_datetime: datetime) -> str:

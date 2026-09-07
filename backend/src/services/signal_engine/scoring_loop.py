@@ -86,6 +86,7 @@ from .notification_framer import (
     FRAMER_UNAVAILABLE_REASON,
     UserFramingContext,
     _safe_fallback,
+    build_deferred_framing_payload,
     derive_local_time_band,
     frame_notification,
 )
@@ -718,110 +719,45 @@ async def _score_one_user(
             state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
             await _safe_write_state(user_id, state, baseline)
             return
-    framed = None
-    relevance_reason = ""
-    for attempt_score, _, attempt_cand, attempt_components in attempts:
-        try:
-            candidate_framed = await asyncio.wait_for(
-                frame_notification(models, attempt_cand, user_context), timeout=10.0
-            )
-        except TimeoutError:
-            logger.warn("signal_engine.scoring_loop: framer LLM timed out, using fallback", {
-                "user_id": user_id,
-                "content_id": attempt_cand.content_id,
-            })
-            candidate_framed = _safe_fallback(attempt_cand)
-
-        # Framer infra outage (not a content rejection): the framer is down for this
-        # tick, so trying more candidates is pointless. Defer the whole tick and
-        # scream so a sustained outage never looks like "nothing was relevant".
-        if candidate_framed.relevance_reason == FRAMER_UNAVAILABLE_REASON:
-            state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-            await _safe_write_state(user_id, state, baseline)
-            summary.blocked_below_threshold += 1
-            logger.warn(
-                "signal_engine.scoring_loop: not sending, framer UNAVAILABLE "
-                "(deferring this tick, infra not relevance; retries next tick)",
-                {
-                    "user_id": user_id,
-                    "content_id": attempt_cand.content_id,
-                    "category": attempt_cand.category,
-                },
-            )
-            return
-
-        # Gate B — relevance contract, fail-CLOSED on a missing reason. A send fires
-        # only when the framer affirmed relevance AND named the interest it matches.
-        attempt_reason = (candidate_framed.relevance_reason or "").strip()
-        if candidate_framed.is_relevant and attempt_reason:
-            framed = candidate_framed
-            best_score, best_cand, components = attempt_score, attempt_cand, attempt_components
-            relevance_reason = attempt_reason
-            break
-        logger.info(
-            "signal_engine.scoring_loop: candidate failed relevance gate, trying next "
-            f"({'no reason given' if candidate_framed.is_relevant else 'not relevant'})",
-            {
-                "user_id": user_id,
-                "content_id": attempt_cand.content_id,
-                "category": attempt_cand.category,
-            },
-        )
-
-    if framed is None:
-        # Every attempted candidate failed the relevance gate this tick. Recover next
-        # tick as the pool refreshes — never a permanent mute.
-        state.consecutive_no_open_ticks = min(100, state.consecutive_no_open_ticks + 1)
-        await _safe_write_state(user_id, state, baseline)
-        summary.blocked_below_threshold += 1
-        logger.info(
-            f"signal_engine.scoring_loop: not sending (relevance gate: all "
-            f"{len(attempts)} attempted candidate(s) rejected)",
-            {"user_id": user_id, "content_id": best_cand.content_id},
-        )
-        return
-
-    # Hand ONE proposal to the funnel. Cross-agent dedup, priority arbitration (vs
-    # thread/icebreaker/re-engage), the tap-worthiness gate, the unified adaptive budget,
-    # and smart-timing all run in the DRAIN. The delivery-dependent bookkeeping (the
-    # learning outcome, the funnel event, sends_today++) runs in on_news_delivered when
-    # the drain actually delivers — so it can never count a held/dropped proposal.
+    # Hand ONE proposal to the funnel — UNFRAMED. Copy generation (and Gate B, the
+    # framer's relevance verdict) now runs in the DRAIN via frame-at-delivery
+    # (notifications/delivery_framing.py), after every non-LLM gate has passed, so
+    # the framer LLM is paid once per genuine send attempt instead of once per
+    # enqueue: this queue's enqueue cadence (up to 6 ticks/day) exceeds the budget's
+    # send allowance, and framed copy for a proposal that expired held in the queue
+    # was pure spend. The attempt chain (chosen pick first, then fallbacks) moves
+    # into the payload so the delivery framer keeps the exact Gate B fall-through.
+    # Cross-agent dedup, arbitration, tap gate, budget, and smart timing were
+    # already the drain's; the delivery-dependent bookkeeping still runs in
+    # on_news_accepted only on a real delivery.
+    top_score, _, top_cand, top_components = attempts[0]
     notification_id = str(uuid.uuid4())
     await orchestrator.submit(
         NotificationProposal(
             user_id=user_id,
             source=SOURCE_NEWS,
             kind=ProposalKind.PROACTIVE,
-            dedup_key=best_cand.content_id,
-            title=framed.title,
-            body=framed.body,
+            dedup_key=top_cand.content_id,
             data={
                 "deep_link": "chat",
-                "content_id": best_cand.content_id,
                 "notification_id": notification_id,
-                "category": best_cand.category,
-                "sub_category": best_cand.sub_category,
-                "source": best_cand.source,
-                "url": best_cand.url,
-                "content_kind": framed.content_kind,
-                "opening_chat_message": framed.opening_chat_message,
-                # Buddy-facing "why I reached out" — injected into the chat prompt on the
-                # FIRST turn after a tap so Buddy stays oriented instead of disowning its
-                # own opener. Never shown in the push itself.
-                "notification_reason": relevance_reason,
                 "notification_origin": "signal_engine",
+                # Candidate-dependent keys (content_id, category, url, content_kind,
+                # opening_chat_message, notification_reason — Buddy's "why I reached
+                # out", injected into the first chat turn after a tap) are filled by
+                # the delivery framer for whichever attempt wins Gate B.
             },
             notification_type="signal_engine",
             collapse_key=f"signal_{notification_id}",
-            # Real freshness: the candidate's own timestamp drives the 18h news window.
-            content_timestamp=best_cand.freshness_ts,
+            # Real freshness: the chain head's timestamp drives the 18h news window
+            # at stage 1; the delivery framer re-checks each attempt individually.
+            content_timestamp=top_cand.freshness_ts,
+            deferred_framing=build_deferred_framing_payload(attempts, user_context),
             decision=NotificationDecision(
-                score=best_score,
-                components=components,
+                score=top_score,
+                components=top_components,
                 gate_a_active=gate_a_active,
-                matched_interest_slug=best_cand.category,
-                relevance_reason=relevance_reason,
-                framer_prompt_version=FRAMER_PROMPT_VERSION,
+                matched_interest_slug=top_cand.category,
                 sends_today_before=state.sends_today,
                 local_hour=user_local_now.hour,
                 day_of_week=user_local_now.weekday(),
@@ -839,18 +775,18 @@ async def _score_one_user(
     summary.notifications_sent += 1
 
     logger.info(
-        f"signal_engine.scoring_loop: notification enqueued "
-        f"(category={best_cand.category}, score={round(best_score, 3)}, "
-        f"reason={relevance_reason!r})",
+        f"signal_engine.scoring_loop: notification enqueued unframed "
+        f"(category={top_cand.category}, score={round(top_score, 3)}, "
+        f"frame_attempts={len(attempts)})",
         {
             "user_id": user_id,
             "notification_id": notification_id,
-            "content_id": best_cand.content_id,
-            "category": best_cand.category,
-            "sub_category": best_cand.sub_category,
-            "best_score": round(best_score, 3),
-            "relevance_reason": relevance_reason,
-            "components": {k: round(v, 3) for k, v in components.items()},
+            "content_id": top_cand.content_id,
+            "category": top_cand.category,
+            "sub_category": top_cand.sub_category,
+            "best_score": round(top_score, 3),
+            "frame_attempts": len(attempts),
+            "components": {k: round(v, 3) for k, v in top_components.items()},
         },
     )
 
