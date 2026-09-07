@@ -84,6 +84,85 @@ def spoken_no_screen_line(reason: str) -> str:
     return _NO_SCREEN_LINES.get(reason, _GENERIC_NO_SCREEN_LINE)
 
 
+# ── The model-facing half of the same signal ─────────────────────────────────
+#
+# Everything above tells the USER there is no screen, and only ever runs inside a
+# save tool. The model itself was never told anything: the no-evidence branch of
+# on_user_turn_completed injected NOTHING, so "no screen this turn" and "a screen
+# arrived and was dull" were byte-identical from where the model sits. Asked
+# "can you see my screen", it read a prompt that says screen evidence usually
+# arrives, a successful enable_screen_context call, and no contradicting fact,
+# and answered yes - then flip-flopped for five turns. Absence is not a signal.
+# A live 2026-09 macOS session is the write-up.
+#
+# Only the NEGATIVE is rendered. A live turn already carries <screen_ui_context>,
+# which asserts its own presence, so a matching positive marker would be tokens
+# on the common path buying nothing.
+SCREEN_STATE_OPEN_TAG = "<screen_state>"
+
+# reason -> the cause clause. Distinct from _NO_SCREEN_LINES on purpose: that is
+# copy to be spoken verbatim, this is a fact for the model to reason from and
+# phrase itself. Both key off the same closed client vocabulary above, so they
+# can never disagree about what "no screen" means.
+_STATE_CAUSES = {
+    REASON_DISABLED: " because screen sharing is off in their Aura settings",
+    REASON_PERMISSION: (
+        " because macOS has not given Aura screen recording permission"
+    ),
+    REASON_MODE_CONFLICT: " because Guide Mode currently owns the screen",
+    REASON_SIGNED_OUT: " because the Aura desktop app is signed out",
+    REASON_CAPTURE_FAILED: " because capture failed on their device",
+}
+
+
+def render_screen_state(reason: str) -> str:
+    """The absent-screen marker injected into a turn that carries no evidence.
+
+    ``reason`` is the freshest client-reported skip reason, or "" when the client
+    reported nothing at all. Unknown is still a negative: no evidence reached this
+    turn either way, and only the actionable next step differs.
+    """
+    return (
+        f"{SCREEN_STATE_OPEN_TAG}\n"
+        f"No screen evidence reached you this turn"
+        f"{_STATE_CAUSES.get(reason, '')}. You cannot see their screen right now. "
+        "Say so plainly if they ask, and never claim otherwise until a screen "
+        "block appears.\n"
+        "</screen_state>"
+    )
+
+
+def remove_screen_state_messages(chat_ctx) -> int:
+    """Drop every ``<screen_state>`` system message. Returns the count.
+
+    Exactly one may be live, for the same reason exactly one screen context may
+    be (see ``collapse_stale_contexts``): two markers means two answers to "can
+    you see me" with nothing saying which is current. Unlike a screen context
+    there is no placeholder, because a spent absence records nothing.
+
+    Removing a list ENTRY is safe on a shallow ``ChatContext.copy()`` and editing
+    a message's content list in place is NOT, since copies share the same
+    ``ChatMessage`` objects. So this only ever deletes, never rewrites.
+    """
+    items = getattr(chat_ctx, "items", None)
+    if items is None:
+        return 0
+    marked = [
+        index
+        for index, item in enumerate(items)
+        if getattr(item, "role", None) == "system"
+        and isinstance(getattr(item, "content", None), list)
+        and any(
+            isinstance(part, str) and SCREEN_STATE_OPEN_TAG in part
+            for part in item.content
+        )
+    ]
+    # Reverse order so earlier indices stay valid as entries are removed.
+    for index in reversed(marked):
+        del items[index]
+    return len(marked)
+
+
 async def request_screen_context(*, user_id: str, session_id: str) -> str:
     """Ask the desktop to prompt the user to enable screen sharing.
 
