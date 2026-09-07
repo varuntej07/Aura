@@ -9,9 +9,26 @@ from pathlib import Path
 from typing import Any
 
 from ...lib.logger import logger
+from .text_sanitizer import has_written_markup
 
 _TURN_METRICS_PATH = Path("logs") / "turn_metrics.jsonl"
 _APPEND_LOCK = threading.Lock()
+
+# Word count above which a spoken turn has stopped sounding like conversation.
+#
+# Measured, not guessed. Across the 128 assistant turns of the heaviest real voice
+# user (6 sessions, 80 minutes, one 53-minute call of 482 turns) the median is 57
+# words, p95 is 87, and the MAX is 91. The first version of this constant was 120,
+# so it could never have fired once: dead instrumentation, which is the exact
+# zero-rows-and-healthy-look-identical failure it was added to prevent. Several of
+# those turns end mid-word because the user talked over them, so the lengths the
+# model intended are longer still.
+#
+# 60 flags 46% of them. That is the honest reading of the current state rather than
+# a comfortable one: the drift is chronic length, not occasional blowups. Nothing
+# enforces it - there is deliberately no output token cap - so being loud is the
+# entire defence.
+_VERBOSE_REPLY_WORDS = 60
 
 
 def _redact_value(value: Any) -> Any:
@@ -286,6 +303,29 @@ class VoiceTurnMetrics:
         turn["assistant_text"] = assistant_text
         turn["t_tts_first_byte_ms"] = metrics_payload.get("tts_ttfb_ms")
         turn["t_end_to_end_first_audio_ms"] = metrics_payload.get("eou_to_first_audio_ms")
+
+        # Voice-register health, measured on the finished text so the streaming
+        # path, tts_node and transcription_node are all untouched. A turn that
+        # shipped four hundred words of markdown used to look exactly like a
+        # twenty-word answer in every log we keep, because the sanitizer quietly
+        # cleaned the markup on its way to TTS and nothing counted anything.
+        reply_words = len(assistant_text.split())
+        reply_markup = has_written_markup(assistant_text)
+        turn["reply_words"] = reply_words
+        turn["reply_markup"] = reply_markup
+        if reply_words > _VERBOSE_REPLY_WORDS or reply_markup:
+            # Counts only, never the text: these lines go to the same sink that
+            # _log deliberately keeps transcripts out of.
+            logger.warn(
+                "VoiceSession: spoken reply left the voice register",
+                {
+                    "session_id": self._session_id,
+                    "turn_index": self._turn_index,
+                    "reply_words": reply_words,
+                    "reply_markup": reply_markup,
+                    "threshold_words": _VERBOSE_REPLY_WORDS,
+                },
+            )
 
         usage = self._usage_by_model.get(model)
         if usage is not None:

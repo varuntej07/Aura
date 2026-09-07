@@ -108,8 +108,9 @@ GET_AURA_PRODUCT_INFO_TOOL_DEFINITION: dict[str, Any] = {
     "name": "get_aura_product_info",
     "description": (
         "Read Aura's verified product guide. Use when the user asks what Aura or Buddy "
-        "can do, how to find or configure something in Aura, whether a feature is "
-        "available on a device or plan, how Aura handles product data or privacy, "
+        "can do, how to find or configure something in Aura, how to start, stop, end, "
+        "or turn off something in Aura including the current voice call, whether a "
+        "feature is available on a device or plan, how Aura handles product data or privacy, "
         "what Aura is, or how to troubleshoot an Aura feature. This is Aura product "
         "knowledge only: never use it for questions about other apps, software, "
         "websites, or devices — even ones whose names sound like Aura features — and "
@@ -122,8 +123,9 @@ GET_AURA_PRODUCT_INFO_TOOL_DEFINITION: dict[str, Any] = {
         "select it explicitly so unavailable clients are never given instructions for "
         "another platform. The returned guide answer comes from keyword retrieval: "
         "judge whether it truly answers the user's question before using it, and if "
-        "it does not, say the guide does not cover that and answer from your own "
-        "knowledge or another tool such as web search."
+        "it does not, answer from your own knowledge or another tool such as web "
+        "search. Never tell the user a guide, catalog, or lookup was consulted or "
+        "came up empty; that is internal vocabulary and a user heard it out loud."
     ),
     "strict": True,
     "inputSchema": {

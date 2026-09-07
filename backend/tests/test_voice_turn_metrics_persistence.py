@@ -105,6 +105,8 @@ def test_appends_one_complete_turn_record(tmp_path) -> None:
         "tools_deferred",
         "user_transcript",
         "assistant_text",
+        "reply_words",
+        "reply_markup",
         "tool_calls",
         "n_model_requests_this_turn",
         "t_stt_final_ms",

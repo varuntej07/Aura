@@ -1,11 +1,18 @@
 """Deterministic written-text -> spoken-language sanitizer for voice TTS.
 
-The LLM (gpt-4.1-mini) frequently emits markdown (bold, bullet lists, headers,
+The LLM (gpt-4.1) frequently emits markdown (bold, bullet lists, headers,
 fences) even on a voice call. Cartesia reads that markup literally ("asterisk
 asterisk content"), which is the single worst voice-register failure. This module
 strips formatting BEFORE text reaches TTS, then rewrites written-only forms
 (numeric dates, URLs, regex escapes, identifiers, and symbols) into language a
 person would actually say.
+
+Stripping is cosmetic, and that cut both ways: it removes the "###" but not the
+four hundred words behind it, and because it happens between the model and the
+speaker it left no trace anywhere. A voice turn that arrived as a markdown
+document and one that arrived as speech logged identically, so nobody could see
+the register failure until a user said the answers were putting them to sleep.
+`has_written_markup` exists to make that difference visible; see turn_metrics.
 
 `sanitize_for_speech` is a pure, deterministic function (easy to unit-test).
 `sanitize_text_stream` wraps the streaming text the TTS node receives, flushing on
@@ -382,6 +389,35 @@ def _normalize_written_forms(text: str) -> str:
 # gone, so no amount of guessing at the REQUEST wording can rescue it. Backticks
 # and fences are included because the model only reaches for them around exact
 # content. Anything matching here has to be shown, not spoken.
+def has_written_markup(text: str) -> bool:
+    """Whether the model wrote document structure into a turn meant to be spoken.
+
+    Reuses the same compiled patterns the stripper does, so the check can never
+    disagree with what actually got removed. Reported rather than acted on: the
+    sanitizer still strips it either way, and the point here is that somebody can
+    finally see it happening. Fail-open like everything else in this module.
+
+    A bare newline counts, and carries most of the signal. Measured over the 128
+    assistant turns of the heaviest real voice user, the markdown patterns alone
+    flagged 7 (5.5%) while 48 (37.5%) contained a blank line. The patterns catch
+    the loud case correctly - one turn was a numbered list of twenty games, read
+    out loud - but the ordinary failure is a prose answer laid out in paragraphs,
+    which carries no markdown at all. Nothing a person says out loud has a hard
+    line break in it, so this costs essentially no false positives.
+    """
+    if not text:
+        return False
+    try:
+        return bool(
+            "\n" in text
+            or _HEADER.search(text)
+            or _BULLET.search(text)
+            or _BOLD_STAR.search(text)
+        )
+    except Exception:
+        return False
+
+
 def sanitize_for_speech(text: str) -> str:
     """Strip markdown formatting from text so it reads cleanly through TTS.
 

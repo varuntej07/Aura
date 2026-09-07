@@ -123,6 +123,8 @@ from .voice.greeting import resolve_opener
 from .voice.guide_control import SPOKEN_GUIDE_REQUEST_FAILED, request_guide_mode
 from .voice.screen_context_control import (
     SPOKEN_ENABLE_REQUEST_FAILED,
+    remove_screen_state_messages,
+    render_screen_state,
     request_screen_context,
 )
 from .voice.interview import InterviewSupervisorAgent, VoiceSessionState
@@ -414,6 +416,12 @@ class BuddyAgent(agents.Agent):
         # its model_scale so a worker-side downscale is undone before publishing.
         self._last_injected_frame_id = ""
         self._last_injected_frame_scale = 1.0
+        # The screen-absence reason currently stated in context, or None when the
+        # model has been told nothing (no marker injected yet, or a live turn
+        # cleared it). Edge-triggering off this is what keeps the marker free:
+        # an unchanged state mutates turn_ctx not at all, so LiveKit's
+        # speculative reply survives every steady-state turn.
+        self._screen_state_reason: str | None = None
         self._point_publish_tasks: set[asyncio.Task] = set()
         # Deterministic capture state. Only finalized user speech can populate
         self._screen_capture_results: dict[str, SaveScreenItemResult] = {}
@@ -849,6 +857,50 @@ class BuddyAgent(agents.Agent):
         self._current_turn_frame_context_id = frame.turn_context_id if frame else ""
         self._action_telemetry.start_turn()
         self._fresh_frame_for_turn = frame is not None
+        # State the ABSENCE of a screen, because nothing else does. The
+        # no-evidence branch above injects nothing, so the model had no fact
+        # saying it cannot see - only a prompt saying evidence usually arrives.
+        # It filled the gap and claimed sight it did not have. See
+        # screen_context_control.render_screen_state.
+        #
+        # Surface-gated because screen sharing IS a desktop-only capability, not
+        # because of where the code runs: on a phone call there is no screen to
+        # be absent, and the mobile prompt says nothing about one. Mobile and
+        # keyboard keep byte-identical turn handling.
+        #
+        # Edge-triggered: an unchanged state performs no turn_ctx mutation at
+        # all, so LiveKit's speculative reply survives every steady-state turn.
+        # Only a real transition (first screenless turn, a toggle, a permission
+        # change) costs one. `structured_context` covers both the block appended
+        # here and one verified already live from early injection.
+        if self._launch_surface is VoiceSurface.DESKTOP:
+            if structured_context is not None or frame is not None:
+                # Invariant: a marker is in context iff the reason is not None,
+                # so a live turn with nothing stated stays completely free.
+                if self._screen_state_reason is not None:
+                    remove_screen_state_messages(turn_ctx)
+                    self._screen_state_reason = None
+            else:
+                screen_state_reason = (
+                    self._screen_context.unavailable_reason()
+                    if self._screen_context is not None
+                    else ""
+                )
+                if screen_state_reason != self._screen_state_reason:
+                    remove_screen_state_messages(turn_ctx)
+                    turn_ctx.add_message(
+                        role="system",
+                        content=[render_screen_state(screen_state_reason)],
+                    )
+                    self._screen_state_reason = screen_state_reason
+                    logger.info(
+                        "VoiceSession: screen state marker injected",
+                        {
+                            "session_id": self._session_id,
+                            "user_id": self._user_id,
+                            "reason": screen_state_reason or "not_reported",
+                        },
+                    )
         self._finalized_message_id = new_message.id
         self._finalized_transcript = finalized_transcript
         self._finalized_turn_instruction = turn_instruction
