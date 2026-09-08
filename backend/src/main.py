@@ -109,7 +109,10 @@ from .handlers.desktop_notifications import (
 from .handlers.desktop_profile import handle_desktop_profile
 from .handlers.guide_usage import handle_guide_usage
 from .handlers.devices import register_device
-from .handlers.diagnostics import handle_startup_diagnostics
+from .handlers.diagnostics import (
+    handle_desktop_startup_diagnostics,
+    handle_startup_diagnostics,
+)
 from .handlers.dictation import (
     handle_delete_trace as handle_dictation_delete_trace,
     handle_get_quota as handle_dictation_get_quota,
@@ -635,6 +638,16 @@ async def devices_web_auth_status_endpoint(request: Request) -> JSONResponse:
 @app.post("/diagnostics/startup")
 async def diagnostics_startup_endpoint(request: Request) -> JSONResponse:
     return await handle_startup_diagnostics(request)
+
+
+# Desktop twin of the beacon above, same posture. UNAUTHENTICATED because the
+# launch it reports on may have died on the sign-in screen, before any Firebase
+# token existed; the client posts it from Rust at the next launch, before the
+# webview signs in. Write only, no user identity, allowlisted fields, shares the
+# per-install rate limit with the Android route.
+@app.post("/diagnostics/desktop")
+async def diagnostics_desktop_endpoint(request: Request) -> JSONResponse:
+    return await handle_desktop_startup_diagnostics(request)
 
 
 @app.post("/chat")

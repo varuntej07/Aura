@@ -42,7 +42,10 @@ Firestore operational reads -----------> same ops dashboard
 | Cloud Run request rate, latency, and failures | Cloud Monitoring and Logging |
 | LLM attempts, tokens, and tool spans | Langfuse |
 | Persisted product state | Firestore, queried narrowly |
-| Desktop crashes | Sentry |
+| Desktop crashes (Rust panics, JS errors, native minidumps) | Sentry |
+| Desktop liveness and subsystem health (`desktop_heartbeat`, every 10 min per running install) | PostHog |
+| Desktop client-side WARN/ERROR lines (`client_log`, rate-limited and redacted) | PostHog |
+| Desktop crash loops that never reach Sentry (`startup_diagnostics` rows with `platform = desktop`) | Firestore, queried narrowly |
 | Voice stage timing | structured worker telemetry, subject to deployment/log access |
 
 Do not treat an absent provider response as a zero. Dashboards must distinguish unavailable, stale cache, empty result, and a measured zero.
@@ -81,6 +84,7 @@ Sensitive field appears ----> redact/drop before logs or analytics export
 - Prefer rate/error/duration metrics for dashboards and structured logs for diagnosis.
 - Correlate with bounded request, session, generation, and tool identifiers. Do not log prompt or transcript content.
 - Keep provider credentials in deployment secrets and never expose them to the browser.
+- A desktop install with an open session and no `desktop_heartbeat` for over 30 minutes is a hung app, not an absent user: the heartbeat is sent from the main window on a timer for as long as the process runs.
 
 ## Code anchors
 

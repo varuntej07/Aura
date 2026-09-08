@@ -94,4 +94,104 @@ class FunnelEvents {
   // anywhere, and the voice-started event carries no transcript or field content.
   static const String keyboardPasswordGenerated = 'keyboard_password_generated';
   static const String keyboardVoiceStarted = 'keyboard_voice_started';
+
+  // Desktop client (Aura-Desktop) product events. Mirrors the Python block of
+  // the same name; the desktop repo keeps its own typed list in
+  // src/lib/analyticsEvents.ts. All client-side and content-free (durations,
+  // counts, enum outcomes, versions). `desktopHeartbeat` fires every 10
+  // minutes while the desktop app runs; `clientLog` is the desktop twin of
+  // app_logger's remote WARN/ERROR capture.
+  static const String desktopClientDesktopAppLaunched = 'desktop_app_launched';
+  static const String desktopClientDesktopInstallObserved = 'desktop_install_observed';
+  static const String desktopClientDesktopOnboardingStepCompleted = 'desktop_onboarding_step_completed';
+  static const String desktopClientDesktopOnboardingCompleted = 'desktop_onboarding_completed';
+  static const String desktopClientDesktopTelemetryConsentAccepted = 'desktop_telemetry_consent_accepted';
+  static const String desktopClientDesktopOnboardingAuthPathSelected = 'desktop_onboarding_auth_path_selected';
+  static const String desktopClientDesktopPrivacySetupSaved = 'desktop_privacy_setup_saved';
+  static const String desktopClientDesktopHotkeyTestPassed = 'desktop_hotkey_test_passed';
+  static const String desktopClientDesktopHotkeyTestSkipped = 'desktop_hotkey_test_skipped';
+  static const String desktopClientDesktopHotkeyTourCompleted = 'desktop_hotkey_tour_completed';
+  static const String desktopClientDesktopAgentDemoStarted = 'desktop_agent_demo_started';
+  static const String desktopClientDesktopAgentDemoFinished = 'desktop_agent_demo_finished';
+  static const String desktopClientDesktopAgentDemoTimedOut = 'desktop_agent_demo_timed_out';
+  static const String desktopClientDesktopSignInStarted = 'desktop_sign_in_started';
+  static const String desktopClientDesktopSignInCompleted = 'desktop_sign_in_completed';
+  static const String desktopClientDesktopSignInFailed = 'desktop_sign_in_failed';
+  static const String desktopClientDesktopSignedOut = 'desktop_signed_out';
+  static const String desktopClientWebAuthStarted = 'web_auth_started';
+  static const String desktopClientWebAuthCompleted = 'web_auth_completed';
+  static const String desktopClientWebAuthFailed = 'web_auth_failed';
+  static const String desktopClientWebAuthExpired = 'web_auth_expired';
+  static const String desktopClientWebAuthCancelled = 'web_auth_cancelled';
+  static const String desktopClientDesktopCheckoutStarted = 'desktop_checkout_started';
+  static const String desktopClientDesktopCheckoutUpgraded = 'desktop_checkout_upgraded';
+  static const String desktopClientDesktopCheckoutDeadline = 'desktop_checkout_deadline';
+  static const String desktopClientDesktopNotificationFetched = 'desktop_notification_fetched';
+  static const String desktopClientDesktopNotificationQueued = 'desktop_notification_queued';
+  static const String desktopClientDesktopNotificationToastShown = 'desktop_notification_toast_shown';
+  static const String desktopClientDesktopNotificationToastDenied = 'desktop_notification_toast_denied';
+  static const String desktopClientDesktopNotificationDismissed = 'desktop_notification_dismissed';
+  static const String desktopClientDesktopNotificationPageDropped = 'desktop_notification_page_dropped';
+  static const String desktopClientVoiceStartFailed = 'voice_start_failed';
+  static const String desktopClientChatSessionStarted = 'chat_session_started';
+  static const String desktopClientChatMessageSent = 'chat_message_sent';
+  static const String desktopClientChatTurnFailed = 'chat_turn_failed';
+  static const String desktopClientDraftCardCopied = 'draft_card_copied';
+  static const String desktopClientDraftCardDismissed = 'draft_card_dismissed';
+  static const String desktopClientCallbackCardShown = 'callback_card_shown';
+  static const String desktopClientCallbackCardEngaged10s = 'callback_card_engaged_10s';
+  static const String desktopClientCallbackCardDismissed = 'callback_card_dismissed';
+  static const String desktopClientCallbackCardToggleOff = 'callback_card_toggle_off';
+  static const String desktopClientCallbackChipDeleted = 'callback_chip_deleted';
+  static const String desktopClientTurnContextUpload = 'turn_context_upload';
+  static const String desktopClientScreenSightToggled = 'screen_sight_toggled';
+  static const String desktopClientMeetingAutoSummon = 'meeting_auto_summon';
+  static const String desktopClientMeetingTickerDismissed = 'meeting_ticker_dismissed';
+  static const String desktopClientMeetingAlertsToggleOff = 'meeting_alerts_toggle_off';
+  static const String desktopClientMeetingNotesArmToggled = 'meeting_notes_arm_toggled';
+  static const String desktopClientMeetingNotesAutoToggled = 'meeting_notes_auto_toggled';
+  static const String desktopClientMeetingCaptureStarted = 'meeting_capture_started';
+  static const String desktopClientMeetingCaptureManual = 'meeting_capture_manual';
+  static const String desktopClientMeetingCaptureCompleted = 'meeting_capture_completed';
+  static const String desktopClientMeetingCaptureFailed = 'meeting_capture_failed';
+  static const String desktopClientMeetingCapBlocked = 'meeting_cap_blocked';
+  static const String desktopClientMeetingUploadAttempt = 'meeting_upload_attempt';
+  static const String desktopClientMeetingNoteCardShown = 'meeting_note_card_shown';
+  static const String desktopClientMeetingNoteCardDismissed = 'meeting_note_card_dismissed';
+  static const String desktopClientMeetingNoteCardToggleOff = 'meeting_note_card_toggle_off';
+  static const String desktopClientGuideSession = 'guide_session';
+  static const String desktopClientGuideCompleted = 'guide_completed';
+  static const String desktopClientGuideAbandoned = 'guide_abandoned';
+  static const String desktopClientGuideStepsReceived = 'guide_steps_received';
+  static const String desktopClientGuideAutoFramesSent = 'guide_auto_frames_sent';
+  static const String desktopClientGuideAgentTimeouts = 'guide_agent_timeouts';
+  static const String desktopClientInterviewCompanionSessionStarted = 'interview_companion_session_started';
+  static const String desktopClientInterviewCompanionSessionEnded = 'interview_companion_session_ended';
+  static const String desktopClientInterviewCompanionTurnLatency = 'interview_companion_turn_latency';
+  static const String desktopClientInterviewCompanionFirstAnswerText = 'interview_companion_first_answer_text';
+  static const String desktopClientInterviewCompanionAnswerCompleted = 'interview_companion_answer_completed';
+  static const String desktopClientInterviewCompanionQuestionDecision = 'interview_companion_question_decision';
+  static const String desktopClientInterviewCompanionResumeAttached = 'interview_companion_resume_attached';
+  static const String desktopClientInterviewCompanionCredentialRotation = 'interview_companion_credential_rotation';
+  static const String desktopClientInterviewCompanionScreenSight = 'interview_companion_screen_sight';
+  static const String desktopClientInterviewCompanionReflection = 'interview_companion_reflection';
+  static const String desktopClientInterviewCompanionRecovery = 'interview_companion_recovery';
+  static const String desktopClientInterviewCompanionError = 'interview_companion_error';
+  static const String desktopClientDesktopDictationShareDrain = 'desktop_dictation_share_drain';
+  static const String desktopClientDictationHoldCompleted = 'dictation_hold_completed';
+  static const String desktopClientDesktopUpdateAvailable = 'desktop_update_available';
+  static const String desktopClientDesktopUpdateCheckFailed = 'desktop_update_check_failed';
+  static const String desktopClientDesktopUpdateInstallStarted = 'desktop_update_install_started';
+  static const String desktopClientDesktopUpdateInstallResult = 'desktop_update_install_result';
+  static const String desktopClientDesktopPermissionResult = 'desktop_permission_result';
+  static const String desktopClientFeedbackSubmitted = 'feedback_submitted';
+  static const String desktopClientDesktopHeartbeat = 'desktop_heartbeat';
+  static const String desktopClientDesktopStartupDiagnosticsSent = 'desktop_startup_diagnostics_sent';
+  static const String desktopClientClientLog = 'client_log';
+
+  // Breakdown keys stamped by the desktop client.
+  static const String propDesktopWindowLabel = 'window_label';
+  static const String propDesktopInstallId = 'install_id';
+  static const String propDesktopLastExitKind = 'last_exit_kind';
+  static const String propDesktopConsecutiveFailedLaunches = 'consecutive_failed_launches';
 }

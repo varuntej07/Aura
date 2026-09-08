@@ -3,6 +3,10 @@
 POST /diagnostics/startup -> UNAUTHENTICATED. An Android client whose PREVIOUS
                              launch never rendered a frame posts what the OS
                              recorded about that death.
+POST /diagnostics/desktop -> UNAUTHENTICATED. The Aura-Desktop client (Tauri,
+                             Windows and macOS) posts a small crash-loop beacon
+                             when its previous run did not exit cleanly. Same
+                             posture, same collection, much smaller body.
 
 Why this endpoint exists at all
 -------------------------------
@@ -54,10 +58,17 @@ for a device in a permanent crash loop, which is exactly the case that motivated
 this endpoint.
 
 Firestore layout (field names are the module constants below):
-  startup_diagnostics/{auto-id}: install_id, previous_stage,
+  startup_diagnostics/{auto-id}: platform ("android"), install_id, previous_stage,
                                  consecutive_failed_launches, launch_count,
                                  device{...}, exits[...], received_at, expires_at
                                  (backend-only; denied to clients)
+  startup_diagnostics/{auto-id}: platform ("desktop"), install_id, app_version,
+                                 os_platform, os_version, os_arch, launch_count,
+                                 consecutive_failed_launches, last_exit{kind, at},
+                                 crash_reporter_alive, previous_app_version,
+                                 received_at, expires_at
+  Rows written before the desktop beacon existed carry no `platform` field; treat
+  a missing value as "android" when reading.
 """
 
 from __future__ import annotations
@@ -110,6 +121,31 @@ FIELD_DEVICE = "device"
 FIELD_EXITS = "exits"
 FIELD_RECEIVED_AT = "received_at"
 FIELD_EXPIRES_AT = "expires_at"
+
+# Which client wrote the row. Added with the desktop beacon; older Android rows
+# have no value here.
+FIELD_PLATFORM = "platform"
+PLATFORM_ANDROID = "android"
+PLATFORM_DESKTOP = "desktop"
+
+# Desktop-only fields. The desktop client has a crash reporter of its own
+# (Sentry minidumps), so this beacon carries only what is needed to spot a
+# crash loop that the reporter itself never got to send.
+FIELD_APP_VERSION = "app_version"
+FIELD_OS_PLATFORM = "os_platform"
+FIELD_OS_VERSION = "os_version"
+FIELD_OS_ARCH = "os_arch"
+FIELD_LAST_EXIT = "last_exit"
+FIELD_CRASH_REPORTER_ALIVE = "crash_reporter_alive"
+FIELD_PREVIOUS_APP_VERSION = "previous_app_version"
+
+MAX_DESKTOP_VERSION_LENGTH = 32
+MAX_DESKTOP_OS_VERSION_LENGTH = 64
+MAX_DESKTOP_OS_ARCH_LENGTH = 16
+MAX_DESKTOP_EXIT_AT_LENGTH = 64
+
+_DESKTOP_OS_PLATFORMS = frozenset({"windows", "macos"})
+_DESKTOP_EXIT_KINDS = frozenset({"clean", "crash", "unknown"})
 
 # Explicit allowlists. Anything not named here is dropped, so the stored shape is
 # decided by this file and never by the client.
@@ -231,6 +267,7 @@ def build_report_doc(body: dict, install_id: str, now: datetime) -> dict:
     """The exact document written to Firestore. Pure, so the stored shape can be
     inspected directly without a database."""
     return {
+        FIELD_PLATFORM: PLATFORM_ANDROID,
         FIELD_INSTALL_ID: install_id,
         FIELD_PREVIOUS_STAGE: _clean_string(body.get("previous_stage")),
         FIELD_CONSECUTIVE_FAILURES: _clean_int(
@@ -243,6 +280,78 @@ def build_report_doc(body: dict, install_id: str, now: datetime) -> dict:
         FIELD_RECEIVED_AT: now,
         FIELD_EXPIRES_AT: now + timedelta(days=DIAGNOSTICS_TTL_DAYS),
     }
+
+
+def _clean_bool(raw: object) -> bool | None:
+    """A bool, or None. Only a real bool counts: 1 / "true" are not accepted."""
+    if isinstance(raw, bool):
+        return raw
+    return None
+
+
+def _clean_count(raw: object) -> int:
+    """A non-negative launch counter. Anything unusable or negative becomes 0."""
+    value = _clean_int(raw)
+    if value is None or value < 0:
+        return 0
+    return value
+
+
+def _clean_choice(raw: object, allowed: frozenset[str]) -> str | None:
+    """A short string that must be one of a fixed set, else None."""
+    value = _clean_string(raw, max_length=MAX_DESKTOP_OS_ARCH_LENGTH)
+    if value is None:
+        return None
+    lowered = value.lower()
+    return lowered if lowered in allowed else None
+
+
+def sanitize_last_exit(raw: object) -> dict:
+    """What the desktop client knows about how its previous run ended. An
+    unrecognised kind is stored as "unknown" rather than dropped, because the
+    beacon only fires when something already went wrong and a row with no
+    verdict is still a row worth counting."""
+    if not isinstance(raw, dict):
+        return {"kind": "unknown"}
+    record: dict = {"kind": _clean_choice(raw.get("kind"), _DESKTOP_EXIT_KINDS) or "unknown"}
+    at = _clean_string(raw.get("at"), max_length=MAX_DESKTOP_EXIT_AT_LENGTH)
+    if at is not None:
+        record["at"] = at
+    return record
+
+
+def build_desktop_report_doc(body: dict, install_id: str, now: datetime) -> dict:
+    """The exact document written for a desktop beacon. Pure, like
+    `build_report_doc`, so the stored shape can be inspected without Firestore.
+    Optional fields are omitted rather than stored as None."""
+    document: dict = {
+        FIELD_PLATFORM: PLATFORM_DESKTOP,
+        FIELD_INSTALL_ID: install_id,
+        FIELD_APP_VERSION: _clean_string(
+            body.get(FIELD_APP_VERSION), max_length=MAX_DESKTOP_VERSION_LENGTH
+        ),
+        FIELD_OS_PLATFORM: _clean_choice(body.get(FIELD_OS_PLATFORM), _DESKTOP_OS_PLATFORMS),
+        FIELD_OS_VERSION: _clean_string(
+            body.get(FIELD_OS_VERSION), max_length=MAX_DESKTOP_OS_VERSION_LENGTH
+        ),
+        FIELD_OS_ARCH: _clean_string(
+            body.get(FIELD_OS_ARCH), max_length=MAX_DESKTOP_OS_ARCH_LENGTH
+        ),
+        FIELD_LAUNCH_COUNT: _clean_count(body.get(FIELD_LAUNCH_COUNT)),
+        FIELD_CONSECUTIVE_FAILURES: _clean_count(body.get(FIELD_CONSECUTIVE_FAILURES)),
+        FIELD_LAST_EXIT: sanitize_last_exit(body.get(FIELD_LAST_EXIT)),
+        FIELD_RECEIVED_AT: now,
+        FIELD_EXPIRES_AT: now + timedelta(days=DIAGNOSTICS_TTL_DAYS),
+    }
+    reporter_alive = _clean_bool(body.get(FIELD_CRASH_REPORTER_ALIVE))
+    if reporter_alive is not None:
+        document[FIELD_CRASH_REPORTER_ALIVE] = reporter_alive
+    previous_version = _clean_string(
+        body.get(FIELD_PREVIOUS_APP_VERSION), max_length=MAX_DESKTOP_VERSION_LENGTH
+    )
+    if previous_version is not None:
+        document[FIELD_PREVIOUS_APP_VERSION] = previous_version
+    return document
 
 
 def _install_is_over_quota(install_id: str) -> bool:
@@ -352,6 +461,79 @@ async def handle_startup_diagnostics(request: Request) -> JSONResponse:
         "sdk_int": device.get("sdk_int"),
         "app_version": device.get("app_version"),
         "installer": device.get("installer"),
+    })
+
+    return JSONResponse({"ok": True}, status_code=200)
+
+
+# ── POST /diagnostics/desktop ────────────────────────────────────────────────
+async def handle_desktop_startup_diagnostics(request: Request) -> JSONResponse:
+    """Record one desktop crash-loop beacon.
+
+    Same contract as the Android handler: body cap, install-id gate, per-install
+    quota, always 200 once the request is well formed enough to be grouped. The
+    desktop client already has Sentry for crashes it can report on; this beacon
+    covers the launch that dies before Sentry (or the sign-in screen) is up, so
+    a crash loop is visible even when nothing else is.
+    """
+    raw_body = await request.body()
+    if len(raw_body) > MAX_BODY_BYTES:
+        logger.warn("Diagnostics: oversized desktop report rejected", {
+            "bytes": len(raw_body),
+            "limit": MAX_BODY_BYTES,
+        })
+        return JSONResponse({"ok": False, "error": "too_large"}, status_code=413)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    install_id = sanitize_install_id(body.get(FIELD_INSTALL_ID))
+    if install_id is None:
+        return JSONResponse({"ok": False, "error": "invalid_install_id"}, status_code=400)
+
+    if _install_is_over_quota(install_id):
+        logger.info("Diagnostics: desktop report throttled", {
+            "install_id": install_id,
+            "window_seconds": INSTALL_WINDOW_SECONDS,
+        })
+        return JSONResponse({"ok": True, "throttled": True}, status_code=200)
+
+    now = datetime.now(UTC)
+    document = build_desktop_report_doc(body, install_id, now)
+
+    def _write() -> None:
+        db = admin_firestore()
+        db.collection(STARTUP_DIAGNOSTICS_COLLECTION).document().set(document)
+
+    try:
+        await asyncio.to_thread(_write)
+    except Exception as exc:
+        logger.exception("Diagnostics: desktop report write failed", {
+            "error": str(exc),
+        })
+        # Still 200: the client cannot act on this and must not retry.
+        return JSONResponse({"ok": False, "error": "internal"}, status_code=200)
+
+    _record_report_call()
+
+    # Error level for the same reason as the Android handler: a desktop app that
+    # keeps dying on launch should page someone, not sit in a collection.
+    logger.error("Diagnostics: desktop app failed to launch cleanly", {
+        "install_id": install_id,
+        "app_version": document[FIELD_APP_VERSION],
+        "previous_app_version": document.get(FIELD_PREVIOUS_APP_VERSION),
+        "os_platform": document[FIELD_OS_PLATFORM],
+        "os_version": document[FIELD_OS_VERSION],
+        "os_arch": document[FIELD_OS_ARCH],
+        "consecutive_failures": document[FIELD_CONSECUTIVE_FAILURES],
+        "launch_count": document[FIELD_LAUNCH_COUNT],
+        "last_exit_kind": document[FIELD_LAST_EXIT].get("kind"),
+        "last_exit_at": document[FIELD_LAST_EXIT].get("at"),
+        "crash_reporter_alive": document.get(FIELD_CRASH_REPORTER_ALIVE),
     })
 
     return JSONResponse({"ok": True}, status_code=200)
