@@ -1353,15 +1353,45 @@ class ToolExecutor:
         if len(key) > 120 or len(value) > 2_000:
             raise ValueError("memory content is too long")
 
-        consent_granted = await _run(
-            lambda: (
-                (
-                    self._user_ref().get().to_dict() or {}
-                ).get("aura_consent_granted")
-                is not False
+        from .safety.age_band import resolve_age_band
+        from .safety.age_signals import is_reserved_age_key, record_age_signal
+
+        # One read serves both the age band and the consent check below; this
+        # used to be a lambda that fetched the doc purely to test one field.
+        user_doc = await _run(lambda: self._user_ref().get().to_dict() or {})
+
+        # Age is a safety signal, never a preference. Refusing the write is the
+        # point: a stored age silently re-enters later prompts as a
+        # personalization fact, which is how a self-reported 15-year-old ended
+        # up being profiled against an account declaring 20 (2026-09-08).
+        if is_reserved_age_key(key):
+            declared = resolve_age_band(user_doc)
+            await record_age_signal(
+                self._user_id,
+                stated_value=value,
+                declared=declared,
+                surface=self._created_via,
+                session_id=self._client_message_id or "",
+                memory_key=key,
             )
-        )
-        if not consent_granted:
+            return {
+                "ok": False,
+                "error": True,
+                "code": "age_not_storable",
+                "retryable": False,
+                "user_message": (
+                    "I don't keep your age in memory, so I haven't saved that."
+                ),
+                "then": (
+                    "Say that plainly and move on. Do not claim it was saved, do not "
+                    "offer to save it another way, and do not repeat the age back."
+                ),
+            }
+
+        # `is True`, not `is not False`. Every other consent site in this
+        # codebase reads it strictly; this one alone was fail-open, so an
+        # account with the field absent or null still got memories written.
+        if user_doc.get("aura_consent_granted") is not True:
             return {
                 "ok": False,
                 "error": True,

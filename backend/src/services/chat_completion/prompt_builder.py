@@ -22,7 +22,13 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ...lib.logger import logger
-from ...prompts import DEPTH_INSTRUCTIONS, MOBILE_TEXT_SYSTEM_PROMPT, TONE_DESCRIPTIONS
+from ...prompts import (
+    DEPTH_INSTRUCTIONS,
+    MOBILE_TEXT_SYSTEM_PROMPT,
+    TONE_DESCRIPTIONS,
+    minor_conversation_policy,
+)
+from ..safety.age_band import applies_minor_policy, resolve_age_band
 from ..memory.retrieval import (
     render_relevant_memory_block,
     retrieve_relevant_memory,
@@ -432,5 +438,19 @@ async def build_turn_system_blocks(
             )
             if memory_block:
                 blocks.append({"type": "text", "text": memory_block})
+
+    # LAST, deliberately. This is an override, so it has to sit after the
+    # profile suffix, the summary, and the injected memory rather than before
+    # them: the identity block permits reciprocated flirtation gated only on the
+    # user's own initiation, and injected profile or memory content can push the
+    # same way. Recency is what makes the override actually bind.
+    #
+    # Empty string for every adult and for UNKNOWN, so no non-minor prompt
+    # changes by a single byte, and the cached prefix is untouched either way.
+    minor_block = minor_conversation_policy(
+        applies_minor_policy(resolve_age_band(user_doc).band)
+    )
+    if minor_block:
+        blocks.append({"type": "text", "text": minor_block})
 
     return blocks

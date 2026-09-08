@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...lib.logger import logger
+from ...prompts import minor_conversation_policy
+from ...services.safety.age_band import applies_minor_policy, band_from_value
 from ...services.entitlement import (
     get_remaining_free_voice_seconds,
     get_user_effective_tier,
@@ -75,6 +77,14 @@ class SessionContext:
             ),
             "memory_summary": self.memory_summary or "(nothing yet — first conversation)",
             "graph_context": self.graph_context,
+            # Rendered AFTER </session> so it is the last thing in the
+            # instructions, which is what makes it override the identity
+            # block's romance rule rather than sit alongside it. "" for every
+            # adult and for an unreadable age, so a non-minor session renders
+            # byte-identically to before this slot existed.
+            "minor_policy": minor_conversation_policy(
+                applies_minor_policy(band_from_value(self.profile.get("age_band")))
+            ),
             "last_session_context": self.last_session_summary,
             "archive_context": self.archive_context,
             "user_aura_profile": self.aura_summary,

@@ -550,7 +550,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "existing key overwrites it, which is how a correction is applied. Do "
             "NOT use for something to do at a time (that is set_reminder), for a "
             "calendar event, or to remove a memory (that is delete_memory). Pick the "
-            "closest category; nothing the user says about themselves is unstorable."
+            "closest category; almost nothing the user says about themselves is "
+            "unstorable. The exception is how old they are: age, date of birth, "
+            "birthday and school grade are never stored here, and the tool will "
+            "refuse them. Aura already knows the age on the account, and a second "
+            "copy learned from conversation is a safety matter rather than a "
+            "preference."
         ),
         "strict": True,
         "inputSchema": {

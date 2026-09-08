@@ -38,12 +38,22 @@ _ENCODING = tiktoken.get_encoding("o200k_base")
 # paid-plan refusal was sitting unread in the tool's own `say`. Anything added here has
 # to earn its tokens the same way; do not raise these to make a comfortable prompt fit.
 #
+# Raised a fourth time (2026-09-08, all three surfaces, ~85 tokens each) by the measured
+# cost of the self-harm exception and the never-guess-an-age rule in _SAFETY_AND_STOP_RULES.
+# Neither is optional: the backend had NO crisis handling of any kind (a grep for
+# suicid|self-harm|crisis|hotline|988 across src/ returned one alarm ringtone slug), while
+# California SB 243 and New York's AI companion law both require detecting and responding to
+# expressions of suicidal ideation, and this product meets their definition of a companion
+# chatbot. The age line answers a live session that guessed a user's age and then treated
+# their real one as banter. These are the cheapest correct versions of both, already trimmed
+# once from 173 tokens to 121.
+#
 # Each ceiling sits ~48 tokens above its measured prompt, so unintended growth still
 # trips the guard rather than being absorbed by it.
 _BEFORE_TOTAL_TOKENS = {
-    "app": 2000,
-    "keyboard": 2050,
-    "desktop": 2266,
+    "app": 2133,
+    "keyboard": 2186,
+    "desktop": 2399,
 }
 
 _CONTEXT_ONE = {
