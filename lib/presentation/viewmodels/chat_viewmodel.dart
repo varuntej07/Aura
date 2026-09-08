@@ -904,6 +904,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
                   timestamp: DateTime.now(),
                   channel: ChatMessageChannel.text,
                   sessionId: _currentSessionId,
+                  llmModel: metadata?['llm_model'] as String?,
                   reminderPayload: reminderJson != null
                       ? ReminderPayload.fromJson(reminderJson)
                       : null,
@@ -1201,6 +1202,7 @@ abstract class ChatViewModel extends SafeChangeNotifier {
           sessionId:
               _currentSessionId ??
               (reply.sessionId.isNotEmpty ? reply.sessionId : null),
+          llmModel: reply.llmModel.isNotEmpty ? reply.llmModel : null,
           reminderPayload: reply.reminder != null
               ? ReminderPayload.fromJson(reply.reminder!)
               : null,

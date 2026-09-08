@@ -21,11 +21,15 @@ class ServerReply {
   final String sessionId;
   final Map<String, dynamic>? reminder;
 
+  /// The LLM that produced [answerText] server-side. 
+  final String llmModel;
+
   const ServerReply({
     required this.status,
     required this.answerText,
     required this.sessionId,
     this.reminder,
+    this.llmModel = '',
   });
 }
 
@@ -189,6 +193,7 @@ class ChatBackupService {
               clarificationJson: Value(_encodeJsonField(d['clarification'])),
               attachmentJson: Value(_encodeJsonField(d['attachments'])),
               inputMethod: Value(d['input_method'] as String?),
+              llmModel: Value(d['llm_model'] as String?),
             ),
           );
         }
@@ -237,6 +242,7 @@ class ChatBackupService {
         answerText: (d['answer_text'] as String?) ?? '',
         sessionId: (d['session_id'] as String?) ?? '',
         reminder: d['reminder'] as Map<String, dynamic>?,
+        llmModel: (d['llm_model'] as String?) ?? '',
       );
     } catch (e, st) {
       AppLogger.error(
@@ -512,6 +518,10 @@ class ChatBackupService {
       if (message.engagementAgent != null)
         'engagement_agent': message.engagementAgent,
       if (message.inputMethod != null) 'input_method': message.inputMethod,
+      // Absent, rather than a placeholder, when the model was not reported: an
+      // assistant message with no llm_model means "not recorded", never "unknown
+      // model answered".
+      if (message.llmModel != null) 'llm_model': message.llmModel,
       'reminder': ?reminder,
       'clarification': ?clarification,
       'attachments': ?attachments,

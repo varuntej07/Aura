@@ -54,6 +54,7 @@ FIELD_ANSWER_TEXT = "answer_text"
 FIELD_COMPLETED_TOOLS = "completed_tools"  # side-effecting tools that already ran (for synthesize/skip)
 FIELD_TOOL_RECEIPTS = "tool_receipts"      # successful result per tool, owned by this turn
 FIELD_REMINDER = "reminder"                # reminder payload if the turn created one
+FIELD_LLM_MODEL = "llm_model"                      # the LLM that actually produced answer_text
 FIELD_PUSHED = "pushed"
 FIELD_EXPIRES_AT = "expires_at"
 
@@ -247,6 +248,7 @@ async def mark_complete(
     answer_text: str,
     completed_tools: list[str] | None = None,
     reminder: dict[str, Any] | None = None,
+    model: str = "",
     pushed: bool = False,
     now: datetime | None = None,
 ) -> None:
@@ -277,6 +279,8 @@ async def mark_complete(
             payload[FIELD_COMPLETED_TOOLS] = completed_tools
         if reminder is not None:
             payload[FIELD_REMINDER] = reminder
+        if model:
+            payload[FIELD_LLM_MODEL] = model
         _ref(user_id, cmid).set(payload, merge=True)
 
     try:

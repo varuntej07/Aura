@@ -358,6 +358,7 @@ async def stream_openai_chat_fallback(
                 )
                 metadata: dict[str, Any] = {
                     "tool_names": names_used, "awaiting_clarification": True,
+                    "llm_model": settings.OPENAI_CHAT_MODEL,
                 }
                 if reminder_data:
                     metadata["reminder"] = reminder_data
@@ -392,7 +393,9 @@ async def stream_openai_chat_fallback(
             }
 
         reminder_data = next((d["data"] for d in captured if d["tool"] == "set_reminder"), None)
-        metadata = {"tool_names": names_used}
+        # Third-tier hop: the recorded model is GPT's, not the Anthropic tier the
+        # turn started on nor the Gemini hop that delegated here.
+        metadata = {"tool_names": names_used, "llm_model": settings.OPENAI_CHAT_MODEL}
         if limit_exhausted:
             metadata["termination_reason"] = "max_tool_turns"
         if reminder_data:

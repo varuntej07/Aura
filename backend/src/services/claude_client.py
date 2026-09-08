@@ -784,6 +784,7 @@ class ClaudeClient:
                     metadata: dict[str, Any] = {
                         "tool_names": tool_names_used,
                         "awaiting_clarification": True,
+                        "llm_model": model_chain[current_model_idx],
                     }
                     if reminder_data:
                         metadata["reminder"] = reminder_data
@@ -822,7 +823,14 @@ class ClaudeClient:
                 (d["data"] for d in all_captured_tool_data if d["tool"] == "set_reminder"),
                 None,
             )
-            metadata = {"tool_names": tool_names_used}
+            # The model that actually produced this answer, not the tier that was
+            # asked for: current_model_idx has already moved if the primary was
+            # exhausted mid-turn. A turn that crossed providers never reaches here:
+            # the Gemini/GPT hops emit their own done event with their own model id.
+            metadata = {
+                "tool_names": tool_names_used,
+                "llm_model": model_chain[current_model_idx],
+            }
             if limit_exhausted:
                 metadata["termination_reason"] = "max_tool_turns"
             if reminder_data:

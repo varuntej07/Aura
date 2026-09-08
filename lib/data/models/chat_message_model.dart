@@ -35,6 +35,10 @@ class ChatMessageModel {
   /// messages and for legacy rows written before this was captured.
   final ChatMessageInputMethod? inputMethod;
 
+  /// The LLM that actually produced this assistant message, as the provider's own
+  /// model id (e.g. 'claude-sonnet-5', 'gpt-4.1').
+  final String? llmModel;
+
   /// Null until the message is persisted to a SQLite session.
   final String? sessionId;
 
@@ -65,6 +69,7 @@ class ChatMessageModel {
     this.feedback,
     this.errorReason,
     this.inputMethod,
+    this.llmModel,
     this.sessionId,
     this.engagementId,
     this.engagementAgent,
@@ -102,6 +107,7 @@ class ChatMessageModel {
               (m) => m.name == map['input_method'],
               orElse: () => ChatMessageInputMethod.typed,
             ),
+      llmModel: map['llm_model'] as String?,
       sessionId: map['session_id'] as String?,
       engagementId: map['engagement_id'] as String?,
       engagementAgent: map['engagement_agent'] as String?,
@@ -125,6 +131,7 @@ class ChatMessageModel {
         if (feedback != null) 'feedback': feedback!.name,
         if (errorReason != null) 'error_reason': errorReason,
         if (inputMethod != null) 'input_method': inputMethod!.name,
+        if (llmModel != null) 'llm_model': llmModel,
         if (sessionId != null) 'session_id': sessionId,
         if (engagementId != null) 'engagement_id': engagementId,
         if (engagementAgent != null) 'engagement_agent': engagementAgent,
@@ -197,6 +204,7 @@ class ChatMessageModel {
     MessageFeedback? Function()? feedback,
     String? Function()? errorReason,
     ChatMessageInputMethod? inputMethod,
+    String? llmModel,
     String? sessionId,
     String? engagementId,
     String? engagementAgent,
@@ -214,6 +222,7 @@ class ChatMessageModel {
       feedback: feedback != null ? feedback() : this.feedback,
       errorReason: errorReason != null ? errorReason() : this.errorReason,
       inputMethod: inputMethod ?? this.inputMethod,
+      llmModel: llmModel ?? this.llmModel,
       sessionId: sessionId ?? this.sessionId,
       engagementId: engagementId ?? this.engagementId,
       engagementAgent: engagementAgent ?? this.engagementAgent,

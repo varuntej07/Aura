@@ -188,6 +188,7 @@ class ChatRepository {
                 clarificationJson:
                     Value(msg.clarificationPayload?.toJsonString()),
                 inputMethod: Value(msg.inputMethod?.name),
+                llmModel: Value(msg.llmModel),
               ),
             );
 
@@ -451,6 +452,7 @@ class ChatRepository {
               (m) => m.name == row.inputMethod,
               orElse: () => ChatMessageInputMethod.typed,
             ),
+      llmModel: row.llmModel,
       sessionId: row.sessionId,
       engagementId: row.engagementId,
       engagementAgent: row.engagementAgent,

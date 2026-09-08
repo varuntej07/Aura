@@ -301,7 +301,11 @@ async def stream_gemini_chat_fallback(
                 reminder_data = next(
                     (d["data"] for d in captured if d["tool"] == "set_reminder"), None
                 )
-                metadata: dict[str, Any] = {"tool_names": names_used, "awaiting_clarification": True}
+                metadata: dict[str, Any] = {
+                    "tool_names": names_used,
+                    "awaiting_clarification": True,
+                    "llm_model": settings.TIER_CHEAP,
+                }
                 if reminder_data:
                     metadata["reminder"] = reminder_data
                 yield {"type": "done", "metadata": metadata}
@@ -333,7 +337,9 @@ async def stream_gemini_chat_fallback(
             }
 
         reminder_data = next((d["data"] for d in captured if d["tool"] == "set_reminder"), None)
-        metadata = {"tool_names": names_used}
+        # This hop answered, so the recorded model is Gemini's, not the Anthropic
+        # tier the turn started on.
+        metadata = {"tool_names": names_used, "llm_model": settings.TIER_CHEAP}
         if limit_exhausted:
             metadata["termination_reason"] = "max_tool_turns"
         if reminder_data:

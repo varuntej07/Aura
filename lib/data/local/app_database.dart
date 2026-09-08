@@ -43,6 +43,9 @@ class ChatMessages extends Table {
   // v10: how the user entered this message — 'typed' | 'pasted'. Null for
   // assistant messages and legacy rows written before capture existed.
   TextColumn get inputMethod => text().nullable()();
+  // v12: the LLM that actually produced this assistant message, as the provider's
+  // own model id. 
+  TextColumn get llmModel => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};
@@ -116,7 +119,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.executor);
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => 12;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -237,6 +240,11 @@ class AppDatabase extends _$AppDatabase {
         await m.createTable(getBetterCatalogCaches);
         await m.createTable(getBetterStoryProgress);
         await m.createTable(getBetterEventOutbox);
+      }
+      if (from < 12) {
+        await customStatement(
+          'ALTER TABLE "chat_messages" ADD COLUMN "llm_model" TEXT',
+        );
       }
     },
     beforeOpen: (details) async {

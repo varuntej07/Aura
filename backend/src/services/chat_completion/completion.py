@@ -204,7 +204,7 @@ async def complete_turn(
         logger.info("chat_completion: skipped (had attachments)", {"user_id": user_id, "cmid": cmid})
         return "skipped_attachments"
 
-    answer, reminder, tools = await _regenerate(turn, user_id, cmid)
+    answer, reminder, tools, model = await _regenerate(turn, user_id, cmid)
     if not answer.strip():
         if not await _store_desktop_answer(
             user_id, desktop_conversation_id, cmid,
@@ -223,7 +223,8 @@ async def complete_turn(
     ):
         return _leave_repairable(user_id, cmid, "regenerated")
     await turn_store.mark_complete(
-        user_id, cmid, answer_text=answer, completed_tools=tools, reminder=reminder, pushed=True
+        user_id, cmid, answer_text=answer, completed_tools=tools, reminder=reminder,
+        model=model, pushed=True,
     )
     await _push_reply(user_id, cmid, session_id, answer)
     logger.info("chat_completion: regenerated and pushed", {
@@ -234,9 +235,9 @@ async def complete_turn(
 
 async def _regenerate(
     turn: dict[str, Any], user_id: str, cmid: str
-) -> tuple[str, dict[str, Any] | None, list[str]]:
+) -> tuple[str, dict[str, Any] | None, list[str], str]:
     """Re-run the chat turn server-side, consuming the stream to completion. Returns
-    (answer_text, reminder_payload_or_None, tool_names)."""
+    (answer_text, reminder_payload_or_None, tool_names, model_id)."""
     message = str(turn.get(turn_store.FIELD_MESSAGE) or "")
     history = list(turn.get(turn_store.FIELD_HISTORY) or [])
     tier = str(turn.get(turn_store.FIELD_TIER) or "pro")
@@ -287,6 +288,7 @@ async def _regenerate(
     parts: list[str] = []
     reminder: dict[str, Any] | None = None
     tools: list[str] = []
+    model = ""
     try:
         async for ev in claude.send_text_turn_stream(
             system_prompt=system_blocks,
@@ -303,6 +305,7 @@ async def _regenerate(
             elif etype == "done":
                 metadata = ev.get("metadata") or {}
                 tools = list(metadata.get("tool_names") or [])
+                model = str(metadata.get("llm_model") or "")
                 if metadata.get("reminder"):
                     reminder = metadata["reminder"]
             elif etype == "error":
@@ -314,7 +317,7 @@ async def _regenerate(
             "user_id": user_id, "cmid": cmid, "error": str(exc),
         })
 
-    return "".join(parts), reminder_ui_payload(reminder, tools), tools
+    return "".join(parts), reminder_ui_payload(reminder, tools), tools, model
 
 
 def _synthesize_confirmation(tools: list[str]) -> str:

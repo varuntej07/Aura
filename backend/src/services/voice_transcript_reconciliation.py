@@ -23,6 +23,7 @@ class ReconciliationResult:
     expected: int = 0
     matched: int = 0
     inserted: int = 0
+    model_stamped: int = 0
     conflicts: int = 0
     status: str = "skipped"
 
@@ -69,6 +70,12 @@ async def reconcile_voice_transcript(
         matched = 0
         conflicts = 0
 
+        # Assistant turns whose document the CLIENT wrote first, and which therefore
+        # cannot carry the model that spoke them: the phone never learns which
+        # FallbackAdapter leg answered. Stamped below with a field-only merge, and only
+        # when the field is absent, so this is one extra write per assistant turn for
+        # the life of the message and never repeats on a later reconciliation.
+        model_backfill: list[tuple[object, str]] = []
         for index, turn in enumerate(expected_turns):
             message_id = deterministic_voice_message_id(conversation_id, index)
             ref = messages.document(message_id)
@@ -85,6 +92,9 @@ async def reconcile_voice_transcript(
                 conflicts += 1
             else:
                 matched += 1
+                turn_model = str(turn.get("llm_model") or "")
+                if turn_model and not data.get("llm_model"):
+                    model_backfill.append((ref, turn_model))
 
         if conflicts:
             return ReconciliationResult(
@@ -92,7 +102,7 @@ async def reconcile_voice_transcript(
                 conflicts=conflicts, status="conflict",
             )
 
-        if not missing and not parent_missing:
+        if not missing and not parent_missing and not model_backfill:
             return ReconciliationResult(
                 expected=len(expected_turns), matched=matched, status="parity",
             )
@@ -119,11 +129,15 @@ async def reconcile_voice_transcript(
                 "sequence": original_index + 1,
                 "status": "sent",
                 "voice_run_id": voice_run_id,
+                **({"llm_model": str(turn["llm_model"])} if turn.get("llm_model") else {}),
             }, merge=True)
+        for ref, turn_model in model_backfill:
+            batch.set(ref, {"llm_model": turn_model}, merge=True)
         batch.commit()
         return ReconciliationResult(
             expected=len(expected_turns), matched=matched,
-            inserted=len(missing), status="repaired",
+            inserted=len(missing), model_stamped=len(model_backfill),
+            status="repaired",
         )
 
     try:

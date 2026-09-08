@@ -448,11 +448,28 @@ class VoiceSessionRecorder:
                 "session_id": self._session_id, "user_id": self._user_id,
                 "text_length": len(str(content)),
             })
-            self.turns.append({
+            # Which LLM actually spoke this turn. The voice pipeline is a
+            # FallbackAdapter over three legs, so this is not derivable from
+            # config: it comes from the per-turn metadata LiveKit attaches to the
+            # ChatMessage (already parsed into metrics_payload above), which the
+            # adapter re-emits verbatim from whichever leg answered. Absent when
+            # LiveKit reported no metrics for the turn, and absent stays absent
+            # rather than being guessed from settings.
+            turn_record: dict[str, Any] = {
                 "role": "assistant",
-                "text": str(content)[:500],
+                # 500 used to be the cap, and it hid the thing it was recording: a
+                # too-long spoken answer stored as exactly 500 characters is
+                # indistinguishable from one that merely was 500 long, so voice
+                # verbosity could not be measured from a stored session at all.
+                # 2000 is well above any answer this prompt should produce and
+                # keeps raw_turns far inside the 1 MiB Firestore document limit.
+                "text": str(content)[:2000],
                 "timestamp": datetime.now(UTC).isoformat(),
-            })
+            }
+            llm_model = metrics_payload.get("llm_model")
+            if llm_model:
+                turn_record["llm_model"] = str(llm_model)
+            self.turns.append(turn_record)
             if self._turn_metrics is not None and not bool(
                 getattr(item, "interrupted", False)
             ):
