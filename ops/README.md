@@ -220,8 +220,21 @@ mobile warnings/errors are redacted by `AppLogger` and read from PostHog.
 
 The LiveKit worker emits structured first-talk and per-turn records, but they
 appear only after the LiveKit Cloud project has a Google Cloud log drain pointed
-at this project. Configure that drain in LiveKit Cloud, then grant the ops
-service account `roles/logging.viewer`. Until then worker values remain `n/a`.
+at this project. **This is the one and only reason the six "voice worker" tiles on
+the Mobile and Desktop tabs are empty**, and those tiles now say so instead of
+rendering a bare `n/a`. Two steps, both outside this repo:
+
+1. In the LiveKit Cloud console, add a log drain targeting Google Cloud Logging
+   in project `juno-2ea45`.
+2. Grant the ops service account read access:
+
+   ```bash
+   gcloud projects add-iam-policy-binding juno-2ea45      --member="serviceAccount:<ops-service-account>"      --role="roles/logging.viewer"
+   ```
+
+The provider filters on `resource.type="cloud_run_revision"` plus the
+`VoiceSession:` message prefixes, so drained records land in the existing query
+with no further change here.
 
 The voice measurements intentionally distinguish:
 

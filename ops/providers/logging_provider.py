@@ -187,11 +187,20 @@ def _percentile(values: list[float], quantile: float) -> float | None:
 
 def voice_latency_stats(project_id: str, days: int = 7, limit: int = 3000) -> dict:
     """Aggregate redacted worker latency records delivered by the LiveKit log drain."""
+    # These records are emitted by the LiveKit voice worker, which runs on LiveKit
+    # Cloud rather than in this GCP project. They only reach Cloud Logging after a
+    # log drain is configured in LiveKit Cloud pointing here (see ops/README.md).
+    # Until then this is legitimately empty, and that is a SETUP gap rather than a
+    # slow or broken worker: the note travels with the payload so the UI can say so.
     empty = {
         "count": 0,
         "worker_first_talk": {"p50": None, "p95": None, "p99": None},
         "token_to_first_talk": {"p50": None, "p95": None, "p99": None},
         "reply_to_first_talk": {"p50": None, "p95": None, "p99": None},
+        "note": (
+            "Needs the LiveKit Cloud log drain into this GCP project, plus "
+            "roles/logging.viewer for the ops service account."
+        ),
     }
     try:
         from google.cloud import logging as cloud_logging
@@ -232,11 +241,14 @@ def voice_latency_stats(project_id: str, days: int = 7, limit: int = 3000) -> di
                 "p95": _percentile(values, 0.95),
                 "p99": _percentile(values, 0.99),
             }
+        found = max(len(worker), len(startup), len(reply))
         return {
-            "count": max(len(worker), len(startup), len(reply)),
+            **empty,
+            "count": found,
             "worker_first_talk": stats(worker),
             "token_to_first_talk": stats(startup),
             "reply_to_first_talk": stats(reply),
+            "note": "" if found else empty["note"],
         }
     except Exception as exc:
         logger.error("voice_latency_stats query failed: %s", exc)

@@ -31,8 +31,10 @@
     lastRefreshAt: 0,
     cooldownTimer: null,
     providerCostRange: "7d",
-    userFilter: null,        // {key, label, uids} — which count the table is showing
+    userFilter: null,        // which count the users table is filtered to
     openUser: null,          // uid of the drawer that is open
+    pendingUser: null,       // uid to open once Overview has its data (from Costs)
+    spenderSort: { key: "est_usd", dir: "desc" },
     logs: { services: "", severity: "ERROR", q: "", hours: 24 },
   };
 
@@ -58,6 +60,79 @@
   };
 
   const PALETTE = ["#2dd4bf", "#a78bfa", "#60a5fa", "#fbbf24", "#f472b6", "#4ade80", "#f87171", "#a3a3a3"];
+
+  /* Status glyphs. The attention rows used to lead with a bare 7px dot, which
+     carried no meaning: a reader could not tell a warning from an outage
+     without reading the sentence. */
+  const ICONS = {
+    bad: '<path d="M12 2 1 21h22L12 2Zm0 6v6m0 3v.5" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    warn: '<path d="M12 2 1 21h22L12 2Zm0 6v6m0 3v.5" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    good: '<path d="M20 6 9 17l-5-5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+  };
+
+  const icon = (tone) =>
+    `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[tone] || ICONS.warn}</svg>`;
+
+  /* One provider row's identity: the real logo mark (or a monogram where no
+     mark exists), in that brand's on-dark colour, beside its real name.
+     Registry lives in brands.js. */
+  function brandChip(slug, href, title) {
+    const b = (window.AuraOpsBrands ? window.AuraOpsBrands.brand(slug) : null)
+      || { name: String(slug || ""), color: "#a3a3a3", color2: "#737373", path: "" };
+    const inner = b.path
+      ? `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${b.path}" fill="${esc(b.color)}"/></svg>`
+      : `<span class="mono" style="color:${esc(b.color)}">${esc((b.name || "?").charAt(0).toUpperCase())}</span>`;
+    const mark = `<span class="brand-mark" style="background:linear-gradient(140deg,${esc(b.color)}2e,${esc(b.color2)}14)">${inner}</span>`;
+    const body = `${mark}<span class="brand-name">${esc(b.name)}</span>`;
+    return href
+      ? `<a class="brand-chip" href="${esc(href)}" target="_blank" rel="noopener noreferrer"
+           title="${esc(title || "Open console")}">${body}<span class="ext">&#8599;</span></a>`
+      : `<span class="brand-chip">${body}</span>`;
+  }
+
+  /* A vertical gradient for bar fills. Chart.js hands the scriptable callback a
+     context with no chartArea on the very first pass, so fall back to the flat
+     colour until layout exists, otherwise the first paint throws. */
+  function barGradient(from, to) {
+    return (context) => {
+      const { ctx, chartArea } = context.chart;
+      if (!chartArea) return from;
+      const g = ctx.createLinearGradient(0, chartArea.bottom, 0, chartArea.top);
+      g.addColorStop(0, to);
+      g.addColorStop(1, from);
+      return g;
+    };
+  }
+
+  /* Shared Chart.js look: hairline grid, glass tooltip, no axis clutter. */
+  function chartOptions(extra) {
+    return {
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "rgba(16,18,28,.94)",
+          borderColor: "rgba(255,255,255,.16)",
+          borderWidth: 1,
+          padding: 11,
+          cornerRadius: 10,
+          titleColor: "#f5f6fa",
+          bodyColor: "#a8adbd",
+          displayColors: false,
+        },
+      },
+      scales: {
+        x: { grid: { display: false }, border: { display: false }, ticks: { color: "#6b7080" } },
+        y: {
+          beginAtZero: true,
+          grid: { color: "rgba(255,255,255,.05)" },
+          border: { display: false },
+          ticks: { color: "#6b7080" },
+        },
+      },
+      ...(extra || {}),
+    };
+  }
 
   if (window.Chart) {
     Chart.defaults.color = "#a3a3a3";
@@ -255,6 +330,23 @@
      installer fetches): then the bars are scaled to the largest step and no
      percentage is shown, because "818%" is not a conversion rate, it is two
      unrelated numbers divided by each other. */
+  /* A ranked list where the VALUE is the point. These used to render as feed
+     rows with the count floated into the right margin in faint 10px mono, which
+     buried the only number that mattered. */
+  function rankedList(rows, { label, value, empty }) {
+    if (!rows.length) return `<p class="empty">${esc(empty)}</p>`;
+    const peak = Math.max(...rows.map((r) => Number(value(r)) || 0), 0);
+    return rows.map((r) => {
+      const v = Number(value(r)) || 0;
+      const width = peak ? Math.max(3, Math.round((v / peak) * 100)) : 0;
+      return `<div class="rank-row">
+        <span class="rl" title="${esc(label(r))}">${esc(label(r))}</span>
+        <span class="rt"><i style="width:${width}%"></i></span>
+        <span class="rv">${esc(compact(v))}</span>
+      </div>`;
+    }).join("");
+  }
+
   function funnel(steps, { comparable = true } = {}) {
     const values = steps.map((s) => s.value).filter((v) => v !== null && v !== undefined);
     const base = comparable
@@ -298,41 +390,69 @@
     return `<div class="card col-6"><h2>${esc(title)}</h2><div class="scroll">${body}</div></div>`;
   }
 
-  function percentileTiles(stats, label) {
+  /* Latency, grouped BY SOURCE rather than as one undifferentiated wall of
+     tiles. Each group either shows real percentiles or says, in one line, what
+     is missing and whose job it is. A dashboard that renders "n/a" fifteen times
+     teaches you to stop reading it: "never measured" and "broken" must not look
+     the same. */
+  function latencyGroup(label, stats, { note, sample } = {}) {
     const values = stats || {};
-    return ["p50", "p95", "p99"].map((p) =>
-      metric(values[p] !== null && values[p] !== undefined ? ms(values[p]) : "n/a", label + " " + p)
-    ).join("");
+    const known = ["p50", "p95", "p99"].some((k) => values[k] !== null && values[k] !== undefined);
+    if (!known) {
+      return `<div class="lat-group missing">
+        <div class="lat-label">${esc(label)}</div>
+        <div class="note">${esc(note || "No data reaching this panel yet.")}</div>
+      </div>`;
+    }
+    return `<div class="lat-group">
+      <div class="lat-label">${esc(label)}${sample ? `<span class="lat-n">${esc(String(sample))} samples</span>` : ""}</div>
+      <div class="strip">${["p50", "p95", "p99"].map((k) =>
+        metric(values[k] !== null && values[k] !== undefined ? ms(values[k]) : NA, k)).join("")}</div>
+    </div>`;
   }
 
   function latencyCard(title, blocks, chatLatency, voiceStats, workerStats) {
-    const tiles = Object.entries(blocks || {}).map(([platform, p]) =>
-      metric(p && p.p95 !== null && p.p95 !== undefined ? ms(p.p95) : "n/a", platform + " p95") +
-      metric(p && p.p99 !== null && p.p99 !== undefined ? ms(p.p99) : "n/a", platform + " p99")
-    ).join("");
     const chat = chatLatency || {};
     const voice = voiceStats || {};
     const worker = workerStats || {};
-    const note = (!Object.values(blocks || {}).some((p) => p && p.p95 !== null && p.p95 !== undefined))
-      ? `<div class="note">Backend split needs the request_latency_by_platform log-based metric plus clients sending X-Aura-Platform (new builds). Until both exist this reads n/a, not zero.</div>`
-      : "";
+
+    const backendKnown = Object.values(blocks || {}).some(
+      (b) => b && (b.p95 !== null && b.p95 !== undefined));
+    const backendTiles = Object.entries(blocks || {}).map(([platform, b]) =>
+      metric(b && b.p95 != null ? ms(b.p95) : NA, platform + " p95") +
+      metric(b && b.p99 != null ? ms(b.p99) : NA, platform + " p99")).join("");
+
+    const backend = backendKnown
+      ? `<div class="lat-group"><div class="lat-label">Backend API, by platform</div>
+           <div class="strip">${backendTiles}</div></div>`
+      : `<div class="lat-group missing"><div class="lat-label">Backend API, by platform</div>
+           <div class="note">Needs the <code>request_latency_by_platform</code> log-based metric
+             plus clients sending <code>X-Aura-Platform</code>. Reads n/a, never zero.</div></div>`;
+
+    /* The voice window is NOT the same span on both platforms: the desktop clock
+       starts at the user's keypress and so also covers summon, token mint,
+       connect and agent join. The provider ships what it measured; label it,
+       rather than presenting two different measurements as one metric. */
+    const voiceLabel = voice.measures
+      ? `Voice, ${voice.measures}`
+      : "Voice, start to first talk";
+
     return `<div class="card col-6"><h2>${esc(title)}</h2>
-      <div class="strip">${tiles}
-        ${percentileTiles({
-          p50: chat.ttft_p50, p95: chat.ttft_p95, p99: chat.ttft_p99,
-        }, "chat first text")}
-        ${percentileTiles({
-          p50: chat.total_p50, p95: chat.total_p95, p99: chat.total_p99,
-        }, "chat complete")}
-        ${percentileTiles({
-          p50: voice.elapsed_p50, p95: voice.elapsed_p95, p99: voice.elapsed_p99,
-        }, "voice start to talk")}
-        ${percentileTiles(worker.worker_first_talk, "worker start to talk")}
-        ${percentileTiles(worker.reply_to_first_talk, "user stop to audio")}
-      </div>
-      ${chat.count ? `<p class="faint">chat latency from ${chat.count} client-observed turns (7d)</p>` : ""}
-      ${worker.count ? `<p class="faint">voice worker latency from ${worker.count} structured records (7d)</p>` : ""}
-      ${note}</div>`;
+      ${backend}
+      ${latencyGroup("Chat, send to first text", {
+        p50: chat.ttft_p50, p95: chat.ttft_p95, p99: chat.ttft_p99,
+      }, { sample: chat.count, note: chat.note || "No client-observed chat turns in the window." })}
+      ${latencyGroup("Chat, send to complete", {
+        p50: chat.total_p50, p95: chat.total_p95, p99: chat.total_p99,
+      }, { sample: chat.count, note: chat.note || "No client-observed chat turns in the window." })}
+      ${latencyGroup(voiceLabel, {
+        p50: voice.elapsed_p50, p95: voice.elapsed_p95, p99: voice.elapsed_p99,
+      }, { sample: voice.count, note: "No voice sessions reported in the window." })}
+      ${latencyGroup("Voice worker, start to talk", worker.worker_first_talk,
+        { sample: worker.count, note: worker.note })}
+      ${latencyGroup("Voice worker, user stop to audio", worker.reply_to_first_talk,
+        { sample: worker.count, note: worker.note })}
+    </div>`;
   }
 
   /* ── OVERVIEW ────────────────────────────────────────────────────── */
@@ -473,12 +593,13 @@
 
   function attentionStrip(items) {
     if (!items.length) {
-      return `<section class="attention clear"><span class="dot good"></span>
-        Nothing is asking for attention. Every check below passed on the data currently loaded.</section>`;
+      return `<section class="attention"><div class="att good">${icon("good")}
+        <span>Nothing is asking for attention. Every check passed on the data currently loaded.</span>
+      </div></section>`;
     }
     return `<section class="attention">${items.map((item) => `
       <div class="att ${esc(item.tone)}${item.drill ? " drill" : ""}"${item.drill ? ` data-drill="${esc(item.drill)}" tabindex="0" role="button"` : ""}>
-        <span class="dot ${esc(item.tone)}"></span><span>${esc(item.text)}</span>
+        ${icon(item.tone)}<span>${esc(item.text)}</span>
       </div>`).join("")}</section>`;
   }
 
@@ -559,8 +680,11 @@
           <div class="body muted">${esc(h.message)}</div></div>`).join("")
           || '<p class="empty">no tick-health lines yet (INFO logs from the signal engine)</p>'}</div>
       <div class="card col-6"><h2>Top screens (7d, by views)</h2>
-        ${(d.screens || []).map((s) => `<div class="row"><span class="when">${esc(String(s.views))}</span>${esc(s.screen)}</div>`).join("")
-          || '<p class="empty">PostHog not configured (needs phx_ key + project id)</p>'}</div>
+        ${rankedList(d.screens || [], {
+          label: (s) => s.screen,
+          value: (s) => s.views,
+          empty: "PostHog not configured (needs phx_ key + project id)",
+        })}</div>
       <div class="card col-12"><h2>Recommendations sent · what / why / did it land</h2><div class="scroll">
         ${(d.recommendations || []).map(recRow).join("") || '<p class="empty">nothing sent yet</p>'}</div></div>
       <div class="card col-8" id="usersCard"><h2>Users <span id="userFilterChip"></span></h2>
@@ -577,6 +701,14 @@
 
     renderUsersTable(d);
     wireOverviewDrills(d);
+
+    /* Arriving from a Top Spenders click on the Costs tab: that table knows the
+       uid but not the person's feeds, which only exist in this payload. */
+    if (state.pendingUser) {
+      const uid = state.pendingUser;
+      state.pendingUser = null;
+      openUserDrawer(uid, d);
+    }
   }
 
   const DRILL_LABELS = {
@@ -796,15 +928,23 @@
         datasets: [{
           data: daily.map((x) => x.actives),
           borderColor: "#2dd4bf",
-          backgroundColor: "rgba(45,212,191,.12)",
-          fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2,
+          backgroundColor: (context) => {
+            const { ctx, chartArea } = context.chart;
+            if (!chartArea) return "rgba(45,212,191,.14)";
+            const g = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+            g.addColorStop(0, "rgba(45,212,191,.38)");
+            g.addColorStop(1, "rgba(45,212,191,0)");
+            return g;
+          },
+          fill: true,
+          tension: 0.36,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          pointHoverBackgroundColor: "#5eead4",
+          borderWidth: 2.4,
         }],
       },
-      options: {
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
-      },
+      options: chartOptions(),
     });
   }
 
@@ -958,8 +1098,11 @@
       <div class="card col-8"><h2>auravoiceapp.com · pageviews (30d)</h2>
         <div class="chart-box"><canvas id="pvChart"></canvas></div></div>
       <div class="card col-4"><h2>Top referrers (30d)</h2>
-        ${(a.top_referrers || []).map((r) => `<div class="row"><span class="when">${r.views}</span>${esc(r.referrer)}</div>`).join("")
-          || '<p class="empty">no referrer data (or PostHog web project not configured)</p>'}</div>
+        ${rankedList(a.top_referrers || [], {
+          label: (r) => r.referrer,
+          value: (r) => r.views,
+          empty: "no referrer data (or PostHog web project not configured)",
+        })}</div>
       <div class="card col-6"><h2>Download funnel</h2>
         ${funnel([
           { label: "download page", note: "30d", value: a.download_page_viewed },
@@ -985,13 +1128,16 @@
         type: "bar",
         data: {
           labels: pv.map((x) => x.day.slice(5)),
-          datasets: [{ data: pv.map((x) => x.views), backgroundColor: "#60a5fa", borderRadius: 4 }],
+          datasets: [{
+            data: pv.map((x) => x.views),
+            backgroundColor: barGradient("#93c5fd", "rgba(96,165,250,.28)"),
+            hoverBackgroundColor: barGradient("#bfdbfe", "rgba(96,165,250,.5)"),
+            borderRadius: 7,
+            borderSkipped: false,
+            maxBarThickness: 34,
+          }],
         },
-        options: {
-          maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
-        },
+        options: chartOptions(),
       });
     }
   }
@@ -1005,11 +1151,8 @@
     const spend = d.llm_spend || {};
     const rangeKeys = d.ranges || ["today", "7d", "30d"];
 
-    const providerName = (row) => row.console_url
-      ? `<a href="${esc(row.console_url)}" target="_blank" rel="noopener noreferrer"
-           title="${esc(row.console_label || "Open provider console")}">${esc(row.provider)}
-           <span class="ext">&#8599;</span></a>`
-      : esc(row.provider);
+    const providerName = (row) =>
+      brandChip(row.provider, row.console_url, row.console_label || "Open provider console");
 
     content.innerHTML = pageHeading(
       "Spend and usage",
@@ -1032,21 +1175,15 @@
           mixed. A provider marked needs setup stays n/a rather than displaying a false zero.</div>
       </div>
       ${llmSpendCard(spend)}
-      <div class="card col-4"><h2>Top spenders (${esc(String(spend.days || 7))}d)</h2><div class="scroll">
-        <table><tr><th>User</th><th class="num">Est. cost</th><th class="num">Tokens</th><th class="num">Calls</th></tr>
-        ${(spend.by_user || []).map((row) => `<tr>
-          <td><span class="user-link">${esc(row.name)}</span></td>
-          <td class="num">${usd(row.est_usd)}</td>
-          <td class="num">${compact(row.tokens)}</td>
-          <td class="num">${compact(row.generations)}</td></tr>`).join("")
-          || '<tr><td colspan="4" class="empty">no ledger rows in range</td></tr>'}
-        </table></div></div>
+      <div class="card col-4"><h2>Top spenders (${esc(String(spend.days || 7))}d)</h2>
+        <div class="scroll" id="spendersBox"></div></div>
       <div class="card col-8"><h2>Cost by provider <span class="tag gray">names link to each console</span></h2>
         <div class="scroll"><table>
         <tr><th>Provider</th><th>Source</th><th>Kind</th><th>Status</th><th class="num">Usage</th><th class="num">Cost</th></tr>
         ${providers.map((row) => `<tr>
           <td>${providerName(row)}</td><td>${esc(row.source || "not connected")}</td>
-          <td>${esc(row.cost_kind)}</td><td class="muted">${esc(row.status)}</td>
+          <td><span class="kind ${esc((row.cost_kind || "unavailable").split(" ")[0])}">${esc(row.cost_kind)}</span></td>
+          <td class="muted">${esc(row.status)}</td>
           <td class="num">${row.usage === null || row.usage === undefined ? NA : compact(row.usage)}</td>
           <td class="num">${row.cost === null || row.cost === undefined ? NA : usd(row.cost)}</td>
         </tr>`).join("") || '<tr><td colspan="6" class="empty">no provider data</td></tr>'}
@@ -1060,21 +1197,111 @@
       </table></div>
     </div>`;
 
+    renderSpenders(spend.by_user || []);
+
     const daily = spend.daily || [];
     if (daily.length) {
       mountChart("spendChart", {
         type: "bar",
         data: {
           labels: daily.map((x) => x.day.slice(5)),
-          datasets: [{ data: daily.map((x) => x.est_usd), backgroundColor: "#2dd4bf", borderRadius: 4 }],
+          datasets: [{
+            data: daily.map((x) => x.est_usd),
+            backgroundColor: barGradient("#5eead4", "rgba(45,212,191,.30)"),
+            hoverBackgroundColor: barGradient("#99f6e4", "rgba(45,212,191,.55)"),
+            borderRadius: 7,
+            borderSkipped: false,
+            maxBarThickness: 46,
+          }],
         },
-        options: {
-          maintainAspectRatio: false,
-          plugins: { legend: { display: false } },
-          scales: { y: { beginAtZero: true } },
-        },
+        options: chartOptions({
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: "rgba(16,18,28,.94)",
+              borderColor: "rgba(255,255,255,.16)",
+              borderWidth: 1,
+              padding: 11,
+              cornerRadius: 10,
+              titleColor: "#f5f6fa",
+              bodyColor: "#a8adbd",
+              displayColors: false,
+              callbacks: { label: (item) => "$" + Number(item.raw || 0).toFixed(4) },
+            },
+          },
+        }),
       });
     }
+  }
+
+  /* Top spenders, sortable.
+
+     This table WAS sorted correctly (cost, descending) and still read as broken,
+     because the tokens column zigzags against it and nothing on screen said
+     which column drove the order. An invisible sort key looks like no sort key.
+     So: an explicit caret on the active column, a rank numeral, and a
+     the sorted column tinted, which makes the ordering visible rather than
+     something the reader has to infer.
+
+     No proportion bar here on purpose: one user is ~87% of spend, so every other
+     row's bar collapses to a stub that reads as a rendering artifact. The rank
+     numeral carries the ordering without that noise. */
+  const SPENDER_COLUMNS = [
+    { key: "est_usd", label: "Est. cost", format: (r) => usd(r.est_usd) },
+    { key: "tokens", label: "Tokens", format: (r) => compact(r.tokens) },
+    { key: "generations", label: "Calls", format: (r) => compact(r.generations) },
+  ];
+
+  function renderSpenders(rows) {
+    const box = document.getElementById("spendersBox");
+    if (!box) return;
+    if (!rows.length) {
+      box.innerHTML = '<p class="empty">no ledger rows in range</p>';
+      return;
+    }
+
+    const { key, dir } = state.spenderSort;
+    const sorted = [...rows].sort((a, b) =>
+      dir === "asc" ? (a[key] || 0) - (b[key] || 0) : (b[key] || 0) - (a[key] || 0));
+
+    box.innerHTML = `<table>
+      <tr><th class="rank"></th><th>User</th>
+        ${SPENDER_COLUMNS.map((c) => `<th class="num sortable" data-sort="${c.key}"
+          data-dir="${c.key === key ? dir : "desc"}"
+          ${c.key === key ? `aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : ""}
+          title="Sort by ${esc(c.label.toLowerCase())}">${esc(c.label)}</th>`).join("")}
+      </tr>
+      ${sorted.map((row, index) => `<tr>
+        <td class="rank">${index + 1}</td>
+        <td><span class="user-link" data-uid="${esc(row.uid || "")}" tabindex="0" role="button"
+            title="Open this person">${esc(row.name)}</span></td>
+        ${SPENDER_COLUMNS.map((c) =>
+          `<td class="num${c.key === key ? " sorted" : ""}">${c.format(row)}</td>`).join("")}
+      </tr>`).join("")}
+    </table>`;
+
+    box.querySelectorAll("th.sortable").forEach((th) => {
+      th.onclick = () => {
+        const next = th.dataset.sort;
+        state.spenderSort = state.spenderSort.key === next
+          ? { key: next, dir: state.spenderSort.dir === "desc" ? "asc" : "desc" }
+          : { key: next, dir: "desc" };
+        renderSpenders(rows);
+      };
+    });
+
+    /* The names used to carry the clickable underline with no handler behind
+       it. Now they open that person, which means leaving Costs for Overview,
+       where the per-user feeds live. */
+    box.querySelectorAll(".user-link[data-uid]").forEach((el) => {
+      const open = () => {
+        if (!el.dataset.uid) return;
+        state.pendingUser = el.dataset.uid;
+        document.querySelector('#tabs .tab[data-tab="overview"]').click();
+      };
+      el.onclick = open;
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+    });
   }
 
   /* Real LLM spend, read from the per-user daily ledger the backend writes on
@@ -1200,6 +1427,7 @@
   async function activateTab(tab) {
     state.tab = tab;
     closeUserDrawer();
+    toggleShortcuts(false);
     destroyChartsUnder(content);
 
     if (tab === "overview") {
@@ -1265,6 +1493,25 @@
     fetchTab(tab);
   }
 
+  /* ── shortcuts popover ───────────────────────────────────────────────
+     Replaces the "1-7 · r · / · Esc" string that used to sit bare in the
+     header, where it read as leftover debug output. */
+  const shortcutsBtn = document.getElementById("shortcuts");
+  const shortcutsPop = document.getElementById("shortcutsPop");
+
+  function toggleShortcuts(show) {
+    const open = show === undefined ? shortcutsPop.hidden : show;
+    shortcutsPop.hidden = !open;
+    shortcutsBtn.setAttribute("aria-expanded", String(open));
+  }
+
+  shortcutsBtn.onclick = (e) => { e.stopPropagation(); toggleShortcuts(); };
+  document.addEventListener("click", (e) => {
+    if (!shortcutsPop.hidden && !shortcutsPop.contains(e.target) && e.target !== shortcutsBtn) {
+      toggleShortcuts(false);
+    }
+  });
+
   /* ── keyboard ────────────────────────────────────────────────────────
      A console this dense is faster to drive from the keyboard. Shortcuts are
      ignored while typing so they never eat a character in the log search box. */
@@ -1275,6 +1522,7 @@
     if (!gate.hidden) return;
 
     if (e.key === "Escape") {
+      if (!shortcutsPop.hidden) { toggleShortcuts(false); e.preventDefault(); return; }
       if (state.openUser) { closeUserDrawer(); e.preventDefault(); }
       return;
     }
@@ -1296,7 +1544,9 @@
     if (e.key === "/") {
       const search = document.querySelector("#logQ, #content input[type=search]");
       if (search) { search.focus(); e.preventDefault(); }
+      return;
     }
+    if (e.key === "?") { toggleShortcuts(); e.preventDefault(); }
   });
 
   /* ── boot ────────────────────────────────────────────────────────── */

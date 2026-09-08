@@ -40,13 +40,23 @@ def _run_hogql(host: str, project_id: str, personal_key: str, hogql: str) -> lis
     return response.json().get("results", [])
 
 
-# Platform filter fragments for HogQL. Mobile events come from posthog_flutter
-# (SDK auto-sets $os to Android/iOS); Windows desktop events come from the app's
-# raw-HTTP capture client which explicitly injects platform='windows'
-# (lib/core/analytics/posthog_http_analytics.dart).
+# Platform filter fragments for HogQL.
+#
+# Mobile events come from posthog_flutter, which auto-sets $os to Android/iOS and
+# sets no `platform` property at all.
+#
+# Aura-Desktop sets platform='desktop-react' (NOT 'windows') and relies on $os for
+# the OS split. VERIFIED against live PostHog on 2026-09-07: 30 Windows and 4
+# macOS desktop events in 30 days, all carrying platform='desktop-react'.
+#
+# The previous filter looked for platform='windows' OR $os='Windows'. The first
+# half never matched anything, and the second half silently dropped every macOS
+# desktop event, which is the same class of bug as counting only .msi downloads
+# and losing the .dmg. Match on the app's own platform tag first, and keep the
+# $os check as a fallback for builds predating that tag.
 _PLATFORM_FRAGMENTS = {
     "mobile": "properties.$os IN ('Android', 'iOS')",
-    "desktop": "(properties.platform = 'windows' OR properties.$os = 'Windows')",
+    "desktop": "(properties.platform = 'desktop-react' OR properties.$os IN ('Windows', 'macOS'))",
 }
 
 
@@ -225,6 +235,17 @@ def chat_latency_percentiles(
         "count": 0,
         "ttft_p50": None, "ttft_p95": None, "ttft_p99": None,
         "total_p50": None, "total_p95": None, "total_p99": None,
+        # Aura-Desktop has no chat_e2e_latency emitter: its chat lane tracks
+        # chat_turn_failed but never times a successful turn (verified in
+        # Aura-Desktop/src, and zero rows in PostHog over 30 days). So a desktop
+        # zero here means "the client does not report this", NOT "chat is slow"
+        # or "chat is instant". The UI must say which.
+        "instrumented": platform != "desktop",
+        "note": (
+            "Aura-Desktop does not emit chat_e2e_latency yet, so there is nothing "
+            "to measure. Needs a desktop-side change."
+            if platform == "desktop" else ""
+        ),
     }
     if not (personal_key and project_id):
         return empty
@@ -248,6 +269,7 @@ def chat_latency_percentiles(
                 return round(float(value), 1) if isinstance(value, (int, float)) else None
 
             return {
+                **empty,
                 "count": int(r[0] or 0),
                 "ttft_p50": _ms(r[1]),
                 "ttft_p95": _ms(r[2]),
@@ -261,23 +283,53 @@ def chat_latency_percentiles(
     return empty
 
 
+# The two clients measure "how long until Buddy talked" with DIFFERENT event names
+# and DIFFERENT property names, so one query cannot serve both. Verified against
+# the writers and against live PostHog on 2026-09-07.
+#
+#   mobile  voice_start_to_first_talk.elapsed_ms
+#           (lib/data/services/voice_session_service.dart)
+#           voice start -> first assistant talk.
+#
+#   desktop voice_first_response.tapToFirstResponseMs
+#           (Aura-Desktop/src/overlay/useVoiceBar.ts)
+#           the user's KEYPRESS -> first output, so it also spans summon, token
+#           mint, connect and agent join. A strictly wider window than mobile's,
+#           which is why the dashboard labels the two differently instead of
+#           averaging them into one misleading number.
+#
+# The desktop tiles read n/a for months because this asked every platform for the
+# mobile event and the mobile property. The data was there the whole time.
+_VOICE_LATENCY_SOURCES = {
+    "mobile": ("voice_start_to_first_talk", "elapsed_ms", "voice start to first talk"),
+    "desktop": ("voice_first_response", "tapToFirstResponseMs", "keypress to first response"),
+}
+
+
 def voice_first_response_stats(
     host: str, project_id: str, personal_key: str, days: int = 7, platform: str = "mobile"
 ) -> dict:
-    """voice_first_response occurrences + p95 of its elapsed_ms property.
-    HONEST CAVEAT: the event historically carried NO properties (it marks that
-    the agent spoke at all, once per session); elapsed_ms only exists from the
-    client build that adds it, so p95 may be null while count is not."""
-    empty = {"count": 0, "elapsed_p50": None, "elapsed_p95": None, "elapsed_p99": None}
+    """Time until the agent first spoke, read from whichever event that platform emits.
+
+    `measures` names what the returned window actually covers so the UI can label
+    it; the two platforms do not measure the same span (see above).
+    """
+    event, prop, measures = _VOICE_LATENCY_SOURCES.get(
+        platform, _VOICE_LATENCY_SOURCES["mobile"]
+    )
+    empty = {
+        "count": 0, "elapsed_p50": None, "elapsed_p95": None, "elapsed_p99": None,
+        "measures": measures, "event": event,
+    }
     if not (personal_key and project_id):
         return empty
     try:
         rows = _run_hogql(host, project_id, personal_key, (
             "SELECT count(), "
-            "quantile(0.50)(toFloat(properties.elapsed_ms)), "
-            "quantile(0.95)(toFloat(properties.elapsed_ms)), "
-            "quantile(0.99)(toFloat(properties.elapsed_ms)) "
-            "FROM events WHERE event = 'voice_start_to_first_talk' "
+            f"quantile(0.50)(toFloat(properties.{prop})), "
+            f"quantile(0.95)(toFloat(properties.{prop})), "
+            f"quantile(0.99)(toFloat(properties.{prop})) "
+            f"FROM events WHERE event = '{event}' "
             f"{_platform_clause(platform)}"
             f"AND timestamp > now() - INTERVAL {int(days)} DAY"
         ))
@@ -290,9 +342,11 @@ def voice_first_response_stats(
                 "elapsed_p50": _ms(r[1]),
                 "elapsed_p95": _ms(r[2]),
                 "elapsed_p99": _ms(r[3]),
+                "measures": measures,
+                "event": event,
             }
     except Exception as exc:
-        logger.error("voice_first_response query failed (%s): %s", platform, exc)
+        logger.error("voice latency query failed (%s): %s", platform, exc)
     return empty
 
 
