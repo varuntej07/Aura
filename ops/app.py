@@ -24,9 +24,16 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-import panels
-
+# load_dotenv MUST run before `import panels`: panels.py (and the providers it
+# imports) read their configuration from os.environ at IMPORT time, so importing
+# it first froze every optional integration to empty. Deploys were unaffected
+# because deploy.sh sets real env vars, which is exactly why this survived: it
+# broke only local runs, silently, by reporting "PostHog not configured" while
+# valid keys sat in ops/.env.
 load_dotenv()
+
+import panels  # noqa: E402  (must follow load_dotenv)
+import ranges  # noqa: E402
 
 PROJECT_ID = os.environ.get("GCP_PROJECT", "juno-2ea45")
 PASSCODE = os.environ.get("OPS_PASSCODE", "")
@@ -50,13 +57,6 @@ async def require_passcode(authorization: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="wrong passcode")
 
 
-_VALID_RANGES = {"today", "7d", "30d"}
-
-
-def _clamp_range(range_key: str) -> str:
-    return range_key if range_key in _VALID_RANGES else "7d"
-
-
 @app.get("/api/dashboard")
 async def dashboard(_gate: None = Depends(require_passcode)) -> JSONResponse:
     data = await anyio.to_thread.run_sync(panels.build_dashboard)
@@ -65,32 +65,9 @@ async def dashboard(_gate: None = Depends(require_passcode)) -> JSONResponse:
 
 @app.get("/api/overview/analytics")
 async def overview_analytics(_gate: None = Depends(require_passcode)) -> JSONResponse:
-    """The slower Overview panels (retention, funnels, default LLM views);
-    the UI fetches this lazily after first paint on a 5-minute cadence."""
+    """The slower Overview panels (retention and the two funnels); the UI
+    fetches this lazily after first paint so the core strip is not blocked."""
     data = await anyio.to_thread.run_sync(panels.build_overview_analytics)
-    return JSONResponse(data)
-
-
-@app.get("/api/llm/cost")
-async def llm_cost(
-    range: str = Query(default="7d"),
-    _gate: None = Depends(require_passcode),
-) -> JSONResponse:
-    data = await anyio.to_thread.run_sync(
-        functools.partial(panels.build_llm_cost, _clamp_range(range))
-    )
-    return JSONResponse(data)
-
-
-@app.get("/api/llm/tools")
-async def llm_tools(
-    range: str = Query(default="7d"),
-    tool: str = Query(default="", max_length=64),
-    _gate: None = Depends(require_passcode),
-) -> JSONResponse:
-    data = await anyio.to_thread.run_sync(
-        functools.partial(panels.build_llm_tools, _clamp_range(range), tool)
-    )
     return JSONResponse(data)
 
 
@@ -100,7 +77,7 @@ async def provider_costs(
     _gate: None = Depends(require_passcode),
 ) -> JSONResponse:
     data = await anyio.to_thread.run_sync(
-        functools.partial(panels.build_provider_costs, _clamp_range(range))
+        functools.partial(panels.build_provider_costs, ranges.clamp(range))
     )
     return JSONResponse(data)
 

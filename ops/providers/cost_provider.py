@@ -1,4 +1,18 @@
-"""Unified provider cost view with explicit actual/estimated/manual labels."""
+"""Unified provider cost view with explicit actual/estimated/manual labels.
+
+Three kinds of number live here and are never mixed:
+
+  actual    - billed figures from a billing export (GCP).
+  estimated - derived from observed usage and a price table (the LLM ledger,
+              Brave queries x a configured unit rate).
+  manual    - a subscription the founder typed in, prorated over the range.
+
+A provider with no source stays `unavailable` and renders n/a. It must never
+show a zero, because a zero is indistinguishable from "cheap" at a glance.
+
+Every row also carries `console_url`, the provider's own usage dashboard, so
+the numbers this file cannot obtain are one click away rather than absent.
+"""
 from __future__ import annotations
 
 import json
@@ -6,25 +20,51 @@ import logging
 import re
 from typing import Any
 
+import ranges
+
 logger = logging.getLogger("ops.costs")
 
 _KNOWN_PROVIDERS = (
-    "anthropic", "gemini", "openai", "brave", "livekit", "cartesia",
+    # "llm" is the combined model spend the Firestore ledger can actually prove;
+    # the three model vendors below it carry consoles, not invented splits.
+    "llm", "anthropic", "gemini", "openai", "brave", "livekit", "cartesia",
     "deepgram", "gcp", "firebase", "posthog", "newsdata",
 )
-_MODEL_PROVIDER_PREFIXES = {
-    "claude": "anthropic", "gemini": "gemini", "gpt": "openai",
-    "o1": "openai", "o3": "openai", "o4": "openai",
-}
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_*]+$")
 
+# Each provider's own usage/billing console. These are the authoritative numbers
+# for anything this dashboard can only estimate, and the per-model split the
+# Firestore LLM ledger structurally cannot give (it stores no model field).
+# Deep links, not homepages: one click should land on usage, not a marketing page.
+PROVIDER_CONSOLES: dict[str, tuple[str, str]] = {
+    "anthropic": ("Anthropic Console usage", "https://console.anthropic.com/settings/usage"),
+    "gemini": ("Google AI Studio usage", "https://aistudio.google.com/app/usage"),
+    "openai": ("OpenAI usage", "https://platform.openai.com/usage"),
+    "llm": ("", ""),
+    "brave": ("Brave Search API usage", "https://api-dashboard.search.brave.com/app/usage"),
+    "livekit": ("LiveKit Cloud usage", "https://cloud.livekit.io/"),
+    "cartesia": ("Cartesia usage", "https://play.cartesia.ai/subscription"),
+    "deepgram": ("Deepgram usage", "https://console.deepgram.com/usage"),
+    "gcp": ("Cloud Billing reports", "https://console.cloud.google.com/billing"),
+    "firebase": ("Firebase usage", "https://console.firebase.google.com/project/juno-2ea45/usage"),
+    "posthog": ("PostHog billing", "https://us.posthog.com/organization/billing"),
+    "newsdata": ("NewsData dashboard", "https://newsdata.io/dashboard"),
+}
 
-def _model_provider(model: str) -> str:
-    lowered = model.lower()
-    for prefix, provider in _MODEL_PROVIDER_PREFIXES.items():
-        if prefix in lowered:
-            return provider
-    return "other_llm"
+
+def _blank_row(provider: str) -> dict[str, Any]:
+    """The canonical shape of one provider row, so every construction site agrees."""
+    label, url = PROVIDER_CONSOLES.get(provider, ("", ""))
+    return {
+        "provider": provider,
+        "cost": None,
+        "cost_kind": "unavailable",
+        "usage": None,
+        "status": "needs setup",
+        "source": "",
+        "console_label": label,
+        "console_url": url,
+    }
 
 
 def _manual_monthly_costs(raw: str) -> dict[str, float]:
@@ -80,42 +120,52 @@ def gcp_billing_cost(project_id: str, table: str, days: int) -> dict[str, Any]:
 def build_provider_costs(
     *,
     range_key: str,
-    llm_cost: dict,
+    llm_spend: dict,
     usage: dict,
     manual_monthly_costs_json: str,
     brave_cost_per_query_usd: float | None,
     gcp_cost: dict,
 ) -> dict[str, Any]:
-    days = {"today": 1, "7d": 7, "30d": 30}.get(range_key, 7)
+    days = ranges.days(range_key)
     rows: dict[str, dict[str, Any]] = {
         provider: {
             "provider": provider,
             "cost": None,
             "cost_kind": "unavailable",
             "usage": None,
-            "status": (
-                "usage tracking intentionally disabled"
-                if provider in {"anthropic", "gemini", "openai"}
-                else "needs setup"
-            ),
+            "status": "needs setup",
             "source": "",
+            "console_label": PROVIDER_CONSOLES.get(provider, ("", ""))[0],
+            "console_url": PROVIDER_CONSOLES.get(provider, ("", ""))[1],
         }
         for provider in _KNOWN_PROVIDERS
     }
 
-    for model in llm_cost.get("models", []):
-        provider = _model_provider(str(model.get("model") or ""))
-        row = rows.setdefault(provider, {
-            "provider": provider, "cost": None, "cost_kind": "unavailable",
-            "usage": None, "status": "needs setup", "source": "",
-        })
-        row["cost"] = round(
-            float(row.get("cost") or 0) + float(model.get("cost") or 0), 4
-        )
-        row["usage"] = int(row.get("usage") or 0) + int(model.get("calls") or 0)
-        row["cost_kind"] = "estimated"
-        row["status"] = "connected"
-        row["source"] = "Langfuse token pricing"
+    # LLM spend comes from the per-user daily ledger the backend writes on every
+    # call (users/{uid}/cost/{date}). It is a real measurement, but an ESTIMATE by
+    # construction: the backend priced it with estimate_microusd() rather than
+    # reading an invoice, so it is labelled estimated and never actual.
+    #
+    # The ledger records no model field, so it cannot be split across
+    # anthropic/gemini/openai. Attributing the whole total to any one of them
+    # would be a fabrication, so the combined figure sits on its own `llm` row and
+    # the three provider rows point at their consoles for the real split.
+    if llm_spend.get("available"):
+        rows["llm"] = {
+            **_blank_row("llm"),
+            "cost": llm_spend.get("est_usd"),
+            "cost_kind": "estimated",
+            "usage": llm_spend.get("generations"),
+            "status": "connected",
+            "source": "Firestore per-user cost ledger (all models combined)",
+        }
+        for provider in ("anthropic", "gemini", "openai"):
+            rows[provider]["status"] = "in the combined LLM total; open the console for the split"
+            rows[provider]["source"] = "no per-model field in the ledger"
+    else:
+        for provider in ("anthropic", "gemini", "openai"):
+            rows[provider]["status"] = "no ledger rows in range"
+            rows[provider]["source"] = "backend/src/services/analytics/llm_cost_ledger.py"
 
     brave_rows = [row for row in usage.get("rows", []) if row.get("provider") == "brave"]
     brave_billable = sum(int(row.get("billable") or 0) for row in brave_rows)
@@ -138,10 +188,7 @@ def build_provider_costs(
     manual = _manual_monthly_costs(manual_monthly_costs_json)
     fraction = min(days, 30) / 30
     for provider, monthly_cost in manual.items():
-        row = rows.setdefault(provider, {
-            "provider": provider, "cost": None, "cost_kind": "unavailable",
-            "usage": None, "status": "needs setup", "source": "",
-        })
+        row = rows.setdefault(provider, _blank_row(provider))
         if row["cost"] is None:
             row.update({
                 "cost": round(monthly_cost * fraction, 4),

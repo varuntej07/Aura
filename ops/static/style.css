@@ -444,3 +444,89 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* ── attention strip ──────────────────────────────────────────────────
+   The first thing on the page: what wants a decision right now. Rows appear
+   only when their condition is true, so an empty strip is a real all-clear. */
+.attention {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 0 0 12px;
+}
+.attention.clear {
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
+  padding: 9px 12px; border-radius: 8px;
+  border: 1px solid rgba(74, 222, 128, .18);
+  background: rgba(74, 222, 128, .05);
+  color: #a3a3a3; font-size: 12px;
+}
+.att {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+  border: 1px solid rgba(255, 255, 255, .07);
+  background: rgba(255, 255, 255, .02);
+}
+.att.bad { border-color: rgba(248, 113, 113, .34); background: rgba(248, 113, 113, .08); color: #fca5a5; }
+.att.warn { border-color: rgba(251, 191, 36, .30); background: rgba(251, 191, 36, .06); color: #fcd34d; }
+.att.drill { cursor: pointer; }
+.att.drill:hover, .att.drill:focus-visible { border-color: rgba(255, 255, 255, .26); outline: none; }
+.att .dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: currentColor; }
+.att .dot.good, .attention.clear .dot { background: #4ade80; }
+
+/* ── drill-down tiles ─────────────────────────────────────────────────
+   Every count whose membership is knowable is clickable, because a number
+   nobody can expand is a number nobody can act on. */
+.metric.drill { cursor: pointer; border-radius: 8px; transition: background .12s, border-color .12s; }
+.metric.drill:hover, .metric.drill:focus-visible {
+  background: rgba(255, 255, 255, .04);
+  border-color: rgba(45, 212, 191, .40);
+  outline: none;
+}
+.metric.drill::after {
+  content: "who?"; display: block; margin-top: 2px;
+  font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
+  color: #525252; opacity: 0; transition: opacity .12s;
+}
+.metric.drill:hover::after, .metric.drill:focus-visible::after { opacity: 1; }
+
+.filter-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 2px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 700;
+  background: rgba(45, 212, 191, .12); color: #2dd4bf;
+  border: 1px solid rgba(45, 212, 191, .30);
+}
+.filter-chip button {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: inherit; font: inherit; text-decoration: underline; opacity: .8;
+}
+
+.user-link { cursor: pointer; border-bottom: 1px dotted rgba(255, 255, 255, .28); }
+.user-link:hover, .user-link:focus-visible { color: #2dd4bf; border-bottom-color: #2dd4bf; outline: none; }
+.warnfg { color: #fcd34d; }
+.ext { font-size: 9px; opacity: .55; }
+td a, .card a { color: inherit; text-decoration: none; border-bottom: 1px dotted rgba(255, 255, 255, .26); }
+td a:hover, .card a:hover { color: #2dd4bf; border-bottom-color: #2dd4bf; }
+
+/* ── per-user drawer ──────────────────────────────────────────────────
+   Filters feeds the page already holds, so opening it costs no extra read. */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 94vw);
+  z-index: 40; overflow-y: auto; padding: 18px 20px 40px;
+  background: #0d0d0d; border-left: 1px solid rgba(255, 255, 255, .10);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, .55);
+}
+.drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.drawer-head h2 { margin: 0 0 2px; }
+.drawer h3 {
+  margin: 18px 0 6px; font-size: 10.5px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase; color: #737373;
+}
+.drawer code { font-size: 10.5px; color: #a3a3a3; }
+.scroll.short { max-height: 190px; }
+body.drawer-open { overflow: hidden; }
+
+.kbd-hint { font-size: 10px; letter-spacing: .08em; opacity: .5; }
+@media (max-width: 900px) { .kbd-hint { display: none; } }
+
+/* A funnel step's window/source, so mixed-window steps read honestly. */
+.fnote { display: block; font-size: 9.5px; font-weight: 600; color: #6b6b6b; letter-spacing: .02em; }

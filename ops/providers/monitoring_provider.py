@@ -6,12 +6,27 @@ voice latency comes from PostHog `voice_first_response` (see posthog_provider).
 """
 from __future__ import annotations
 
+import functools
 import logging
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("ops.monitoring")
 
 _BACKEND_SERVICE = "juno-backend"
+
+
+@functools.lru_cache(maxsize=1)
+def _client():
+    """One Monitoring client for the process (same reasoning as
+    logging_provider._client).
+
+    Three functions here each built their own per call, and the mobile tab calls
+    into them once per platform, so a cold load paid several gRPC channel setups
+    purely to issue one request each.
+    """
+    from google.cloud import monitoring_v3
+
+    return monitoring_v3.MetricServiceClient()
 
 
 def latency_percentiles(
@@ -31,7 +46,7 @@ def latency_percentiles(
         logger.error("google-cloud-monitoring not installed; latency panel disabled")
         return {"p50": None, "p95": None, "p99": None}
 
-    client = monitoring_v3.MetricServiceClient()
+    client = _client()
     project_name = f"projects/{project_id}"
     now = datetime.now(timezone.utc)
     interval = monitoring_v3.TimeInterval(
@@ -99,7 +114,7 @@ def latency_percentiles_by_platform(
         logger.error("google-cloud-monitoring not installed; platform latency disabled")
         return empty
 
-    client = monitoring_v3.MetricServiceClient()
+    client = _client()
     now = datetime.now(timezone.utc)
     interval = monitoring_v3.TimeInterval(
         end_time=now,
@@ -153,7 +168,7 @@ def server_error_count(
     except ImportError:
         return None
 
-    client = monitoring_v3.MetricServiceClient()
+    client = _client()
     now = datetime.now(timezone.utc)
     interval = monitoring_v3.TimeInterval(
         end_time=now,

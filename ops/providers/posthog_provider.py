@@ -4,11 +4,11 @@ Needs a PERSONAL API key (phx_...) with read scope. The public phc_ project key 
 embeds is WRITE-ONLY and cannot read, so it will not work here. Set POSTHOG_PERSONAL_KEY
 and POSTHOG_PROJECT_ID (the numeric project id, not the phc_ key).
 
-CONFIRM BEFORE RELYING ON THIS PANEL: the screen event name below must match what the
-Flutter AppRouteObserver actually emits. PostHog's mobile default is the `$screen` event
-with a `$screen_name` property; if the app logs a custom event name, change the two
-constants and the HogQL keys to match. This is the one contract in the dashboard not yet
-verified against a writer.
+The screen event/property names below were VERIFIED against live data on 2026-09-07:
+the query returns real Flutter route names (Home, Settings, Chat), which confirms the
+app emits PostHog's mobile default `$screen` event with a `$screen_name` property. If
+the app ever moves to a custom event name, change the two constants and the HogQL keys
+together.
 """
 from __future__ import annotations
 
@@ -18,18 +18,23 @@ import httpx
 
 logger = logging.getLogger("ops.posthog")
 
-# TODO(confirm): match these to lib/core/analytics + AppRouteObserver before trusting the panel.
+# Verified live 2026-09-07 (returns real route names, not an empty set).
 SCREEN_EVENT = "$screen"
 SCREEN_NAME_PROPERTY = "$screen_name"
 
 
+# One pooled client for the process. Each HogQL call used to open a fresh TCP
+# connection and TLS handshake to PostHog, and a single dashboard load makes
+# several; connection reuse removes that per-call setup entirely.
+_client = httpx.Client(timeout=20.0)
+
+
 def _run_hogql(host: str, project_id: str, personal_key: str, hogql: str) -> list[list]:
     url = f"{host.rstrip('/')}/api/projects/{project_id}/query/"
-    response = httpx.post(
+    response = _client.post(
         url,
         headers={"Authorization": f"Bearer {personal_key}"},
         json={"query": {"kind": "HogQLQuery", "query": hogql}},
-        timeout=20.0,
     )
     response.raise_for_status()
     return response.json().get("results", [])
@@ -105,15 +110,27 @@ def retention_summary(host: str, project_id: str, personal_key: str) -> dict:
     except Exception as exc:
         logger.error("retention daily series failed: %s", exc)
 
-    for key, days in (("dau", 1), ("wau", 7), ("mau", 30)):
-        try:
-            rows = _run_hogql(host, project_id, personal_key, (
-                "SELECT count(DISTINCT person_id) FROM events "
-                f"WHERE timestamp > now() - INTERVAL {days} DAY"
-            ))
-            out[key] = int(rows[0][0]) if rows and rows[0] else 0
-        except Exception as exc:
-            logger.error("retention %s query failed: %s", key, exc)
+    # DAU/WAU/MAU in ONE query. This used to be three separate HogQL requests in
+    # a loop: three network round trips and three independent ClickHouse scans to
+    # produce three numbers over nested windows of the same table. uniqIf computes
+    # all three from a single 30-day scan.
+    #
+    # The trade is real and deliberate: previously each metric had its own
+    # try/except, so a failure lost one number. Now a failure loses all three.
+    # They therefore stay None (never 0) on failure, so the UI shows "n/a" rather
+    # than reporting nobody was active.
+    try:
+        rows = _run_hogql(host, project_id, personal_key, (
+            "SELECT "
+            "uniqIf(person_id, timestamp > now() - INTERVAL 1 DAY), "
+            "uniqIf(person_id, timestamp > now() - INTERVAL 7 DAY), "
+            "uniq(person_id) "
+            "FROM events WHERE timestamp > now() - INTERVAL 30 DAY"
+        ))
+        if rows and rows[0]:
+            out["dau"], out["wau"], out["mau"] = (int(value or 0) for value in rows[0][:3])
+    except Exception as exc:
+        logger.error("retention dau/wau/mau query failed (all three read n/a): %s", exc)
 
     try:
         # Cohort = the week a person was first seen (within the 90d window);

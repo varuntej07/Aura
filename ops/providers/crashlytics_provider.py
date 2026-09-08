@@ -62,7 +62,7 @@ def mobile_crashes(
     limit: int = 25,
 ) -> dict[str, Any]:
     """Grouped crash issues across the Android + iOS export tables, in the
-    shared crash-feed shape (same rows the Sentry desktop panel emits)."""
+    shared crash-feed shape the UI's crash panel renders."""
     try:
         from google.cloud import bigquery
     except ImportError:

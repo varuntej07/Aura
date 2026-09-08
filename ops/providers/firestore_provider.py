@@ -14,11 +14,30 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+# Mirrors static/time.js FUTURE_TOLERANCE_SECONDS. A shared convention, stated in
+# both places rather than assumed: a timestamp more than this far ahead of now is
+# a broken client clock, not activity.
+FUTURE_TOLERANCE_SECONDS = 300
+
 from firebase_admin import firestore
 from google.cloud.firestore_v1 import Query
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from fields import (
+    COST,
+    COST_EST_MICROUSD,
+    COST_LLM_CACHED_INPUT_TOKENS,
+    COST_LLM_GENERATIONS,
+    COST_LLM_INPUT_TOKENS,
+    COST_LLM_OUTPUT_TOKENS,
+    LD_DEVICE_NAME,
+    LD_INSTALL_ID,
+    LD_LAST_SEEN_AT,
+    LD_LINKED_AT,
+    LD_PLATFORM,
+    LINKED_DEVICES,
+    USER_LAST_DESKTOP_ACTIVE_AT,
+    USER_LINKED_PLATFORMS,
     DEC_LANE,
     DEC_MATCHED_SLUG,
     DEC_RELEVANCE_REASON,
@@ -131,14 +150,24 @@ def _display_name(uid: str, users: dict[str, dict]) -> str:
     return user.get(USER_DISPLAY_NAME) or user.get(USER_EMAIL) or uid[:6]
 
 
-def _uid_from_message_ref(ref) -> str:
-    # users/{uid}/chat_sessions/{sid}/messages/{mid} -> users/{uid}
-    return ref.parent.parent.parent.parent.id
+def _owner_uid(ref) -> str:
+    """The users/{uid} doc id that owns a collection-group hit.
 
-
-def _uid_from_voice_ref(ref) -> str:
-    # users/{uid}/voice_sessions/{sid} -> users/{uid}
-    return ref.parent.parent.id
+    None of the subcollection docs store uid as a field: it is always an
+    ancestor doc id, so it is recovered by walking the reference up to the
+    `users` collection. Walking by NAME rather than by a fixed number of
+    .parent hops means one helper serves every depth the dashboard reads —
+    voice_sessions and notifications sit two levels up, chat messages four —
+    and a doc that moves deeper later does not silently start reporting a
+    session id as a uid.
+    """
+    node = ref
+    while node is not None:
+        parent_collection = node.parent
+        if parent_collection is not None and parent_collection.id == USERS:
+            return node.id
+        node = parent_collection.parent if parent_collection is not None else None
+    return ""
 
 
 def latest_text_messages(users: dict[str, dict], limit: int = 60) -> list[dict]:
@@ -191,7 +220,7 @@ def latest_text_messages(users: dict[str, dict], limit: int = 60) -> list[dict]:
         data = doc.to_dict() or {}
         if data.get(MSG_ROLE) != MSG_ROLE_USER:
             continue
-        uid = _uid_from_message_ref(doc.reference)
+        uid = _owner_uid(doc.reference)
         out.append({
             "uid": uid,
             "name": _display_name(uid, users),
@@ -227,7 +256,7 @@ def latest_voice_sessions(users: dict[str, dict], limit: int = 30) -> list[dict]
     out: list[dict] = []
     for doc in docs:
         data = doc.to_dict() or {}
-        uid = _uid_from_voice_ref(doc.reference)
+        uid = _owner_uid(doc.reference)
         out.append({
             "uid": uid,
             "name": _display_name(uid, users),
@@ -244,9 +273,29 @@ def user_metrics_and_table(users: dict[str, dict], now: datetime, utc_offset_hou
 
     signins_today counts users whose last_login_at is today AND who were NOT created
     today (your "signins today, not new"). active_today uses last_active_at, which the
-    app refreshes on every silent session restore, not just explicit logins.
+    app refreshes on every silent session restore, not just explicit logins, so it
+    means "opened the app", NOT "talked to Buddy".
+
+    Every count is bounded on BOTH sides of today: a device with a wrong clock
+    writes a future last_active_at and would otherwise count as active forever.
+    Those users are reported in the `future_stamped` cohort instead of being
+    silently discarded.
+
+    Alongside the counts this returns the uid SET behind each one, because a count
+    nobody can expand is a count nobody can act on.
     """
     start = _start_of_today(now, utc_offset_hours)
+    # A timestamp cannot legitimately be in the future. The client writes
+    # last_active_at from its OWN clock (auth_repository.dart), so a device with
+    # a wrong date stamps a date days ahead and then counts as "active today"
+    # forever after. The message feeds already discard future timestamps using
+    # this same 300s tolerance (static/time.js FUTURE_TOLERANCE_SECONDS); the
+    # counts did not, which silently inflated "active today". They are excluded
+    # from the counts and surfaced separately, never dropped without a trace.
+    horizon = now + timedelta(seconds=FUTURE_TOLERANCE_SECONDS)
+
+    def _within_today(value: datetime | None) -> bool:
+        return value is not None and start <= value <= horizon
 
     new_today = signins_today = active_today = 0
     table: list[dict] = []
@@ -255,24 +304,36 @@ def user_metrics_and_table(users: dict[str, dict], now: datetime, utc_offset_hou
         last_login = _to_datetime(data.get(USER_LAST_LOGIN_AT))
         last_active = _to_datetime(data.get(USER_LAST_ACTIVE_AT))
 
-        is_new = created is not None and created >= start
-        if is_new:
-            new_today += 1
-        if last_login is not None and last_login >= start and not is_new:
-            signins_today += 1
-        if last_active is not None and last_active >= start:
-            active_today += 1
+        future_stamped = last_active is not None and last_active > horizon
+        is_new = _within_today(created)
+        signed_in = _within_today(last_login) and not is_new
+        is_active = _within_today(last_active)
+        new_today += is_new
+        signins_today += signed_in
+        active_today += is_active
 
+        platforms = data.get(USER_LINKED_PLATFORMS)
         table.append({
             "uid": uid,
             "name": data.get(USER_DISPLAY_NAME) or data.get(USER_EMAIL) or uid[:6],
             "email": data.get(USER_EMAIL, ""),
+            "created_at": _iso(created),
             "last_login": _iso(last_login),
             "last_active": _iso(last_active),
             "login_count": data.get(USER_LOGIN_COUNT, 0),
             "is_active": bool(data.get(USER_IS_ACTIVE, False)),
             "platform": data.get(USER_SIGN_IN_METHOD, "") or data.get(USER_PLATFORM, ""),
+            "linked_platforms": [str(p) for p in platforms] if isinstance(platforms, list) else [],
+            "last_desktop_active": _iso(_to_datetime(data.get(USER_LAST_DESKTOP_ACTIVE_AT))),
             "aura_consent": bool(data.get(USER_AURA_CONSENT, False)),
+            # Which of the top-strip counts this row is BEHIND. The dashboard used
+            # to render only the counts, so "6 active today" named nobody and the
+            # founder could not tell who they were. Every count now ships the set
+            # it counted, from the same single users read.
+            "new_today": bool(is_new),
+            "signed_in_today": bool(signed_in),
+            "active_today": bool(is_active),
+            "future_stamped": bool(future_stamped),
         })
 
     table.sort(key=lambda row: row["last_active"], reverse=True)
@@ -282,6 +343,19 @@ def user_metrics_and_table(users: dict[str, dict], now: datetime, utc_offset_hou
             "new_today": new_today,
             "signins_today": signins_today,
             "active_today": active_today,
+        },
+        # The membership lists behind the counts, so the UI can answer "who?"
+        # without a second read. active_today means last_active_at moved today,
+        # and its writer (auth_repository.dart) fires on silent session restore
+        # as well as explicit sign-in: it means "opened the app", NOT "talked to
+        # Buddy". The UI derives the stronger "talked today" set from the message
+        # and voice feeds it already has.
+        "cohorts": {
+            "active_today": [r["uid"] for r in table if r["active_today"]],
+            "future_stamped": [r["uid"] for r in table if r["future_stamped"]],
+            "new_today": [r["uid"] for r in table if r["new_today"]],
+            "signins_today": [r["uid"] for r in table if r["signed_in_today"]],
+            "total_users": [r["uid"] for r in table],
         },
         "users": table,
     }
@@ -425,7 +499,7 @@ def latest_notifications(users: dict[str, dict], per_user: int = 6, total: int =
             .stream()
         )
         rows = [
-            _notification_row(doc.reference.parent.parent.id, users, doc.to_dict() or {})
+            _notification_row(_owner_uid(doc.reference), users, doc.to_dict() or {})
             for doc in snaps
         ]
         for r in rows:
@@ -460,15 +534,17 @@ def latest_notifications(users: dict[str, dict], per_user: int = 6, total: int =
     return rows[:total]
 
 
-def payment_intents(users: dict[str, dict]) -> list[dict]:
+def payment_intents(users: dict[str, dict], limit: int = 500) -> list[dict]:
     """Every captured paywall interest across all users (beta interest-capture
     writes, see fields.py PAYMENT_INTENT block). One BARE collection-group
     stream: no field filter or order, so it needs NO composite index or field
     override (Read Discipline: one query, never a per-user loop). The
     collection is tiny by construction — at most one doc per tier+period per
-    user — and sorting happens in memory."""
+    user — and sorting happens in memory. The `limit` is a backstop, not a
+    product rule: the bound is structural, but an unbounded stream in code is
+    a promise nothing enforces."""
     try:
-        docs = list(_db().collection_group(PAYMENT_INTENT).stream())
+        docs = list(_db().collection_group(PAYMENT_INTENT).limit(limit).stream())
     except Exception as exc:
         logger.error("payment_intents read failed: %s", exc)
         return []
@@ -476,8 +552,7 @@ def payment_intents(users: dict[str, dict]) -> list[dict]:
     rows: list[dict] = []
     for doc in docs:
         data = doc.to_dict() or {}
-        # users/{uid}/payment_intent/{tier}_{period} -> users/{uid}
-        uid = doc.reference.parent.parent.id
+        uid = _owner_uid(doc.reference)
         captured = _to_datetime(data.get(PI_CAPTURED_AT))
         rows.append({
             "uid": uid,
@@ -491,3 +566,180 @@ def payment_intents(users: dict[str, dict]) -> list[dict]:
     for r in rows:
         r.pop("_sort", None)
     return rows
+
+
+def desktop_installs(users: dict[str, dict], now: datetime, limit: int = 1000) -> dict:
+    """Real desktop installs: one row per installation that reached a signed-in state.
+
+    This exists because GitHub's per-asset `download_count` is not an install
+    count and cannot be made into one. It is a raw HTTP counter incremented by
+    crawlers, security scanners, and, decisively, the Tauri updater re-fetching
+    the same .msi on every auto-update of every EXISTING install. That is how the
+    dashboard could show 10 "downloads" against 0 users with both numbers correct.
+
+    `users/{uid}/linked_devices/{install_id}` is the honest denominator: the
+    backend writes exactly one doc per installation that completed pairing or
+    web-auth (backend/src/services/linked_devices.py), keyed by the client's own
+    install_id, so re-running the same install does not double count and an
+    installer that was downloaded but never opened does not count at all.
+
+    ONE bare collection_group stream: no field filter, no order, therefore no
+    composite index and no COLLECTION_GROUP override (the same discipline
+    payment_intents follows). Sorting and the 7-day window are applied in memory
+    over a bounded row set.
+    """
+    empty = {
+        "available": False, "installs": 0, "active_7d": 0,
+        "users_with_desktop": 0, "by_platform": {}, "devices": [],
+    }
+    try:
+        docs = list(_db().collection_group(LINKED_DEVICES).limit(limit).stream())
+    except Exception as exc:
+        logger.error("desktop_installs read failed: %s", exc)
+        return empty
+
+    week_ago = now - timedelta(days=7)
+    by_platform: dict[str, int] = {}
+    rows: list[dict] = []
+    active_7d = 0
+    for doc in docs:
+        data = doc.to_dict() or {}
+        uid = _owner_uid(doc.reference)
+        platform = str(data.get(LD_PLATFORM) or "unknown")
+        by_platform[platform] = by_platform.get(platform, 0) + 1
+        last_seen = _to_datetime(data.get(LD_LAST_SEEN_AT))
+        if last_seen is not None and last_seen >= week_ago:
+            active_7d += 1
+        rows.append({
+            "uid": uid,
+            "name": _display_name(uid, users),
+            "install_id": str(data.get(LD_INSTALL_ID) or doc.id),
+            "device_name": str(data.get(LD_DEVICE_NAME) or ""),
+            "platform": platform,
+            "linked_at": _iso(_to_datetime(data.get(LD_LINKED_AT))),
+            "last_seen": _iso(last_seen),
+            "_sort": last_seen or datetime.min.replace(tzinfo=timezone.utc),
+        })
+
+    rows.sort(key=lambda row: row["_sort"], reverse=True)
+    for row in rows:
+        row.pop("_sort", None)
+
+    # Cross-check against the root-doc footprint. linked_platforms is written by
+    # a DIFFERENT path (the array-union in desktop_profile / pairing / web_auth),
+    # so a mismatch between these two numbers means one writer is failing rather
+    # than being a rounding difference. Both are shown, never reconciled silently.
+    mobile_only = {"android", "ios", "web"}
+    users_with_desktop = sum(
+        1 for data in users.values()
+        if isinstance(data.get(USER_LINKED_PLATFORMS), list)
+        and any(str(platform) not in mobile_only for platform in data[USER_LINKED_PLATFORMS])
+    )
+
+    return {
+        "available": True,
+        "installs": len(rows),
+        "active_7d": active_7d,
+        "users_with_desktop": users_with_desktop,
+        "by_platform": by_platform,
+        "devices": rows[:200],
+    }
+
+
+def llm_spend(users: dict[str, dict], now: datetime, days: int = 7) -> dict:
+    """Real LLM spend from the per-user daily ledger the backend already writes.
+
+    The Costs tab used to claim "usage tracking intentionally disabled" for
+    anthropic/gemini/openai. That has been false since 2026-08: every backend LLM
+    call merge-increments `users/{uid}/cost/{YYYY-MM-DD}` with generations,
+    input/cached/output tokens and estimated microUSD
+    (backend/src/services/analytics/llm_cost_ledger.py, schema in cost_doc.py),
+    whether or not Langfuse is configured.
+
+    Read shape: the doc id IS the UTC date, so this needs no query at all. It
+    builds the exact document paths for (every user x every day in the window)
+    and issues ONE batched get_all(). No index, no collection-group scan, one
+    round trip, and a day with no activity simply comes back non-existent rather
+    than costing anything. At beta scale that is 16 users x 7 days = 112 refs in
+    a single RPC. The window is capped at 30 days so the ref count stays bounded;
+    at thousands of users this should read a rollup the backend writes instead.
+
+    HONEST LIMIT: the ledger stores no model field (estimate_microusd folds the
+    model into the dollar amount), so this gives real TOTAL and PER-USER spend but
+    cannot give a per-model claude/gemini/gpt split. The Costs tab links out to
+    each provider's own console for that.
+    """
+    window_days = max(1, min(int(days), 30))
+    empty = {
+        "available": False, "days": window_days, "est_usd": None,
+        "generations": 0, "input_tokens": 0, "cached_input_tokens": 0,
+        "output_tokens": 0, "docs_found": 0, "daily": [], "by_user": [],
+    }
+    if not users:
+        return empty
+
+    dates = [(now - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(window_days)]
+    db = _db()
+    refs = [
+        db.collection(USERS).document(uid).collection(COST).document(date)
+        for uid in users
+        for date in dates
+    ]
+    try:
+        snapshots = list(db.get_all(refs))
+    except Exception as exc:
+        logger.error("llm_spend batch read failed (%d refs): %s", len(refs), exc)
+        return empty
+
+    microusd_total = generations_total = 0
+    input_total = cached_total = output_total = 0
+    per_day: dict[str, float] = {date: 0.0 for date in dates}
+    per_user: dict[str, dict] = {}
+    present = 0
+
+    for snapshot in snapshots:
+        if not getattr(snapshot, "exists", False):
+            continue
+        present += 1
+        data = snapshot.to_dict() or {}
+        uid = _owner_uid(snapshot.reference)
+        microusd = int(data.get(COST_EST_MICROUSD) or 0)
+        generations = int(data.get(COST_LLM_GENERATIONS) or 0)
+        input_tokens = int(data.get(COST_LLM_INPUT_TOKENS) or 0)
+        cached_tokens = int(data.get(COST_LLM_CACHED_INPUT_TOKENS) or 0)
+        output_tokens = int(data.get(COST_LLM_OUTPUT_TOKENS) or 0)
+
+        microusd_total += microusd
+        generations_total += generations
+        input_total += input_tokens
+        cached_total += cached_tokens
+        output_total += output_tokens
+        per_day[snapshot.id] = round(per_day.get(snapshot.id, 0.0) + microusd / 1e6, 6)
+
+        row = per_user.setdefault(uid, {
+            "uid": uid, "name": _display_name(uid, users),
+            "est_usd": 0.0, "generations": 0, "tokens": 0,
+        })
+        row["est_usd"] = round(row["est_usd"] + microusd / 1e6, 6)
+        row["generations"] += generations
+        # Cached prompt tokens are a separate field, not a subset of input_tokens,
+        # so all three are summed for a true per-user token total.
+        row["tokens"] += input_tokens + cached_tokens + output_tokens
+
+    # A ledger that exists but recorded nothing this window is a real, useful
+    # zero. A ledger with NO documents at all means the backend is not writing it.
+    # Those two must never render identically, so `available` carries the
+    # distinction and `docs_found` shows the evidence.
+    by_user = sorted(per_user.values(), key=lambda row: row["est_usd"], reverse=True)
+    return {
+        "available": present > 0,
+        "days": window_days,
+        "est_usd": round(microusd_total / 1e6, 4),
+        "generations": generations_total,
+        "input_tokens": input_total,
+        "cached_input_tokens": cached_total,
+        "output_tokens": output_total,
+        "docs_found": present,
+        "daily": [{"day": date, "est_usd": per_day.get(date, 0.0)} for date in sorted(per_day)],
+        "by_user": by_user[:25],
+    }

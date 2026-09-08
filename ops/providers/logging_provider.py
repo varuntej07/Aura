@@ -1,6 +1,7 @@
 """Searchable operational logs and structured usage aggregates."""
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -8,6 +9,22 @@ import math
 logger = logging.getLogger("ops.logging")
 
 _BACKEND_SERVICE = "juno-backend"
+
+
+@functools.lru_cache(maxsize=4)
+def _client(project_id: str):
+    """One Cloud Logging client per project, built once.
+
+    Five functions in this module each constructed their own client per call, so
+    a single cold dashboard load paid several gRPC channel setups and credential
+    acquisitions before any query ran. The client is thread-safe and the process
+    is a short-lived Cloud Run revision, so holding it for the process lifetime
+    is safe; the trade is that rotated ADC credentials need a restart to be
+    picked up, which a new revision already is.
+    """
+    from google.cloud import logging as cloud_logging
+
+    return cloud_logging.Client(project=project_id)
 
 
 # Sources the dashboard can read after the LiveKit Google Cloud log drain is set.
@@ -80,7 +97,7 @@ def recent_errors(
 
     severity = min_severity.upper() if min_severity.upper() in _SEVERITIES else "ERROR"
     try:
-        client = cloud_logging.Client(project=project_id)
+        client = _client(project_id)
         log_filter = f"{_service_clause(services)} AND severity>={severity}"
         entries = client.list_entries(
             filter_=log_filter,
@@ -137,7 +154,7 @@ def search_logs(
         parts.append(f'"{term}"')
 
     try:
-        client = cloud_logging.Client(project=project_id)
+        client = _client(project_id)
         entries = client.list_entries(
             filter_=" AND ".join(parts),
             order_by=cloud_logging.DESCENDING,
@@ -181,9 +198,15 @@ def voice_latency_stats(project_id: str, days: int = 7, limit: int = 3000) -> di
         from datetime import datetime, timedelta, timezone
 
         since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 30)))
-        client = cloud_logging.Client(project=project_id)
+        client = _client(project_id)
         entries = client.list_entries(
+            # The bare quoted terms below are a GLOBAL RESTRICTION, which makes
+            # Cloud Logging search every field of every log in the project for
+            # the window. Anchoring on resource.type first lets the index cut the
+            # candidate set before the text match, so cost tracks worker volume
+            # rather than total project log volume.
             filter_=(
+                'resource.type="cloud_run_revision" AND '
                 f'timestamp>="{since.isoformat()}" AND '
                 '("VoiceSession: first talk metrics" OR "VoiceSession: turn metrics")'
             ),
@@ -227,9 +250,18 @@ def provider_usage_stats(project_id: str, days: int = 7, limit: int = 5000) -> d
         from datetime import datetime, timedelta, timezone
 
         since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 30)))
-        client = cloud_logging.Client(project=project_id)
+        client = _client(project_id)
         entries = client.list_entries(
-            filter_=f'timestamp>="{since.isoformat()}" AND "provider_request"',
+            # Same reasoning as voice_latency_stats: anchor on the emitting
+            # service before the text term. Only the backend calls
+            # observability.log_provider_request, so constraining to it cannot
+            # lose a record, and it stops a 30-day range from scanning the whole
+            # project's logs to find a few thousand Brave calls.
+            filter_=(
+                'resource.type="cloud_run_revision" AND '
+                f'resource.labels.service_name="{_BACKEND_SERVICE}" AND '
+                f'timestamp>="{since.isoformat()}" AND "provider_request"'
+            ),
             order_by=cloud_logging.DESCENDING,
             max_results=limit,
         )
@@ -296,7 +328,7 @@ def recent_recommender_health(
         return []
 
     try:
-        client = cloud_logging.Client(project=project_id)
+        client = _client(project_id)
         log_filter = (
             'resource.type="cloud_run_revision" '
             f'AND resource.labels.service_name="{service_name}" '

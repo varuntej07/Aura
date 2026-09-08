@@ -24,13 +24,11 @@ USER_LOGIN_COUNT = "login_count"
 USER_IS_ACTIVE = "is_active"
 USER_SIGN_IN_METHOD = "sign_in_method"
 USER_PLATFORM = "platform"
-USER_TIMEZONE = "timezone"
 USER_AURA_CONSENT = "aura_consent_granted"
 
 # ── users/{uid}/chat_sessions/{sid}/messages/{mid} ───────────────────────────
 # Writer: lib/data/services/chat_backup_service.dart (_messageDoc). uid is NOT a
 # field on the doc — it is the grandparent doc id, recovered from the reference path.
-CHAT_SESSIONS = "chat_sessions"
 MESSAGES = "messages"
 MSG_TEXT = "text"
 MSG_ROLE = "role"               # "user" | "assistant"
@@ -46,7 +44,6 @@ VOICE_STARTED_AT = "started_at"      # ISO-8601 string
 VOICE_SUMMARY = "summary"
 VOICE_TOTAL_DURATION = "total_duration"
 VOICE_NUM_TURNS = "num_of_turns"
-VOICE_ARCHIVED = "archived"
 
 # ── observed_feedback/{id} (top-level collection) ────────────────────────────
 # Writer: backend/src/services/feedback/feedback_schema.py (build_feedback_document).
@@ -55,7 +52,6 @@ FB_SUMMARY = "summary"
 FB_QUOTE = "verbatim_quote"
 FB_CATEGORY = "category"
 FB_SEVERITY = "severity"
-FB_SOURCE = "source"
 FB_CREATED_AT = "created_at"
 FB_USERNAME = "username"
 
@@ -69,8 +65,6 @@ FB_USERNAME = "username"
 # field. Rows self-purge on a 90-day Firestore TTL (expires_at), so this collection
 # never grows unbounded — the dashboard adds no writes of its own.
 NOTIFICATIONS = "notifications"
-NOTIF_TYPE = "type"
-NOTIF_ORIGIN = "origin"            # "signal_engine" | "reminder" | "thread_engine" | ...
 NOTIF_TITLE = "title"
 NOTIF_BODY = "body"
 NOTIF_CATEGORY = "category"
@@ -95,3 +89,49 @@ PAYMENT_INTENT = "payment_intent"
 PI_TIER = "tier"                    # "companion" | "pro"
 PI_BILLING_PERIOD = "billing_period"  # "monthly" | "annual"
 PI_CAPTURED_AT = "captured_at"      # Firestore server Timestamp
+
+# ── users/{uid}/linked_devices/{install_id} ──────────────────────────────────
+# Writer: backend/src/services/linked_devices.py (upsert_linked_device), called
+# from handlers/pairing.py and handlers/web_auth.py. ONE doc per real desktop
+# installation that reached a signed-in state, keyed by the client's own
+# install_id (a UUID), so the count is installs-that-signed-in, NOT HTTP fetches
+# of an installer file. This is the only honest desktop-adoption denominator we
+# have: GitHub's per-asset download_count also counts crawlers and every Tauri
+# auto-update re-fetch, and cannot be de-botted from GitHub's API.
+# uid is the grandparent doc id, not a field. Schema version 2 uses NATIVE
+# Firestore timestamps for linked_at/last_seen_at (the root user doc keeps its
+# separate ISO-string contract; see ECOSYSTEM.md).
+LINKED_DEVICES = "linked_devices"
+LD_INSTALL_ID = "install_id"
+LD_DEVICE_NAME = "device_name"
+LD_PLATFORM = "platform"          # "windows" today; macOS ships through the same path
+LD_LINKED_AT = "linked_at"        # Firestore Timestamp, never rewritten after first link
+LD_LAST_SEEN_AT = "last_seen_at"  # Firestore Timestamp, refreshed on every link/sign-in
+
+# ── users/{uid} desktop surface footprint ────────────────────────────────────
+# Writers: handlers/desktop_profile.py L141-142, handlers/pairing.py,
+# handlers/web_auth.py (array-union) and the Flutter app on every open
+# (auth_repository.dart, UserModel.fieldLinkedPlatforms).
+USER_LINKED_PLATFORMS = "linked_platforms"          # array: ["android", "windows", ...]
+USER_LAST_DESKTOP_ACTIVE_AT = "last_desktop_active_at"  # ISO-8601 string
+
+# ── users/{uid}/cost/{YYYY-MM-DD} ────────────────────────────────────────────
+# Writer: backend/src/services/analytics/llm_cost_ledger.py, whose schema
+# contract lives in backend/src/services/cost_doc.py. Merge-incremented on EVERY
+# backend LLM call (chat, voice, fallbacks, background agents) via
+# llm_telemetry._Recording.finish, independent of whether Langfuse is
+# configured. Rows self-purge on a 90-day TTL (expires_at).
+#
+# The doc id IS the UTC date, which is why the dashboard reads this with a
+# batched get_all() over known paths instead of a query: no index, no
+# collection-group scan, one round trip.
+#
+# NOTE there is deliberately no model field: estimate_microusd(model, tokens)
+# folds the model into the dollar amount, so this ledger gives real TOTAL and
+# per-user spend but cannot give a per-model split. Do not invent one from it.
+COST = "cost"
+COST_LLM_GENERATIONS = "llm_generations"
+COST_LLM_INPUT_TOKENS = "llm_input_tokens"
+COST_LLM_CACHED_INPUT_TOKENS = "llm_cached_input_tokens"
+COST_LLM_OUTPUT_TOKENS = "llm_output_tokens"
+COST_EST_MICROUSD = "est_llm_microusd"

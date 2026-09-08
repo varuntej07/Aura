@@ -98,26 +98,38 @@ phone/laptop ─► https://juno-ops-….run.app ─► enter passcode ─► co
 ## Layout (v2: dark control-room)
 
 ```
-Overview:  metric strip (signins/new/active/total/msgs/p95/5xx) ·
-           messages + voice feeds · recommender health · recommendations sent ·
-           top screens · users table · feedback · multi-service errors ·
+Overview:  attention strip (only what needs a decision) · metric strip
+           (signins/new/opened-app/talked/total/msgs/p95/5xx, every count
+           clickable to see WHO) · messages + voice feeds · recommender health ·
+           recommendations sent · top screens · filterable users table ·
+           per-user drawer · feedback · multi-service errors ·
            retention (DAU/WAU/MAU + cohort grid) · notification funnel ·
            revenue funnel (paywall interest capture)
 Mobile:    Crashlytics crash feed (BigQuery export) · per-platform backend
            latency · client-observed chat/voice p50/p95/p99 · LiveKit worker
            first-talk and reply p50/p95/p99 · downloads (honest
            "not live yet" until the store listings ship)
-Desktop:   operational errors in Logs · same latency block ·
-           GitHub Releases download counts
+Desktop:   adoption funnel (site click -> installer fetches -> signed-in
+           installs -> active 7d) · signed-in install list · same latency block ·
+           operational errors in Logs
 Web:       auravoiceapp.com pageviews · referrers · download funnel
-           (download_page_viewed -> download_clicked -> installer downloads)
-Costs:     Claude/Gemini/OpenAI traced spend · Brave query count and breakdown ·
+           (download_page_viewed -> download_clicked -> installer fetches ->
+           signed-in installs)
+Costs:     live LLM spend from the Firestore ledger (est. USD, tokens, cache
+           hit rate, per-day chart, top spenders) · one-click links to every
+           provider's own usage console · Brave query count and breakdown ·
            GCP billing export · manual subscription costs with explicit labels
 Logs:      error-first merged Cloud Run/LiveKit/mobile viewer · warning toggle ·
            text/service/range filters · duplicate grouping
 Architecture: synthetic static/runtime topology, concurrent sample traces,
               inspector, waterfall, fallback and cache overlays
 ```
+
+Within one payload build the independent provider reads are issued
+concurrently (a small thread pool in `panels.py`), because they are all blocking
+network round trips to different systems and a cold Overview load makes about
+twenty of them. Concurrency changes *when* those calls happen, never *how many*:
+the TTL caches below remain the read-cost gate.
 
 Refresh model: NOTHING auto-refreshes. Each tab fetches once on first view,
 then serves from client memory; only the Refresh button re-fetches the active
@@ -131,11 +143,74 @@ scripted curl loop cost one provider fetch per window, never one per request.
 | Var | Feeds | Notes |
 |---|---|---|
 | `OPS_CRASHLYTICS_BQ_DATASET` | Mobile crash feed | Default `firebase_crashlytics`; requires the one-click BigQuery export in Firebase console |
-| `GITHUB_TOKEN` | Desktop downloads | Optional; lifts the 60 req/hr unauthenticated limit (provider caches 15 min anyway) |
+| `GITHUB_TOKEN` | Desktop installer fetches | Optional; lifts the 60 req/hr unauthenticated limit (provider caches 15 min anyway) |
 | `OPS_POSTHOG_WEB_PROJECT_ID` | Web tab | Only if aura-web uses a different PostHog project than the app (unverified, see ECOSYSTEM.md) |
 | `OPS_GCP_BILLING_TABLE` | Actual GCP cost | Full BigQuery billing export table name: `project.dataset.table` |
 | `OPS_BRAVE_COST_PER_QUERY_USD` | Estimated Brave cost | Optional unit rate multiplied by observed billable queries |
 | `OPS_PROVIDER_MONTHLY_COSTS_JSON` | Providers with subscriptions | JSON map such as `{"livekit":50,"cartesia":20}`; values are prorated for the selected range |
+
+## Answering "who?" (every count is a drill-down)
+
+The strip used to render `active today: 6` with no way to learn who the six
+were. Now every count whose membership is knowable is clickable and filters the
+Users table to exactly those people; clicking any name opens a per-user drawer
+with their messages, voice sessions, what Buddy recommended them and whether it
+landed, their desktop installs, and their LLM spend. The drawer is a client-side
+filter over feeds the Overview payload already contains, so it costs **zero**
+extra Firestore reads.
+
+Two activity numbers sit side by side on purpose:
+
+- **opened app today** is `last_active_at`, written by `auth_repository.dart` on
+  sign-in *and on silent session restore*. It means the app came to the
+  foreground, nothing more.
+- **talked to Buddy today** is distinct uids in today's message and voice feeds.
+
+For a companion app the second is the number that matters, and the gap between
+them is the thing worth seeing. When people open the app and leave without
+talking, the attention strip at the top says so.
+
+## Desktop downloads are not installs
+
+GitHub's per-asset `download_count` is a raw HTTP counter. Crawlers and security
+scanners fetch release assets, and the Tauri updater re-fetches the same `.msi`
+on **every auto-update of every existing install**, so one happy user generates a
+"download" per release. None of that is filterable through GitHub's API. This is
+why the dashboard could show 10 downloads against 0 users with both numbers
+correct.
+
+The dashboard therefore reports two different things and never conflates them:
+
+| Number | Source | What it means |
+|---|---|---|
+| installer fetches | GitHub Releases | Upper bound on interest. Bots and auto-updates included. |
+| installs signed in | `users/{uid}/linked_devices/{install_id}` | One doc per installation that actually reached a signed-in state. |
+
+`linked_devices` is written by `backend/src/services/linked_devices.py` on
+pairing and web-auth, keyed by the client's own `install_id`, so a reinstall does
+not double count and a download that was never opened does not count at all. The
+read is one bare `collection_group` stream: no index, no field override.
+
+## LLM cost needs no configuration
+
+The Costs tab used to say *"usage tracking intentionally disabled"* for
+Anthropic/Gemini/OpenAI. That was wrong. Since 2026-08 the backend increments
+`users/{uid}/cost/{YYYY-MM-DD}` on **every** model call (chat, voice, fallbacks,
+background agents) with generations, input/cached/output tokens and estimated
+microUSD, on a 90-day TTL. The dashboard reads it directly.
+
+Because the doc id *is* the date, that read needs no query: the panel builds the
+exact `users/{uid}/cost/{date}` paths for the window and issues one batched
+`get_all()`. No index, no collection-group scan, one round trip.
+
+Two limits, both stated on the card rather than left to be assumed:
+
+- It is an **estimate**. The backend prices each call from a token table
+  (`estimate_microusd`), not from an invoice.
+- It carries **no model field**, so it cannot be split into Claude / Gemini /
+  GPT. Attributing the combined total to any one vendor would be a fabrication,
+  so it sits on its own `llm` row and each vendor row links to that provider's
+  own usage console for the real split.
 
 ## Error and voice log sources
 
@@ -228,7 +303,8 @@ When this reaches hundreds of users, switch `latest_notifications` to one
 |---|---|
 | `app.py` | FastAPI: the passcode gate + all `/api/*` routes, serves the page |
 | `panels.py` | composes the providers into per-endpoint payloads |
-| `providers/` | one module per source (firestore, monitoring, logging, posthog, langfuse, crashlytics/BigQuery, sentry, github releases) |
+| `providers/` | one module per source (firestore, monitoring, logging, posthog, crashlytics/BigQuery, github releases, cost) |
+| `ranges.py` | the today/7d/30d vocabulary, defined once |
 | `fields.py` | every Firestore field name in one place, mirroring the app/backend writers |
 | `static/` | the UI: `index.html`, `style.css`, `app.js`, the architecture-twin module, and vendored Chart.js (no build step) |
 
@@ -261,9 +337,10 @@ OPS_PASSCODE=test1234 uvicorn app:app --reload --port 8000   # open http://local
   in PostHog (`voice_first_response`) and can be added as a panel later.
 - **"Top screens" ranks by view count, not true dwell time.** Real "time spent on a page"
   needs per-session windowing; view count is the honest first cut.
-- **PostHog screen event name is unverified.** `posthog_provider.SCREEN_EVENT` /
-  `SCREEN_NAME_PROPERTY` default to PostHog's mobile standard (`$screen` / `$screen_name`).
-  Confirm against the Flutter `AppRouteObserver` before trusting that one panel.
+- **PostHog screen event name is verified** (2026-09-07): the panel returns real Flutter
+  route names, confirming the app emits PostHog's mobile standard (`$screen` /
+  `$screen_name`). Change `posthog_provider.SCREEN_EVENT` / `SCREEN_NAME_PROPERTY` only if
+  the app moves to a custom event name.
 - **"Today" is `OPS_UTC_OFFSET_HOURS`.** Set it to your day boundary (e.g. `5.5` IST, `-7` PDT).
 - **PostHog is optional.** Without `POSTHOG_PERSONAL_KEY` + `POSTHOG_PROJECT_ID`, only the
   top-screens panel is empty; everything else works.
