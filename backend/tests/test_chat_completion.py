@@ -119,7 +119,7 @@ async def test_complete_turn_regenerates_and_pushes(monkeypatch):
     monkeypatch.setattr(turn_store, "claim_for_completion", AsyncMock(return_value=claimed))
     mark_complete = AsyncMock()
     monkeypatch.setattr(turn_store, "mark_complete", mark_complete)
-    monkeypatch.setattr(completion, "_regenerate", AsyncMock(return_value=("Paris.", None, [])))
+    monkeypatch.setattr(completion, "_regenerate", AsyncMock(return_value=("Paris.", None, [], "claude-sonnet-5")))
     push = AsyncMock()
     monkeypatch.setattr(completion, "_push_reply", push)
 
@@ -141,7 +141,7 @@ async def test_complete_turn_marks_failed_and_skips_push_when_regen_empty(monkey
     monkeypatch.setattr(turn_store, "claim_for_completion", AsyncMock(return_value=claimed))
     mark_failed = AsyncMock()
     monkeypatch.setattr(turn_store, "mark_failed", mark_failed)
-    monkeypatch.setattr(completion, "_regenerate", AsyncMock(return_value=("", None, [])))
+    monkeypatch.setattr(completion, "_regenerate", AsyncMock(return_value=("", None, [], "")))
     push = AsyncMock()
     monkeypatch.setattr(completion, "_push_reply", push)
 

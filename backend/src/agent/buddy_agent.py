@@ -2362,7 +2362,11 @@ class BuddyAgent(agents.Agent):
         quick factual question (web_surf).
 
         request: what to research, in the user's words.
-        destination: the database they named, in their words.
+        destination: the database they named, in their words. Speech recognition
+        mangles proper nouns: if what you heard is a near-homophone of a word
+        already used in this conversation ("motion" for "Notion"), take the word
+        they actually used. Never create a database named after the connector
+        itself; that is a misheard destination, not a name they chose.
         confirmed_database_id: ONLY on a follow-up turn after this tool asked
         which database and the user picked one - pass that candidate's id.
         create_confirmed: ONLY after this tool proposed creating a database
@@ -2378,8 +2382,25 @@ class BuddyAgent(agents.Agent):
             confirmed_database_id=confirmed_database_id,
             create_confirmed=create_confirmed,
         )
+        asked_question = bool(result.candidates or result.proposed_create_name)
+        # `then` is the only field in the Action Truth envelope that binds the NEXT
+        # utterance, and this tool used to omit it entirely. On 2026-09-08 a free
+        # user's run was refused with the correct line already in `say`
+        # ("Background research needs a paid plan..."), and Buddy said research was
+        # in progress four separate times instead. `render: verbatim` alone was not
+        # enough; the refusal branch is the one that most needs a binding.
+        if result.dispatched:
+            then = "Say that and stop. Do not add findings, progress, or timing you were not given."
+        elif asked_question:
+            then = "Ask that and wait for their answer before calling this again."
+        else:
+            then = (
+                "Say that verbatim. Nothing was started, so do not say research is "
+                "running, starting, or on its way, and correct any earlier claim "
+                "that it was."
+            )
         return {
-            "ok": result.dispatched or bool(result.candidates or result.proposed_create_name),
+            "ok": result.dispatched or asked_question,
             "say": result.spoken_confirmation,
             "candidates": [
                 {"database_id": database_id, "title": title}
@@ -2387,6 +2408,7 @@ class BuddyAgent(agents.Agent):
             ],
             "proposed_create_name": result.proposed_create_name,
             "render": {"mode": "verbatim", "channel": "voice"},
+            "then": then,
         }
 
     @function_tool

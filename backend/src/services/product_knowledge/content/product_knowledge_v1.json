@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "knowledge_version": "2026.09.03.1",
+  "knowledge_version": "2026.09.08.1",
   "product_release": {
     "stage": "beta",
     "answers": {
@@ -24,7 +24,7 @@
       "summary": "Aura is a beta companion available as an Android mobile app and a desktop app on Windows and macOS (beta), with account-scoped state and surface-specific tools.",
       "answers": {
         "voice": "I can talk or chat with you, remember what matters, handle reminders, work with your calendar and Gmail, look things up, and help you write. There's more on Android and on Windows. Want me to go deeper on any of it?",
-        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS, and Aura Desktop is available on **Windows** with a **macOS** beta rolling out. Across supported devices, Buddy provides chat and voice, account-scoped memory and Your Aura context, reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive follow-ups, a daily briefing, feedback, and writing help. Android adds Buddy Keyboard, a one-tap voice widget, notifications, loud alarm reminders, and the Get Better idea feed. Windows adds text and voice shortcuts, dictation, screen understanding when you ask, Screen Saves, Guide Mode, Buddy Drafts and visible artifacts, meeting notes, Interview Companion, mock interviews, background research, insights, notifications, and dashboard pages for conversations, drafts, saved items, meetings, research, and connectors. Durable account data is shared, while each surface keeps its own visible conversation scrollback."
+        "chat": "Aura is currently in **beta**. The mobile app is available on **Android**, not iOS, and Aura Desktop is available on **Windows** with a **macOS** beta rolling out. Across supported devices, Buddy provides chat and voice, account-scoped memory and Your Aura context, reminders, Google Calendar and Gmail tools when connected, live web search, topic tracking, proactive follow-ups, a daily briefing, feedback, and writing help. Android adds Buddy Keyboard, a one-tap voice widget, notifications, loud alarm reminders, and the Get Better idea feed. Windows adds text and voice shortcuts, dictation, screen understanding when you ask, Screen Saves, Guide Mode, Buddy Drafts and visible artifacts, meeting notes, Interview Companion, mock interviews, durable background research on a paid plan, insights, notifications, and dashboard pages for conversations, drafts, saved items, meetings, research, and connectors. Durable account data is shared, while each surface keeps its own visible conversation scrollback."
       },
       "surfaces": ["all"],
       "platforms": ["all"],
@@ -46,7 +46,7 @@
       "summary": "The beta Android app provides Buddy chat and voice plus Android keyboard, widget, alarm, notification, memory, connector, and profile experiences.",
       "answers": {
         "voice": "On your phone I can talk or chat, remember what matters, set reminders and loud alarms, use your calendar and Gmail, search the web, and help you write. There's also Buddy Keyboard and a one-tap voice widget. Want more on any of those?",
-        "chat": "Aura's mobile app is currently in **beta on Android**; it is **not available on iOS**. The Android app includes Buddy chat and voice, useful memory and Your Aura, regular reminders and loud alarm reminders, Google Calendar and Gmail tools when connected, live web research, topic tracking, proactive notifications and follow-up questions, a daily briefing, the Get Better idea feed and chat, writing help, Buddy Keyboard, and a one-tap voice widget. Settings contains voice and response controls, reminders and alarms, connectors, Your Aura, PC linking, plan and account controls, feedback, privacy, and terms."
+        "chat": "Aura's mobile app is currently in **beta on Android**; it is **not available on iOS**. The Android app includes Buddy chat and voice, useful memory and Your Aura, regular reminders and loud alarm reminders, Google Calendar and Gmail tools when connected, live web search, topic tracking, proactive notifications and follow-up questions, a daily briefing, the Get Better idea feed and chat, writing help, Buddy Keyboard, and a one-tap voice widget. Settings contains voice and response controls, reminders and alarms, connectors, Your Aura, PC linking, plan and account controls, feedback, privacy, and terms."
       },
       "surfaces": ["app"],
       "platforms": ["android"],
@@ -69,7 +69,7 @@
       "summary": "The beta desktop client (Windows, plus a fresh macOS beta) provides chat, voice, dictation, screen-aware help, dashboard workflows, meetings, interviews, research, and settings.",
       "answers": {
         "voice": "On your computer I can chat or talk, take dictation, and when you ask, understand what's on your screen, save things from it, draft for you, guide you through a task, or run a mock interview. Want me to dig into any of those?",
-        "chat": "Aura Desktop is currently in **beta on Windows**, with a fresh **macOS** beta rolling out; some desktop features reach the Mac build after Windows. It uses the same account-scoped reminders, memories, Your Aura profile, Google Calendar tools, Calendar and Gmail connections, trackers, and research as Android. Its companion overlay supports text and voice shortcuts, hold-to-talk dictation, screen understanding when you ask, Screen Saves, pointing, Guide Mode, Buddy Drafts, visible artifacts, and mock interviews. Its dashboard provides Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, notifications, General/Voice/System settings, account, billing, privacy, updates, and a link to the Android app."
+        "chat": "Aura Desktop is currently in **beta on Windows**, with a fresh **macOS** beta rolling out; some desktop features reach the Mac build after Windows. It uses the same account-scoped reminders, memories, Your Aura profile, Google Calendar tools, Calendar and Gmail connections, trackers, and paid-plan background research as Android. Its companion overlay supports text and voice shortcuts, hold-to-talk dictation, screen understanding when you ask, Screen Saves, pointing, Guide Mode, Buddy Drafts, visible artifacts, and mock interviews. Its dashboard provides Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, notifications, General/Voice/System settings, account, billing, privacy, updates, and a link to the Android app."
       },
       "surfaces": ["desktop"],
       "platforms": ["windows", "macos"],
@@ -342,19 +342,20 @@
       "kind": "how_to",
       "status": "shipped",
       "title": "Open plan controls",
-      "summary": "Upgrade Plan is available from Settings.",
+      "summary": "Plan controls live in Settings on the phone app and in Plans and Billing on Aura Desktop.",
       "answers": {
-        "voice": "Open the side menu, tap Settings, then Upgrade Plan.",
-        "chat": "Go to **side menu → Settings → Upgrade Plan** to view the plan options available to your account."
+        "voice": "On your phone, open the side menu, tap Settings, then Upgrade Plan. On your computer, open Settings from the Aura dashboard and go to Plans and Billing.",
+        "chat": "On the phone app: **side menu → Settings → Upgrade Plan**. On Aura Desktop: open **Settings** from the dashboard, then **Plans and Billing**. Either one shows the plan options available to your account."
       },
-      "surfaces": ["app"],
-      "platforms": ["android"],
+      "surfaces": ["all"],
+      "platforms": ["all"],
       "availability": {"tiers": ["all"], "connectors": [], "permissions": [], "minimum_versions": {}},
-      "navigation": ["Open the side menu", "Tap Settings", "Tap Upgrade Plan"],
+      "navigation": ["Phone: open the side menu, tap Settings, tap Upgrade Plan", "Desktop: open Settings from the dashboard, then Plans and Billing"],
       "action_tools": [],
-      "search_terms": ["upgrade", "plan", "subscription", "paid plan", "pricing screen", "change plan"],
+      "search_terms": ["upgrade", "plan", "subscription", "paid plan", "pricing screen", "change plan", "billing", "how do i pay"],
       "evidence": [
-        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Upgrade Plan row", "verified_at": "2026-08-25"}
+        {"path": "lib/presentation/screens/settings/settings_screen.dart", "symbol": "Upgrade Plan row", "verified_at": "2026-08-25"},
+        {"path": "src/dashboard/SettingsDialog.tsx", "symbol": "Plans and Billing route", "verified_at": "2026-09-08"}
       ]
     },
     {
@@ -656,20 +657,64 @@
       "kind": "availability",
       "status": "shipped",
       "title": "Screen understanding and Guide Mode availability",
-      "summary": "Screen tools are Windows-only and depend on current user-granted screen context.",
+      "summary": "Screen tools run on Aura Desktop on both Windows and macOS and depend on current user-granted screen context.",
       "answers": {
-        "voice": "Screen understanding, Screen Saves, and Guide Mode are Windows features. I use screen context when you ask, and actions that depend on what’s visible require a current desktop frame or the desktop’s explicit Guide Mode handoff.",
-        "chat": "Screen understanding, Screen Saves, reusable visual artifacts, and Guide Mode are Windows-only capabilities. Aura uses screen context when you ask; screen-dependent actions require current desktop-provided context, and Guide Mode must be explicitly armed by the desktop."
+        "voice": "Screen understanding, Screen Saves, and Guide Mode work on Aura Desktop, on Windows and on Mac. I use screen context when you ask, and anything that depends on what’s visible needs a current desktop frame or the desktop’s explicit Guide Mode handoff.",
+        "chat": "Screen understanding, Screen Saves, reusable visual artifacts, and Guide Mode are **Aura Desktop** capabilities on both **Windows** and **macOS**; the Mac build captures the same things, just more slowly, because the Windows fast path has no Mac equivalent. Aura uses screen context when you ask; screen-dependent actions require current desktop-provided context, and Guide Mode must be explicitly armed by the desktop."
       },
       "surfaces": ["desktop"],
-      "platforms": ["windows"],
+      "platforms": ["windows", "macos"],
       "availability": {"tiers": ["all"], "connectors": [], "permissions": ["user-provided screen context or explicit Guide Mode activation"], "minimum_versions": {}},
       "navigation": [],
       "action_tools": ["save_screen_item", "set_guide_mode", "present_visible_artifact"],
-      "search_terms": ["see my screen", "screen understanding", "screen share", "guide mode availability", "windows only", "screen saves"],
+      "search_terms": ["see my screen", "screen understanding", "screen share", "guide mode availability", "guide mode on mac", "screen saves"],
       "evidence": [
         {"path": "backend/src/agent/voice/capabilities.py", "symbol": "desktop-only screen capabilities", "verified_at": "2026-08-25"},
-        {"path": "architectures/guide-mode.md", "symbol": "desktop arming and frame flow", "verified_at": "2026-08-25"}
+        {"path": "architectures/guide-mode.md", "symbol": "desktop arming and frame flow", "verified_at": "2026-08-25"},
+        {"path": "src-tauri/src/guide/capture/mod.rs", "symbol": "xcap fallback serves non-Windows builds; DDA is a Windows fast path only", "verified_at": "2026-09-08"}
+      ]
+    },
+    {
+      "id": "availability.research",
+      "kind": "availability",
+      "status": "shipped",
+      "title": "Background research availability",
+      "summary": "Background research is a durable run that keeps working after Aura is closed, and it needs a paid plan.",
+      "answers": {
+        "voice": "Yes, I can research in the background. I keep working after this call ends and after you close Aura, then send you a sourced brief, and I can write it into a Notion database if you name one. It needs a paid plan though, so I can’t start one on the free plan.",
+        "chat": "**Background research** is a durable run rather than a chat answer: Buddy keeps working after you end the call or quit Aura, then delivers a sourced brief with citations. Name a Notion database and the brief is written straight into it. It **requires a paid plan** and cannot be started on the free plan; each paid plan includes a set number of research runs per day. Only the quick depth exists today, deep research has not been released."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["pro", "companion", "starter"], "connectors": [], "permissions": [], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": ["start_research", "research_to_notion", "cancel_research"],
+      "search_terms": ["background research", "background research agent", "research agent", "deep research", "do research", "research for me", "keeps running", "while i'm away", "autonomous agent", "sourced brief", "persistent agent"],
+      "evidence": [
+        {"path": "backend/src/services/research/credits.py", "symbol": "RESEARCH_DAILY_CREDITS gives free 0 credits and refuses with research_requires_paid", "verified_at": "2026-09-08"},
+        {"path": "backend/src/services/tool_executor.py", "symbol": "_start_research rejects any depth other than quick", "verified_at": "2026-09-08"},
+        {"path": "backend/src/agent/voice/research_dispatch.py", "symbol": "durable run creation and Notion delivery binding", "verified_at": "2026-09-08"}
+      ]
+    },
+    {
+      "id": "privacy.background_listening",
+      "kind": "privacy",
+      "status": "shipped",
+      "title": "Whether Aura listens in the background",
+      "summary": "The microphone is live only during a voice call, a dictation hold, or an armed meeting recording, never between sessions.",
+      "answers": {
+        "voice": "No, I’m not listening in the background. Your mic is only live during a call like this one, or while you hold the dictation key on your computer. The one exception is Meeting Notes, and that only records after you arm it yourself.",
+        "chat": "Aura does **not** listen in the background. The microphone is open only during an active voice call, while you hold the desktop dictation key, or during a meeting recording **you armed yourself**, which shows a recording indicator the whole time it runs. Nothing is captured between sessions, and Aura never starts listening on its own. The desktop voice shortcut is a keyboard trigger, not a spoken wake word, so nothing is listening for its name."
+      },
+      "surfaces": ["all"],
+      "platforms": ["all"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["microphone"], "minimum_versions": {}},
+      "navigation": [],
+      "action_tools": [],
+      "search_terms": ["always listening", "are you listening", "background listening", "listening in the background", "is my mic on", "recording me", "eavesdropping", "wake word", "mic always on", "do you hear me when i'm not talking"],
+      "evidence": [
+        {"path": "src-tauri/src/voice_toggle_key.rs", "symbol": "voice trigger is a keyboard hook, not audio; no wake word exists", "verified_at": "2026-09-08"},
+        {"path": "src-tauri/src/meeting/session.rs", "symbol": "meeting capture is user-armed only with a persistent recording indicator", "verified_at": "2026-09-08"}
       ]
     },
     {

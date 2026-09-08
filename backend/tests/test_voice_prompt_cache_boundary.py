@@ -31,12 +31,19 @@ _ENCODING = tiktoken.get_encoding("o200k_base")
 # after a live desktop session had Buddy tell a speaking user "I can't actually hear
 # you, but I can read everything you type" — LiveKit's prompting guide names the gap:
 # the LLM in an STT-LLM-TTS pipeline "has no built-in understanding of its own position
-# in a voice pipeline." Anything added here has to earn its tokens the same way; do not
-# raise these to make a comfortable prompt fit.
+# in a voice pipeline." Raised a third time (2026-09-08, desktop only), by the measured
+# cost of the Action Truth rule against announcing a durable action before its envelope
+# returns, after a live desktop session told a free user four separate times that a
+# background research run was in progress when none was ever created and the correct
+# paid-plan refusal was sitting unread in the tool's own `say`. Anything added here has
+# to earn its tokens the same way; do not raise these to make a comfortable prompt fit.
+#
+# Each ceiling sits ~48 tokens above its measured prompt, so unintended growth still
+# trips the guard rather than being absorbed by it.
 _BEFORE_TOTAL_TOKENS = {
     "app": 2000,
     "keyboard": 2050,
-    "desktop": 2170,
+    "desktop": 2266,
 }
 
 _CONTEXT_ONE = {

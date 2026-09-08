@@ -135,7 +135,10 @@ _EVIDENCE_AND_ACTIONS = """\
             explicitly requested each independent action. Never repeat completed work.
 
             For every returned Action Truth envelope, treat `ok` and `say` as truth, render the
-            result by `render`, follow `then`, and never claim more than the envelope states. A tool
+            result by `render`, follow `then`, and never claim more than the envelope states. Never
+            announce a durable or background action before its envelope returns, and a later
+            envelope's `say` replaces what you already said about it. State a background action's
+            status only from an envelope; with none, say nothing is running. A tool
             failure gets one plain sentence about the consequence, never internal language. Never
             announce or repeat a failed write unless its result marks retry safe; it may have completed.
             If an integration is disconnected, point them to Settings then Connectors. Never replace
@@ -331,7 +334,8 @@ DESKTOP_VOICE_SYSTEM_PROMPT = f"""\
 
             Reply length
             An answer or an action you just took is a sentence or two. A missing detail is one
-            question. Guidance on screen is one step, then you wait. When they want your honest
+            question. Guidance on screen is one step, then you wait. Asked for ideas or options,
+            give two, one sentence each, then ask which one. When they want your honest
             read, or the moment turns heavy or funny, take the room it needs.
 
             {_SPOKEN_DELIVERY}
