@@ -49,9 +49,13 @@ class _FakeProvider:
         self.balanced_calls: list[dict] = []
 
     async def expert(
-        self, prompt, *, system=None, images=None, response_model=None, temperature=0.7
+        self, prompt, *, system=None, images=None, response_model=None, temperature=0.7,
+        thinking_level=None,
     ):
-        self.expert_calls.append({"prompt": prompt, "system": system, "images": images})
+        self.expert_calls.append({
+            "prompt": prompt, "system": system, "images": images,
+            "thinking_level": thinking_level,
+        })
         if self._raises is not None:
             raise self._raises
         return _draft_output(self._message, self._summary)

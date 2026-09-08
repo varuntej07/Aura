@@ -8,7 +8,7 @@ the ledger; only the µUSD estimate stays 0, with one warn per process so a new
 model shows up in logs instead of silently pricing at zero.
 
 Rates verified 2026-08-30 (Anthropic first-party API; OpenAI and Gemini public
-list prices). Update this table when a provider changes list pricing or a new
+list prices), gemini-3.8-flash added 2026-09-08 from the Gemini API pricing page. Update this table when a provider changes list pricing or a new
 model enters `config/settings.py` fallback chains.
 """
 
@@ -26,6 +26,11 @@ _PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
     "claude-opus-4-8": (5.00, 0.50, 25.00),
     "gemini-2.5-flash-lite": (0.10, 0.025, 0.40),
     "gemini-2.5-flash": (0.30, 0.075, 2.50),
+    # settings.TIER_EXPERT. INTRODUCTORY pricing through 2026-12-31; on 2027-01-01 it
+    # becomes (1.50, 0.15, 7.50). This table is the cost ledger's only view of spend, so
+    # leaving the introductory numbers here past that date silently halves every reported
+    # expert-tier cost.
+    "gemini-3.8-flash": (0.75, 0.075, 3.75),
 }
 
 _warned_unknown_models: set[str] = set()

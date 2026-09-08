@@ -8,7 +8,7 @@ mirroring the already-tested _call_gemini chain. These pin:
   - a 404 (NotFoundError) skips retries and jumps straight to the next model
   - a 400 (BadRequestError) raises immediately and never falls back (fails identically
     on every model)
-  - expert() walks Sonnet -> Haiku -> Gemini Flash end to end
+  - expert() walks Gemini 3.8 Flash -> Haiku when Google is down
   - reason_turn() escalates Sonnet -> Haiku and raises only after the last model
 """
 
@@ -146,18 +146,19 @@ async def test_call_anthropic_no_chain_raises(monkeypatch):
     assert create.await_count == mp._MAX_RETRIES
 
 
-async def test_expert_walks_sonnet_haiku_then_gemini(monkeypatch):
-    """expert() chain Sonnet -> Haiku -> Gemini Flash: both Claude models down -> Gemini serves."""
-    create = AsyncMock(side_effect=_rate_limit())  # every Claude attempt 429s
+async def test_expert_walks_gemini_then_haiku(monkeypatch):
+    """expert() chain Gemini 3.8 Flash -> Haiku. The tier's primary is Google now, so the
+    thing worth pinning is that a Google outage does NOT take the tier down with it."""
+    create = AsyncMock(return_value=_text_response("haiku rescued it"))
     provider = _provider_with_anthropic(create)
-    _attach_gemini(provider, "gemini rescued it", monkeypatch)
+    g_client = _attach_gemini(provider, "unused", monkeypatch)
+    g_client.models.generate_content.side_effect = RuntimeError("503 unavailable")
     monkeypatch.setattr(mp.asyncio, "sleep", AsyncMock())
 
     result = await provider.expert("a hard question")
 
-    assert result == "gemini rescued it"
-    # Sonnet x _MAX_RETRIES + Haiku x _MAX_RETRIES before the Gemini hop.
-    assert create.await_count == 2 * mp._MAX_RETRIES
+    assert result == "haiku rescued it"
+    assert create.await_count == 1
 
 
 async def test_balanced_falls_back_to_gemini(monkeypatch):

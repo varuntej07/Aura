@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from ....lib.logger import logger
-from ...model_provider import get_model_provider
+from ...model_provider import THINKING_MEDIUM, get_model_provider
 from .. import fields as F
 from ..eligibility import entity_binding_status
 from ..llm_models import Brief
@@ -377,6 +377,16 @@ async def run(ctx: StageContext) -> StageResult:
             system=SYNTHESIZE_SYSTEM,
             response_model=Brief,
             max_output_tokens=OUTPUT_TOKENS_PER_CALL,
+            # The one caller with no user waiting on it, and the hardest reasoning in the
+            # pipeline (choose and order claims across every verified source), so it takes
+            # the deepest level that is SAFE here rather than the deepest one offered.
+            # Not `high`: Google documents thinking tokens as billed with output but does
+            # NOT document whether they consume max_output_tokens, and this call has only
+            # OUTPUT_TOKENS_PER_CALL (4_000) to cover thinking AND a full Brief. If they
+            # share that budget, `high` truncates the JSON, the Brief fails to parse, and
+            # the run dies on the most expensive stage it has. Raise to `high` once that
+            # interaction has actually been measured against a real response.
+            thinking_level=THINKING_MEDIUM,
         )
     if not isinstance(result, Brief):
         raise RuntimeError("synthesize: provider did not return Brief")

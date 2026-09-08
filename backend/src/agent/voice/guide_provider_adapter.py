@@ -16,7 +16,7 @@ from ...prompts import (
     guide_decision_user_prompt,
     guide_planning_user_prompt,
 )
-from ...services.model_provider import get_model_provider
+from ...services.model_provider import THINKING_MINIMAL, get_model_provider
 from .guide_kernel import (
     GuideDecisionProvider,
     GuideFrameInput,
@@ -178,7 +178,17 @@ class AuraGuideDecisionProvider(GuideDecisionProvider):
                 system=GUIDE_DECISION_SYSTEM_PROMPT,
                 images=[image],
                 response_model=GuideVisualDecision,
+                # Was chosen for determinism, and the Gemini primary now overrides it to
+                # 1.0 (Google documents sub-1.0 as risking looping). Kept for the Anthropic
+                # hop below it, where it still applies. Guide decisions are consequently
+                # less repeatable than they were on Sonnet.
                 temperature=0.0,
+                # This fallback only runs AFTER the balanced primary already burned
+                # GUIDE_VISUAL_FIRST_ATTEMPT_TIMEOUT_S (7s) of an 11s deadline, so it has
+                # roughly 4s to answer. Anything above minimal spends the remaining budget
+                # on thinking tokens and returns nothing before the deadline fires, which
+                # is strictly worse than a shallower answer that arrives.
+                thinking_level=THINKING_MINIMAL,
             ),
             first_timeout=settings.GUIDE_VISUAL_FIRST_ATTEMPT_TIMEOUT_S,
             total_timeout=settings.GUIDE_VISUAL_DECISION_DEADLINE_S,

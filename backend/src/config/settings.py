@@ -289,14 +289,24 @@ class Settings(BaseSettings):
     # Model tiers
     # TIER_CHEAP -> cheap + fast; background tasks, notification copy, simple classification
     # TIER_BALANCED -> mid-tier; tool-calling tasks, structured output with reasoning
-    # TIER_EXPERT -> full reasoning; main chat, complex multi-turn (most expensive)
+    # TIER_EXPERT -> full reasoning; complex synthesis, high-stakes vision output.
+    # Gemini 3.8 Flash: cheaper per token than the Haiku BELOW it in this chain
+    # ($0.75/$3.75 vs $1.00/$5.00 per Mtok), faster, 1M context. Two caveats that are
+    # properties of the model, not of this config: its temperature is pinned to 1.0 by
+    # model_provider (Google documents lower values as risking looping), so this tier can
+    # no longer serve a caller that needs determinism; and its price DOUBLES to
+    # $1.50/$7.50 on 2027-01-01 when introductory pricing ends, at which point it costs
+    # more than the Haiku fallback and this choice should be re-argued, not assumed.
     # Provider is inferred from the model ID prefix by ModelProvider.
     TIER_CHEAP: str = "gemini-2.5-flash"
     TIER_CHEAP_FALLBACK: str = "gemini-2.5-flash-lite"           # tried when TIER_CHEAP fails
     TIER_CHEAP_LAST_RESORT: str = "claude-haiku-4-5-20251001"    # tried when TIER_CHEAP_FALLBACK also fails
     TIER_BALANCED: str = "claude-haiku-4-5-20251001"
     TIER_BALANCED_FALLBACK: str = "gemini-2.5-flash"            # balanced() -> Gemini Flash when Haiku fails
-    TIER_EXPERT: str = "claude-sonnet-4-6"
+    TIER_EXPERT: str = "gemini-3.8-flash"
+    # Deliberately Anthropic: the primary is Google now, so a Google outage must not take
+    # the whole tier down with it. The third hop returning to Gemini is acceptable only
+    # because two independent providers have already been tried by then.
     TIER_EXPERT_FALLBACK: str = "claude-haiku-4-5-20251001"    # expert() -> Haiku, then TIER_CHEAP (Gemini Flash)
     # TIER_REASONING -> Opus, kept available for rare hard-synthesis steps (not the default).
     # claude-opus-4-8 uses adaptive thinking (no budget_tokens, no temperature — both 400).

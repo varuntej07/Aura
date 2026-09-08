@@ -31,7 +31,7 @@ from ...prompts import (
     outbound_refine_user_prompt,
 )
 from .. import draft_common
-from ..model_provider import get_model_provider
+from ..model_provider import THINKING_LOW, get_model_provider
 from ..user_aura_schema import interest_prompt_lines
 from .skills import GENERAL_SKILL_ID, get_writing_skill, is_writing_skill_id
 
@@ -217,7 +217,15 @@ async def draft_outbound(
             system=system_prompt,
             images=[{"media_type": "image/jpeg", "data": jpeg_base64}],
             response_model=_DraftOutput,
+            # Honoured only if the chain falls through to the Anthropic hop; the Gemini
+            # primary pins temperature at 1.0. A snippet asking for 0.2 therefore no
+            # longer gets exactness from THIS tier, which is a real behaviour change for
+            # the snippet channel and the reason it is called out here rather than buried.
             temperature=temperature,
+            # A user is watching a draft appear inside DRAFT_TIMEOUT_SECONDS (25s), and
+            # the whole 25s also has to cover reading a dense screen frame. Low keeps a
+            # reasoning pass over the image without spending the budget on it.
+            thinking_level=THINKING_LOW,
         )
     else:
         model_call = provider.balanced(

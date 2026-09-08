@@ -220,29 +220,60 @@ def _anthropic_strict_schema(node: Any) -> Any:
     return node
 
 
+# JSON Schema keywords Gemini's decoder does not need. Stripped wherever a schema
+# is expected, never where a FIELD NAME is expected (see _GEMINI_NAME_KEYED).
+_GEMINI_STRIP_KEYWORDS = {
+    "title",
+    "description",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+}
+
+# Maps whose KEYS are field names chosen by the model author, not schema keywords.
+# The strip set must never be applied to these keys: a pydantic model with a field
+# literally named ``title`` (FramedNotification, StarStory, GuidePlanningStep, and
+# 28 others) would lose that property while ``required`` still demanded it, and
+# Gemini rejects the result with "schema at top-level requires unspecified property
+# 'title'". Every cheap-tier call for those models then 400s twice and falls through
+# to the last-resort model. Decide by POSITION in the schema tree, not by name, so a
+# field can be called anything at all.
+_GEMINI_NAME_KEYED = {"properties", "$defs", "definitions", "patternProperties"}
+
+
 def _gemini_json_schema(node: Any) -> Any:
     """Keep Pydantic validation while avoiding Gemini decoder state explosion."""
     if isinstance(node, dict):
-        return {
-            key: _gemini_json_schema(value)
-            for key, value in node.items()
-            if key not in {
-                "title",
-                "description",
-                "minLength",
-                "maxLength",
-                "minItems",
-                "maxItems",
-                "minimum",
-                "maximum",
-                "exclusiveMinimum",
-                "exclusiveMaximum",
-                "multipleOf",
-            }
-        }
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in _GEMINI_STRIP_KEYWORDS:
+                continue
+            if key in _GEMINI_NAME_KEYED and isinstance(value, dict):
+                out[key] = {
+                    name: _gemini_json_schema(sub) for name, sub in value.items()
+                }
+            else:
+                out[key] = _gemini_json_schema(value)
+        return out
     if isinstance(node, list):
         return [_gemini_json_schema(item) for item in node]
     return node
+
+# Gemini 3 thinking levels (google.genai types.ThinkingLevel). Kept as plain strings so a
+# caller never has to import the SDK enum just to pick a depth.
+THINKING_MINIMAL = "minimal"
+THINKING_LOW = "low"
+THINKING_MEDIUM = "medium"
+THINKING_HIGH = "high"
+
+# Gemini 3 is documented to run at temperature 1.0 and to degrade below it. Not a tunable.
+_GEMINI_3_TEMPERATURE = 1.0
 
 _MAX_RETRIES = 3
 _BASE_DELAY_S = 1.0           # Anthropic backoff: 1s, 2s, 4s
@@ -284,6 +315,12 @@ _MODEL_ID_PROVIDER_OVERRIDES: dict[str, str] = {
     # provider and must fall through to the prefix scan instead.
     if model_id and "/" in model_id
 }
+
+
+def _is_gemini_3(model_id: str) -> bool:
+    """Whether this id is a Gemini 3.x model, which configures reasoning differently
+    from 2.5 (thinking_level, not thinking_budget) and pins temperature at 1.0."""
+    return (model_id or "").strip().casefold().startswith("gemini-3")
 
 
 def provider_for_model(model_id: str) -> str:
@@ -402,7 +439,7 @@ class ModelProvider:
 
     cheap() -> settings.TIER_CHEAP (currently gemini-2.5-flash)
     balanced() -> settings.TIER_BALANCED (currently claude-haiku-4-5)
-    expert() -> settings.TIER_EXPERT (currently claude-sonnet-4-6)
+    expert() -> settings.TIER_EXPERT (currently gemini-3.8-flash)
 
     When response_model (a Pydantic BaseModel subclass) is given, the raw LLM
     text is parsed as JSON into that model and returned as the typed instance.
@@ -778,17 +815,36 @@ class ModelProvider:
         response_model: type[T] | None = None,
         temperature: float = 0.7,
         max_output_tokens: int | None = None,
+        thinking_level: str = THINKING_MEDIUM,
     ) -> str | T:
-        """Full reasoning. Use for: main chat, complex multi-turn, high-stakes output.
-        Most expensive — only use where quality matters. Currently Claude Sonnet.
+        """Full reasoning. Use for: complex synthesis, high-stakes output.
+        Most expensive per token of the non-Opus tiers. Currently Gemini 3.8 Flash,
+        falling back to Claude Haiku and then to Gemini 2.5 Flash.
 
-        ``images`` follows the same shape as :meth:`balanced` (Sonnet and every hop
-        in the fallback chain are vision-capable). The outbound drafter is the
-        first caller: reading a dense email thread off a screen frame is exactly
-        the high-stakes case this tier exists for."""
+        ``images`` follows the same shape as :meth:`balanced`; every hop in the
+        chain is vision-capable. The outbound drafter reads a dense email thread
+        off a screen frame, which is exactly the high-stakes case this tier exists for.
+
+        ``thinking_level`` is the knob that makes this tier worth its price, and it is
+        NOT one-size-fits-all: it trades latency for reasoning depth on every 3.x hop
+        (``minimal``/``low``/``medium``/``high``). Pick it from the deadline the CALLER
+        lives under, not from how important the work feels. A caller with seconds to
+        spare (a Guide visual decision inside an 11s deadline) must ask for ``minimal``;
+        a caller with no user waiting (research synthesis) should ask for ``high``.
+        The default is ``medium`` so an unconsidered call is neither the slowest nor
+        the shallowest option.
+
+        ``temperature`` is honoured by the Anthropic hop but PINNED TO 1.0 on any
+        Gemini 3.x hop, per Google's documented guidance that lower values risk looping
+        and degraded reasoning. A caller that needs determinism cannot get it from this
+        tier any more; use :meth:`balanced` (Anthropic primary) instead.
+
+        Raises NotImplementedError if ``tools`` or ``history`` is passed while the chain
+        is on a Gemini model, rather than silently answering without them."""
         model_id = settings.TIER_EXPERT
         logger.debug("ModelProvider.expert", {
             "model": model_id, "prompt_len": len(prompt), "images": len(images or []),
+            "thinking_level": thinking_level,
         })
         return await self._call(
             model_id=model_id,
@@ -802,6 +858,7 @@ class ModelProvider:
             response_model=response_model,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
         )
 
     async def grounded(
@@ -948,6 +1005,7 @@ class ModelProvider:
         response_model: type[T] | None,
         temperature: float,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> str | T:
         provider = _infer_provider(model_id)
         chain = list(fallback_chain or [])
@@ -956,6 +1014,22 @@ class ModelProvider:
 
         for structured_attempt in range(structured_attempts):
             if provider == "gemini":
+                # _call_gemini has no tool-use or multi-turn history path. Dropping either
+                # silently would answer a DIFFERENT question than the caller asked and look
+                # like a healthy response while doing it, so this fails loudly instead. It
+                # matters now that an expert-tier chain can start on Gemini: a caller that
+                # needs tools has to route through a provider that has them.
+                if tools:
+                    raise NotImplementedError(
+                        f"ModelProvider: '{caller}' passed tools to Gemini model "
+                        f"'{model_id}', which has no tool path here. Pin an Anthropic "
+                        "model for this call or add tool support to _call_gemini()."
+                    )
+                if history:
+                    raise NotImplementedError(
+                        f"ModelProvider: '{caller}' passed history to Gemini model "
+                        f"'{model_id}', which has no multi-turn path here."
+                    )
                 raw = await self._call_gemini(
                     model_id=model_id,
                     fallback_chain=chain,
@@ -966,6 +1040,7 @@ class ModelProvider:
                     response_model=response_model,
                     temperature=temperature,
                     max_output_tokens=max_output_tokens,
+                    thinking_level=thinking_level,
                 )
             elif provider == "anthropic":
                 raw = await self._call_anthropic(
@@ -1021,21 +1096,50 @@ class ModelProvider:
         response_model: type[T] | None = None,
         temperature: float,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> str:
         client = self._get_gemini_client()
         from google.genai import types  # type: ignore
 
         contents: list = []
-        # The cheap/fast tier must never "think": Gemini 2.5 Flash runs hidden reasoning
-        # before answering by default, which adds seconds of latency. This path serves the
-        # latency-sensitive fast work (keyboard drafts, notification copy, summaries), so we
-        # disable thinking outright (thinking_budget=0). The grounded path is separate
-        # (_call_gemini_grounded) and keeps its own config.
+        # Reasoning is configured PER MODEL FAMILY, not per caller, because a fallback hop
+        # can land this call on a different family than the one the caller asked for.
+        #
+        # Gemini 2.5: the cheap/fast tier must never "think". 2.5 Flash runs hidden
+        # reasoning before answering by default, which adds seconds of latency, and this
+        # path serves latency-sensitive fast work (keyboard drafts, notification copy,
+        # summaries). thinking_budget=0 disables it outright.
+        #
+        # Gemini 3: thinking CANNOT be disabled, and thinking_budget and thinking_level are
+        # mutually exclusive in one request (verified against the current Gemini 3 developer
+        # guide, and against google-genai 2.10.0, whose ThinkingLevel enum is
+        # MINIMAL/LOW/MEDIUM/HIGH). Sending the 2.5 config to a 3.x model is therefore not a
+        # no-op, it is the wrong parameter. `minimal` is the floor and the closest analogue
+        # to the old behaviour, so it stays the default and every existing cheap() caller
+        # keeps the latency profile it has today; a caller that wants the reasoning it is
+        # paying for asks for it explicitly.
         config_kwargs: dict[str, Any] = {
-            "temperature": temperature,
             "max_output_tokens": max(1, int(max_output_tokens or 4096)),
-            "thinking_config": types.ThinkingConfig(thinking_budget=0),
         }
+        if _is_gemini_3(model_id):
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_level=(thinking_level or THINKING_MINIMAL).upper()
+            )
+            # Google's Gemini 3 guidance is explicit that temperature stays at its 1.0
+            # default, and that going below it risks looping or degraded reasoning. Callers
+            # here pass 0.0-0.7 because that is correct for Anthropic and for Gemini 2.5,
+            # so the value is honoured for those and overridden only for 3.x, where it is
+            # documented to hurt. Logged rather than silently swallowed.
+            if abs(temperature - _GEMINI_3_TEMPERATURE) > 1e-9:
+                logger.debug("ModelProvider: pinning Gemini 3 temperature to default", {
+                    "model": model_id,
+                    "caller": caller,
+                    "requested_temperature": temperature,
+                })
+            config_kwargs["temperature"] = _GEMINI_3_TEMPERATURE
+        else:
+            config_kwargs["temperature"] = temperature
+            config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
         if system:
             # Gemini: system instruction goes in GenerateContentConfig, not contents
             config_kwargs["system_instruction"] = system
@@ -1091,6 +1195,10 @@ class ModelProvider:
                 response_model=response_model,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
+                # Carried across the hop: the depth the caller asked for is a property of
+                # the WORK, not of the model that happened to answer. Ignored by the
+                # Anthropic hop and by 2.5, applied again if the chain lands on another 3.x.
+                thinking_level=thinking_level,
             )
             return result if isinstance(result, str) else result.model_dump_json()
 

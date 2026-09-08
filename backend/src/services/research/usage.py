@@ -81,6 +81,16 @@ MODEL_RATES: dict[str, ModelRate] = {
         output_microusd_per_mtok=15_000_000,
         checked_on="2026-08-11",
     ),
+    # settings.TIER_EXPERT since 2026-09-08, so this is now the row synthesize resolves
+    # against. Same lesson as the sonnet row above: without it every synthesis reports
+    # cost_known=False and the pipeline's most expensive stage stops counting toward the
+    # project-day cost cap. Introductory pricing; becomes 1_500_000/7_500_000 on
+    # 2027-01-01.
+    "gemini-3.8-flash": ModelRate(
+        input_microusd_per_mtok=750_000,
+        output_microusd_per_mtok=3_750_000,
+        checked_on="2026-09-08",
+    ),
 }
 
 # Longest first, so "gemini-2.5-flash-lite" can never be matched by the "gemini-2.5-flash"
