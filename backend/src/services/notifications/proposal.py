@@ -291,6 +291,14 @@ class NotificationProposal:
     # Optional learning-substrate metadata persisted to the ledger (signal/news).
     decision: NotificationDecision | None = None
 
+    # How many times the queue has already held THIS proposal, read from the queue
+    # doc's ``hold_count`` by ``queue_store.list_pending``. Runtime-only: producers
+    # never set it and ``_proposal_to_doc`` never writes it back (a fresh enqueue
+    # always stamps 0), so it cannot round-trip into Firestore. It exists so a hold
+    # can tell "the dependency blipped once" from "the dependency has been down for
+    # an hour" without adding a second counter.
+    hold_count: int = 0
+
     def __post_init__(self) -> None:
         if not self.notification_type:
             self.notification_type = self.source

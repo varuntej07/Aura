@@ -95,7 +95,10 @@ async def _judge_worth_a_thread(
     except Exception as exc:
         logger.error(
             "threads.thread_writer: worthiness judge unavailable, failing closed (skip thread)",
-            {"error": str(exc)},
+            # str(TimeoutError()) is "", which is what this logged for every one of
+            # these on 2026-09-08: an error line carrying no error. The type is the
+            # part that says whether the judge timed out or genuinely failed.
+            {"error": str(exc), "error_type": type(exc).__name__},
         )
         return False, "judge_unavailable"
     judgment = cast(_ReminderWorthinessJudgment, result)

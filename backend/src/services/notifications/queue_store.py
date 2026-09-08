@@ -162,6 +162,7 @@ def _doc_to_proposal(data: dict[str, Any]) -> NotificationProposal:
         priority=int(data[FIELD_PRIORITY]) if data.get(FIELD_PRIORITY) is not None else None,
         decision=decision,
         deferred_framing=data.get(FIELD_DEFERRED_FRAMING) or None,
+        hold_count=int(data.get(FIELD_HOLD_COUNT) or 0),
     )
 
 

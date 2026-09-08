@@ -42,9 +42,11 @@ class _FakeModels:
         self.prompt = ""
         self.system = ""
 
-    async def cheap(self, prompt, *, system, response_model, temperature):
+    async def cheap(self, prompt, *, system, response_model, temperature,
+                    attempt_timeout_s=None):
         self.prompt = prompt
         self.system = system
+        self.attempt_timeout_s = attempt_timeout_s
         return self._result
 
 

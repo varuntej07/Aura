@@ -90,6 +90,15 @@ _QUIET_END_MINUTES = 7 * 60          # 07:00
 # 7.5h quiet-hours night (~8 instead of ~450).
 MAX_HOLD_DEFERRAL = timedelta(hours=1)
 
+# How many consecutive holds a dependency outage gets at the normal 1-minute retry
+# before the hold starts deferring (see _outage_hold_eligible). Three keeps a
+# genuine blip recovering within ~3 minutes, which is what the fast retry is for,
+# while a stuck dependency stops re-running its failing call every single minute.
+OUTAGE_FAST_RETRY_HOLDS = 3
+# Linear backoff step past that threshold: 5m, 10m, 15m, ... clamped by
+# MAX_HOLD_DEFERRAL. A day-long outage costs ~25 attempts instead of ~1440.
+OUTAGE_BACKOFF_STEP = timedelta(minutes=5)
+
 # The engagement time-slot grid used by smart timing is 30-minute slots (see
 # _is_preferred_slot); an off-peak hold can therefore not become eligible before
 # the next slot boundary.
@@ -299,8 +308,12 @@ async def drain_user_queue(
         if framing_verdict == delivery_framing.UNAVAILABLE:
             logger.error("orchestrator: delivery framer unavailable, holding batch", {
                 "user_id": user_id, "source": winner.source,
+                "hold_count": winner.hold_count,
             })
-            await _hold_all(user_id, survivors, now)
+            await _hold_all(
+                user_id, survivors, now,
+                eligible_until=_outage_hold_eligible(winner, now),
+            )
             return OrchestratorDecision(Disposition.HOLD, REASON_FRAMER_UNAVAILABLE)
         if framing_verdict == delivery_framing.REJECTED:
             await queue_store.mark(
@@ -335,8 +348,12 @@ async def drain_user_queue(
                 "thread_id": winner.data.get("thread_id", ""),
                 "sensitivity_source": sensitivity.source,
                 "sensitivity_categories": sensitivity.categories,
+                "hold_count": winner.hold_count,
             })
-            await _hold_all(user_id, survivors, now)
+            await _hold_all(
+                user_id, survivors, now,
+                eligible_until=_outage_hold_eligible(winner, now),
+            )
             return OrchestratorDecision(Disposition.HOLD, REASON_SENSITIVITY_UNAVAILABLE)
         if not sensitivity.allows_proactive:
             await queue_store.mark(
@@ -724,6 +741,27 @@ def _budget_hold_eligible(
     if decision.reason == "global_daily_cap":
         return now + MAX_HOLD_DEFERRAL
     return None
+
+
+def _outage_hold_eligible(
+    proposal: NotificationProposal, now: datetime
+) -> datetime | None:
+    """When may a batch held by a DEPENDENCY OUTAGE be retried?
+
+    ``None`` (the 1-minute retry) for the first few holds, because that is right
+    for a blip and is what every outage path here has always done. The problem is
+    the outage that does not clear: on 2026-09-08 a framer that 400'd on every
+    single call held the same news proposal every minute for a full day, ~682
+    attempts, each paying a real LLM call, until the 30h queue TTL purged it. The
+    proposal's own ``hold_count`` already distinguishes the two cases, so past the
+    threshold this backs off linearly. ``_hold_all`` still clamps to
+    MAX_HOLD_DEFERRAL, so a wrong value here delays a queue by an hour, never
+    silences it.
+    """
+    over = proposal.hold_count - OUTAGE_FAST_RETRY_HOLDS
+    if over < 0:
+        return None
+    return now + OUTAGE_BACKOFF_STEP * (over + 1)
 
 
 def _is_quiet_hours(local_now: datetime) -> bool:
