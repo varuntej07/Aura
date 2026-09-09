@@ -213,6 +213,25 @@ class MockFirebaseAuthService extends _i1.Mock
           as _i4.Future<_i5.Result<_i2.User>>);
 
   @override
+  _i4.Future<_i5.Result<void>> sendPasswordResetEmail(String? email) =>
+      (super.noSuchMethod(
+            Invocation.method(#sendPasswordResetEmail, [email]),
+            returnValue: _i4.Future<_i5.Result<void>>.value(
+              _i6.dummyValue<_i5.Result<void>>(
+                this,
+                Invocation.method(#sendPasswordResetEmail, [email]),
+              ),
+            ),
+            returnValueForMissingStub: _i4.Future<_i5.Result<void>>.value(
+              _i6.dummyValue<_i5.Result<void>>(
+                this,
+                Invocation.method(#sendPasswordResetEmail, [email]),
+              ),
+            ),
+          )
+          as _i4.Future<_i5.Result<void>>);
+
+  @override
   _i4.Future<_i5.Result<void>> signOut() =>
       (super.noSuchMethod(
             Invocation.method(#signOut, []),

@@ -764,6 +764,17 @@ class $ChatMessagesTable extends ChatMessages
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _llmModelMeta = const VerificationMeta(
+    'llmModel',
+  );
+  @override
+  late final GeneratedColumn<String> llmModel = GeneratedColumn<String>(
+    'llm_model',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -782,6 +793,7 @@ class $ChatMessagesTable extends ChatMessages
     clarificationJson,
     attachmentJson,
     inputMethod,
+    llmModel,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -921,6 +933,12 @@ class $ChatMessagesTable extends ChatMessages
         ),
       );
     }
+    if (data.containsKey('llm_model')) {
+      context.handle(
+        _llmModelMeta,
+        llmModel.isAcceptableOrUnknown(data['llm_model']!, _llmModelMeta),
+      );
+    }
     return context;
   }
 
@@ -994,6 +1012,10 @@ class $ChatMessagesTable extends ChatMessages
         DriftSqlType.string,
         data['${effectivePrefix}input_method'],
       ),
+      llmModel: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}llm_model'],
+      ),
     );
   }
 
@@ -1020,6 +1042,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
   final String? clarificationJson;
   final String? attachmentJson;
   final String? inputMethod;
+  final String? llmModel;
   const ChatMessage({
     required this.id,
     required this.sessionId,
@@ -1037,6 +1060,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     this.clarificationJson,
     this.attachmentJson,
     this.inputMethod,
+    this.llmModel,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1074,6 +1098,9 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     }
     if (!nullToAbsent || inputMethod != null) {
       map['input_method'] = Variable<String>(inputMethod);
+    }
+    if (!nullToAbsent || llmModel != null) {
+      map['llm_model'] = Variable<String>(llmModel);
     }
     return map;
   }
@@ -1114,6 +1141,9 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       inputMethod: inputMethod == null && nullToAbsent
           ? const Value.absent()
           : Value(inputMethod),
+      llmModel: llmModel == null && nullToAbsent
+          ? const Value.absent()
+          : Value(llmModel),
     );
   }
 
@@ -1141,6 +1171,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       ),
       attachmentJson: serializer.fromJson<String?>(json['attachmentJson']),
       inputMethod: serializer.fromJson<String?>(json['inputMethod']),
+      llmModel: serializer.fromJson<String?>(json['llmModel']),
     );
   }
   @override
@@ -1163,6 +1194,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       'clarificationJson': serializer.toJson<String?>(clarificationJson),
       'attachmentJson': serializer.toJson<String?>(attachmentJson),
       'inputMethod': serializer.toJson<String?>(inputMethod),
+      'llmModel': serializer.toJson<String?>(llmModel),
     };
   }
 
@@ -1183,6 +1215,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     Value<String?> clarificationJson = const Value.absent(),
     Value<String?> attachmentJson = const Value.absent(),
     Value<String?> inputMethod = const Value.absent(),
+    Value<String?> llmModel = const Value.absent(),
   }) => ChatMessage(
     id: id ?? this.id,
     sessionId: sessionId ?? this.sessionId,
@@ -1206,6 +1239,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
         ? attachmentJson.value
         : this.attachmentJson,
     inputMethod: inputMethod.present ? inputMethod.value : this.inputMethod,
+    llmModel: llmModel.present ? llmModel.value : this.llmModel,
   );
   ChatMessage copyWithCompanion(ChatMessagesCompanion data) {
     return ChatMessage(
@@ -1239,6 +1273,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
       inputMethod: data.inputMethod.present
           ? data.inputMethod.value
           : this.inputMethod,
+      llmModel: data.llmModel.present ? data.llmModel.value : this.llmModel,
     );
   }
 
@@ -1260,7 +1295,8 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
           ..write('reminderJson: $reminderJson, ')
           ..write('clarificationJson: $clarificationJson, ')
           ..write('attachmentJson: $attachmentJson, ')
-          ..write('inputMethod: $inputMethod')
+          ..write('inputMethod: $inputMethod, ')
+          ..write('llmModel: $llmModel')
           ..write(')'))
         .toString();
   }
@@ -1283,6 +1319,7 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
     clarificationJson,
     attachmentJson,
     inputMethod,
+    llmModel,
   );
   @override
   bool operator ==(Object other) =>
@@ -1303,7 +1340,8 @@ class ChatMessage extends DataClass implements Insertable<ChatMessage> {
           other.reminderJson == this.reminderJson &&
           other.clarificationJson == this.clarificationJson &&
           other.attachmentJson == this.attachmentJson &&
-          other.inputMethod == this.inputMethod);
+          other.inputMethod == this.inputMethod &&
+          other.llmModel == this.llmModel);
 }
 
 class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
@@ -1323,6 +1361,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
   final Value<String?> clarificationJson;
   final Value<String?> attachmentJson;
   final Value<String?> inputMethod;
+  final Value<String?> llmModel;
   final Value<int> rowid;
   const ChatMessagesCompanion({
     this.id = const Value.absent(),
@@ -1341,6 +1380,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     this.clarificationJson = const Value.absent(),
     this.attachmentJson = const Value.absent(),
     this.inputMethod = const Value.absent(),
+    this.llmModel = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ChatMessagesCompanion.insert({
@@ -1360,6 +1400,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     this.clarificationJson = const Value.absent(),
     this.attachmentJson = const Value.absent(),
     this.inputMethod = const Value.absent(),
+    this.llmModel = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        sessionId = Value(sessionId),
@@ -1384,6 +1425,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     Expression<String>? clarificationJson,
     Expression<String>? attachmentJson,
     Expression<String>? inputMethod,
+    Expression<String>? llmModel,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1403,6 +1445,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
       if (clarificationJson != null) 'clarification_json': clarificationJson,
       if (attachmentJson != null) 'attachment_json': attachmentJson,
       if (inputMethod != null) 'input_method': inputMethod,
+      if (llmModel != null) 'llm_model': llmModel,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1424,6 +1467,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     Value<String?>? clarificationJson,
     Value<String?>? attachmentJson,
     Value<String?>? inputMethod,
+    Value<String?>? llmModel,
     Value<int>? rowid,
   }) {
     return ChatMessagesCompanion(
@@ -1443,6 +1487,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
       clarificationJson: clarificationJson ?? this.clarificationJson,
       attachmentJson: attachmentJson ?? this.attachmentJson,
       inputMethod: inputMethod ?? this.inputMethod,
+      llmModel: llmModel ?? this.llmModel,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1498,6 +1543,9 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
     if (inputMethod.present) {
       map['input_method'] = Variable<String>(inputMethod.value);
     }
+    if (llmModel.present) {
+      map['llm_model'] = Variable<String>(llmModel.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1523,6 +1571,7 @@ class ChatMessagesCompanion extends UpdateCompanion<ChatMessage> {
           ..write('clarificationJson: $clarificationJson, ')
           ..write('attachmentJson: $attachmentJson, ')
           ..write('inputMethod: $inputMethod, ')
+          ..write('llmModel: $llmModel, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3859,6 +3908,7 @@ typedef $$ChatMessagesTableCreateCompanionBuilder =
       Value<String?> clarificationJson,
       Value<String?> attachmentJson,
       Value<String?> inputMethod,
+      Value<String?> llmModel,
       Value<int> rowid,
     });
 typedef $$ChatMessagesTableUpdateCompanionBuilder =
@@ -3879,6 +3929,7 @@ typedef $$ChatMessagesTableUpdateCompanionBuilder =
       Value<String?> clarificationJson,
       Value<String?> attachmentJson,
       Value<String?> inputMethod,
+      Value<String?> llmModel,
       Value<int> rowid,
     });
 
@@ -3985,6 +4036,11 @@ class $$ChatMessagesTableFilterComposer
 
   ColumnFilters<String> get inputMethod => $composableBuilder(
     column: $table.inputMethod,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get llmModel => $composableBuilder(
+    column: $table.llmModel,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -4096,6 +4152,11 @@ class $$ChatMessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get llmModel => $composableBuilder(
+    column: $table.llmModel,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$ChatSessionsTableOrderingComposer get sessionId {
     final $$ChatSessionsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -4188,6 +4249,9 @@ class $$ChatMessagesTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get llmModel =>
+      $composableBuilder(column: $table.llmModel, builder: (column) => column);
+
   $$ChatSessionsTableAnnotationComposer get sessionId {
     final $$ChatSessionsTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -4256,6 +4320,7 @@ class $$ChatMessagesTableTableManager
                 Value<String?> clarificationJson = const Value.absent(),
                 Value<String?> attachmentJson = const Value.absent(),
                 Value<String?> inputMethod = const Value.absent(),
+                Value<String?> llmModel = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ChatMessagesCompanion(
                 id: id,
@@ -4274,6 +4339,7 @@ class $$ChatMessagesTableTableManager
                 clarificationJson: clarificationJson,
                 attachmentJson: attachmentJson,
                 inputMethod: inputMethod,
+                llmModel: llmModel,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -4294,6 +4360,7 @@ class $$ChatMessagesTableTableManager
                 Value<String?> clarificationJson = const Value.absent(),
                 Value<String?> attachmentJson = const Value.absent(),
                 Value<String?> inputMethod = const Value.absent(),
+                Value<String?> llmModel = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ChatMessagesCompanion.insert(
                 id: id,
@@ -4312,6 +4379,7 @@ class $$ChatMessagesTableTableManager
                 clarificationJson: clarificationJson,
                 attachmentJson: attachmentJson,
                 inputMethod: inputMethod,
+                llmModel: llmModel,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

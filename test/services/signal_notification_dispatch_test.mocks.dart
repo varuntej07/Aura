@@ -4,10 +4,11 @@
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
 import 'dart:async' as _i3;
+import 'dart:typed_data' as _i6;
 
 import 'package:aura/core/network/api_client.dart' as _i2;
 import 'package:aura/core/network/api_response.dart' as _i4;
-import 'package:aura/data/services/posthog_analytics_service.dart' as _i6;
+import 'package:aura/data/services/posthog_analytics_service.dart' as _i7;
 import 'package:mockito/mockito.dart' as _i1;
 import 'package:mockito/src/dummies.dart' as _i5;
 
@@ -157,6 +158,15 @@ class MockApiClient extends _i1.Mock implements _i2.ApiClient {
           as _i3.Future<_i4.Result<T>>);
 
   @override
+  _i3.Future<_i6.Uint8List?> getBytes(String? path, {Duration? timeout}) =>
+      (super.noSuchMethod(
+            Invocation.method(#getBytes, [path], {#timeout: timeout}),
+            returnValue: _i3.Future<_i6.Uint8List?>.value(),
+            returnValueForMissingStub: _i3.Future<_i6.Uint8List?>.value(),
+          )
+          as _i3.Future<_i6.Uint8List?>);
+
+  @override
   _i3.Stream<String> streamPost(String? path, Map<String, dynamic>? body) =>
       (super.noSuchMethod(
             Invocation.method(#streamPost, [path, body]),
@@ -170,7 +180,7 @@ class MockApiClient extends _i1.Mock implements _i2.ApiClient {
 ///
 /// See the documentation for Mockito's code generation for more information.
 class MockPostHogAnalyticsService extends _i1.Mock
-    implements _i6.PostHogAnalyticsService {
+    implements _i7.PostHogAnalyticsService {
   @override
   _i3.Future<void> trackEvent(
     String? event, {
