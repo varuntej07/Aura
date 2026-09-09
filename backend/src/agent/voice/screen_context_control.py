@@ -3,11 +3,12 @@
 Two halves of one contract with the desktop (ECOSYSTEM.md):
 
 * Inbound ``screen_context.unavailable``: the client publishes this once per
-  turn when it SKIPS capture (setting off, macOS permission missing, Guide
-  Mode owns the screen, signed out, capture crashed). Before this signal the
-  worker could not tell "user disabled screen context" from "client crashed"
-  from "capture in flight" - every one was silence. The reason is a closed
-  vocabulary; anything else is recorded as ``capture_failed``.
+  turn when it SKIPS capture (setting off, Screen Sight switched off with its
+  shortcut, macOS permission missing, Guide Mode owns the screen, signed out,
+  capture crashed). Before this signal the worker could not tell "user disabled
+  screen context" from "client crashed" from "capture in flight" - every one
+  was silence. The reason is a closed vocabulary; anything else is recorded as
+  ``capture_failed``.
 
 * Outbound ``screen_context.request``: mirrors ``guide.request``'s shape. The
   desktop stays the sole authority over the privacy setting: it shows an
@@ -28,6 +29,11 @@ SCREEN_CONTEXT_REQUEST_TYPE = "screen_context.request"
 # security decision points (generalSettings voiceScreenContext, security.rs
 # denials, macOS screen_capture_permitted).
 REASON_DISABLED = "screen_context_disabled"
+# Distinct from REASON_DISABLED on purpose. That one is the standing privacy
+# setting, fixed in Settings and answerable with an enable request. This one is
+# the Screen Sight shortcut, a per-session toggle the user just pressed, and
+# offering to flip the setting would answer a question they did not ask.
+REASON_SCREEN_SIGHT_OFF = "screen_sight_off"
 REASON_PERMISSION = "permission_denied"
 REASON_MODE_CONFLICT = "mode_conflict"
 REASON_SIGNED_OUT = "signed_out"
@@ -35,6 +41,7 @@ REASON_CAPTURE_FAILED = "capture_failed"
 UNAVAILABLE_REASONS = frozenset(
     {
         REASON_DISABLED,
+        REASON_SCREEN_SIGHT_OFF,
         REASON_PERMISSION,
         REASON_MODE_CONFLICT,
         REASON_SIGNED_OUT,
@@ -57,6 +64,10 @@ _NO_SCREEN_LINES = {
         "I can't see your screen because macOS hasn't given Aura screen "
         "recording permission. You can grant it under System Settings, "
         "Privacy and Security, Screen Recording."
+    ),
+    REASON_SCREEN_SIGHT_OFF: (
+        "I can't see your screen because Screen Sight is switched off. Turn it "
+        "back on with the Screen Sight shortcut and ask me again."
     ),
     REASON_MODE_CONFLICT: (
         "I can't grab your screen while Guide Mode has it. Stop Guide Mode "
@@ -106,6 +117,10 @@ SCREEN_STATE_OPEN_TAG = "<screen_state>"
 # can never disagree about what "no screen" means.
 _STATE_CAUSES = {
     REASON_DISABLED: " because screen sharing is off in their Aura settings",
+    # No key names here. Which keys those are differs per platform, and the
+    # product knowledge catalog already answers that with the client's platform
+    # in hand, so naming them here is the one place they could go stale.
+    REASON_SCREEN_SIGHT_OFF: " because they switched Screen Sight off",
     REASON_PERMISSION: (
         " because macOS has not given Aura screen recording permission"
     ),
