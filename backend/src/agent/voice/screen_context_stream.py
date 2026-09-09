@@ -546,3 +546,16 @@ class StructuredContextStore:
         if (time.monotonic() - received_at) > max_age_s:
             return ""
         return reason
+
+    @property
+    def client_ever_reported(self) -> bool:
+        """Whether this client has EVER sent a capture-skipped signal.
+
+        unavailable_reason() answers "" for two unrelated facts: the client said
+        nothing, and the client's last word went stale. Both used to render as
+        the same flat assertion that Buddy cannot see the screen, so a call one
+        second old - before the desktop has said anything at all - told the model
+        to deny screen sight outright. Silence from the client is not a report
+        of blindness, and this is the field that keeps the two apart.
+        """
+        return self._unavailable is not None

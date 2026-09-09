@@ -242,6 +242,19 @@ class ScreenFrameStore:
         return self._latest is not None
 
     @property
+    def screen_sight_is_live(self) -> bool:
+        """True once this session has a frame OR is assembling its first one.
+
+        Distinct from has_ever_received_frame, which cannot tell a session that
+        never armed screen sight from one whose very first frame is still being
+        assembled. That gap is not hypothetical: the first frame is also the
+        slowest (it pays a full-resolution decode and LANCZOS downscale on a
+        thread), so it is the single frame most likely to be mid-flight at the
+        turn boundary, and it was the only one that could never be waited for.
+        """
+        return self._latest is not None or self._inflight_count > 0
+
+    @property
     def frame_count(self) -> int:
         """How many frames this session ever assembled successfully. Metadata only
         (for the desktop history screen's "screen-sight used Nx" line) — never the
@@ -511,13 +524,29 @@ def _frame_label(frame: ScreenFrame) -> str:
     range, so this is the only place the model learns the bounds. They are phrased as
     a coordinate space rather than a size ("1280x800 pixels") because the size framing
     was being read back to users as a complaint about the image being too small.
+
+    The label carries its own scope rule, and that is load-bearing. This text is
+    appended to the USER'S message (see attach_screen_frame_to_turn), so it reads in
+    their voice, and a person attaching an image to what they just said is
+    conventionally asking about the image. The frame is attached to EVERY armed turn
+    with no relevance gate, so on a turn with little spoken content the screenshot
+    becomes the most answerable thing present. In a live 2026-09-09 session the user
+    said "What the fuck? Busy drill." and Buddy replied with a bullet list about the
+    GitHub repo on screen, then was asked "Who the fuck told you to talk about my
+    screen?". The one prompt sentence forbidding that sits ~300 lines away in a cached
+    system prompt, next to the opposite instruction ("answer from it and never say you
+    cannot see their screen"). Announcing availability without stating the limit is
+    what made the announcement an invitation, so the limit ships with it.
     """
     bounds = ""
     if frame.width_px and frame.height_px:
         bounds = f" Pointing coordinates in it run from 0,0 to {frame.width_px - 1},{frame.height_px - 1}."
     return (
-        "A screenshot of the user's screen accompanies this message "
-        f"(the display their cursor is on).{bounds}"
+        "A screenshot of the user's screen is available to you this turn "
+        f"(the display their cursor is on).{bounds} It was captured automatically, "
+        "not shown to you deliberately: answer what they actually said, and do not "
+        "describe, summarize, or comment on the screen unless their words ask about "
+        "it or you need it to answer them."
     )
 
 
@@ -528,6 +557,7 @@ async def attach_screen_frame_to_turn(
     *,
     session_id: str,
     user_id: str,
+    current_turn_context_id: str = "",
 ) -> ScreenFrame | None:
     """Attach the freshest screen frame to the user's turn; strict no-op when unarmed.
 
@@ -536,14 +566,32 @@ async def attach_screen_frame_to_turn(
     non-screen-sight sessions. Returns the injected frame (the pointing publisher
     stamps its id into element.point) or None. Never raises (a raised hook drops
     the whole turn reply).
+
+    ``current_turn_context_id`` is the id this SPOKEN turn already consumed, and
+    it is what makes the second fragment of one utterance work. Endpointing
+    splits one spoken thought into several finalized messages, the desktop
+    stamps one turn_context_id for the whole thought, and this hook runs per
+    fragment. Without the id, fragment two asked ``fresh_frame`` for a frame
+    that fragment one had just marked consumed, was refused as "a previous turn
+    already saw this", and - because ``strip_stale_images`` above had already
+    replaced fragment one's image with a placeholder - ended the turn with
+    strictly less evidence than it started with. The turn then declared itself
+    blind while the user's screenshot sat one message above. ``fresh_frame``
+    was built with this exemption from the start; nothing ever passed it here.
     """
     try:
-        if not store.has_ever_received_frame:
+        # Strict no-op for a session that never armed screen sight: touching
+        # turn_ctx there would cost LiveKit's speculative reply on every turn of
+        # every non-screen call. A first frame still in flight is NOT that case,
+        # and bailing on it here skipped the in-flight wait inside fresh_frame.
+        if not store.screen_sight_is_live:
             return None
 
         stripped = strip_stale_images(turn_ctx)
 
-        frame = await store.fresh_frame()
+        frame = await store.fresh_frame(
+            current_turn_context_id=current_turn_context_id or None
+        )
         if frame is None:
             if stripped:
                 logger.info(

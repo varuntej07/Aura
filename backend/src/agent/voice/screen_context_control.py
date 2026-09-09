@@ -130,13 +130,36 @@ _STATE_CAUSES = {
 }
 
 
-def render_screen_state(reason: str) -> str:
+def render_screen_state(reason: str, *, client_reported: bool = True) -> str:
     """The absent-screen marker injected into a turn that carries no evidence.
 
-    ``reason`` is the freshest client-reported skip reason, or "" when the client
-    reported nothing at all. Unknown is still a negative: no evidence reached this
-    turn either way, and only the actionable next step differs.
+    ``reason`` is the freshest client-reported skip reason. ``client_reported``
+    is whether the client has said ANYTHING about its screen yet, and the two
+    branches below are different facts that must not read alike.
+
+    A reported reason is a real, useful thing to tell the user plainly: sharing
+    is off, macOS has not granted permission, capture failed. It names a fix.
+
+    Client silence is not that. It is the ordinary state at the start of a call
+    and between captures, and rendering it as "you cannot see their screen"
+    turned an unknown into an assertion. A live 2026-09-08 desktop session is
+    what that cost: the user's screenshot sat one message above, Buddy announced
+    it had "no screenshot or live screen evidence available", and then described
+    that same screen accurately fifteen seconds later. The unreported branch
+    still forbids describing or assuming a screen - Buddy must never claim sight
+    it does not have - it just stops ordering a denial, and stops naming the
+    plumbing, which the cached policy already forbids out loud.
     """
+    if not client_reported and not reason:
+        return (
+            f"{SCREEN_STATE_OPEN_TAG}\n"
+            "No screen evidence reached you this turn. Do not describe, assume, or "
+            "answer from anything on their screen. If they ask about it, say you are "
+            "not seeing it at the moment and ask what is on it, rather than telling "
+            "them screen sharing is unavailable. Never mention screenshots, frames, "
+            "blocks, or how any of this reaches you.\n"
+            "</screen_state>"
+        )
     return (
         f"{SCREEN_STATE_OPEN_TAG}\n"
         f"No screen evidence reached you this turn"
