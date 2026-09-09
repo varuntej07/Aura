@@ -49,6 +49,15 @@ class MockAuthViewModel extends _i1.Mock implements _i2.AuthViewModel {
           as bool);
 
   @override
+  bool get passwordResetInFlight =>
+      (super.noSuchMethod(
+            Invocation.getter(#passwordResetInFlight),
+            returnValue: false,
+            returnValueForMissingStub: false,
+          )
+          as bool);
+
+  @override
   bool get needsOnboarding =>
       (super.noSuchMethod(
             Invocation.getter(#needsOnboarding),
@@ -125,6 +134,21 @@ class MockAuthViewModel extends _i1.Mock implements _i2.AuthViewModel {
             returnValueForMissingStub: _i4.Future<void>.value(),
           )
           as _i4.Future<void>);
+
+  @override
+  _i4.Future<void> sendPasswordResetEmail(String? email) =>
+      (super.noSuchMethod(
+            Invocation.method(#sendPasswordResetEmail, [email]),
+            returnValue: _i4.Future<void>.value(),
+            returnValueForMissingStub: _i4.Future<void>.value(),
+          )
+          as _i4.Future<void>);
+
+  @override
+  void clearPasswordResetNotice() => super.noSuchMethod(
+    Invocation.method(#clearPasswordResetNotice, []),
+    returnValueForMissingStub: null,
+  );
 
   @override
   _i4.Future<void> signInWithEmail(String? email, String? password) =>
