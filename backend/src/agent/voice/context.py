@@ -56,6 +56,12 @@ class SessionContext:
     graph_context: str = ""
     connector_states: dict[str, bool] = field(default_factory=dict)
     text_chat_context: str = ""
+    # Sources that fell back to their default because the gather timed out or the
+    # fetch raised, as opposed to genuinely returning nothing. Empty-because-broken
+    # and empty-because-new must not render identically: the first is a returning
+    # user whose memory did not load, and telling Buddy that is their first
+    # conversation makes it disown them out loud.
+    degraded_sources: frozenset[str] = frozenset()
 
     @property
     def prompt_context_vars(self) -> dict[str, str]:
@@ -75,7 +81,15 @@ class SessionContext:
                 if self.text_chat_context
                 else ""
             ),
-            "memory_summary": self.memory_summary or "(nothing yet — first conversation)",
+            "memory_summary": (
+                self.memory_summary
+                or (
+                    "(did not load for this call — say you remember them and use your "
+                    "memory tools; do NOT tell them this is your first conversation)"
+                    if "memory_summary" in self.degraded_sources
+                    else "(nothing yet — first conversation)"
+                )
+            ),
             "graph_context": self.graph_context,
             # Rendered AFTER </session> so it is the last thing in the
             # instructions, which is what makes it override the identity
@@ -85,7 +99,15 @@ class SessionContext:
             "minor_policy": minor_conversation_policy(
                 applies_minor_policy(band_from_value(self.profile.get("age_band")))
             ),
-            "last_session_context": self.last_session_summary,
+            # last_session_at was fetched and then dropped on the floor, so the prompt
+            # could say WHAT was discussed last time but never WHEN. "Yesterday you
+            # were..." is the difference between a companion and a lookup table, and
+            # without the timestamp Buddy could only guess at it or stay vague.
+            "last_session_context": (
+                f"({self.last_session_at}) {self.last_session_summary}"
+                if self.last_session_summary and self.last_session_at
+                else self.last_session_summary
+            ),
             "archive_context": self.archive_context,
             "user_aura_profile": self.aura_summary,
         }
@@ -140,6 +162,7 @@ async def gather_session_context(
             ("text_chat_context", fetch_text_handoff(user_id, conversation_id), "")
         )
 
+    timed_out = False
     try:
         raw_results = await asyncio.wait_for(
             asyncio.gather(
@@ -148,18 +171,23 @@ async def gather_session_context(
             timeout=PRE_SESSION_FETCH_TIMEOUT_S,
         )
     except TimeoutError:
+        timed_out = True
         logger.warn("VoiceSession: pre-session fetch timed out, using defaults", {
             "session_id": session_id, "user_id": user_id,
         })
         raw_results = [default for _, _, default in sources]
 
     resolved: dict[str, Any] = {}
+    degraded: set[str] = set()
     for (name, _coroutine, default), value in zip(sources, raw_results):
+        if timed_out:
+            degraded.add(name)
         if isinstance(value, BaseException):
             logger.warn("VoiceSession: pre-session fetch failed", {
                 "session_id": session_id, "user_id": user_id,
                 "source": name, "error": str(value),
             })
+            degraded.add(name)
             resolved[name] = default
         else:
             resolved[name] = value
@@ -189,4 +217,5 @@ async def gather_session_context(
         ),
         connector_states=resolved["connector_states"],
         text_chat_context=resolved.get("text_chat_context", ""),
+        degraded_sources=frozenset(degraded),
     )

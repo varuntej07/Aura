@@ -140,6 +140,48 @@ See `architectures/alarm-tier.md`.
 5. The worker uploads the retained JPEG, then writes the Firestore item with a stable retry-safe id. It speaks success only after both operations succeed.
 6. The recorder stores the deterministic action receipt through the same durable receipt path used by write tools.
 
+## What decides whether Buddy can see the screen this turn
+
+Undocumented until 2026-09-08, which is part of why two commits touched it and
+neither noticed the frame was being dropped. Blocks decide sight, never the
+model (`prompts.py` `_DESKTOP_SCREEN_POLICY`). Exactly one of three states
+reaches a desktop turn:
+
+- **A screenshot or `<screen_ui_context>` block.** Buddy sees the screen and
+  answers from it.
+- **A `<screen_state>` block.** No evidence reached the turn. It has two
+  wordings, and the split matters: a **client-reported** reason (sharing off,
+  macOS permission, capture failed) is stated plainly to the user because it
+  names a fix, while **client silence** — the ordinary state at the start of a
+  call — forbids describing the screen but must never be spoken as "I cannot see
+  your screen". Silence is an unknown, not a report of blindness. Rendering the
+  two alike is what made Buddy deny sight with the user's screenshot one message
+  above it.
+- **Neither.** Also means no.
+
+A frame is dropped, and the state block injected instead, when any of these
+holds (`screen_frames.py`):
+
+| rule | constant | notes |
+|---|---|---|
+| older than the freshness bound | `_FRAME_MAX_AGE_S = 15.0` | measured from **arrival at the worker**, not capture time, and never re-validated against pixels. A static screen the client stops re-capturing ages out. |
+| already consumed by a **different** turn | `_consumed_turn_ids` | the desktop stamps one `turn_context_id` per spoken turn |
+| still assembling | `_INFLIGHT_FRAME_WAIT_S = 0.8` | waited for, then given up on |
+
+One spoken turn is one `turn_context_id` is one frame, but endpointing splits a
+spoken turn into several finalized messages and the hook runs per fragment. So
+every fragment must pass its own turn's id into `fresh_frame` to be exempt from
+the consumed check; without it, fragment two loses the frame **and**
+`strip_stale_images` has already replaced fragment one's image with a
+placeholder, leaving the turn with less evidence than it started with.
+
+`<screen_state>` lives only for the generation it was injected into: LiveKit
+hands `on_user_turn_completed` a copy of the chat context and does not keep
+added messages (verified in livekit-agents 1.6.4, `agent_activity.py`
+`temp_mutable_chat_ctx`). Mutating that context also costs the speculative
+reply, so the marker is edge-triggered and is not re-injected on an unchanged
+state.
+
 ## Specialized agent handoffs
 
 Interview Mode and Guide Mode replace Buddy with specialized agents inside the
@@ -286,10 +328,28 @@ and [guide-mode.md](guide-mode.md) for armed screen guidance on desktop.
 
 ## Prompt engineering rules
 
-Both system prompts (`BUDDY_CHAT_SYSTEM_PROMPT` in `settings.py`, `VOICE_PROMPT`
-in `agent/voice_prompt.py`) follow Anthropic and OpenAI house rules: XML-tagged
-sections, motivation stated inline, affirmative framing, few-shot `<example>`
-blocks, and for long prompts the few hard rules restated at the very end.
+Both system prompts (`BUDDY_CHAT_SYSTEM_PROMPT` in `settings.py`, and the voice
+pair `MOBILE_VOICE_SYSTEM_PROMPT` / `DESKTOP_VOICE_SYSTEM_PROMPT` in `prompts.py`;
+`agent/voice_prompt.py` now holds only the dynamic `<session>` block) follow
+Anthropic and OpenAI house rules: XML-tagged sections, motivation stated inline,
+affirmative framing, few-shot `<example>` blocks, and for long prompts the few hard
+rules restated at the very end.
+
+**The restatement at the end is `VOICE_TURN_CLOSING_CHECK`, and it is appended AFTER
+the `<session>` block**, in `buddy_agent.__init__`, so it is the literal last thing
+the model reads. That placement is deliberate and was bought with evidence: a live
+2026-09-09 desktop session opened nearly every turn on a concession and closed it on
+a service offer while every rule forbidding both was present and live. The rules were
+not missing, they were in the middle. A fresh desktop turn is ~9.3k tokens of which
+tool schemas are ~73% and the persona ~9%, so mid-prompt is the weakest slot there is.
+It costs no prompt cache: the cacheable prefix already ends where the `<session>`
+block begins, so text after it was never cacheable either way. `test_voice_prompt_cache_boundary`
+asserts both the tail and a token ceiling; raise the ceiling deliberately or not at all.
+
+Two consequences worth keeping: the mobile prompt's in-body "Final check" was DELETED
+when this landed rather than left beside it, and a new rule about how a turn sounds
+belongs in `_SPOKEN_DELIVERY` or here, never in both. `prompts.py` states the reason
+at length: a second statement of a rule weakens the first.
 
 **Signal-to-noise beats word count.** There is no magic length threshold.
 Adherence tracks structure and placement, not raw size. Attention is highest at
@@ -370,6 +430,58 @@ examples and never as a keyword list: Buddy uses the tool to DO the action and
 never hands over manual steps for something a tool covers. A not-connected
 result means telling the user warmly that it isn't linked, pointing at
 Settings > Connectors, and offering to do it once linked. Never a bare refusal.
+
+### Background research has exactly one read path
+
+Every research tool except one is a `ToolEffect.WRITE`. `start_research`,
+`research_to_notion`, `deliver_research_to_notion`, `answer_research_question` and
+`cancel_research` all report work being REQUESTED; none of them reports work being
+FINISHED. Status otherwise arrives push-only, through `RunNarrator`
+(`voice/research_dispatch.py`), which polls `/research/{run_id}` and speaks via
+`generate_reply`. Narration is checkpoint-only: a clarification the run paused
+on, the terminal receipt, and one "taking longer than usual" note when
+`state_revision` stalls past `_STALL_NOTE_AFTER_S`. Routine per-state progress
+notes were deliberately removed; a healthy run advancing is not news.
+
+Three related mechanics, all 2026-09-09 (code-complete, unverified live):
+
+- **Dead-air filler.** `research_to_notion` / `deliver_research_to_notion` take
+  an injected `RunContext` and wrap dispatch in `ctx.with_filler` with
+  `RESEARCH_STILL_WORKING_PHRASES` (`voice/tool_filler.py`), the same pattern
+  `draft_outbound_message` ships. The turn still completes only when the
+  dispatch outcome is known (Action Truth forbids announcing earlier), but the
+  up-to-40s wait is covered by periodic canned fillers instead of silence.
+- **Run addressing.** `deliver_research_to_notion` and `cancel_research` take an
+  optional `run_id`; with several active runs they return a question envelope
+  listing runs by their request text (`_ask_which_run`) instead of the old
+  `active_run_ids[0]` guess that could hit the wrong run.
+- **Session-start rehydration.** `BuddyAgent.on_enter` fires one detached
+  `fetch_resumable_research_runs` (GET `/research`, filtered to live,
+  Notion-bound, recently updated runs) and re-tracks them, so a user who hung
+  up mid-run hears the receipt when they come back. Once per agent instance;
+  handoff returns skip it.
+
+That left a hole with no data in it, and the model filled it. Asked "is it done" and
+"did you dump it into my Notion", Buddy invented a "10 to 20 minutes" estimate and a
+flat yes, holding nothing but an in-flight envelope from several turns earlier. Two
+things close it:
+
+- **`get_research_status`** (`ToolEffect.READ`, desktop-only) reads the recent runs.
+  Delivery is reported ONLY from `delivery_result.page_id`, the same receipt the
+  narrator gates its spoken "saved to X" on, and `notion_destination` is deliberately
+  a separate field: where it was told to go is not proof it arrived, and collapsing
+  the two is the bug. The tool's `then` forbids estimating a completion time, because
+  no completion time exists anywhere in the projection.
+- **`_execute_research_delivery._on_result` now calls `narrator.track()`**, exactly as
+  its dispatch twin always did. `RunNarrator.forget()` evicts a run the moment it goes
+  result-terminal, so binding Notion to an ALREADY-FINISHED run left nothing watching
+  it and the truthful confirmation never fired. Re-tracking is safe on a narrated run:
+  `forget()` leaves `_revisions` intact and `track()` uses `setdefault`, so only the
+  delivery's own revision bump speaks.
+
+The general shape, which is the third instance of it in this file: when Buddy states
+something false about its own background work, look for the missing READ before
+reaching for prompt wording. Wording cannot fix an absent data source.
 
 ### Copyable content: cards, not speech
 

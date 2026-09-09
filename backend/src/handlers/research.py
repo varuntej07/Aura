@@ -224,6 +224,21 @@ async def handle_signal(request: Request, run_id: str, kind: str) -> JSONRespons
         })
     elif kind == "admit":
         signal.update({"plan_version": int(body.get("plan_version") or 0), "preset": "quick"})
+    elif kind == "deliver":
+        data_source_id = str(body.get("data_source_id") or "").strip()
+        if not data_source_id:
+            # Rejected before the engine sees it, so nothing downstream would record
+            # this. A caller that keeps sending an empty destination looks identical to
+            # a caller that never calls at all unless it is logged right here.
+            logger.warn(
+                "research: deliver rejected, no data_source_id",
+                {"user_id": uid, "run_id": run_id},
+            )
+            return JSONResponse({"error": "data_source_id is required."}, status_code=400)
+        signal.update({
+            "data_source_id": data_source_id,
+            "database_name": str(body.get("database_name") or "").strip(),
+        })
     try:
         status = await get_research_engine().signal(uid, run_id, signal)
     except ValueError as exc:

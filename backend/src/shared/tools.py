@@ -100,6 +100,15 @@ CORE_TOOLS: frozenset[str] = frozenset({
     "list_reminders",
     "get_upcoming_events",
     "query_memory",
+    # Reachable on every surface, in chat and in voice, so a turn where retrieval
+    # scored nothing still leaves Buddy able to look something up and to say what
+    # this user has connected. Both were previously absent from the floor, and the
+    # live consequence was Buddy claiming it had no capabilities at all.
+    # start_research deliberately does NOT belong here: it is desktop-only in voice
+    # and denied on chat contract v1, so adding it would trip
+    # verify_core_tool_exposure on three surfaces. The selector protects it instead.
+    "web_surf",
+    "list_connectors",
 })
 
 # Canonical tool specs
@@ -630,6 +639,50 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "include_events": {"type": "boolean", "default": True},
             },
         },
+    },
+    {
+        "name": "get_research_status",
+        # The retrieval document the voice selector scores the user's words against,
+        # so the ordinary ways people ask have to be IN the text: "is it done", "did
+        # it save", "what's happening with", "how long", "did you send it".
+        "description": (
+            "Read the live state of this user's recent background research runs, including "
+            "whether each one has finished and whether its results actually landed in Notion. "
+            "Use whenever they ask about research you started for them: what its status is, "
+            "how far along it is, whether it is done yet, how much longer it will take, what "
+            "happened to it, or whether it was saved or sent to their Notion. This is the only "
+            "way to know any of that. Never answer those questions from memory, from an earlier "
+            "turn, or from what a start or delivery tool said before, because those reported "
+            "the work being requested and not the work being finished, and never estimate how "
+            "long a run will take. A run whose delivered_to_notion is false is NOT in Notion "
+            "yet even when notion_destination names a database: that field is where it was "
+            "told to go, not proof it arrived."
+        ),
+        "strict": True,
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_connectors",
+        # Wording matters here twice over. It is what the model reads to decide
+        # whether this tool answers the question, and it is also the retrieval
+        # document the voice selector scores the user's words against, so the
+        # ordinary ways people name this ("connected", "linked", "integrations",
+        # and the service names themselves) have to appear in the text.
+        "description": (
+            "Report which external services this user has actually connected to Aura, and the "
+            "state of each one. Use whenever they ask what they are connected or linked to, "
+            "which integrations or connectors are set up, whether Aura can reach their "
+            "Google Calendar, Gmail, or Notion, or why a connected service is not working. "
+            "This reads THIS user's live connection state, so never answer those questions "
+            "from memory or from the product guide: a connector can be linked, disabled, or "
+            "in need of reconnection, and only this tool knows which."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "web_surf",

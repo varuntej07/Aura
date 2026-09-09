@@ -51,6 +51,20 @@ DRAFT_STILL_WORKING_PHRASES: list[str] = [
 DRAFT_STILL_WORKING_DELAY_S = 6.0
 DRAFT_FILLER_INTERVAL_S = 8.0
 
+# Same job for the research dispatch tools (research_to_notion,
+# deliver_research_to_notion): the first canned ack comes from
+# SLOW_TOOL_THINKING_PHRASES via ToolFillerSpeaker, and these cover the long
+# tail of the two sequential 20s-timeout backend calls, which used to be up to
+# ~35s of silence after that single ack. Sized so a worst-case dispatch hears
+# every phrase once and then goes quiet rather than looping.
+RESEARCH_STILL_WORKING_PHRASES: list[str] = [
+    "still lining that up, one sec",
+    "almost there, hang tight",
+    "still on it, this one's taking a moment",
+]
+RESEARCH_STILL_WORKING_DELAY_S = 6.0
+RESEARCH_FILLER_INTERVAL_S = 10.0
+
 # One filler per stretch of tool work: chained tool rounds inside this window
 # stay silent so Buddy doesn't stack "one sec" on "one sec".
 _FILLER_DEDUP_WINDOW_S = 4.0

@@ -80,12 +80,22 @@ async def test_none_answer_and_empty_digest_fall_back(monkeypatch):
 
     calls_after_none_case = len(provider.prompts)
     empty_context = _session_context(
-        memory_summary="", last_session_summary="", aura_summary=""
+        memory_summary="",
+        last_session_summary="",
+        aura_summary="",
+        dominant_tone="",
+        dominant_emotion="",
     )
     task = greeting.start_opener_task(empty_context, session_id="s1", user_id="u1")
     assert await greeting.resolve_opener(task, budget_s=1.0) == ""
-    # No LLM call was spent on an empty digest.
-    assert len(provider.prompts) == calls_after_none_case
+    # An empty digest now DOES spend a call. It used to short-circuit to "", which
+    # is why a user with no history could never get a generated opener and always
+    # heard the hardcoded line - the bug this module was written to prevent.
+    assert len(provider.prompts) == calls_after_none_case + 1
+    # And the absence is stated as a fact rather than left as a hole. Given only a
+    # clock reading the model invents a shared past ("still at it with that old
+    # lawnmower?") for someone it has never spoken to.
+    assert "No history" in provider.prompts[-1]
 
 
 async def test_missing_task_resolves_to_static_fallback():
@@ -111,6 +121,10 @@ class _FakeAgent:
         # on_enter checks this first: a Buddy resuming from an Interview Mode
         # handoff acknowledges the return instead of opening the call.
         self._resume_from_interview = False
+        # Already-rehydrated so on_enter skips the research narration lookup:
+        # this fake exercises the greeting path, and a fake must not reach for
+        # the backend run list.
+        self._research_rehydrated = True
         self.session = _FakeSession()
 
 

@@ -1349,6 +1349,11 @@ async def research_cancel_endpoint(request: Request, run_id: str) -> JSONRespons
     return await handle_research_signal(request, run_id, "cancel")
 
 
+@app.post("/research/{run_id}/deliver")
+async def research_deliver_endpoint(request: Request, run_id: str) -> JSONResponse:
+    return await handle_research_signal(request, run_id, "deliver")
+
+
 @app.delete("/research/{run_id}")
 async def research_delete_endpoint(request: Request, run_id: str) -> JSONResponse:
     return await handle_research_signal(request, run_id, "delete")
@@ -1419,9 +1424,13 @@ async def on_startup() -> None:
     _check_env()
     # Loud on a capability hole rather than waiting for a user to be told Aura cannot
     # do something it can.
-    from .shared.tool_exposure import verify_core_tool_exposure
+    from .shared.tool_exposure import (
+        verify_core_tool_exposure,
+        verify_tool_filler_coverage,
+    )
 
     verify_core_tool_exposure(component="api")
+    verify_tool_filler_coverage(component="api")
 
 
 @app.on_event("shutdown")  # pyright: ignore[reportDeprecated]

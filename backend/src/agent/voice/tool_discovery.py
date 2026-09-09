@@ -541,11 +541,25 @@ class ToolCatalog:
             clause_scores = _bm25_scores(_tokenize(action_clauses[-1]), documents)
             if not active_intent.referenced_object:
                 clause_scores = _penalize_id_required(eligible, clause_scores)
+            clause_by_name = {
+                entry.name: score for entry, score in zip(eligible, clause_scores)
+            }
             clause_ranked = sorted(
                 zip(eligible, clause_scores),
                 key=lambda row: (-row[1], row[0].name),
             )
-            if clause_ranked[0][1] > 0:
+            # Hand the turn to the last clause ONLY when the sentence-level leader
+            # says nothing about that clause. "set a reminder for 6pm and then show
+            # me my calendar" is two asks: set_reminder scores 0 on "show me my
+            # calendar", so the calendar tool is genuinely what the turn ends on.
+            # "research these companies and put it in my Notion CRM" is ONE ask
+            # phrased in two clauses: research_to_notion leads the sentence at 23.46
+            # AND still scores 5.88 on the final clause, yet the clause winner was
+            # save_to_notion (screen capture) at 8.99. Promoting there swapped a
+            # durable research run for a screenshot of whatever was on screen.
+            # Gating on "the leader has nothing to say about this clause" is a fact
+            # about the retrieval scores, not a reading of what the user meant.
+            if clause_ranked[0][1] > 0 and clause_by_name.get(primary.name, 0.0) <= 0:
                 primary = clause_ranked[0][0]
         chosen: list[ToolCatalogEntry] = []
         chosen_names: set[str] = set()
@@ -556,24 +570,35 @@ class ToolCatalog:
                 chosen_names.add(entry.name)
 
         _choose(primary)
+        # Everything that actually scored, best first, namespace ignored.
+        #
+        # This used to be namespace-locked, with cross-namespace fill unlocked only
+        # when a regex found "and"/"then"/"also" in the sentence. Both halves were
+        # wrong. The lock threw away the second-best tool while slots sat empty:
+        # "spin up a background agent that gathers founder resources" ranked
+        # web_surf (research.web) first and start_research (research.background)
+        # second, and the model was handed six tools plus a hole where the
+        # background-research tool should have been, so Buddy told the user it could
+        # not run background work at all. And the unlock was a word list over user
+        # speech deciding which tools EXIST, which is the thing this codebase has
+        # been burned by every time it shipped. Wording may decide what is SUGGESTED
+        # and must never decide what is reachable, so the fill is now unconditional
+        # and the ranking alone orders it.
+        #
+        # Score also comes before namespace, not after. Seeding the bundle with the
+        # primary's siblings first sounds harmless and is not: on the utterance above
+        # it spent three of seven slots on screen tools scoring 0, and start_research
+        # (tied on score, sorted sixth by name) fell off the end anyway. A tool that
+        # scored must never lose a slot to one that did not.
+        for entry, score in ranked:
+            if score > 0:
+                _choose(entry)
+        # Whatever is left over goes to the primary's own namespace, so a coherent
+        # bundle still forms when the slots are free. Nothing that scored can be
+        # displaced by this: it runs last.
         for entry, _score in ranked:
             if entry.metadata.namespace == primary.metadata.namespace:
                 _choose(entry)
-        if _requests_multiple_actions(selection.finalized_request):
-            secondary_namespaces: list[str] = []
-            for entry, score in ranked:
-                namespace = entry.metadata.namespace
-                if namespace == primary.metadata.namespace:
-                    continue
-                if score < top_score * 0.55 or score <= 0:
-                    continue
-                if namespace not in secondary_namespaces:
-                    secondary_namespaces.append(namespace)
-                if len(secondary_namespaces) == 1:
-                    break
-            for entry, _score in ranked:
-                if entry.metadata.namespace in secondary_namespaces:
-                    _choose(entry)
 
         # Added AFTER max_results is spent, not competing for its slots, so the semantic
         # bundle is exactly what it would have been without the floor.

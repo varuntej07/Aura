@@ -384,6 +384,31 @@ class FirestoreResearchEngine:
             if admission.admitted and admission.first_stage_id and not admission.replayed:
                 await self._deliver(uid, (admission.first_stage_id,))
             return await self.status(uid, run_id)
+        if kind == "deliver":
+            # Late-bind a Notion destination onto a run that finished without one, and
+            # dispatch the delivery immediately. store.bind_delivery owns every
+            # precondition, including the one that keeps an already-bound destination
+            # immutable, so this branch only has to dispatch what it reserved.
+            bound, reason, stage_id = await store.bind_delivery(
+                uid,
+                run_id,
+                delivery={
+                    "data_source_id": str(signal.get("data_source_id", "")),
+                    "database_name": str(signal.get("database_name", "")),
+                },
+                correlation_id=str(signal.get("correlation_id", "")),
+            )
+            if not bound:
+                # store.bind_delivery already logged WHY at the point of decision.
+                # This records that the refusal actually reached a caller as a 400,
+                # which is what separates "we refused" from "the client never asked".
+                logger.info(
+                    "research.engine: deliver signal refused",
+                    {"user_id": uid, "run_id": run_id, "reason": reason},
+                )
+                raise ValueError(reason or "delivery_refused")
+            await self._deliver(uid, (stage_id,))
+            return await self.status(uid, run_id)
         if kind == "delete":
             from . import deletion as deletion_mod
 

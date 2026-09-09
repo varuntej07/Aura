@@ -78,8 +78,10 @@ class Capability(StrEnum):
     MEMORY_READ = "memory_read"
     MEMORY_WRITE = "memory_write"
     WEB_READ = "web_read"
+    RESEARCH_READ = "research_read"
     RESEARCH_WRITE = "research_write"
     USER_CONTEXT_READ = "user_context_read"
+    CONNECTOR_READ = "connector_read"
     FEEDBACK_WRITE = "feedback_write"
     TRACKING_WRITE = "tracking_write"
     SCREEN_SAVE = "screen_save"
@@ -302,10 +304,32 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             required=("request", "depth"),
         ),
         _tool(
+            # READ, and deliberately not gated on anything. It is the only way to know
+            # whether a run finished or whether its results reached Notion; every other
+            # research tool is a WRITE. Gating it would delete it from exactly the turn
+            # it exists for, the same reasoning as list_connectors below.
+            "get_research_status",
+            Capability.RESEARCH_READ,
+            ToolEffect.READ,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+        ),
+        _tool(
             "get_user_context",
             Capability.USER_CONTEXT_READ,
             ToolEffect.READ,
             namespace="personal.context",
+        ),
+        _tool(
+            # Deliberately declares NO required_connectors. Every other connector-aware
+            # tool here is gated on the connector being live, which is right for a tool
+            # that acts through it. This one reports on them, so gating it would delete
+            # it from exactly the turn it is for: the user asking what is connected
+            # while nothing is.
+            "list_connectors",
+            Capability.CONNECTOR_READ,
+            ToolEffect.READ,
+            namespace="personal.connectors",
         ),
         _tool(
             "report_feedback",
@@ -385,7 +409,17 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             concurrent=False,
             connectors=("notion",),
             latency=ToolLatency.HIGH,
+            # `destination` stays a required ARGUMENT but is explicitly allowed to be
+            # empty, exactly as on research_to_notion and deliver_research_to_notion.
+            # The tool's own docstring instructs the model to send it EMPTY when the
+            # user named Notion but no place inside it, so that the tool can ask which
+            # database. Without this the gate refused that call as
+            # missing_required_tool_field, nothing survived the batch, and the user
+            # heard "Hmm, that didn't go through. Say it once more?" - which blamed
+            # their speech for a contract the tool itself had asked the model to use.
+            # "dump all the details into my Notion" is precisely that case.
             required=("intent", "destination"),
+            empty_allowed=("destination",),
         ),
         _tool(
             # Archives the session's most recent Notion save (reversible from
@@ -412,7 +446,36 @@ VOICE_TOOL_REGISTRY: dict[str, VoiceToolCapability] = {
             concurrent=False,
             connectors=("notion",),
             latency=ToolLatency.HIGH,
+            # `destination` stays a required ARGUMENT but is explicitly allowed to
+            # be empty, which is how the model says "they asked for Notion without
+            # naming a place in it". Without that third state it had to supply some
+            # string, so "dump it into my notion" arrived as a database named "my
+            # notion" and Buddy offered to create it.
             required=("request", "destination"),
+            empty_allowed=("destination",),
+        ),
+        _tool(
+            # Binds a Notion destination onto a run that ALREADY exists and
+            # dispatches its delivery. Same shape as research_to_notion minus the
+            # request: the run is the thing being delivered, so its id comes from
+            # session state, never from the model. Without it the only route to
+            # Notion was to start a second, separately billed run of work the user
+            # had already paid for.
+            "deliver_research_to_notion",
+            Capability.RESEARCH_WRITE,
+            ToolEffect.WRITE,
+            namespace="research.background",
+            surfaces=DESKTOP_ONLY,
+            concurrent=False,
+            connectors=("notion",),
+            latency=ToolLatency.MEDIUM,
+            # `destination` stays a required ARGUMENT but is explicitly allowed to
+            # be empty, which is how the model says "they asked for Notion without
+            # naming a place in it". Without that third state it had to supply some
+            # string, so "dump it into my notion" arrived as a database named "my
+            # notion" and Buddy offered to create it.
+            required=("destination",),
+            empty_allowed=("destination",),
         ),
         _tool(
             # Relays the user's answer to a parked research run's question.

@@ -122,6 +122,14 @@ class DestinationCopy:
 
     ask_format: str  # receives {titles}
     propose_format: str  # receives {name}
+    # Asked when the user named no destination at all. Receives {titles}, and
+    # must never invent a name: an unnamed destination is a question, not a
+    # database to create. Defaulted so a caller that has not written its own
+    # wording still gets a correct question rather than the propose branch.
+    unspecified_format: str = "Which Notion database should that go in - {titles}?"
+    # Asked when they named nothing AND have no databases to choose from, so
+    # there is no name to propose and none may be invented.
+    unnamed_format: str = "You don't have any Notion databases yet - what should I call a new one?"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +179,24 @@ def decide_destination(
             data_source_id=str(resolved.get("data_source_id") or ""),
             database_name=str(resolved.get("title") or destination),
         )
+    if outcome == "unspecified":
+        # They asked for Notion without naming a place in it. One database is
+        # unambiguous, so use it; otherwise ask using their real titles. Nothing
+        # here is derived from what they said, because they said no name.
+        candidates = [
+            (str(item.get("data_source_id") or ""), str(item.get("title") or ""))
+            for item in resolved.get("candidates", [])
+            if item.get("data_source_id")
+        ]
+        if len(candidates) == 1:
+            return DestinationDecision(
+                data_source_id=candidates[0][0], database_name=candidates[0][1]
+            )
+        titles = " or ".join(title for _, title in candidates[:2])
+        return DestinationDecision(
+            question=copy.unspecified_format.format(titles=titles),
+            candidates=candidates,
+        )
     if outcome == "ask":
         candidates = [
             (str(item.get("data_source_id") or ""), str(item.get("title") or ""))
@@ -185,6 +211,11 @@ def decide_destination(
     # propose_create / no_databases / anything unrecognized: propose creating,
     # named strictly from the user's own words.
     name = " ".join(destination.split())[:80]
+    if not name:
+        # Nothing was named AND there is nothing to choose from, so there is no
+        # honest name to propose. Ask for one instead of proposing the empty
+        # string, which rendered as "create one called  ?".
+        return DestinationDecision(question=copy.unnamed_format)
     return DestinationDecision(
         question=copy.propose_format.format(name=name),
         proposed_create_name=name,

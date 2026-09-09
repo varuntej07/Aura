@@ -15,7 +15,11 @@ from livekit.agents.llm._provider_format.openai import to_fnc_ctx
 
 from src.agent import buddy_agent as buddy_agent_module
 from src.agent.buddy_agent import BuddyAgent
-from src.agent.voice.action_policy import derive_turn_policy, evaluate_execution
+from src.agent.voice.action_policy import (
+    derive_turn_policy,
+    evaluate_execution,
+    gated_action_speech,
+)
 from src.agent.voice.capabilities import (
     VOICE_TOOL_REGISTRY,
     ToolEffect,
@@ -368,6 +372,8 @@ def test_every_current_voice_tool_has_registry_metadata():
         "query_memory",
         "web_surf",
         "get_user_context",
+        "get_research_status",
+        "list_connectors",
         "report_feedback",
         "track_topic",
         "draft_outbound_message",
@@ -377,6 +383,7 @@ def test_every_current_voice_tool_has_registry_metadata():
         "undo_notion_save",
         "enable_screen_context",
         "research_to_notion",
+        "deliver_research_to_notion",
         "answer_research_question",
         "cancel_research",
         "set_guide_mode",
@@ -417,7 +424,16 @@ async def test_original_followup_reaches_existing_model_with_reminder_tool(monke
     # what let Buddy tell a user it had no reminder tool.
     passed_tool_names = [tool.info.name for tool in captured["tools"]]
     assert "set_reminder" in passed_tool_names
-    assert "web_surf" not in passed_tool_names
+    # This used to also assert web_surf was selected OUT, which held because the
+    # bundle was locked to the primary's namespace and web_surf was not on the floor.
+    # Both halves of that changed: web_surf joined the core floor (a turn where
+    # retrieval scored nothing left Buddy unable to look anything up, which reads to
+    # the user as having no capabilities at all), and the bundle now fills across
+    # namespaces by score. What bounds the exposed set is the max_results cap, which
+    # a three-tool fixture cannot reach, so the exclusion is asserted where it can
+    # actually bite - in the tool_discovery selection tests - and what belongs here is
+    # that the floor really is applied on a continuation turn.
+    assert {"set_reminder", "query_memory", "web_surf"}.issubset(passed_tool_names)
     passed_context = captured["context"]
     passed_text = [item.text_content for item in passed_context.items]
     assert passed_text[:3] == [
@@ -596,7 +612,12 @@ async def test_fully_rejected_generation_without_text_gets_failure_sentence():
     )
 
     assert _calls_from_output(output) == []
-    assert output == ["Hmm, that didn't go through. Say it once more?"]
+    # The spoken line is chosen by WHY the batch was gated. `not_a_tool` is
+    # unregistered_voice_tool, a capability the model does not have here, so the
+    # honest line is that Buddy cannot do it - not a request to repeat, which is what
+    # the single old sentence said for every reason code alike.
+    assert output == [gated_action_speech("unregistered_voice_tool")]
+    assert "once more" not in output[0]
 
 
 async def test_single_valid_call_is_preserved_unchanged():

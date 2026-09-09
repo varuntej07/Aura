@@ -53,7 +53,12 @@ async def test_reminder_read_moves_post_call_instruction_into_result(monkeypatch
     result = await mcp.list_reminders()
 
     assert result["render"] == {"mode": "summary", "channel": "voice"}
-    assert result["then"] == "Report only the reminders in this result."
+    # summary+voice results now also carry the spoken-register budget appended by
+    # action_truth_envelope. `mode: "summary"` used to be a label nothing read, so a
+    # result was handed to the model with a grounding rule and no delivery rule and got
+    # read back as a written document. The tool's own grounding line still leads.
+    assert result["then"].startswith("Report only the reminders in this result.")
+    assert "no headings, bullets" in result["then"]
 
 
 async def test_calendar_read_moves_time_narration_into_result(monkeypatch):

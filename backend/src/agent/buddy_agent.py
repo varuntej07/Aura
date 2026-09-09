@@ -35,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import random
 import time
 from collections.abc import AsyncIterable, Callable
 from copy import deepcopy
@@ -56,7 +55,7 @@ from livekit.agents import llm as lk_llm
 
 from ..config.settings import settings
 from ..lib.logger import logger
-from ..prompts import voice_system_prompt
+from ..prompts import VOICE_TURN_CLOSING_CHECK, voice_system_prompt
 from ..services.analytics.llm_telemetry import start_tool_span
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import (
@@ -93,11 +92,14 @@ from ..shared.tools import (
     validate_and_coerce_tool_input,
 )
 from .voice.action_policy import (
+    REPAIRABLE_GATE_REASONS,
     WRITE_INTENT_MIN_STT_CONFIDENCE,
     TurnCapabilityPolicy,
     completed_tool_results,
     derive_turn_policy,
     evaluate_execution,
+    gate_repair_instruction,
+    gated_action_speech,
     verbatim_voice_result,
 )
 from .voice.action_telemetry import VoiceActionTelemetry
@@ -146,7 +148,9 @@ from .voice.research_dispatch import (
     RunNarrator,
     answer_research_run,
     cancel_research_run,
+    deliver_existing_run_to_notion,
     dispatch_research_to_notion,
+    fetch_resumable_research_runs,
 )
 from .voice.screen_saves import SaveScreenItemResult, save_screen_capture
 from .voice.speculation import SpeculationDecision, TurnMutations, decide, is_reusable
@@ -169,7 +173,12 @@ from .voice.tool_discovery import (
     ToolSelection,
     recent_dialogue_context,
 )
-from .voice.tool_filler import ToolFillerSpeaker
+from .voice.tool_filler import (
+    RESEARCH_FILLER_INTERVAL_S,
+    RESEARCH_STILL_WORKING_DELAY_S,
+    RESEARCH_STILL_WORKING_PHRASES,
+    ToolFillerSpeaker,
+)
 from .voice.tool_result import action_truth_envelope
 from .voice.turn_metrics import VoiceTurnMetrics
 from .voice.visible_artifacts import (
@@ -212,6 +221,13 @@ _MEMORY_OPEN_TAG = "<relevant_memory>"
 # so the graceful path and its circuit breaker become unreachable. Expressed as
 # a ratio so the two can never drift back into equality by independent edits.
 _RETRIEVAL_BACKSTOP_MULTIPLIER = 1.5
+
+# How long a finalized turn may go without any assistant item before it is
+# reported as dead air. Deliberately well past the slowest legitimate turn:
+# research_to_notion alone can spend ~40s across two sequential 20s-timeout
+# backend calls, and reporting a slow answer as a silent one would make the
+# signal worthless. This only ever decides when to LOG.
+_SILENT_TURN_REPORT_AFTER_S = 60.0
 
 
 def _remove_memory_blocks(chat_ctx: lk_llm.ChatContext) -> int:
@@ -304,16 +320,17 @@ for _raw_tool_definition in (
     assert_strict_tool_schema(_raw_tool_definition)
 
 
-# The user explicitly opened the call, so the opening only confirms presence. It
-# must not invent a reason for the call, revive memory, or ask a question before
-# the user has said what they want.
-CASUAL_GREETINGS = [
-    "hey, i'm here",
-    "hey buddy, i'm here",
-    "yo, i'm here",
-    "heyyy, i'm here",
-    "hey you",
-]
+# The opener is generated per session from the situation (voice/greeting.py).
+# This constant is the ERROR PATH only: the provider failed, or the call missed
+# VOICE_GREETING_SEED_BUDGET_S. It cannot itself be generated, because that path
+# is precisely the one where a model call is unavailable or too slow.
+#
+# It replaced a five-line random rotation that, because opener_task was never
+# passed at the production BuddyAgent call site, spoke on 100% of sessions rather
+# than on the rare failure it was written for. One line rather than five: a
+# rotation implies variety this path does not have, and seeing it twice in a row
+# should look like the fault it is instead of like personality.
+FALLBACK_GREETING = "hey, i'm here"
 
 
 class BuddyAgent(agents.Agent):
@@ -370,14 +387,20 @@ class BuddyAgent(agents.Agent):
             voice_system_prompt(voice_surface.value, voice_mode)
             + voice_capability_digest(voice_surface.value)
             + render_voice_session_context(session_context)
+            # Last, deliberately after the volatile session block: this is the end of
+            # context, where adherence is highest, and the register rules it points at
+            # were otherwise buried mid-prompt. See VOICE_TURN_CLOSING_CHECK for why it
+            # is a pointer rather than a second copy, and why it costs no cache.
+            + VOICE_TURN_CLOSING_CHECK
         )
         super().__init__(
             instructions=instructions,
             chat_ctx=chat_ctx,
         )
         self._user_id = user_id
-        # Raced against CASUAL_GREETINGS in greet(); None simply means the static
-        # line speaks, which is the correct behaviour for a user with no history.
+        # Raced against FALLBACK_GREETING in greet(). None means the fallback
+        # speaks, which is now a fault worth noticing rather than a normal path:
+        # voice_agent always passes a task. resolve_opener logs when it is missing.
         self._opener_task = opener_task
         self._screen_frames = screen_frames
         self._screen_context = screen_context
@@ -421,7 +444,12 @@ class BuddyAgent(agents.Agent):
         # cleared it). Edge-triggering off this is what keeps the marker free:
         # an unchanged state mutates turn_ctx not at all, so LiveKit's
         # speculative reply survives every steady-state turn.
-        self._screen_state_reason: str | None = None
+        # Now the whole marker identity, (reason, client_reported), not the
+        # reason alone: the same empty reason renders two different markers
+        # depending on whether the client has reported yet, so keying on the
+        # reason alone would leave the first, softer one standing after the
+        # client finally spoke.
+        self._screen_state_reason: tuple[str, bool] | None = None
         self._point_publish_tasks: set[asyncio.Task] = set()
         # Deterministic capture state. Only finalized user speech can populate
         self._screen_capture_results: dict[str, SaveScreenItemResult] = {}
@@ -444,9 +472,25 @@ class BuddyAgent(agents.Agent):
         # session only exists once the agent is active) and closed by the
         # entrypoint's finally via close_research_narrator.
         self._research_narrator: RunNarrator | None = None
+        # One rehydration query per BuddyAgent instance: on_enter re-runs on
+        # every return from a Guide/Interview handoff, and the instance (and
+        # its narrator) survives those, so only the first activation looks up
+        # runs the previous session left in flight.
+        self._research_rehydrated = False
         self._research_dispatch_lock = asyncio.Lock()
         self._research_dispatch_results: dict[str, ResearchDispatchResult] = {}
         self._research_candidates: dict[str, str] = {}
+        # The create name this session actually OFFERED out loud. The confirm
+        # turn used to create a database named from whatever `destination` the
+        # model re-supplied on that second call, which nothing checked against
+        # the name the user had just agreed to, so a yes could create a
+        # database they never heard named.
+        self._research_proposed_create_name = ""
+        # Delivery of an EXISTING run gets its own lock and cache. Sharing
+        # research_to_notion's would let one finalized message's cached dispatch
+        # answer the other tool's call, and the two say different things.
+        self._research_delivery_lock = asyncio.Lock()
+        self._research_delivery_results: dict[str, ResearchDispatchResult] = {}
         self._last_research_run_id = ""
         self._direct_action_recorder: Callable[..., None] | None = None
         self._typed_text_observer: Callable[[str], None] | None = None
@@ -477,11 +521,29 @@ class BuddyAgent(agents.Agent):
         # self._turn_context_id below, which prefers structured_context over
         # the frame id and so can diverge from what was actually consumed.
         self._current_turn_frame_context_id = ""
+        # The same id, but scoped to the SPOKEN turn rather than to this hook
+        # invocation, and cleared the moment Buddy answers. Endpointing splits
+        # one spoken thought across several finalized messages, so the attach in
+        # on_user_turn_completed runs more than once for one utterance and every
+        # run after the first would otherwise be refused its own turn's frame.
+        #
+        # It has to be a SEPARATE field from _current_turn_frame_context_id,
+        # which is rewritten on every fragment: reusing that one would also
+        # exempt the next genuine turn when no new frame arrived, and re-attach
+        # the previous turn's screenshot - exactly what the consumed check
+        # exists to prevent. An assistant reply is the boundary between "still
+        # the same thought" and "a new one", so speaking is what clears this.
+        self._spoken_turn_frame_context_id = ""
         self._action_telemetry = VoiceActionTelemetry(
             session_id=session_id, surface=self._launch_surface.value
         )
         self._context_compactor = VoiceContextCompactor(session_id=session_id)
         self._context_compaction_checks: set[asyncio.Task] = set()
+        # Silent-turn detection. `_answered_turn_index` is the newest turn that
+        # produced ANY assistant item; a watchdog per finalized turn compares
+        # against it and reports dead air that would otherwise leave no trace.
+        self._silent_turn_watchdogs: set[asyncio.Task] = set()
+        self._answered_turn_index = -1
         self._turn_metrics = turn_metrics
         # Bound after construction by voice_agent, because it needs the room's
         # client-events topic. None means "publish and assume", which is the
@@ -599,6 +661,16 @@ class BuddyAgent(agents.Agent):
         self._text_output = text_output
 
     async def on_enter(self) -> None:
+        if not self._research_rehydrated:
+            # Detached on purpose: the greeting must never wait on a backend
+            # read, and a rehydration failure must cost the session nothing.
+            self._research_rehydrated = True
+            rehydrate_task = asyncio.create_task(
+                self._rehydrate_research_narration(),
+                name=f"research-rehydrate-{self._session_id[:8]}",
+            )
+            self._silent_turn_watchdogs.add(rehydrate_task)
+            rehydrate_task.add_done_callback(self._silent_turn_watchdogs.discard)
         if getattr(self, "_resume_from_guide", False):
             self._resume_from_guide = False
             ready = self._guide_resume_ready
@@ -704,13 +776,15 @@ class BuddyAgent(agents.Agent):
         )
 
     async def greet(self) -> None:
-        # Prefer the memory-seeded opener when it resolves inside the budget;
-        # otherwise the static list keeps the sub-1s hello. resolve_opener is
-        # fail-open ("" on timeout/error), so the greeting can never hang.
+        # The situational opener when it resolves inside the budget; otherwise the
+        # fallback keeps the sub-1s hello. resolve_opener is fail-open ("" on
+        # timeout/error) and logs the miss, so the greeting can never hang and a
+        # session that quietly fell back is visible in the worker log rather than
+        # looking identical to a healthy one.
         opener = await resolve_opener(
             self._opener_task, settings.VOICE_GREETING_SEED_BUDGET_S
         )
-        await self.session.say(opener or random.choice(CASUAL_GREETINGS))
+        await self.session.say(opener or FALLBACK_GREETING)
 
     async def on_user_turn_completed(
         self, turn_ctx: lk_llm.ChatContext, new_message: lk_llm.ChatMessage
@@ -845,11 +919,13 @@ class BuddyAgent(agents.Agent):
                 new_message,
                 session_id=self._session_id,
                 user_id=self._user_id,
+                current_turn_context_id=self._spoken_turn_frame_context_id,
             )
             self._last_injected_frame_id = frame.frame_id if frame else ""
             self._last_injected_frame_scale = frame.model_scale if frame else 1.0
             if frame is not None:
                 self._screen_frames.mark_turn_consumed(frame.turn_context_id)
+                self._spoken_turn_frame_context_id = frame.turn_context_id
         # Reset every turn (not just inside the branch above) so a mid-turn
         # tool call on a LATER turn that carried no frame of its own can never
         # inherit an earlier turn's exemption id. See fresh_frame's
@@ -886,19 +962,36 @@ class BuddyAgent(agents.Agent):
                     if self._screen_context is not None
                     else ""
                 )
-                if screen_state_reason != self._screen_state_reason:
+                # Whether the client has EVER spoken about its screen. Part of
+                # the edge-trigger key, not just the wording: the marker changes
+                # meaning the moment the first report lands, so a session that
+                # went quiet-then-reported must re-render rather than keep the
+                # softer line.
+                client_reported = (
+                    self._screen_context.client_ever_reported
+                    if self._screen_context is not None
+                    else False
+                )
+                screen_state_key = (screen_state_reason, client_reported)
+                if screen_state_key != self._screen_state_reason:
                     remove_screen_state_messages(turn_ctx)
                     turn_ctx.add_message(
                         role="system",
-                        content=[render_screen_state(screen_state_reason)],
+                        content=[
+                            render_screen_state(
+                                screen_state_reason,
+                                client_reported=client_reported,
+                            )
+                        ],
                     )
-                    self._screen_state_reason = screen_state_reason
+                    self._screen_state_reason = screen_state_key
                     logger.info(
                         "VoiceSession: screen state marker injected",
                         {
                             "session_id": self._session_id,
                             "user_id": self._user_id,
                             "reason": screen_state_reason or "not_reported",
+                            "client_reported": client_reported,
                         },
                     )
         self._finalized_message_id = new_message.id
@@ -1183,8 +1276,57 @@ class BuddyAgent(agents.Agent):
         )
         self._interim_updates = 0
         self._last_interim_transcript = ""
+        self._arm_silent_turn_watchdog(current_turn_index)
         if context_was_compacted:
             await self.update_chat_ctx(turn_ctx)
+
+    def _arm_silent_turn_watchdog(self, turn_index: int) -> None:
+        """Log loudly if this finalized turn never produces any assistant speech.
+
+        A turn that speaks nothing produces no assistant conversation item, so
+        TurnMetrics.complete_turn never runs and the turn leaves NO metrics row
+        and NO log line anywhere. Dead air and a healthy turn were byte-identical
+        from every sink we keep, which is why a live silent turn could only be
+        narrowed to two candidate causes instead of one.
+
+        Purely observational: it reads state, speaks nothing, changes no reply
+        path, and adds no latency to any turn. The delay is deliberately longer
+        than the slowest legitimate turn (research_to_notion can spend ~40s in
+        two sequential backend calls) so a slow answer is never reported as a
+        silent one.
+        """
+
+        async def _watch() -> None:
+            try:
+                await asyncio.sleep(_SILENT_TURN_REPORT_AFTER_S)
+                if self._answered_turn_index >= turn_index:
+                    return
+                logger.error(
+                    "VoiceSession: silent turn",
+                    {
+                        "session_id": self._session_id,
+                        "user_id": self._user_id,
+                        "turn_index": turn_index,
+                        "waited_s": _SILENT_TURN_REPORT_AFTER_S,
+                        # The reason codes already collected for this turn are the
+                        # whole point: they name which gate ate the reply.
+                        "deferred_tools": self._action_telemetry.deferred_reasons(),
+                        "surface": self._launch_surface.value,
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warn(
+                    "VoiceSession: silent turn watchdog failed",
+                    {"session_id": self._session_id, "error": str(exc)},
+                )
+
+        task = asyncio.create_task(
+            _watch(), name=f"silent-turn-{self._session_id[:8]}-{turn_index}"
+        )
+        self._silent_turn_watchdogs.add(task)
+        task.add_done_callback(self._silent_turn_watchdogs.discard)
 
     def _unconsumed_structured_context(self) -> StructuredContext | None:
         """The newest structured snapshot no turn has attached yet, if any."""
@@ -2279,12 +2421,25 @@ class BuddyAgent(agents.Agent):
         in my recruiting CRM", "save this to Notion", "add her to my
         pipeline").
 
+        This tool captures the CURRENT SCREEN and nothing else. It never
+        researches, looks anything up, or produces new material.
+
         Do NOT call it for a bare "save this" with no destination - that is
         save_screen_item. Do NOT call it when the user asks how the feature
-        works, quotes someone, or says NOT to save.
+        works, quotes someone, or says NOT to save. Do NOT call it when they
+        ask you to research, investigate, or look into a subject and put the
+        results in Notion, however they phrase the saving part ("dump all the
+        details into my Notion", "put your findings in there") - the thing they
+        want written does not exist on screen yet, so that is
+        research_to_notion, or deliver_research_to_notion when a run from this
+        session already covered it. A screenshot accompanies most turns; its
+        presence is never a reason to prefer this tool.
 
         intent: what the user wants captured, in their words.
-        destination: the database they named, in their words.
+        destination: the database INSIDE Notion they named, in their words, or
+        EMPTY when they only named Notion itself and no place within it; this
+        tool then asks them which database rather than inventing one. "put this
+        in my Notion" names the connector, not a database, so pass empty.
         confirmed_database_id: ONLY on a follow-up turn, after this tool asked
         a disambiguation question and the user picked one of the offered
         databases - pass that candidate's id.
@@ -2309,7 +2464,25 @@ class BuddyAgent(agents.Agent):
                 for candidate in result.candidates
             ],
             "proposed_create_name": result.proposed_create_name,
-            "render": {"mode": "verbatim", "channel": "voice"},
+            # Same replay rule as the research tools: a cache hit means this exact
+            # line was already spoken for this finalized message, and re-binding it
+            # to the verbatim path speaks it a second time word for word.
+            **(
+                {}
+                if result.already_spoken
+                else {"render": {"mode": "verbatim", "channel": "voice"}}
+            ),
+            **(
+                {
+                    "then": (
+                        "You ALREADY said this to them in this same turn. Do not "
+                        "repeat it. Move the conversation forward from what they "
+                        "just asked."
+                    )
+                }
+                if result.already_spoken
+                else {}
+            ),
         }
 
     @function_tool
@@ -2344,11 +2517,48 @@ class BuddyAgent(agents.Agent):
             "render": {"mode": "verbatim", "channel": "voice"},
         }
 
+    async def _with_research_filler(self, ctx: RunContext | None, execute):
+        """Best-effort "still working" filler around a slow research call.
+
+        Mirrors draft_outbound's wrapper: a filler enter/exit failure must never
+        cost the dispatch. Exceptions from ``execute`` itself never reach the
+        broad except because the exactly-once skeleton converts them to fallback
+        results (CancelledError re-raises and correctly propagates here). The
+        re-call on the fallback path is safe because the skeleton returns the
+        cached result for the same finalized message; ``result`` is assigned
+        inside the block so an exit-only failure never re-executes and never
+        mislabels a first result as already spoken.
+        """
+        if ctx is None:
+            return await execute()
+        result = None
+        try:
+            async with ctx.with_filler(
+                lambda step: RESEARCH_STILL_WORKING_PHRASES[step],
+                delay=RESEARCH_STILL_WORKING_DELAY_S,
+                interval=RESEARCH_FILLER_INTERVAL_S,
+                max_steps=len(RESEARCH_STILL_WORKING_PHRASES),
+            ):
+                result = await execute()
+        except Exception as exc:
+            logger.warn(
+                "VoiceResearch: filler wrapper failed",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "error": str(exc),
+                },
+            )
+        if result is None:
+            result = await execute()
+        return result
+
     @function_tool
     async def research_to_notion(
         self,
+        ctx: RunContext,
         request: str,
-        destination: str,
+        destination: str = "",
         confirmed_database_id: str = "",
         create_confirmed: bool = False,
     ) -> dict[str, object]:
@@ -2357,16 +2567,25 @@ class BuddyAgent(agents.Agent):
         into something AND name a Notion destination ("research these
         companies into my CRM"). The run keeps working after the call ends.
 
+        This STARTS NEW research, so only call it when no run exists yet. If
+        research is already running or already finished in this session and they
+        want it in Notion, call deliver_research_to_notion instead: calling this
+        one there runs and bills the same work a second time.
+
         Do NOT call it to save what is already on screen (save_to_notion), for
         research with no Notion destination named (start_research), or for a
         quick factual question (web_surf).
 
         request: what to research, in the user's words.
-        destination: the database they named, in their words. Speech recognition
-        mangles proper nouns: if what you heard is a near-homophone of a word
-        already used in this conversation ("motion" for "Notion"), take the word
-        they actually used. Never create a database named after the connector
-        itself; that is a misheard destination, not a name they chose.
+        destination: the database INSIDE Notion they named, in their words, or
+        EMPTY when they named none. "put it in my Notion", "save it to Notion",
+        "dump it in there" name the connector, not a database, so pass empty and
+        this tool asks them which one. Pass a name only for a place within
+        Notion ("my CRM", "the reading list", "Q3 planning"). Guessing a name
+        from words that only meant Notion itself is what created a database
+        called "my notion". Speech recognition also mangles proper nouns: if
+        what you heard is a near-homophone of a word already used in this
+        conversation ("motion" for "Notion"), take the word they actually used.
         confirmed_database_id: ONLY on a follow-up turn after this tool asked
         which database and the user picked one - pass that candidate's id.
         create_confirmed: ONLY after this tool proposed creating a database
@@ -2375,12 +2594,16 @@ class BuddyAgent(agents.Agent):
         The returned confirmation is the exact wording to speak. If it is a
         question, ask it and wait for the answer before calling again.
         """
-        result = await self._execute_research_dispatch(
-            self._finalized_message_id or f"tool:{self._action_telemetry.turn_index}",
-            request=request,
-            destination=destination,
-            confirmed_database_id=confirmed_database_id,
-            create_confirmed=create_confirmed,
+        result = await self._with_research_filler(
+            ctx,
+            lambda: self._execute_research_dispatch(
+                self._finalized_message_id
+                or f"tool:{self._action_telemetry.turn_index}",
+                request=request,
+                destination=destination,
+                confirmed_database_id=confirmed_database_id,
+                create_confirmed=create_confirmed,
+            ),
         )
         asked_question = bool(result.candidates or result.proposed_create_name)
         # `then` is the only field in the Action Truth envelope that binds the NEXT
@@ -2399,6 +2622,16 @@ class BuddyAgent(agents.Agent):
                 "running, starting, or on its way, and correct any earlier claim "
                 "that it was."
             )
+        if result.already_spoken:
+            # A cache replay: this exact line was already spoken for this
+            # finalized message, so speaking it verbatim again repeats Buddy
+            # word for word, which is what a live session heard. Drop the
+            # verbatim binding for the replay only and let the model carry the
+            # conversation forward instead.
+            then = (
+                "You ALREADY said this to them in this same turn. Do not repeat it. "
+                "Move the conversation forward from what they just asked."
+            )
         return {
             "ok": result.dispatched or asked_question,
             "say": result.spoken_confirmation,
@@ -2407,7 +2640,177 @@ class BuddyAgent(agents.Agent):
                 for database_id, title in result.candidates
             ],
             "proposed_create_name": result.proposed_create_name,
+            **(
+                {}
+                if result.already_spoken
+                else {"render": {"mode": "verbatim", "channel": "voice"}}
+            ),
+            "then": then,
+        }
+
+    def _resolve_research_run(self, run_id: str) -> tuple[str, list[tuple[str, str]]]:
+        """Resolve which of this session's runs a research verb targets.
+
+        Returns (resolved_run_id, ambiguous_runs); at most one is non-empty,
+        and both empty means the session has no run at all. ambiguous_runs is
+        [(run_id, request_text), ...] so the caller can ask the user which one,
+        replacing the old ``active_run_ids[0]`` guess that silently hit the
+        wrong run whenever two were live.
+        """
+        narrator = self._research_narrator
+        active = narrator.active_run_ids if narrator is not None else []
+        if run_id:
+            if run_id in active or run_id == self._last_research_run_id:
+                return run_id, []
+            # A stale or mistranscribed id falls through to normal resolution
+            # below rather than acting on a run this session never tracked.
+        if len(active) == 1:
+            return active[0], []
+        if len(active) > 1:
+            descriptions = narrator.run_descriptions() if narrator else {}
+            return "", [(rid, descriptions.get(rid, "")) for rid in active]
+        if self._last_research_run_id:
+            return self._last_research_run_id, []
+        return "", []
+
+    @staticmethod
+    def _ask_which_run(runs: list[tuple[str, str]], *, verb: str) -> dict[str, object]:
+        """Question envelope for the several-runs-active case. The model asks,
+        the user picks, the model re-calls with the chosen run_id."""
+        options = " or ".join(
+            f'"{description[:60]}"' if description else "an earlier one"
+            for _, description in runs
+        )
+        return {
+            "ok": True,
+            "say": f"You've got more than one research going - which one should I {verb}, {options}?",
+            "runs": [
+                {"run_id": rid, "request": description} for rid, description in runs
+            ],
             "render": {"mode": "verbatim", "channel": "voice"},
+            "then": (
+                "Ask that and wait for their answer. When they pick one, call "
+                "this tool again with that run's run_id from the runs list. Do "
+                "not guess between them."
+            ),
+        }
+
+    @function_tool
+    async def deliver_research_to_notion(
+        self,
+        ctx: RunContext,
+        destination: str = "",
+        confirmed_database_id: str = "",
+        create_confirmed: bool = False,
+        run_id: str = "",
+    ) -> dict[str, object]:
+        """Save research that ALREADY EXISTS in this session into the user's
+        Notion, when they ask you to put, save, dump, or move that research
+        somewhere in Notion. Use this whenever the research is already running
+        or already finished, however they phrase it.
+
+        Do NOT call research_to_notion for that case: it starts a brand new run,
+        so the user pays for the same research twice and gets two copies. Use
+        research_to_notion only when there is no run yet and they are asking for
+        new research. For saving what is on screen, use save_to_notion.
+
+        destination: the database INSIDE Notion they named, in their words, or
+        EMPTY when they named none. "put it in my Notion", "save it to Notion",
+        "dump it in there" name the connector, not a database, so pass empty and
+        this tool asks them which one. Pass a name only for a place within
+        Notion ("my CRM", "the reading list", "Q3 planning"). Guessing a name
+        from words that only meant Notion itself is what created a database
+        called "my notion". Speech recognition also mangles proper nouns: if
+        what you heard is a near-homophone of a word already used in this
+        conversation ("motion" for "Notion"), take the word they actually used.
+        confirmed_database_id: ONLY on a follow-up turn after this tool asked
+        which database and the user picked one - pass that candidate's id.
+        create_confirmed: ONLY after this tool proposed creating a database
+        and the user explicitly said yes.
+        run_id: ONLY on a follow-up turn, after this tool listed several
+        active runs and the user picked one - pass that run's run_id from the
+        returned runs list. Leave empty otherwise; this tool resolves the run
+        itself when only one exists.
+
+        The returned confirmation is the exact wording to speak. If it is a
+        question, ask it and wait for the answer before calling again.
+        """
+        run_id, ambiguous_runs = self._resolve_research_run(run_id)
+        if ambiguous_runs:
+            return self._ask_which_run(ambiguous_runs, verb="save")
+        if not run_id:
+            # The model reached for this tool, so the user asked to save research that
+            # session state says does not exist. Either they are right and the run id
+            # was lost (narrator never tracked it, or the session was resumed), or the
+            # model picked the wrong tool. Both are worth finding later, and neither
+            # leaves any other trace: this branch touches no backend.
+            logger.warn(
+                "VoiceResearch: deliver requested with no session run",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "destination": destination[:80],
+                    "narrator_present": self._research_narrator is not None,
+                },
+            )
+            return {
+                "ok": False,
+                "say": "There's no research from this session to save.",
+                "render": {"mode": "verbatim", "channel": "voice"},
+                "then": (
+                    "Say that and stop. Nothing was saved, so do not claim it was. "
+                    "If they want that topic researched into Notion, use "
+                    "research_to_notion to start a fresh run."
+                ),
+            }
+        result = await self._with_research_filler(
+            ctx,
+            lambda: self._execute_research_delivery(
+                self._finalized_message_id
+                or f"tool:{self._action_telemetry.turn_index}",
+                run_id=run_id,
+                destination=destination,
+                confirmed_database_id=confirmed_database_id,
+                create_confirmed=create_confirmed,
+            ),
+        )
+        asked_question = bool(result.candidates or result.proposed_create_name)
+        if result.dispatched:
+            then = (
+                "Say that and stop. The write is in flight, not finished, so do not "
+                "say it is saved or name a page until the runtime tells you it landed."
+            )
+        elif asked_question:
+            then = "Ask that and wait for their answer before calling this again."
+        else:
+            then = (
+                "Say that verbatim. Nothing was saved, so do not say the research is "
+                "in Notion, on its way, or saving, and correct any earlier claim "
+                "that it was."
+            )
+        if result.already_spoken:
+            # A cache replay: this exact line was already spoken for this
+            # finalized message, so speaking it verbatim again repeats Buddy
+            # word for word, which is what a live session heard. Drop the
+            # verbatim binding for the replay only and let the model carry the
+            # conversation forward instead.
+            then = (
+                "You ALREADY said this to them in this same turn. Do not repeat it. "
+                "Move the conversation forward from what they just asked."
+            )
+        return {
+            "ok": result.dispatched or asked_question,
+            "say": result.spoken_confirmation,
+            "candidates": [
+                {"database_id": database_id, "title": title}
+                for database_id, title in result.candidates
+            ],
+            "proposed_create_name": result.proposed_create_name,
+            **(
+                {}
+                if result.already_spoken
+                else {"render": {"mode": "verbatim", "channel": "voice"}}
+            ),
             "then": then,
         }
 
@@ -2462,17 +2865,22 @@ class BuddyAgent(agents.Agent):
         }
 
     @function_tool
-    async def cancel_research(self) -> dict[str, object]:
+    async def cancel_research(self, run_id: str = "") -> dict[str, object]:
         """Cancel the background research run this session started. Call when
-        the user asks to stop, cancel, or abandon the research. The returned
-        confirmation is the exact wording to speak.
+        the user asks to stop, cancel, or abandon the research.
+
+        run_id: ONLY on a follow-up turn, after this tool listed several
+        active runs and the user picked one - pass that run's run_id from the
+        returned runs list. Leave empty otherwise; this tool resolves the run
+        itself when only one exists.
+
+        The returned confirmation is the exact wording to speak. If it is a
+        question, ask it and wait for the answer before calling again.
         """
         narrator = self._research_narrator
-        run_id = ""
-        if narrator is not None and narrator.active_run_ids:
-            run_id = narrator.active_run_ids[0]
-        elif self._last_research_run_id:
-            run_id = self._last_research_run_id
+        run_id, ambiguous_runs = self._resolve_research_run(run_id)
+        if ambiguous_runs:
+            return self._ask_which_run(ambiguous_runs, verb="cancel")
         if not run_id:
             return {
                 "ok": False,
@@ -2523,7 +2931,12 @@ class BuddyAgent(agents.Agent):
         async with lock:
             cached = cache.get(finalized_message_id)
             if cached is not None:
-                return cached
+                # Flagged, not silently replayed. The dispatch is correctly
+                # deduped, but handing the identical line back to the verbatim
+                # speech path spoke it a second time, word for word - which is
+                # what a live session heard. max_tool_steps allows three rounds
+                # per turn, so this could stack.
+                return replace(cached, already_spoken=True)
 
             self._action_telemetry.emitted(tool_name, "deterministic_finalized_speech")
             span = start_tool_span(tool_name=tool_name, source="voice", uid=self._user_id)
@@ -2571,8 +2984,72 @@ class BuddyAgent(agents.Agent):
                     latency_ms=latency_ms,
                 )
             if generation_cancelled:
+                # The write was shielded and landed, but the turn that would
+                # have confirmed it is gone: the tool call is marked an error,
+                # and verbatim_voice_result skips errored outputs. Silence here
+                # means the user authorized durable work, is paying for it, and
+                # is never told it started. Hand the receipt to the narrator,
+                # which waits for a quiet moment instead of talking over them.
+                if success_of(result) and result.spoken_confirmation:
+                    self._announce_cancelled_action(result.spoken_confirmation)
                 raise asyncio.CancelledError()
             return result
+
+    async def _rehydrate_research_narration(self) -> None:
+        """Re-track the user's still-active Notion-bound runs on session start.
+
+        A user who hung up mid-run and came back had nothing watching the run,
+        so the truthful "saved to X" receipt (or the clarification it paused
+        on) never reached them. track() dedupes via setdefault and narrates
+        only on a revision bump, so re-tracking a run this session already
+        knows is harmless.
+        """
+        runs = await fetch_resumable_research_runs(
+            session_id=self._session_id,
+            firebase_id_token=self._firebase_id_token,
+        )
+        if not runs:
+            return
+        narrator = self._research_narrator
+        if narrator is None:
+            narrator = RunNarrator(
+                session=self.session,
+                session_id=self._session_id,
+                user_id=self._user_id,
+                firebase_id_token=self._firebase_id_token,
+            )
+            self._research_narrator = narrator
+        for run_id, database_name, description in runs:
+            if not self._last_research_run_id:
+                self._last_research_run_id = run_id
+            narrator.track(run_id, database_name, description=description)
+        logger.info(
+            "VoiceResearch: rehydrated narration for in-flight runs",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "run_count": len(runs),
+            },
+        )
+
+    def _announce_cancelled_action(self, line: str) -> None:
+        """Queue a receipt for an action whose reply generation was cancelled."""
+        narrator = self._research_narrator
+        if narrator is None:
+            narrator = RunNarrator(
+                session=self.session,
+                session_id=self._session_id,
+                user_id=self._user_id,
+                firebase_id_token=self._firebase_id_token,
+            )
+            self._research_narrator = narrator
+        task = asyncio.create_task(
+            narrator.announce(line), name=f"action-receipt-{self._session_id[:8]}"
+        )
+        # Owned like every other detached task here, so a failure in the
+        # compensating receipt can never surface inside the cancelled turn.
+        self._silent_turn_watchdogs.add(task)
+        task.add_done_callback(self._silent_turn_watchdogs.discard)
 
     async def _execute_research_dispatch(
         self,
@@ -2593,6 +3070,8 @@ class BuddyAgent(agents.Agent):
         def _on_result(result: ResearchDispatchResult) -> None:
             if result.candidates:
                 self._research_candidates = dict(result.candidates)
+            if result.proposed_create_name:
+                self._research_proposed_create_name = result.proposed_create_name
             if result.dispatched and result.run_id:
                 self._last_research_run_id = result.run_id
                 narrator = self._research_narrator
@@ -2604,7 +3083,11 @@ class BuddyAgent(agents.Agent):
                         firebase_id_token=self._firebase_id_token,
                     )
                     self._research_narrator = narrator
-                narrator.track(result.run_id, result.database_name or "your Notion")
+                narrator.track(
+                    result.run_id,
+                    result.database_name or "your Notion",
+                    description=request,
+                )
 
         return await self._run_finalized_notion_action(
             finalized_message_id,
@@ -2620,11 +3103,98 @@ class BuddyAgent(agents.Agent):
                 destination=destination,
                 confirmed_data_source_id=confirmed_database_id,
                 confirmed_database_name=confirmed_name,
-                create_database_named=(destination if create_confirmed else ""),
+                create_database_named=(
+                    # The name they said yes to, not the one the model re-sends
+                    # on the confirm turn. Nothing used to check the two matched.
+                    (self._research_proposed_create_name or destination)
+                    if create_confirmed
+                    else ""
+                ),
             ),
             success_of=lambda result: result.dispatched,
             fallback_factory=lambda: ResearchDispatchResult(
                 spoken_confirmation="I couldn't start that research - try again?"
+            ),
+            on_result=_on_result,
+            recorder_payload=lambda result: {
+                "run_id": result.run_id,
+                "database_name": result.database_name,
+                "asked_question": bool(
+                    result.candidates or result.proposed_create_name
+                ),
+                "say": result.spoken_confirmation,
+            },
+        )
+
+    async def _execute_research_delivery(
+        self,
+        finalized_message_id: str,
+        *,
+        run_id: str,
+        destination: str,
+        confirmed_database_id: str,
+        create_confirmed: bool,
+    ) -> ResearchDispatchResult:
+        """Deliver one existing run into Notion exactly once per finalized message."""
+        confirmed_name = ""
+        if confirmed_database_id:
+            confirmed_name = self._research_candidates.get(confirmed_database_id, "")
+            if not confirmed_name:
+                confirmed_database_id = ""
+
+        def _on_result(result: ResearchDispatchResult) -> None:
+            if result.candidates:
+                self._research_candidates = dict(result.candidates)
+            if result.proposed_create_name:
+                self._research_proposed_create_name = result.proposed_create_name
+            # Re-track, exactly as the dispatch twin above does. Without this a run
+            # that finished BEFORE a destination was bound is never polled again:
+            # RunNarrator.forget() evicts a run the moment it goes result-terminal, so
+            # binding Notion to an already-finished run left nothing watching it and
+            # the truthful "saved to X" line never fired. Asked "did you dump it into
+            # my Notion", the model then had a stale in-flight envelope, no receipt,
+            # and no tool to check, and it confabulated a yes.
+            # Safe to call on an already-narrated run: forget() leaves _revisions
+            # intact and track() uses setdefault, so an unchanged state does not
+            # re-speak. Only the delivery's own revision bump narrates.
+            if result.dispatched and result.run_id:
+                self._last_research_run_id = result.run_id
+                narrator = self._research_narrator
+                if narrator is None:
+                    narrator = RunNarrator(
+                        session=self.session,
+                        session_id=self._session_id,
+                        user_id=self._user_id,
+                        firebase_id_token=self._firebase_id_token,
+                    )
+                    self._research_narrator = narrator
+                narrator.track(result.run_id, result.database_name or "your Notion")
+
+        return await self._run_finalized_notion_action(
+            finalized_message_id,
+            lock=self._research_delivery_lock,
+            cache=self._research_delivery_results,
+            tool_name="deliver_research_to_notion",
+            call_id_prefix="research-deliver",
+            coro_factory=lambda: deliver_existing_run_to_notion(
+                uid=self._user_id,
+                session_id=self._session_id,
+                firebase_id_token=self._firebase_id_token,
+                run_id=run_id,
+                destination=destination,
+                confirmed_data_source_id=confirmed_database_id,
+                confirmed_database_name=confirmed_name,
+                create_database_named=(
+                    # The name they said yes to, not the one the model re-sends
+                    # on the confirm turn. Nothing used to check the two matched.
+                    (self._research_proposed_create_name or destination)
+                    if create_confirmed
+                    else ""
+                ),
+            ),
+            success_of=lambda result: result.dispatched,
+            fallback_factory=lambda: ResearchDispatchResult(
+                spoken_confirmation="I couldn't save that research to Notion - try again?"
             ),
             on_result=_on_result,
             recorder_payload=lambda result: {
@@ -2968,6 +3538,29 @@ class BuddyAgent(agents.Agent):
                 "stt_confidence": (
                     self._finalized_stt_confidence if finalized else None
                 ),
+                # Why this bundle, not just what it was. Selected tools alone cannot
+                # answer the only question anyone asks of this log, which is "the tool
+                # exists, so where did it go". A user was told Buddy could not run
+                # background work on a turn where start_research ranked second and was
+                # then discarded by a namespace rule, and nothing recorded that: the
+                # log showed a healthy seven-tool bundle, identical to a correct one.
+                #
+                # reason_codes name the structural refusals (surface, connector,
+                # rollout, frame, authorization). dropped_scoring is the other half and
+                # the one that was missing: a tool that MATCHED the utterance and still
+                # did not make the cut. An entry there is either the cap doing its job
+                # or a selector bug, and it is the first thing to read either way.
+                "reason_codes": list(selection.reason_codes),
+                "primary_tool": selection.primary_tool,
+                "top_scores": [
+                    {"tool": name, "score": score}
+                    for name, score in selection.scores[:8]
+                ],
+                "dropped_scoring": [
+                    name
+                    for name, score in selection.scores
+                    if score > 0 and name not in exposed_names
+                ],
             },
         )
 
@@ -3088,18 +3681,73 @@ class BuddyAgent(agents.Agent):
                         )
                 yield item
 
-        raw_stream = _observe_raw_stream(raw_stream)
-        raw_stream = self._apply_execution_safety(
-            raw_stream,
-            policy=execution_policy,
-            chat_ctx=chat_ctx,
-            speculation_epoch=speculation_epoch,
-        )
-        stream = self._speak_filler_on_tool_calls(raw_stream)
-        stream = self._card_narrated_artifact(
-            filter_point_tags(stream, on_point=_on_point),
-            armed=armed,
-        )
+        # Set by _apply_execution_safety when a call was gated for a reason the model
+        # can fix, and only then. Empty means "nothing to repair".
+        repair_state: dict[str, str] = {}
+
+        def _guarded_stream(generation, *, allow_repair: bool):
+            guarded = self._apply_execution_safety(
+                generation,
+                policy=execution_policy,
+                chat_ctx=chat_ctx,
+                speculation_epoch=speculation_epoch,
+                repair_state=repair_state if allow_repair else None,
+            )
+            return self._card_narrated_artifact(
+                filter_point_tags(
+                    self._speak_filler_on_tool_calls(guarded), on_point=_on_point
+                ),
+                armed=armed,
+            )
+
+        async def _generation_with_repair():
+            async for item in _guarded_stream(
+                _observe_raw_stream(raw_stream), allow_repair=finalized
+            ):
+                yield item
+            if not repair_state:
+                return
+            # ONE bounded retry, and only on a finalized turn. Reaching here means
+            # every call was gated and the model spoke nothing, so this branch is a
+            # dead end today: the user hears a failure line and has to say it all
+            # again. The happy path never enters it, so a successful turn's
+            # user-perceived latency is unchanged; the path this does cost is one
+            # already costing a full repeated utterance.
+            #
+            # allow_repair=False on the second pass is what bounds it: the retry
+            # cannot arm another retry, so the reason-aware line in
+            # _apply_execution_safety stays the terminal outcome.
+            repair_tool = repair_state.get("tool", "")
+            repair_reason = repair_state.get("reason", "")
+            logger.info(
+                "VoiceAction: repairing gated call",
+                {
+                    "session_id": self._session_id,
+                    "turn_index": current_turn_index,
+                    "surface": str(self._launch_surface),
+                    "tool": repair_tool,
+                    "reason": repair_reason,
+                },
+            )
+            repair_state.clear()
+            repair_ctx = inference_ctx.copy()
+            repair_ctx.add_message(
+                role="system",
+                content=[
+                    gate_repair_instruction(
+                        tool=repair_tool, reason_code=repair_reason
+                    )
+                ],
+            )
+            async for item in _guarded_stream(
+                Agent.default.llm_node(
+                    self, repair_ctx, inference_tools, model_settings
+                ),
+                allow_repair=False,
+            ):
+                yield item
+
+        stream = _generation_with_repair()
         first_output_logged = False
         spoken_parts: list[str] = []
         async for item in stream:
@@ -3338,7 +3986,7 @@ class BuddyAgent(agents.Agent):
         yield ack
 
     async def _apply_execution_safety(
-        self, chunks, *, policy, chat_ctx, speculation_epoch=None
+        self, chunks, *, policy, chat_ctx, speculation_epoch=None, repair_state=None
     ):
         """Gate complete model-emitted calls before LiveKit's concurrent executor."""
         had_text = False
@@ -3512,7 +4160,22 @@ class BuddyAgent(agents.Agent):
                 for entry in evaluated_calls
             ):
                 return
-            yield "Hmm, that didn't go through. Say it once more?"
+            gated_call, _gated_registration, gated_decision, _gated_item = (
+                evaluated_calls[0]
+            )
+            gate_reason = str(gated_decision.reason_code)
+            gate_tool = str(getattr(gated_call, "name", ""))
+            # A malformed call is the model's mistake, not the user's, and it is
+            # repairable: the reason code names the exact contract that was broken.
+            # Hand it back once and let the model re-emit before saying anything.
+            # The caller owns that retry because only it holds the LLM; a set
+            # repair_state means "do not speak yet". Passing repair_state=None (a
+            # speculative pass, or the repair pass itself) keeps this terminal.
+            if repair_state is not None and gate_reason in REPAIRABLE_GATE_REASONS:
+                repair_state["tool"] = gate_tool
+                repair_state["reason"] = gate_reason
+                return
+            yield gated_action_speech(gate_reason)
         if policy.finalized_turn and evaluated_calls and not surviving:
             self._active_intent.clear()
 
@@ -3533,6 +4196,17 @@ class BuddyAgent(agents.Agent):
         return latency_ms
 
     def record_voice_conversation_item(self, item: object) -> None:
+        if getattr(item, "role", None) == "assistant":
+            # Any assistant item at all, interrupted or not, means the turn
+            # was not dead air. Recorded before the interrupted filter below
+            # on purpose: a reply the user cut off was still a reply.
+            self._answered_turn_index = self._action_telemetry.turn_index
+            # Buddy answering ends the spoken turn, so the next finalized
+            # message starts a new thought rather than continuing this one and
+            # must not inherit this turn's frame exemption. Cleared for an
+            # INTERRUPTED reply too: it still spoke against this frame, and the
+            # user cutting in is the clearest possible turn boundary there is.
+            self._spoken_turn_frame_context_id = ""
         if (
             getattr(item, "role", None) == "assistant"
             and not bool(getattr(item, "interrupted", False))
@@ -3558,6 +4232,8 @@ class BuddyAgent(agents.Agent):
     def close_voice_context(self) -> None:
         self._context_compactor.close()
         for task in self._context_compaction_checks:
+            task.cancel()
+        for task in self._silent_turn_watchdogs:
             task.cancel()
         if self._screen_frames is not None:
             self._screen_frames.close()

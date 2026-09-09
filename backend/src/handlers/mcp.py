@@ -109,6 +109,7 @@ async def _run_tool(tool_name: str, args: dict) -> dict:
             "get_upcoming_events": "Your calendar is taking too long to respond. Try again in a moment.",
             "create_calendar_event": "Couldn't reach your calendar in time. Try again.",
             "get_user_context": "That's taking too long. Try again in a moment.",
+            "list_connectors": "I couldn't check your connections in time. Try again in a sec.",
             "web_surf": "Couldn't reach the web in time. Try again in a sec.",
             "track_topic": "Uh ohh!, couldn't set that up in time. Try again in a sec.",
         }
@@ -441,6 +442,59 @@ async def start_research(request: str, depth: str = "quick") -> dict[str, Any]:
         success_say=(
             "I started the research. You can keep working, and I'll notify you when "
             "the sourced brief is ready."
+        ),
+    )
+
+
+@mcp_server.tool()
+async def get_research_status() -> dict[str, Any]:
+    """Read the live state of the user's recent background research runs.
+
+    Use whenever they ask about research you started: its status, how far along it
+    is, whether it is done, what happened to it, or whether it was saved to their
+    Notion. This reads live state, so never answer those questions from memory or
+    from what a start or delivery tool said on an earlier turn.
+    """
+    result = await _run_tool("get_research_status", {})
+    return _with_action_truth(
+        result,
+        render_mode="summary",
+        then=(
+            "Answer only from `runs`. If it is empty, nothing is running - say that, "
+            "and never describe work you cannot see here. `state` is the truth about "
+            "progress; you have no completion time and must never estimate one, so if "
+            "they ask how long, say you do not know rather than guessing a number. "
+            "`delivered_to_notion` is the ONLY thing that means it is in their Notion. "
+            "When it is false, it is not there yet, even if `notion_destination` names "
+            "a database - that is where it is headed. If you told them earlier that it "
+            "was saved and this says otherwise, correct that in one plain line."
+        ),
+    )
+
+
+# Connectors --------------------------------------------------------------
+
+@mcp_server.tool()
+async def list_connectors() -> dict[str, Any]:
+    """Report which external services this user has connected, and the state of each.
+
+    Use whenever they ask what they are connected or linked to, which integrations
+    or connectors are set up, whether Aura can reach their Google Calendar, Gmail,
+    or Notion, or why a connected service is not working. This reads live state,
+    so never answer those questions from memory or the product guide.
+    """
+    result = await _run_tool("list_connectors", {})
+    return _with_action_truth(
+        result,
+        render_mode="summary",
+        then=(
+            "Answer from `connectors` and nothing else. Never name a service that is "
+            "not in it, and never claim a connection the state does not show. Say the "
+            "connected ones plainly in one breath. A `disabled` connector is one they "
+            "turned off and can turn back on; `not_connected` was never linked; "
+            "`needs_reconnect` is linked but broken and is the only one worth "
+            "volunteering a next step for, which is Settings then Connectors. "
+            "Do not read the whole list back when they asked about one service."
         ),
     )
 
