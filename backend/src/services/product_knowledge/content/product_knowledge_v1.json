@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "knowledge_version": "2026.09.08.1",
+  "knowledge_version": "2026.09.09.2",
   "product_release": {
     "stage": "beta",
     "answers": {
@@ -426,20 +426,20 @@
       "kind": "how_to",
       "status": "beta",
       "title": "Navigate Aura Desktop",
-      "summary": "The Windows dashboard sidebar exposes Aura Desktop's current product pages.",
+      "summary": "The Aura Desktop dashboard sidebar exposes the app's current product pages, identically on Windows and macOS.",
       "answers": {
-        "voice": "Open the Aura Desktop dashboard and use the left sidebar. It has Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, the Android app link, Help, and Settings.",
-        "chat": "Open the **Aura Desktop dashboard** and use the left sidebar. Current pages are **Home, Conversations, Drafts, Saved, Meetings, Interview Companion, Research, Insights, Dictation, Connectors, Get the mobile app, Help**, and **Settings**. Meetings, Interview, and Research are visibly marked beta in the desktop navigation."
+        "voice": "Open the Aura Desktop dashboard and use the left sidebar. It has Home, History, Meetings, Interview Companion, Research, Insights, Dictation, and Connectors, with the mobile app link, Help, and Settings below. Conversations, Drafts, and Saved live inside History.",
+        "chat": "Open the **Aura Desktop dashboard** and use the left sidebar. Current pages are **Home, History, Meetings, Interview Companion, Research, Insights, Dictation**, and **Connectors**, with **Get the mobile app**, **Help**, and **Settings** below them. Your **Conversations**, **Drafts**, and **Saved** items are sections inside the **History** page rather than separate sidebar entries. Meetings, Interview, and Research are visibly marked beta in the navigation. The sidebar is the same on Windows and macOS."
       },
       "surfaces": ["desktop"],
-      "platforms": ["windows"],
+      "platforms": ["windows", "macos"],
       "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
       "navigation": ["Open Aura Desktop", "Open the dashboard", "Choose a page from the left sidebar"],
       "action_tools": [],
-      "search_terms": ["desktop navigation", "windows dashboard", "sidebar", "conversations page", "drafts page", "saved page", "meetings page", "research page", "insights page", "where is feature on desktop"],
+      "search_terms": ["desktop navigation", "windows dashboard", "mac dashboard", "macos sidebar", "sidebar", "history page", "conversations page", "drafts page", "saved page", "meetings page", "research page", "insights page", "where is feature on desktop"],
       "evidence": [
-        {"path": "../Aura-Desktop/src/dashboard/navConfig.ts", "symbol": "primaryNavItems and footerNavItems", "verified_at": "2026-08-25"},
-        {"path": "../Aura-Desktop/src/dashboard/DashboardApp.tsx", "symbol": "dashboardPages", "verified_at": "2026-08-25"}
+        {"path": "../Aura-Desktop/src/dashboard/navConfig.ts", "symbol": "primaryNavItems and footerNavItems", "verified_at": "2026-09-09"},
+        {"path": "../Aura-Desktop/src/dashboard/DashboardApp.tsx", "symbol": "dashboardPages", "verified_at": "2026-09-09"}
       ]
     },
     {
@@ -453,7 +453,7 @@
         "chat": "In the Aura Desktop dashboard, select **Settings** in the sidebar. The settings dialog contains **General, Voice, System, Account, Plans and Billing**, and **Data and Privacy**, plus the installed version and update check."
       },
       "surfaces": ["desktop"],
-      "platforms": ["windows"],
+      "platforms": ["windows", "macos"],
       "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account"], "minimum_versions": {}},
       "navigation": ["Open the Aura Desktop dashboard", "Select Settings in the sidebar", "Choose the relevant settings section"],
       "action_tools": [],
@@ -463,24 +463,47 @@
       ]
     },
     {
+      "id": "how_to.desktop_screen_sight",
+      "kind": "how_to",
+      "status": "shipped",
+      "title": "Turn Screen Sight on or off on Aura Desktop",
+      "summary": "Screen Sight is the Aura Desktop shortcut that controls whether Buddy sees the screen during a voice conversation, with a status pill confirming each change.",
+      "answers": {
+        "voice": "Screen Sight controls whether I can see your screen while we talk. Press Control Alt S on Windows, or Control Option S on a Mac, and a pill confirms it is off. Press the same keys again to turn it back on.",
+        "chat": "**Screen Sight** controls whether Buddy can see your screen during a voice conversation on Aura Desktop. Press **Ctrl+Alt+S** on Windows or **Control+Option+S** on macOS to toggle it; a status pill confirms **Screen Sight on** or **Screen Sight off**. While it is off, nothing from your screen is sent for your spoken turns, neither a screenshot nor the window's text, and Buddy will say it cannot see your screen. Press the same shortcut again to turn it back on; it also resets when you restart Aura. That shortcut is the quick toggle. The standing control is the **Let Aura see your screen while you talk** switch in **Settings, General**, and turning that back on clears the shortcut's off state. Both the shortcut and the switch live in **Settings, General**, where the shortcut can also be rebound."
+      },
+      "surfaces": ["desktop"],
+      "platforms": ["windows", "macos"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["signed-in Aura account", "screen recording permission on macOS"], "minimum_versions": {}},
+      "navigation": ["Start or join a Buddy voice conversation on Aura Desktop", "Press Ctrl+Alt+S on Windows, or Control+Option+S on macOS", "Check the status pill for Screen Sight on or Screen Sight off"],
+      "action_tools": [],
+      "search_terms": ["screen sight", "turn off screen sight", "stop looking at my screen", "stop seeing my screen", "stop watching my screen", "ctrl alt s", "control option s", "screen sight shortcut", "screen sharing shortcut"],
+      "evidence": [
+        {"path": "../Aura-Desktop/src-tauri/src/hotkeys.rs", "symbol": "screenSight Control+Alt+KeyS accelerator", "verified_at": "2026-09-09"},
+        {"path": "../Aura-Desktop/src-tauri/src/security.rs", "symbol": "Operation::CaptureTurnScreen screen sight gate", "verified_at": "2026-09-09"},
+        {"path": "../Aura-Desktop/src-tauri/src/status_pill.rs", "symbol": "StatusPillKind ScreenSightOn and ScreenSightOff", "verified_at": "2026-09-09"}
+      ]
+    },
+    {
       "id": "how_to.desktop_dictation",
       "kind": "how_to",
       "status": "beta",
       "title": "Use Aura Desktop dictation",
-      "summary": "Aura Desktop provides hold-to-talk dictation with a dedicated HUD and settings page.",
+      "summary": "Aura Desktop provides hold-to-talk dictation with a dedicated HUD and settings page, on Windows and macOS.",
       "answers": {
-        "voice": "On Windows, hold Control plus the Windows key to dictate into the field that currently has focus, then release to transcribe and insert. Open the Desktop Dictation page to review its setup and options.",
-        "chat": "On Windows, use Aura Desktop's hold-to-talk dictation chord, **Ctrl+Win**, while the target text field has focus; release to transcribe and insert. Open **Dashboard → Dictation** for setup and options. Dictation is separate from a Buddy voice conversation."
+        "voice": "Hold Control plus the Windows key on a PC, or Control plus Command on a Mac, to dictate into whatever field has focus, then release to transcribe and insert. The Dictation page in the dashboard has its setup and options.",
+        "chat": "Aura Desktop's hold-to-talk dictation chord is **Ctrl+Win** on Windows and **Ctrl+Cmd** on macOS: hold it while the target text field has focus, then release to transcribe and insert. Open **Dashboard, Dictation** for setup and options. Dictation is separate from a Buddy voice conversation. On macOS it needs three permissions under System Settings, Privacy and Security: **Microphone**, **Accessibility** so Aura can type the text into the field, and **Input Monitoring** so it can notice the chord. A newly granted permission only takes effect after Aura restarts, and the Dictation page shows a button for whichever step is still outstanding."
       },
       "surfaces": ["desktop"],
-      "platforms": ["windows"],
-      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["microphone access", "a focused editable field"], "minimum_versions": {}},
-      "navigation": ["Open Aura Desktop", "Select Dictation in the dashboard sidebar", "Use Ctrl+Win in a focused text field"],
+      "platforms": ["windows", "macos"],
+      "availability": {"tiers": ["all"], "connectors": [], "permissions": ["microphone access", "a focused editable field", "Accessibility and Input Monitoring on macOS"], "minimum_versions": {}},
+      "navigation": ["Open Aura Desktop", "Select Dictation in the dashboard sidebar", "Hold the dictation chord in a focused text field"],
       "action_tools": [],
-      "search_terms": ["desktop dictation", "voice typing", "speech to text", "hold to talk", "ctrl win", "dictation shortcut", "type with voice"],
+      "search_terms": ["desktop dictation", "voice typing", "speech to text", "hold to talk", "ctrl win", "ctrl cmd", "dictation on mac", "input monitoring", "dictation shortcut", "type with voice"],
       "evidence": [
         {"path": "ECOSYSTEM.md", "symbol": "Desktop dictation transcription credential", "verified_at": "2026-08-25"},
-        {"path": "../Aura-Desktop/src/dashboard/pages/DictationPage.tsx", "symbol": "DictationPage", "verified_at": "2026-08-25"}
+        {"path": "../Aura-Desktop/src/dashboard/pages/DictationPage.tsx", "symbol": "DictationPage", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src-tauri/src/dictation/chord.rs", "symbol": "DICTATION_CHORD and DictationChord::label per-platform legend", "verified_at": "2026-09-09"}
       ]
     },
     {
@@ -508,21 +531,23 @@
       "id": "how_to.desktop_meetings",
       "kind": "how_to",
       "status": "beta",
-      "title": "Use Meeting Notes on Windows",
-      "summary": "Meeting Notes is an explicitly armed desktop beta feature with its own dashboard page.",
+      "title": "Use Meeting Notes on Aura Desktop",
+      "summary": "Meeting Notes is an explicitly armed desktop beta feature with its own dashboard page, on Windows and macOS.",
       "answers": {
-        "voice": "On Windows, open the Meetings page and explicitly arm notes for an eligible meeting. Meeting Notes is off by default and only starts from its own meeting capture flow.",
-        "chat": "Open **Aura Desktop → Meetings**. Meeting Notes is a beta feature that must be explicitly armed; auto meeting notes is off by default. It has a separate capture and retention lifecycle from Interview Companion. Current product rules only allow eligible meetings up to 60 minutes."
+        "voice": "Open the Meetings page and explicitly arm notes for an eligible meeting. Meeting Notes is off by default and only starts from its own capture flow. On a Mac it also needs System Audio Recording permission, and macOS 14.4 or later.",
+        "chat": "Open **Aura Desktop, Meetings**. Meeting Notes is a beta feature that must be explicitly armed; auto meeting notes is off by default. It has a separate capture and retention lifecycle from Interview Companion. Current product rules only allow eligible meetings up to 60 minutes. It runs on **Windows** and **macOS**; on macOS it additionally needs **System Audio Recording** permission under System Settings, Privacy and Security, and **macOS 14.4 or later**. macOS only asks for that permission once capture actually starts, so a refusal shows up as a capture failure rather than as a prompt beforehand."
       },
       "surfaces": ["desktop"],
-      "platforms": ["windows"],
-      "availability": {"tiers": ["all"], "connectors": ["google_calendar"], "permissions": ["explicit meeting-note arming", "microphone and system-audio access"], "minimum_versions": {}},
+      "platforms": ["windows", "macos"],
+      "availability": {"tiers": ["all"], "connectors": ["google_calendar"], "permissions": ["explicit meeting-note arming", "microphone and system-audio access", "System Audio Recording on macOS"], "minimum_versions": {}},
       "navigation": ["Open the Aura Desktop dashboard", "Select Meetings", "Choose an eligible meeting", "Arm Meeting Notes"],
       "action_tools": [],
-      "search_terms": ["meeting notes", "record meeting", "meeting transcript", "meeting summary", "auto meeting notes", "meetings page", "zoom notes", "teams notes"],
+      "search_terms": ["meeting notes", "record meeting", "meeting transcript", "meeting summary", "auto meeting notes", "meetings page", "meeting notes on mac", "system audio", "zoom notes", "teams notes"],
       "evidence": [
         {"path": "ECOSYSTEM.md", "symbol": "Meeting Notes lifecycle", "verified_at": "2026-08-25"},
-        {"path": "../Aura-Desktop/src/dashboard/pages/MeetingsPage.tsx", "symbol": "MeetingsPage", "verified_at": "2026-08-25"}
+        {"path": "../Aura-Desktop/src/dashboard/pages/MeetingsPage.tsx", "symbol": "MeetingsPage", "verified_at": "2026-08-25"},
+        {"path": "../Aura-Desktop/src-tauri/src/macos_audio.rs", "symbol": "SystemAudioCapture AudioDeviceStart raises the System Audio Recording prompt", "verified_at": "2026-09-09"},
+        {"path": "../Aura-Desktop/src-tauri/tauri.conf.json", "symbol": "bundle.macOS.minimumSystemVersion 14.4", "verified_at": "2026-09-09"}
       ]
     },
     {
