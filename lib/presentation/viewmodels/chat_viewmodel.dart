@@ -642,7 +642,16 @@ abstract class ChatViewModel extends SafeChangeNotifier {
   ///
   /// [openingMessage] is what the user asked to be woken FOR, so Buddy opens on
   /// their own commitment rather than a generic greeting.
-  Future<void> loadAlarmWakeContext({required String openingMessage}) async {
+  ///
+  /// [morningBrief] is the user's configured post-alarm routine (weather,
+  /// calendar, tasks...), already being fetched while the chat opened. The
+  /// opener above seeds instantly and never waits on it; when the brief
+  /// resolves it is appended as a second Buddy bubble — or nothing appears,
+  /// which is the correct rendering of every failure at wake-up time.
+  Future<void> loadAlarmWakeContext({
+    required String openingMessage,
+    Future<String?>? morningBrief,
+  }) async {
     _messages.clear();
     _error = null;
 
@@ -658,6 +667,35 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     }
     _setState(ViewState.loaded);
     await _refreshSessions();
+
+    if (morningBrief != null) {
+      unawaited(_appendMorningBrief(morningBrief, _currentSessionId));
+    }
+  }
+
+  Future<void> _appendMorningBrief(
+    Future<String?> morningBrief,
+    String? seededSessionId,
+  ) async {
+    String? text;
+    try {
+      text = await morningBrief;
+    } catch (_) {
+      return;
+    }
+    // Only into the alarm-seeded session: a user who already moved to another
+    // conversation must never find a stray weather bubble in it.
+    if (text == null || text.isEmpty || _currentSessionId != seededSessionId) {
+      return;
+    }
+    await _persistMessage(ChatMessageModel(
+      id: _uuid.v4(),
+      text: text,
+      isUser: false,
+      timestamp: DateTime.now(),
+      channel: ChatMessageChannel.text,
+      sessionId: _currentSessionId,
+    ));
   }
 
   /// Starts a NEW dedicated conversation about the daily briefing, embedded in the

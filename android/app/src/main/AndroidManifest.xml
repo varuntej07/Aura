@@ -298,6 +298,12 @@
     <!-- The ringing service. mediaPlayback because it is playing audio. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <!-- Approximate location, COARSE only and foreground only: one fix after the
+         user answers an alarm with "I'm up", so the morning brief's weather is
+         for where they actually are. Requested in-context when the alarm page's
+         weather toggle is first enabled; denial degrades to timezone-region
+         weather. Never FINE, never background. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
 
     <queries>
         <intent>

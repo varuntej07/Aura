@@ -184,7 +184,10 @@ from .handlers.research import (
 from .handlers.reminders import (
     handle_acknowledge_alarm,
     handle_alarm_feature_interest,
+    handle_get_alarm_routine,
     handle_list_alarms,
+    handle_morning_brief,
+    handle_put_alarm_routine,
     handle_wake_clip,
 )
 from .handlers.pairing import (
@@ -1022,6 +1025,24 @@ async def reminders_ack_endpoint(request: Request, reminder_id: str) -> JSONResp
 @app.post("/feedback/alarm-interest")
 async def alarm_feature_interest_endpoint(request: Request) -> JSONResponse:
     return await handle_alarm_feature_interest(request)
+
+
+# Post-alarm morning routine: config the alarm page / Routines editor round-
+# trips, and the brief Buddy appends to the chat that "I'm up" already opens.
+# See services/alarm_routine.py.
+@app.get("/alarm/routine")
+async def alarm_routine_get_endpoint(request: Request) -> JSONResponse:
+    return await handle_get_alarm_routine(request)
+
+
+@app.put("/alarm/routine")
+async def alarm_routine_put_endpoint(request: Request) -> JSONResponse:
+    return await handle_put_alarm_routine(request)
+
+
+@app.get("/alarm/morning-brief")
+async def alarm_morning_brief_endpoint(request: Request) -> JSONResponse:
+    return await handle_morning_brief(request)
 
 
 # Buddy reading a reminder aloud, for the `buddy` alarm tone. Fetched when the

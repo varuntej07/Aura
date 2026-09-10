@@ -1,9 +1,12 @@
 """Today's weather for a user, from Open-Meteo (free, no API key).
 
-We never ask the user for their location. Coordinates are inferred coarsely from
-their IANA timezone via a small lookup — enough to answer "is it hot / raining
-where they are today", which is all an opener needs. An unknown timezone simply
-yields no weather (the bundle still has day and headlines).
+The icebreaker path never asks the user for their location: coordinates are
+inferred coarsely from their IANA timezone via a small lookup — enough to answer
+"is it hot / raining where they are today", which is all an opener needs. An
+unknown timezone simply yields no weather (the bundle still has day and
+headlines). The morning-brief path may instead pass device-granted approximate
+coordinates to ``fetch_today_forecast``; those are request-scoped and never
+stored.
 
 Hard rules honoured here:
   * fail-OPEN: any error / timeout returns ``None`` and the opener proceeds
@@ -105,6 +108,90 @@ def _temperature_band(temp_c: float) -> str:
 def coordinates_for_timezone(timezone_name: str) -> tuple[float, float] | None:
     """Coarse coordinates for a timezone, or None if we cannot place it."""
     return _TIMEZONE_COORDINATES.get(timezone_name)
+
+
+@dataclass
+class ForecastSummary:
+    """Today's daily forecast: the shape a wake-up line needs."""
+
+    condition: str  # clear | cloudy | foggy | rainy | snowy | stormy
+    high_c: float
+    low_c: float
+
+    def describe(self) -> str:
+        """One short phrase, e.g. 'clear today, high of 21C and a low of 12C'."""
+        return (
+            f"{self.condition} today, high of {round(self.high_c)}C"
+            f" and a low of {round(self.low_c)}C"
+        )
+
+
+async def _fetch_open_meteo(params: dict) -> dict | None:
+    """One bounded, retried Open-Meteo GET. None on any failure (fail-open)."""
+    last_error: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(
+                timeout=_REQUEST_TIMEOUT_S, follow_redirects=True
+            ) as client:
+                resp = await client.get(_OPEN_METEO_URL, params=params)
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as exc:
+            last_error = exc
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(_BASE_BACKOFF_S * attempt)
+    logger.debug("weather: fetch failed, proceeding without weather", {
+        "error": str(last_error) if last_error else None,
+    })
+    return None
+
+
+async def fetch_today_forecast(
+    latitude: float, longitude: float
+) -> ForecastSummary | None:
+    """Today's daily forecast at a point, or None (never raises).
+
+    The caller owns where the coordinates came from; this function neither logs
+    nor stores them beyond the one provider request.
+    """
+    data = await _fetch_open_meteo({
+        "latitude": round(latitude, 2),
+        "longitude": round(longitude, 2),
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+        "forecast_days": 1,
+        "timezone": "auto",
+        "temperature_unit": "celsius",
+    })
+    if data is None:
+        return None
+    daily = data.get("daily") or {}
+    raw_code = (daily.get("weather_code") or [None])[0]
+    raw_high = (daily.get("temperature_2m_max") or [None])[0]
+    raw_low = (daily.get("temperature_2m_min") or [None])[0]
+    if raw_code is None or raw_high is None or raw_low is None:
+        return None
+    try:
+        code = int(raw_code)
+        high = float(raw_high)
+        low = float(raw_low)
+    except (TypeError, ValueError):
+        return None
+    return ForecastSummary(
+        condition=_condition_from_wmo_code(code),
+        high_c=high,
+        low_c=low,
+    )
+
+
+async def fetch_today_forecast_for_zone(
+    timezone_name: str,
+) -> ForecastSummary | None:
+    """Today's forecast for the timezone's representative point, or None."""
+    coords = coordinates_for_timezone(timezone_name)
+    if coords is None:
+        return None
+    return await fetch_today_forecast(*coords)
 
 
 async def fetch_today_weather(timezone_name: str) -> WeatherSummary | None:

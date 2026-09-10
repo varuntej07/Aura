@@ -95,6 +95,7 @@ class _ChatScreenState extends State<ChatScreen> {
             // dismissed banner.
             await chatVm.loadAlarmWakeContext(
               openingMessage: extra.openingMessage,
+              morningBrief: extra.morningBrief,
             );
         }
         _jumpToBottom();

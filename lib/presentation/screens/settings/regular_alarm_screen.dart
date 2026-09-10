@@ -9,6 +9,7 @@ import '../../../core/constants/alarm_tones.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/glass_card.dart';
+import '../../../data/services/alarm_routine_service.dart';
 import '../../../data/services/alarm_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/settings_viewmodel.dart';
@@ -35,6 +36,11 @@ class _RegularAlarmScreenState extends State<RegularAlarmScreen> {
   String _deviceToneTitle = '';
   DateTime? _nextTriggerAt;
 
+  /// Server-side routine config; null until (and unless) the fetch succeeds,
+  /// which keeps a blind PUT from clobbering config saved on another install.
+  AlarmRoutineConfig? _routine;
+  bool _weatherBusy = false;
+
   static const _days = <({int value, String label})>[
     (value: 7, label: 'S'),
     (value: 1, label: 'M'),
@@ -59,6 +65,7 @@ class _RegularAlarmScreenState extends State<RegularAlarmScreen> {
       service.refreshCapabilities(),
     ]);
     unawaited(service.flushComingSoonInterest());
+    unawaited(_loadRoutine());
     if (!mounted) return;
     final alarm = values[0]! as RegularAlarmSettings;
     final deviceTone = values[1] as DeviceTone?;
@@ -67,6 +74,11 @@ class _RegularAlarmScreenState extends State<RegularAlarmScreen> {
       _deviceToneTitle = deviceTone?.title ?? '';
       _loading = false;
     });
+  }
+
+  Future<void> _loadRoutine() async {
+    final config = await context.read<AlarmRoutineService>().fetchConfig();
+    if (mounted && config != null) setState(() => _routine = config);
   }
 
   void _replace(RegularAlarmSettings value) {
@@ -142,12 +154,62 @@ class _RegularAlarmScreenState extends State<RegularAlarmScreen> {
     _showMessage('Thanks for the interest — $label is coming soon.');
   }
 
-  void _openRoutines() {
+  Future<void> _openRoutines() async {
     HapticFeedback.lightImpact();
-    unawaited(
-      context.read<AlarmService>().recordComingSoonInterest('routines'),
+    final updated = await context.push<AlarmRoutineConfig>(
+      '/settings/alarm/routines',
+      extra: _routine,
     );
-    context.push('/settings/alarm/routines');
+    if (!mounted) return;
+    if (updated != null) {
+      setState(() => _routine = updated);
+    } else if (_routine == null) {
+      // The editor may have loaded config this screen's own fetch missed.
+      unawaited(_loadRoutine());
+    }
+  }
+
+  Future<void> _toggleWeather(bool value) async {
+    if (_weatherBusy) return;
+    HapticFeedback.selectionClick();
+    final service = context.read<AlarmRoutineService>();
+
+    // A blind PUT with no fetched baseline could erase routine config saved
+    // elsewhere, so re-fetch before the first write instead of guessing.
+    var routine = _routine;
+    if (routine == null) {
+      setState(() => _weatherBusy = true);
+      routine = await service.fetchConfig();
+      if (!mounted) return;
+      if (routine == null) {
+        setState(() => _weatherBusy = false);
+        _showMessage("Couldn't reach Buddy. Try again in a moment.");
+        return;
+      }
+      _routine = routine;
+    }
+
+    if (value) {
+      // In-context ask, exactly once per grant state. Denial is a fine answer:
+      // the forecast falls back to region-level weather.
+      await service.ensureLocationPermission();
+      if (!mounted) return;
+    }
+
+    setState(() {
+      _weatherBusy = true;
+      _routine = routine!.copyWith(showWeather: value);
+    });
+    final stored = await service.saveConfig(_routine!);
+    if (!mounted) return;
+    setState(() {
+      _weatherBusy = false;
+      // Revert to the pre-toggle config when the save did not land.
+      _routine = stored ?? routine;
+    });
+    if (stored == null) {
+      _showMessage("Couldn't save that. Try once more.");
+    }
   }
 
   Future<void> _save() async {
@@ -283,11 +345,11 @@ class _RegularAlarmScreenState extends State<RegularAlarmScreen> {
                               _replace(_alarm.copyWith(vibrate: value)),
                           onSunrise: () =>
                               _comingSoon('sunrise_alarm', 'Sunrise Alarm'),
-                          onWeather: () => _comingSoon(
-                            'weather_forecast',
-                            'Weather forecast',
-                          ),
-                          onRoutines: _openRoutines,
+                          weatherEnabled: _routine?.showWeather ?? false,
+                          onWeather: _weatherBusy
+                              ? null
+                              : (value) => unawaited(_toggleWeather(value)),
+                          onRoutines: () => unawaited(_openRoutines()),
                         ),
                 ),
               ),
@@ -352,6 +414,7 @@ class _AlarmEditor extends StatelessWidget {
     required this.onSound,
     required this.onVibrate,
     required this.onSunrise,
+    required this.weatherEnabled,
     required this.onWeather,
     required this.onRoutines,
   });
@@ -366,7 +429,8 @@ class _AlarmEditor extends StatelessWidget {
   final VoidCallback onSound;
   final ValueChanged<bool> onVibrate;
   final VoidCallback onSunrise;
-  final VoidCallback onWeather;
+  final bool weatherEnabled;
+  final ValueChanged<bool>? onWeather;
   final VoidCallback onRoutines;
 
   @override
@@ -471,15 +535,23 @@ class _AlarmEditor extends StatelessWidget {
                   _OptionRow(
                     icon: Icons.cloud_outlined,
                     title: 'Weather forecast',
-                    subtitle: 'Show weather forecast after alarm',
-                    trailing: const _ComingSoonIndicator(),
-                    onTap: onWeather,
+                    subtitle: 'Buddy shares the forecast after your alarm',
+                    trailing: Switch.adaptive(
+                      value: weatherEnabled,
+                      onChanged: onWeather,
+                    ),
+                    onTap: onWeather == null
+                        ? () {}
+                        : () => onWeather!(!weatherEnabled),
                   ),
                   _OptionRow(
                     icon: Icons.auto_awesome_outlined,
                     title: 'Routines',
                     subtitle: 'Start your morning with Buddy',
-                    trailing: const _ComingSoonIndicator(showPlus: true),
+                    trailing: const Icon(
+                      Icons.chevron_right_rounded,
+                      color: AppColors.textTertiary,
+                    ),
                     onTap: onRoutines,
                     showDivider: false,
                   ),
@@ -690,9 +762,7 @@ class _OptionRow extends StatelessWidget {
 }
 
 class _ComingSoonIndicator extends StatelessWidget {
-  const _ComingSoonIndicator({this.showPlus = false});
-
-  final bool showPlus;
+  const _ComingSoonIndicator();
 
   @override
   Widget build(BuildContext context) {
@@ -704,20 +774,14 @@ class _ComingSoonIndicator extends StatelessWidget {
         border: Border.all(color: AppColors.textTertiary, width: 1.5),
       ),
       alignment: Alignment.center,
-      child: showPlus
-          ? const Icon(
-              Icons.add_rounded,
-              color: AppColors.textTertiary,
-              size: 21,
-            )
-          : Container(
-              width: 8,
-              height: 8,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: AppColors.textTertiary,
-              ),
-            ),
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          color: AppColors.textTertiary,
+        ),
+      ),
     );
   }
 }

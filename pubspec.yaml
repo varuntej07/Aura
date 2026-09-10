@@ -43,6 +43,7 @@ dependencies:
   package_info_plus: 9.0.1  # runtime app version/build for feedback docs
   device_info_plus: 12.3.0  # sign-in device metadata; must match the release-build pin in dependency_overrides below
   app_links:  # aura://voice deep link (Voice Launcher: Siri / widgets / external links)
+  geolocator:  # approximate coords for the post-alarm weather brief; foreground only
   just_audio:  # voice-picker previews only; live call audio is livekit_client's
   in_app_purchase: ^3.3.0
 

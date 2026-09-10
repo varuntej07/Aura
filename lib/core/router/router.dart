@@ -33,7 +33,8 @@ import '../../presentation/screens/settings/alarm_tone_picker_screen.dart';
 import '../../presentation/screens/settings/aura_profile_screen.dart';
 import '../../presentation/screens/settings/link_device_screen.dart';
 import '../../presentation/screens/settings/regular_alarm_screen.dart';
-import '../../presentation/screens/settings/routine_coming_soon_screen.dart';
+import '../../data/services/alarm_routine_service.dart';
+import '../../presentation/screens/settings/alarm_routine_screen.dart';
 import '../../presentation/screens/settings/settings_screen.dart';
 import '../../presentation/screens/settings/voice_picker_screen.dart';
 import '../../presentation/screens/subscription/paywall_screen.dart';
@@ -210,8 +211,12 @@ GoRouter buildRouter(
       GoRoute(
         path: '/settings/alarm/routines',
         name: 'Alarm Routines',
-        pageBuilder: (context, state) =>
-            _slidePage(state, const RoutineComingSoonScreen()),
+        pageBuilder: (context, state) => _slidePage(
+          state,
+          AlarmRoutineScreen(
+            initialConfig: state.extra as AlarmRoutineConfig?,
+          ),
+        ),
       ),
       GoRoute(
         path: '/settings/alarm-sound',

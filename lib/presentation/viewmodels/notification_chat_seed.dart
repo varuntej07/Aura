@@ -43,6 +43,11 @@ class NotificationChatSeed {
 
   final String notificationReason;
 
+  /// Alarm origin only: the morning-brief fetch already in flight when "I'm
+  /// up" opened this chat. The opener never waits on it; the chat appends the
+  /// result as a second Buddy bubble if and when it resolves with text.
+  final Future<String?>? morningBrief;
+
   const NotificationChatSeed({
     required this.origin,
     this.openingMessage = '',
@@ -54,5 +59,6 @@ class NotificationChatSeed {
     this.threadId = '',
     this.suggestedReplies = const [],
     this.notificationReason = '',
+    this.morningBrief,
   });
 }

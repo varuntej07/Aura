@@ -36,7 +36,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
 from ..lib.logger import logger
-from ..services import alarm_sync, alarm_tones, alarm_voice
+from ..services import alarm_routine, alarm_sync, alarm_tones, alarm_voice
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import FeedbackReport
 from ..services.firebase import admin_firestore
@@ -101,6 +101,94 @@ async def handle_alarm_feature_interest(request: Request) -> JSONResponse:
     if not captured:
         return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
     return JSONResponse({"ok": True})
+
+
+async def handle_get_alarm_routine(request: Request) -> JSONResponse:
+    """GET /alarm/routine — the stored post-alarm routine config, or defaults."""
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        config = await alarm_routine.read_routine(user_id)
+    except Exception as exc:
+        # Defaults served on a store failure would read as "the user turned
+        # everything off"; a 503 tells the client to keep what it has.
+        logger.error("reminders: routine read failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
+    return JSONResponse(config)
+
+
+async def handle_put_alarm_routine(request: Request) -> JSONResponse:
+    """PUT /alarm/routine — validated write of the routine config."""
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    try:
+        stored = await alarm_routine.write_routine(user_id, body)
+    except Exception as exc:
+        logger.error("reminders: routine write failed", {
+            "user_id": user_id,
+            "error": str(exc),
+        })
+        return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
+    if stored is None:
+        return JSONResponse({"error": "Invalid routine."}, status_code=400)
+    return JSONResponse(stored)
+
+
+def _parse_coordinate(raw: str | None, bound: float) -> float | None:
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not -bound <= value <= bound:
+        return None
+    # Two decimals (~1km) is all the forecast needs; anything finer is
+    # precision this endpoint has no business holding, even in flight.
+    return round(value, 2)
+
+
+async def handle_morning_brief(request: Request) -> JSONResponse:
+    """GET /alarm/morning-brief — what Buddy says right after "I'm up".
+
+    Always 200 with {"text": null} when there is nothing to say: a data miss
+    at wake-up must never surface as an error in a chat that is already open.
+    """
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    latitude = _parse_coordinate(request.query_params.get("lat"), 90.0)
+    longitude = _parse_coordinate(request.query_params.get("lon"), 180.0)
+    if latitude is None or longitude is None:
+        latitude = longitude = None
+
+    try:
+        brief = await alarm_routine.compose_morning_brief(
+            user_id, latitude, longitude
+        )
+    except Exception as exc:
+        logger.error("reminders: morning brief failed", {
+            "user_id": user_id,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
+        brief = {"text": None, "sections": []}
+    logger.info("reminders: morning brief served", {
+        "user_id": user_id,
+        "has_text": brief["text"] is not None,
+        "sections": [s["type"] for s in brief["sections"]],
+    })
+    return JSONResponse(brief)
 
 
 def _reminders_ref(user_id: str):

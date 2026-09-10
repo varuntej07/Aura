@@ -13,6 +13,7 @@ import '../../../data/models/subscription_plan.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/agent_suggestion_pills_repository.dart';
 import '../../../data/repositories/chat_repository.dart';
+import '../../../data/services/alarm_routine_service.dart';
 import '../../../data/services/alarm_service.dart';
 import '../../../data/services/buddy_pills_refresher.dart';
 import '../../../data/services/session_consolidator.dart';
@@ -346,9 +347,23 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     final wake = await VoiceLauncherBridge.instance.consumePendingAlarmWake();
     if (wake == null || !mounted) return;
 
-    unawaited(
-      context.read<AlarmService>().acknowledge(wake.reminderId, action: 'im_up'),
-    );
+    // The device-local regular wake-up alarm has no server row; acking its
+    // `local:` id would just 404 against /reminders and mislead the logs.
+    if (!wake.reminderId.startsWith('local:')) {
+      unawaited(
+        context.read<AlarmService>().acknowledge(
+          wake.reminderId,
+          action: 'im_up',
+        ),
+      );
+    }
+
+    // Start the morning-brief fetch now so it races the chat opening rather
+    // than following it. The seeded chat appends the result when it lands and
+    // shows nothing on failure; the opener below never waits on this.
+    final morningBrief = context
+        .read<AlarmRoutineService>()
+        .fetchMorningBrief();
 
     final opener = wake.message.isEmpty
         ? "You're up. What's first?"
@@ -358,6 +373,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       extra: NotificationChatSeed(
         origin: NotificationChatOrigin.alarm,
         openingMessage: opener,
+        morningBrief: morningBrief,
       ),
     );
   }

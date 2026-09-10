@@ -26,6 +26,7 @@ import '../data/services/buddy_pills_refresher.dart';
 import '../data/services/session_consolidator.dart';
 import '../data/services/chat_service_provider.dart';
 import '../data/services/stub_chat_service_provider.dart';
+import '../data/services/alarm_routine_service.dart';
 import '../data/services/alarm_service.dart';
 import '../data/services/notification_service.dart';
 import '../data/services/posthog_analytics_service.dart';
@@ -89,6 +90,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     authService: firebaseAuthService,
   );
   final alarmService = AlarmService(apiClient: apiClient);
+  final alarmRoutineService = AlarmRoutineService(apiClient: apiClient);
   final notificationService = NotificationService(
     apiClient: apiClient,
     signalEventSink: backendApiService,
@@ -155,6 +157,7 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
     // Remote services
     Provider<NotificationService>.value(value: notificationService),
     Provider<AlarmService>.value(value: alarmService),
+    Provider<AlarmRoutineService>.value(value: alarmRoutineService),
     Provider<BackendApiService>.value(value: backendApiService),
     Provider<GetBetterRepository>.value(value: getBetterRepository),
     Provider<BuddyPillsRefresher>.value(value: buddyPillsRefresher),
