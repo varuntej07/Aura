@@ -2987,5 +2987,9 @@ INTERVIEW_BRIEF_BUILD_TASK = (
     "panel. Every output item must list the exact source IDs that support it. Never "
     "turn a target company, target role, job requirement, research fact, gap or "
     "do-not-claim item into candidate experience. Do not create an item when no "
-    "compatible supplied source supports it."
+    "compatible supplied source supports it. Keep the brief compact: at most 20 "
+    "candidate facts, 16 projects, 10 STAR stories, 16 metrics, 20 job requirements "
+    "and 12 likely interviewer questions. Keep each item's text under 2000 "
+    "characters and each STAR story title under 200 characters. Support each item "
+    "with 1 to 8 source IDs."
 )

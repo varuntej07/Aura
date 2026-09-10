@@ -13,6 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..lib.logger import logger
 from ..prompts import INTERVIEW_BRIEF_BUILD_TASK
 
 VerificationState = Literal["verified", "unverified"]
@@ -151,6 +152,105 @@ class DraftStarStory(BaseModel):
     result: DraftClaim
 
 
+# The strict-schema call that produces a draft cannot enforce these caps (the
+# provider strips min/max keywords before sending the schema, because strict
+# mode rejects them), so the model routinely overflows one on a large
+# preparation. Every violation used to fail the whole 10-15KB response and cost
+# a full regeneration the handler's deadline could not fit; salvage keeps the
+# compliant items instead, and assemble_interview_brief re-caps and re-filters
+# everything downstream anyway.
+_DRAFT_CLAIM_LIST_CAPS = {
+    "candidate_facts": 20,
+    "projects": 16,
+    "metrics": 16,
+    "jd_requirements": 20,
+    "likely_interviewer_questions": 12,
+}
+_DRAFT_STAR_STORY_CAP = 10
+_DRAFT_TEXT_MAX = 2_000
+_DRAFT_TITLE_MAX = 200
+_DRAFT_SOURCE_IDS_MAX = 8
+
+
+def _salvage_draft(data: dict) -> dict:
+    counts = {
+        "dropped_claims": 0,
+        "truncated_texts": 0,
+        "truncated_source_id_lists": 0,
+        "truncated_lists": 0,
+        "dropped_stories": 0,
+        "truncated_titles": 0,
+    }
+
+    def clean_claim(item: object) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        if len(text) > _DRAFT_TEXT_MAX:
+            text = text[:_DRAFT_TEXT_MAX]
+            counts["truncated_texts"] += 1
+        raw_ids = item.get("source_ids")
+        if not isinstance(raw_ids, list):
+            return None
+        source_ids = [sid for sid in raw_ids if isinstance(sid, str) and sid]
+        if not source_ids:
+            return None
+        if len(source_ids) > _DRAFT_SOURCE_IDS_MAX:
+            source_ids = source_ids[:_DRAFT_SOURCE_IDS_MAX]
+            counts["truncated_source_id_lists"] += 1
+        return {"text": text, "source_ids": source_ids}
+
+    out = dict(data)
+    for field, cap in _DRAFT_CLAIM_LIST_CAPS.items():
+        raw = out.get(field)
+        if raw is None:
+            continue
+        if not isinstance(raw, list):
+            out[field] = []
+            continue
+        cleaned = [claim for claim in map(clean_claim, raw) if claim is not None]
+        counts["dropped_claims"] += len(raw) - len(cleaned)
+        if len(cleaned) > cap:
+            cleaned = cleaned[:cap]
+            counts["truncated_lists"] += 1
+        out[field] = cleaned
+
+    raw_stories = out.get("star_stories")
+    if raw_stories is not None:
+        stories: list[dict] = []
+        if isinstance(raw_stories, list):
+            for story in raw_stories:
+                if not isinstance(story, dict):
+                    counts["dropped_stories"] += 1
+                    continue
+                title = story.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    counts["dropped_stories"] += 1
+                    continue
+                if len(title) > _DRAFT_TITLE_MAX:
+                    title = title[:_DRAFT_TITLE_MAX]
+                    counts["truncated_titles"] += 1
+                parts = {
+                    part: clean_claim(story.get(part))
+                    for part in ("situation", "task", "action", "result")
+                }
+                if any(claim is None for claim in parts.values()):
+                    counts["dropped_stories"] += 1
+                    continue
+                stories.append({"title": title, **parts})
+        if len(stories) > _DRAFT_STAR_STORY_CAP:
+            stories = stories[:_DRAFT_STAR_STORY_CAP]
+            counts["truncated_lists"] += 1
+        out["star_stories"] = stories
+
+    if any(counts.values()):
+        # Counts only: this module never logs preparation content.
+        logger.warn("interview_preparation: brief draft salvaged", counts)
+    return out
+
+
 class InterviewBriefDraft(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -160,6 +260,15 @@ class InterviewBriefDraft(BaseModel):
     metrics: list[DraftClaim] = Field(default_factory=list, max_length=16)
     jd_requirements: list[DraftClaim] = Field(default_factory=list, max_length=20)
     likely_interviewer_questions: list[DraftClaim] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="before")
+    @classmethod
+    def salvage_model_output(cls, data: object) -> object:
+        # Non-dict input keeps the normal pydantic error path so programmer
+        # errors still fail loudly; only model-produced dicts are salvaged.
+        if not isinstance(data, dict):
+            return data
+        return _salvage_draft(data)
 
 
 class InterviewBrief(BaseModel):
