@@ -23,7 +23,13 @@ _PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
     "gpt-4.1": (2.00, 0.50, 8.00),
     "claude-haiku-4-5": (1.00, 0.10, 5.00),
     "claude-sonnet-4-6": (3.00, 0.30, 15.00),
+    # settings.TIER_EXPERT since 2026-09-10 (intro $2/$10 pricing ended 2026-08-31).
+    "claude-sonnet-5": (3.00, 0.30, 15.00),
     "claude-opus-4-8": (5.00, 0.50, 25.00),
+    "claude-opus-5": (5.00, 0.50, 25.00),
+    # settings.INTERVIEW_COMPANY_RESEARCH_MODEL since 2026-09-10. PROMOTIONAL pricing
+    # through 2026-11-21; standard is (5.00, 0.50, 30.00) after.
+    "gpt-5.6-sol": (4.00, 0.40, 20.00),
     "gemini-2.5-flash-lite": (0.10, 0.025, 0.40),
     "gemini-2.5-flash": (0.30, 0.075, 2.50),
     # settings.TIER_EXPERT. INTRODUCTORY pricing through 2026-12-31; on 2027-01-01 it

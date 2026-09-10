@@ -137,7 +137,10 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_CHAT_MODEL: str = "gpt-4.1"
     OPENAI_TEXT_CHAT_MODEL: str = "gpt-5.6-luna"
-    INTERVIEW_COMPANY_RESEARCH_MODEL: str = "gpt-5.6-terra"
+    # Sol over Terra (2026-09-10): the dossier is a one-shot, 95s-budget research
+    # call where answer quality is the whole product; Sol is OpenAI's strongest
+    # 5.6 ($4/$20 promo to 2026-11-21, then $5/$30) on the same Responses surface.
+    INTERVIEW_COMPANY_RESEARCH_MODEL: str = "gpt-5.6-sol"
     # Groq-hosted primary for first-token speed (LPU TTFT is a fraction of the
     # frontier providers'); Haiku keeps the fallback leg, where its per-session
     # prompt cache stays warm. Groq models have no vision: a screen_sight turn
@@ -290,27 +293,31 @@ class Settings(BaseSettings):
     # TIER_CHEAP -> cheap + fast; background tasks, notification copy, simple classification
     # TIER_BALANCED -> mid-tier; tool-calling tasks, structured output with reasoning
     # TIER_EXPERT -> full reasoning; complex synthesis, high-stakes vision output.
-    # Gemini 3.8 Flash: cheaper per token than the Haiku BELOW it in this chain
-    # ($0.75/$3.75 vs $1.00/$5.00 per Mtok), faster, 1M context. Two caveats that are
-    # properties of the model, not of this config: its temperature is pinned to 1.0 by
-    # model_provider (Google documents lower values as risking looping), so this tier can
-    # no longer serve a caller that needs determinism; and its price DOUBLES to
-    # $1.50/$7.50 on 2027-01-01 when introductory pricing ends, at which point it costs
-    # more than the Haiku fallback and this choice should be re-argued, not assumed.
+    # Sonnet 5 (2026-09-10, quality-first pass while the user base is small): the
+    # expert tier exists for judgment quality, and Sonnet 5 sits a full class above
+    # both Gemini 3.8 Flash and Haiku on synthesis/agentic indexes. It also removes
+    # two 3.8-flash properties that fought this tier: temperature pinned to 1.0
+    # (expert callers ask for 0.1-0.7) and the intro pricing that DOUBLES to
+    # $1.50/$7.50 on 2027-01-01. Sonnet is $3/$15 flat. model_provider omits
+    # sampling params for 4.6+/5-gen Anthropic models (temperature there is a 400)
+    # and pins thinking off on structured expert calls so JSON can't be truncated
+    # by its own reasoning.
     # Provider is inferred from the model ID prefix by ModelProvider.
     TIER_CHEAP: str = "gemini-2.5-flash"
     TIER_CHEAP_FALLBACK: str = "gemini-2.5-flash-lite"           # tried when TIER_CHEAP fails
     TIER_CHEAP_LAST_RESORT: str = "claude-haiku-4-5-20251001"    # tried when TIER_CHEAP_FALLBACK also fails
     TIER_BALANCED: str = "claude-haiku-4-5-20251001"
     TIER_BALANCED_FALLBACK: str = "gemini-2.5-flash"            # balanced() -> Gemini Flash when Haiku fails
-    TIER_EXPERT: str = "gemini-3.8-flash"
-    # Deliberately Anthropic: the primary is Google now, so a Google outage must not take
-    # the whole tier down with it. The third hop returning to Gemini is acceptable only
-    # because two independent providers have already been tried by then.
-    TIER_EXPERT_FALLBACK: str = "claude-haiku-4-5-20251001"    # expert() -> Haiku, then TIER_CHEAP (Gemini Flash)
+    TIER_EXPERT: str = "claude-sonnet-5"
+    # Deliberately Google: the primary is Anthropic now, so an Anthropic outage must
+    # not take the whole tier down with it. The last-resort hop is also Google
+    # (TIER_CHEAP), acceptable because a simultaneous two-provider outage is the
+    # only way to reach it with both already failed.
+    TIER_EXPERT_FALLBACK: str = "gemini-3.8-flash"    # expert() -> Gemini 3.8 Flash, then TIER_CHEAP (Gemini 2.5 Flash)
     # TIER_REASONING -> Opus, kept available for rare hard-synthesis steps (not the default).
-    # claude-opus-4-8 uses adaptive thinking (no budget_tokens, no temperature — both 400).
-    TIER_REASONING: str = "claude-opus-4-8"
+    # Opus 5: same $5/$25 as the 4.8 it replaced, newer generation, adaptive thinking
+    # (no budget_tokens, no temperature — both 400). Currently unreferenced by code.
+    TIER_REASONING: str = "claude-opus-5"
     
     # TIER_GROUNDED -> Gemini with Google Search grounding (live web search + synthesis in ONE call)
     TIER_GROUNDED: str = "gemini-2.5-flash"

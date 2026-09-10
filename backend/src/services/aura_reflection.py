@@ -442,7 +442,10 @@ async def reflect_session(
         profile_context=_profile_context_block(profile),
         transcript=transcript,
     )
-    return cast(ReflectionPatch, await get_model_provider().balanced(
+    # expert(): reflection distills a whole session into durable memory with no
+    # user waiting; extraction judgment here compounds into everything Buddy
+    # later recalls. temperature only applies to the Gemini fallback hops.
+    return cast(ReflectionPatch, await get_model_provider().expert(
         prompt,
         system=AURA_REFLECTION_SYSTEM_PROMPT,
         response_model=ReflectionPatch,

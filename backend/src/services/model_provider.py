@@ -196,6 +196,24 @@ _STRICT_SCHEMA_HINTS = {
 }
 
 
+# Anthropic removed sampling parameters (temperature/top_p/top_k) on the 4.6+
+# generations: sending temperature to claude-sonnet-5, claude-opus-5, or any
+# 4.6/4.7/4.8 model is a hard 400, and a genuine Anthropic 400 deliberately does
+# not advance the fallback chain (see _call_anthropic). Haiku 4.5 and the older
+# 4.5-era snapshots still accept it. A prefix allowlist, not a version parse:
+# the Anthropic ids reachable through tiers are few and all named in settings.
+_ANTHROPIC_SAMPLING_MODEL_PREFIXES = (
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-3",
+)
+
+
+def _anthropic_accepts_sampling(model_id: str) -> bool:
+    return model_id.startswith(_ANTHROPIC_SAMPLING_MODEL_PREFIXES)
+
+
 def _anthropic_strict_schema(node: Any) -> Any:
     """Rewrite a pydantic JSON Schema so Anthropic strict structured output accepts it."""
     if isinstance(node, dict):
@@ -818,8 +836,8 @@ class ModelProvider:
         thinking_level: str = THINKING_MEDIUM,
     ) -> str | T:
         """Full reasoning. Use for: complex synthesis, high-stakes output.
-        Most expensive per token of the non-Opus tiers. Currently Gemini 3.8 Flash,
-        falling back to Claude Haiku and then to Gemini 2.5 Flash.
+        Most expensive per token of the non-Opus tiers. Currently Claude Sonnet 5,
+        falling back to Gemini 3.8 Flash and then to Gemini 2.5 Flash.
 
         ``images`` follows the same shape as :meth:`balanced`; every hop in the
         chain is vision-capable. The outbound drafter reads a dense email thread
@@ -834,10 +852,11 @@ class ModelProvider:
         The default is ``medium`` so an unconsidered call is neither the slowest nor
         the shallowest option.
 
-        ``temperature`` is honoured by the Anthropic hop but PINNED TO 1.0 on any
+        ``temperature`` is DROPPED on the Sonnet 5 primary (Anthropic removed sampling
+        params on the 4.6+ generations; sending one is a 400) and PINNED TO 1.0 on any
         Gemini 3.x hop, per Google's documented guidance that lower values risk looping
-        and degraded reasoning. A caller that needs determinism cannot get it from this
-        tier any more; use :meth:`balanced` (Anthropic primary) instead.
+        and degraded reasoning. A caller that needs low-temperature determinism cannot
+        get it from this tier; use :meth:`balanced` (Haiku primary) instead.
 
         Raises NotImplementedError if ``tools`` or ``history`` is passed while the chain
         is on a Gemini model, rather than silently answering without them."""
@@ -1492,8 +1511,16 @@ class ModelProvider:
             "model": model_id,
             "max_tokens": max(1, int(max_output_tokens or 2048)),
             "messages": messages,
-            "temperature": temperature,
         }
+        if _anthropic_accepts_sampling(model_id):
+            kwargs["temperature"] = temperature
+        elif response_model is not None:
+            # 4.6+/5-gen models run adaptive thinking when the parameter is
+            # omitted, and thinking spends the same max_tokens the JSON needs.
+            # Structured calls pin thinking off so a schema-bound response can
+            # never be truncated by its own reasoning; plain-text calls keep
+            # the adaptive default.
+            kwargs["thinking"] = {"type": "disabled"}
         if system:
             kwargs["system"] = system
         if tools:
