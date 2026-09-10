@@ -45,7 +45,16 @@ class DestinationCandidate:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedDestination:
-    """outcome: 'bind' | 'ask' | 'propose_create' | 'no_databases'."""
+    """outcome: 'bind' | 'ask' | 'propose_create' | 'no_databases' | 'unspecified'.
+
+    'unspecified' means the caller named no destination at all, and it is a
+    DIFFERENT fact from 'propose_create' (they named one and nothing matched).
+    Collapsing the two is what produced "Want me to create one called my
+    notion?": the user had said "dump it into my notion", meaning the account,
+    the model had no way to express "they named no database", so it passed the
+    only words it had and they came straight back as a proposed database name.
+    A caller that gets 'unspecified' must ask which database, never invent one.
+    """
 
     outcome: str
     data_source_id: str | None = None
@@ -123,13 +132,26 @@ async def resolve_destination(uid: str, spoken_destination: str) -> ResolvedDest
     other failures raise ValueError for the handler to surface honestly.
     """
     spoken = (spoken_destination or "").strip()
-    if not spoken:
-        return ResolvedDestination(outcome="propose_create")
 
     connector = NotionConnector(uid)
     entries = await _titles_with_embeddings(uid, connector)
     if not entries:
         return ResolvedDestination(outcome="no_databases")
+
+    # No words to match, so there is nothing to score. Their real database
+    # titles ride along as candidates so the caller can ask which one using
+    # Notion's own data rather than anything spoken. Ordered by Notion's
+    # relevance, which is the only order available without a query.
+    if not spoken:
+        return ResolvedDestination(
+            outcome="unspecified",
+            candidates=[
+                DestinationCandidate(
+                    data_source_id=data_source_id, title=title, similarity=0.0
+                )
+                for data_source_id, title, _vector in entries
+            ],
+        )
 
     spoken_vector = await embed_text(spoken)
     scored = sorted(

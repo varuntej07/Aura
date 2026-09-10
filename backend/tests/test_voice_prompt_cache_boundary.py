@@ -20,6 +20,7 @@ from src.prompts import (
     DESKTOP_VOICE_SYSTEM_PROMPT,
     GUIDE_SYSTEM_PROMPT,
     MOBILE_VOICE_SYSTEM_PROMPT,
+    VOICE_TURN_CLOSING_CHECK,
 )
 
 _ENCODING = tiktoken.get_encoding("o200k_base")
@@ -38,12 +39,74 @@ _ENCODING = tiktoken.get_encoding("o200k_base")
 # paid-plan refusal was sitting unread in the tool's own `say`. Anything added here has
 # to earn its tokens the same way; do not raise these to make a comfortable prompt fit.
 #
+# Raised a fourth time (2026-09-08, all three surfaces, ~85 tokens each) by the measured
+# cost of the self-harm exception and the never-guess-an-age rule in _SAFETY_AND_STOP_RULES.
+# Neither is optional: the backend had NO crisis handling of any kind (a grep for
+# suicid|self-harm|crisis|hotline|988 across src/ returned one alarm ringtone slug), while
+# California SB 243 and New York's AI companion law both require detecting and responding to
+# expressions of suicidal ideation, and this product meets their definition of a companion
+# chatbot. The age line answers a live session that guessed a user's age and then treated
+# their real one as banter. These are the cheapest correct versions of both, already trimmed
+# once from 173 tokens to 121.
+#
+# Raised a fifth time (2026-09-09) by two blocks that each answer a defect observed in
+# ONE live session, sess_09615c9ddc704982b976def51c520a5f:
+#   * _MEMORY_FACTS (~91 tokens, all three surfaces). Asked "Do you remember our last
+#     conversation?", Buddy said it had none and that "each session is independent for
+#     your privacy and security". The worker logs show memory retrieval SUCCEEDED that
+#     turn (memory_outcome "ok", 6-14 atoms) with no pre-session fetch timeout, so the
+#     data was in the prompt and only the capability claim was missing. Three existing
+#     lines lean the other way ("never from memory or conversation history", "never
+#     introduce them", "do not answer from memory"), all meaning do-not-fabricate. With
+#     nothing affirmative to read, the model fell back to generic-assistant boilerplate.
+#     Same failure class as _*_VOICE_SESSION_FACTS and the same fix.
+#   * The screen-scope clause (~73 further tokens, desktop only). The user said "What the
+#     fuck? Busy drill." and got a bullet list about the repo on their screen, then asked
+#     "Who the fuck told you to talk about my screen?". A frame is attached to EVERY armed
+#     turn with no relevance gate, so the rule has to say that presence is not a request.
+#     This partly replaces the old one-line "Never narrate or expand from screen evidence
+#     unless asked", which sat next to the opposite instruction and lost to it.
+# Both were compressed once before landing (memory 167 -> 91, screen 110 -> 73). The cost
+# is paid on turn 1 only: pipelines.py pins prompt_cache_key per user on every OpenAI leg
+# and caching="ephemeral" on the Anthropic leg, so turn 2+ reads this prefix from cache.
+#
 # Each ceiling sits ~48 tokens above its measured prompt, so unintended growth still
 # trips the guard rather than being absorbed by it.
+# Raised a sixth time (2026-09-09, ~98 tokens on all three surfaces) by "How a turn
+# opens and closes" in _SPOKEN_DELIVERY plus the two-line hello rule in the identity
+# block. A live desktop session opened nearly every turn with an affirmation ("You're
+# right, you didn't ask about your screen"), closed nearly every turn with a service
+# offer ("if you want X, just say so"), answered "good morning" with a well-wish
+# paragraph, and spent whole turns promising to be shorter instead of being shorter.
+# Two of those four had no rule at all. The other two DID, and lost: anti-acknowledgement
+# was stated in both _CONVERSATION_AUTHORITY and _SPOKEN_DELIVERY, which is the same
+# dilution the comment above _SPOKEN_DELIVERY diagnoses and claims to have removed - the
+# block was added while the originals stayed. Stating it once is the fix; the duplicates
+# are deleted here, which is why the net is +98 and not the +145 the new block costs.
+# The closing offer additionally had a competing INSTRUCTION in voice/tool_result.py
+# ("Offer to go further rather than going further unasked") that no prompt wording could
+# outrank; that line is deleted rather than argued with. Compressed once before landing,
+# 145 -> 98, per the rule above. HBS's analysis of 1,200 companion chats puts this exact
+# closing-offer shape among the tactics that make users angry and churn, so it is a
+# retention defect and not a style preference.
+#
+# Raised deliberately on 2026-09-09, +143 app, +143 keyboard, +177 desktop, after a live
+# desktop session in which every rule above was present and none of them held: the
+# model opened on a concession and closed on a service offer, turn after turn. Two
+# structural changes, not more words:
+#   - VOICE_TURN_CLOSING_CHECK (101 tokens) now terminates the assembled prompt, after
+#     the session block. Position was the defect. _SPOKEN_DELIVERY sat at roughly the
+#     midpoint of a ~9k-token turn, which the architecture doc itself names as where
+#     attention decays, and the desktop prompt ended on an age-and-crisis rule.
+#   - Two contrastive <example> blocks in _SPOKEN_DELIVERY. gpt-4.1 mirrors the shape
+#     of its prompt far more reliably than it obeys a prohibition, and every rule these
+#     illustrate was already stated and already ignored.
+# Paid for partly by deleting the mobile in-body "Final check", which the closing block
+# now covers - same de-duplication rule as the paragraph above, applied again.
 _BEFORE_TOTAL_TOKENS = {
-    "app": 2000,
-    "keyboard": 2050,
-    "desktop": 2266,
+    "app": 2513,
+    "keyboard": 2566,
+    "desktop": 2884,
 }
 
 _CONTEXT_ONE = {
@@ -182,8 +245,17 @@ async def test_actual_openai_boundary_has_cacheable_static_prefix(
     assert second_request["messages"][1]["role"] == "user"
     assert first_prompt != second_prompt
     assert first_stable == second_stable
-    assert first_prompt.endswith(render_voice_session_context(_CONTEXT_ONE))
-    assert second_prompt.endswith(render_voice_session_context(_CONTEXT_TWO))
+    # The session block is no longer the literal tail: VOICE_TURN_CLOSING_CHECK is
+    # appended after it, deliberately, because the end of context is where adherence
+    # is highest and the register rules were otherwise buried mid-prompt. The
+    # invariant this guards is unchanged - nothing dynamic survives past the cache
+    # boundary and the tail is deterministic - so it now asserts both segments.
+    assert first_prompt.endswith(
+        render_voice_session_context(_CONTEXT_ONE) + VOICE_TURN_CLOSING_CHECK
+    )
+    assert second_prompt.endswith(
+        render_voice_session_context(_CONTEXT_TWO) + VOICE_TURN_CLOSING_CHECK
+    )
     assert _common_token_prefix(first_prompt, second_prompt) >= 1024
     assert _common_token_prefix(first_prompt, second_prompt) >= len(
         _ENCODING.encode(first_stable)
@@ -207,7 +279,10 @@ def test_static_first_prompt_preserves_surface_behavior_and_size(surface: str) -
     normalized = " ".join(prompt.split())
     context_start = prompt.index(VOICE_SESSION_CONTEXT_START)
 
-    assert prompt.endswith(render_voice_session_context(_EQUIVALENT_BASELINE_CONTEXT))
+    assert prompt.endswith(
+        render_voice_session_context(_EQUIVALENT_BASELINE_CONTEXT)
+        + VOICE_TURN_CLOSING_CHECK
+    )
     assert len(_ENCODING.encode(prompt)) <= _BEFORE_TOTAL_TOKENS[surface]
     # Per-tool guidance moved into each tool's own description (GPT-4.1 guide:
     # use the tools field, not the prompt). Nothing may reintroduce it here.

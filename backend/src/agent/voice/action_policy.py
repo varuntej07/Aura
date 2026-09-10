@@ -20,6 +20,72 @@ UNTRUSTED_READ_TOOLS = frozenset({"web_surf", "query_memory", "get_user_context"
 # tool description; policy never interprets the user's wording.
 WRITE_INTENT_MIN_STT_CONFIDENCE = 0.65
 
+# Gates that mean the MODEL built a bad call, not that the user was misheard. These
+# are worth handing back to the model once so it can re-emit; every other reason code
+# is about timing, exposure or trust and a retry would only repeat it.
+REPAIRABLE_GATE_REASONS = frozenset(
+    {"missing_required_tool_field", "invalid_tool_arguments"}
+)
+
+# What Buddy says when a call was gated, nothing else survived, and the model wrote no
+# text of its own. The single line this replaced was "Hmm, that didn't go through. Say
+# it once more?" for EVERY reason code, which told the user their speech was the
+# problem when the truth was a malformed tool call or a withheld capability. That is
+# what made one user repeat a research request verbatim into an identical wall twice.
+# Never ask for a repeat unless the transcript really was the doubt.
+_GATE_SPEECH = {
+    "missing_required_tool_field": (
+        "I got most of that but not where it should go. Where do you want it?"
+    ),
+    "invalid_tool_arguments": (
+        "I got most of that but not where it should go. Where do you want it?"
+    ),
+    "fresh_turn_required_after_untrusted_read": (
+        "I just looked that up, so let me do the saving part on its own. "
+        "Want me to go ahead?"
+    ),
+    "tool_not_exposed_for_turn": "I can't do that one from here yet.",
+    "unregistered_voice_tool": "I can't do that one from here yet.",
+    "side_effect_already_emitted": "Let me finish the first one before that one.",
+    "unsafe_parallel_tool_batch": "Let me finish the first one before that one.",
+    "guide_start_only": "I can't do that one from here yet.",
+}
+_GATE_SPEECH_DEFAULT = "That one didn't go through on my end. Want me to try again?"
+
+
+def gated_action_speech(reason_code: str) -> str:
+    """The spoken line for a fully gated turn, chosen by why it was gated."""
+    return _GATE_SPEECH.get(reason_code, _GATE_SPEECH_DEFAULT)
+
+
+def gate_repair_instruction(*, tool: str, reason_code: str) -> str:
+    """The one corrective note handed back to the model before it re-emits.
+
+    Names the contract that was broken and nothing else. It must not tell the model
+    what the user meant, only what the call was missing, so intent stays the model's
+    judgement from the tool description.
+    """
+    if reason_code == "invalid_tool_arguments":
+        detail = (
+            f"The arguments you sent to `{tool}` were not valid JSON for its schema."
+        )
+    else:
+        detail = (
+            f"Your call to `{tool}` left out a field its schema requires, or sent an "
+            "empty string for one that may not be empty. Re-read that tool's "
+            "description: several of them accept an EMPTY string for a destination "
+            "when the user named the connector but no place inside it, and that is a "
+            "real, allowed value you must pass explicitly."
+        )
+    return (
+        "<tool_call_rejected>"
+        f"{detail} It was not run and the user has not been told anything. "
+        "Emit the call once more with the field supplied, or pick the tool that "
+        "actually fits what they asked for. Do not ask them to repeat themselves: "
+        "their request came through fine."
+        "</tool_call_rejected>"
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class TurnCapabilityPolicy:
@@ -97,9 +163,20 @@ def completed_tool_results(chat_ctx: lk_llm.ChatContext) -> dict[str, bool]:
 
 
 def verbatim_voice_result(chat_ctx: lk_llm.ChatContext) -> str | None:
-    """Return exact speech required by the latest Action Truth tool result."""
+    """Return exact speech required by the latest Action Truth tool result.
+
+    An assistant message ends the scan: an envelope with an assistant turn
+    after it was already spoken, and binding it again re-speaks the old line
+    word for word. That is not hypothetical - narrator and announce replies
+    are generated via ``generate_reply(instructions=...)``, whose instructions
+    land as a SYSTEM message, so the last-user boundary alone does not move
+    and every such reply while the user stayed quiet would re-yield the stale
+    confirmation instead of the narration.
+    """
     latest_user = latest_user_index(chat_ctx)
     for item in reversed(chat_ctx.items[latest_user + 1 :]):
+        if isinstance(item, lk_llm.ChatMessage) and item.role == "assistant":
+            return None
         if not isinstance(item, lk_llm.FunctionCallOutput) or item.is_error:
             continue
         parsed = parse_tool_output(item)

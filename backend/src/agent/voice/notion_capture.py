@@ -74,6 +74,14 @@ class SaveToNotionResult:
     error_code: str | None = None
     dropped_fields: list[str] = field(default_factory=list)
     already_saved: bool = False
+    # Set by the shared exactly-once skeleton when this result came from its
+    # per-finalized-message cache rather than a fresh run. Required, not
+    # optional: the skeleton stamps it with dataclasses.replace() on every
+    # result type it returns, so a type missing this field raises TypeError out
+    # of the tool the second time it is called in one turn. It also carries the
+    # same meaning it does for the research results - the line was already
+    # spoken, so the replay must not bind it to the verbatim speech path again.
+    already_spoken: bool = False
     # Set when the turn ends in a question instead of a write: the model asks
     # the user and calls the tool again with a confirmed choice.
     candidates: list[NotionCandidate] = field(default_factory=list)

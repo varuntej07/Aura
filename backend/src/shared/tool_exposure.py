@@ -19,6 +19,7 @@ The core floor in tool_discovery.py is what holds the line there.
 
 from __future__ import annotations
 
+from .tool_thinking_phrases import SLOW_TOOL_THINKING_PHRASES
 from .tools import CORE_TOOLS
 
 
@@ -79,5 +80,46 @@ def verify_core_tool_exposure(*, component: str) -> list[str]:
         logger.info(
             "core_tool_exposure_verified",
             {"component": component, "core_tools": sorted(canonical)},
+        )
+    return problems
+
+
+def verify_tool_filler_coverage(*, component: str) -> list[str]:
+    """Log any slow voice tool that would run without a spoken filler.
+
+    The same smoke-alarm shape as the check above, for the other way Buddy goes
+    quiet. ``capabilities.py`` declares how slow each tool is; SLOW_TOOL_THINKING_PHRASES
+    decides whether anything is said while it runs. They are two hand-maintained
+    lists describing one fact, so they drifted: research_to_notion sat at
+    ToolLatency.HIGH with two sequential 20s backend calls and no phrase, which
+    is up to forty seconds of a live call with nothing spoken at all.
+
+    Only HIGH and MEDIUM are required to have one. LOW tools are deliberately
+    silent (a filler there just delays an instant confirmation), and a phrase for
+    a LOW tool is allowed rather than flagged: query_memory and get_user_context
+    both carry one today because they are slow on some paths and fast on others.
+
+    Returns the problems found, so a caller can assert on them.
+    """
+    from ..lib.logger import logger
+
+    from ..agent.voice.capabilities import VOICE_TOOL_REGISTRY, ToolLatency
+
+    slow = {ToolLatency.HIGH, ToolLatency.MEDIUM}
+    problems = sorted(
+        f"{name} ({registration.latency}) has no thinking phrase"
+        for name, registration in VOICE_TOOL_REGISTRY.items()
+        if registration.latency in slow and name not in SLOW_TOOL_THINKING_PHRASES
+    )
+
+    if problems:
+        logger.error(
+            "tool_filler_coverage_regression",
+            {"component": component, "problems": problems},
+        )
+    else:
+        logger.info(
+            "tool_filler_coverage_verified",
+            {"component": component, "covered": sorted(SLOW_TOOL_THINKING_PHRASES)},
         )
     return problems

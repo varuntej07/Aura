@@ -16,6 +16,10 @@ class VoiceActionTelemetry:
         self._turn_started_at = time.monotonic()
         self._first_response_logged = False
         self._emitted: list[tuple[str, float]] = []
+        # Retained per turn, not just logged, so the silent-turn watchdog in
+        # buddy_agent can name WHICH gate ate the reply. Logging alone left the
+        # reason in a line nothing correlated with the missing answer.
+        self._deferred_this_turn: list[str] = []
 
     @property
     def turn_index(self) -> int:
@@ -26,6 +30,7 @@ class VoiceActionTelemetry:
         self._turn_index += 1
         self._turn_started_at = time.monotonic()
         self._first_response_logged = False
+        self._deferred_this_turn = []
 
     def policy(
         self,
@@ -102,7 +107,12 @@ class VoiceActionTelemetry:
         )
         return latency_ms
 
+    def deferred_reasons(self) -> list[str]:
+        """Every tool gated on the current turn, as "tool:reason" pairs."""
+        return list(self._deferred_this_turn)
+
     def deferred(self, tool_name: str, reason: str) -> None:
+        self._deferred_this_turn.append(f"{tool_name}:{reason}")
         logger.info(
             "VoiceAction: execution deferred",
             {

@@ -54,6 +54,7 @@ from .voice.auth import mint_firebase_id_token
 from .voice.bridge_handover import BRIDGE_CONTROL_TYPES, BridgeHandoverCoordinator
 from .voice.context import gather_session_context
 from .voice.free_tier_limit import run_free_tier_voice_limit, run_out_of_free_time_close
+from .voice.greeting import prewarm_opener_model, start_opener_task
 from .voice.guide_default_profile import GenericGuideProfile
 from .voice.guide_mode import (
     GUIDE_HEARTBEAT_TYPE,
@@ -249,13 +250,30 @@ def prewarm(process: JobProcess) -> None:
     # Prewarm runs inside each LiveKit job process. Configure tracing here so
     # its provider exists in the same process that creates agent spans.
     configure_arize_tracing("voice")
-    from ..shared.tool_exposure import verify_core_tool_exposure
+    from ..shared.tool_exposure import (
+        verify_core_tool_exposure,
+        verify_tool_filler_coverage,
+    )
 
     verify_core_tool_exposure(component="voice")
+    verify_tool_filler_coverage(component="voice")
     logger.info("VoiceWorker: prewarming VAD model")
     # Bundled local silero VAD (livekit-local-inference); replaces the deprecated
     # livekit-plugins-silero. Loaded here so the model isn't cold on the first job.
     process.userdata["vad"] = inference.VAD(model="silero")
+
+    # Same reason as the VAD above, for the opener's provider client. Measured: the
+    # first call in a fresh process takes 3.85s against a 0.39s warm median, and
+    # that gap is HTTP client and telemetry init, not inference. Unwarmed, the first
+    # session after every deploy or scale-up silently gets the fallback greeting.
+    # asyncio.run is safe here: prewarm runs before the job loop starts, so there is
+    # no running loop to conflict with, and a failure is logged rather than raised
+    # because a cold client is a duller hello, never a broken session.
+    logger.info("VoiceWorker: prewarming opener model")
+    try:
+        asyncio.run(prewarm_opener_model())
+    except Exception as exc:
+        logger.warn("VoiceWorker: opener prewarm skipped", {"error": str(exc)})
     # The semantic end-of-turn model can't be prewarmed: LiveKit loads and
     # initializes it inside AgentSession on first use (it needs the job's
     # inference executor, which only exists in the entrypoint). Only its
@@ -453,6 +471,16 @@ async def entrypoint(ctx: JobContext) -> None:
         # parallel under a hard ceiling. Each source defaults independently.
         session_context = await gather_session_context(user_id, session_id, conversation_id)
         context_vars = session_context.prompt_context_vars
+
+        # Start the opener HERE, not in on_enter. Everything between this line and
+        # session.start - pipeline build, tool registry, data handlers, byte-stream
+        # topics - runs while this call is in flight, which is what keeps a
+        # generated greeting off the first-word latency path. Measured 0.39s median
+        # against a 0.9s budget, so it has normally resolved before on_enter awaits
+        # it. Moving this later would spend that overlap and start costing latency.
+        opener_task = start_opener_task(
+            session_context, session_id=session_id, user_id=user_id
+        )
 
         voice_request_id = launch.voice_request_id
         voice_requested_at_ms = launch.voice_requested_at_ms
@@ -680,6 +708,7 @@ async def entrypoint(ctx: JobContext) -> None:
             user_id=user_id,
             context_vars=context_vars,
             chat_ctx=chat_ctx,
+            opener_task=opener_task,
             screen_frames=screen_frames,
             screen_context=screen_context,
             session_id=session_id,

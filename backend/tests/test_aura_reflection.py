@@ -171,10 +171,10 @@ def test_fold_corrects_wrong_life_fact():
 
 class _FakeProvider:
     def __init__(self) -> None:
-        self.balanced_called = False
+        self.expert_called = False
 
-    async def balanced(self, *args, **kwargs):
-        self.balanced_called = True
+    async def expert(self, *args, **kwargs):
+        self.expert_called = True
         return ReflectionPatch(session_summary="ok")
 
     async def cheap(self, *args, **kwargs):
@@ -196,7 +196,7 @@ def test_consolidate_skips_without_consent(monkeypatch):
         {"role": "user", "text": "i wrote a blog on tensor parallelism"},
         {"role": "user", "text": "how do i get a job at annapurna labs"},
     ]))
-    assert fake.balanced_called is False  # GDPR gate: never profiled
+    assert fake.expert_called is False  # GDPR gate: never profiled
 
 
 def test_consolidate_skips_trivial_session(monkeypatch):
@@ -205,7 +205,7 @@ def test_consolidate_skips_trivial_session(monkeypatch):
     asyncio.run(reflection.consolidate_session("u1", "s1", [
         {"role": "user", "text": "what's 5km in miles"},  # one user turn -> no arc
     ]))
-    assert fake.balanced_called is False
+    assert fake.expert_called is False
 
 
 def test_consolidate_runs_model_and_applies_patch(monkeypatch):
@@ -230,6 +230,6 @@ def test_consolidate_runs_model_and_applies_patch(monkeypatch):
         {"role": "assistant", "text": "nice, what's it about?"},
         {"role": "user", "text": "how do i get an SDE role at annapurna labs"},
     ]))
-    assert fake.balanced_called is True
+    assert fake.expert_called is True
     assert captured.get("session_id") == "s1"
     assert isinstance(captured.get("patch"), ReflectionPatch)

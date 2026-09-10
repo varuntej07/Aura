@@ -39,6 +39,7 @@ from .firebase import admin_firestore
 from .gmail_connector import GmailConnector
 from .google_calendar_connector import GoogleCalendarConnector
 from .model_provider import _strip_fences, get_model_provider
+from .notion_connector import NotionConnector
 from .outbound_draft.drafter import REASON_OK, draft_outbound, writing_voice_lines
 from .product_knowledge import (
     CurrentProductSurface,
@@ -503,11 +504,13 @@ class ToolExecutor:
             "delete_memory": self._delete_memory,
             "query_memory": self._query_memory,
             "get_user_context": self._get_user_context,
+            "list_connectors": self._list_connectors,
             "ask_clarification": self._ask_clarification,
             "configure_agent": self._configure_agent,
             "get_agent_config": self._get_agent_config,
             "web_surf": self._web_surf,
             "start_research": self._start_research,
+            "get_research_status": self._get_research_status,
             "reason_step": self._reason_step,
             "report_feedback": self._report_feedback,
         }
@@ -1353,15 +1356,45 @@ class ToolExecutor:
         if len(key) > 120 or len(value) > 2_000:
             raise ValueError("memory content is too long")
 
-        consent_granted = await _run(
-            lambda: (
-                (
-                    self._user_ref().get().to_dict() or {}
-                ).get("aura_consent_granted")
-                is not False
+        from .safety.age_band import resolve_age_band
+        from .safety.age_signals import is_reserved_age_key, record_age_signal
+
+        # One read serves both the age band and the consent check below; this
+        # used to be a lambda that fetched the doc purely to test one field.
+        user_doc = await _run(lambda: self._user_ref().get().to_dict() or {})
+
+        # Age is a safety signal, never a preference. Refusing the write is the
+        # point: a stored age silently re-enters later prompts as a
+        # personalization fact, which is how a self-reported 15-year-old ended
+        # up being profiled against an account declaring 20 (2026-09-08).
+        if is_reserved_age_key(key):
+            declared = resolve_age_band(user_doc)
+            await record_age_signal(
+                self._user_id,
+                stated_value=value,
+                declared=declared,
+                surface=self._created_via,
+                session_id=self._client_message_id or "",
+                memory_key=key,
             )
-        )
-        if not consent_granted:
+            return {
+                "ok": False,
+                "error": True,
+                "code": "age_not_storable",
+                "retryable": False,
+                "user_message": (
+                    "I don't keep your age in memory, so I haven't saved that."
+                ),
+                "then": (
+                    "Say that plainly and move on. Do not claim it was saved, do not "
+                    "offer to save it another way, and do not repeat the age back."
+                ),
+            }
+
+        # `is True`, not `is not False`. Every other consent site in this
+        # codebase reads it strictly; this one alone was fail-open, so an
+        # account with the field absent or null still got memories written.
+        if user_doc.get("aura_consent_granted") is not True:
             return {
                 "ok": False,
                 "error": True,
@@ -1723,6 +1756,62 @@ class ToolExecutor:
             "user_message": user_message,
         }
 
+    async def _get_research_status(self, inp: dict[str, Any]) -> ToolResult:
+        """Read the user's recent research runs. The ONLY read path there is.
+
+        Every other research tool is a WRITE, so before this existed there was no way
+        to answer "is it done?" or "did it land in Notion?" at all. In a live
+        2026-09-09 voice session the model was asked exactly that, had only a stale
+        in-flight envelope from several turns earlier, and confabulated both a "10 to
+        20 minutes" estimate and a flat "yes, I sent it to your Notion" for a delivery
+        that had produced no receipt. A missing data source cannot be fixed with prompt
+        wording; this is the source.
+
+        Delivery is reported ONLY from `delivery_result.page_id`, the same receipt the
+        voice narrator gates its spoken "saved to X" on. A bound destination with no
+        receipt reports `delivered: False` with the destination named, because "we
+        agreed where it goes" and "it is there" are different facts and collapsing them
+        is the bug this tool exists to prevent.
+        """
+        from .research import fields as research_fields
+        from .research.engine import get_research_engine
+
+        engine = get_research_engine()
+        runs = await engine.list_runs(self._user_id, limit=5)
+        if not runs:
+            return {
+                "runs": [],
+                "user_message": "Nothing is running and nothing has finished recently.",
+            }
+
+        terminal = {
+            research_fields.STATE_READY,
+            research_fields.STATE_PARTIAL,
+            research_fields.STATE_FAILED,
+            research_fields.STATE_CANCELLED,
+        }
+        rows: list[dict[str, Any]] = []
+        for raw in runs[:3]:
+            run = dict(raw or {})
+            delivery = dict(run.get(research_fields.DELIVERY) or {})
+            receipt = dict(run.get(research_fields.DELIVERY_RESULT) or {})
+            state = str(run.get(research_fields.STATE) or "")
+            rows.append({
+                "run_id": str(run.get(research_fields.RUN_ID) or ""),
+                "request": str(run.get(research_fields.REQUEST_TEXT) or "")[:200],
+                "state": state,
+                "finished": state in terminal,
+                "processing_stage": str(
+                    run.get(research_fields.PROCESSING_STAGE) or ""
+                ),
+                "source_count": int(run.get(research_fields.SOURCE_COUNT, 0) or 0),
+                # Named destination and actual arrival, deliberately separate fields.
+                "notion_destination": str(delivery.get("database_name") or ""),
+                "delivered_to_notion": bool(receipt.get("page_id")),
+                "updated_at": str(run.get(research_fields.UPDATED_AT) or ""),
+            })
+        return {"runs": rows}
+
     # Clarification (chat-only — returns sentinel dict, not a Firestore call)
     async def _ask_clarification(self, inp: dict[str, Any]) -> ToolResult:
         question = str(inp.get("question", "")).strip()
@@ -1830,6 +1919,77 @@ class ToolExecutor:
             context["upcoming_events"] = result.get("events", [])
 
         return context
+
+    # What this user has actually connected. The three get_status() readers below are the
+    # same ones GET /connectors serves, so the answer Buddy speaks and the state the
+    # Connectors page renders come from one source and cannot disagree.
+    #
+    # This exists because there was no path to the answer at all. connector state was
+    # fetched once per voice session and spent entirely on tool eligibility, never
+    # reaching the prompt, and no tool reported it, so "what am I connected to" had no
+    # truthful answer and Buddy improvised one.
+    async def _list_connectors(self, inp: dict[str, Any]) -> ToolResult:
+        def _state(status: dict[str, Any]) -> str:
+            # Three outcomes, not a boolean. Disabling a connector deliberately RETAINS
+            # its server-side credentials (see connectors.py), so "off but re-enablable"
+            # and "never linked" are different facts and need different next steps.
+            if status.get("enabled"):
+                return "needs_reconnect" if status.get("last_error") else "connected"
+            return "disabled" if status.get("can_reconnect") else "not_connected"
+
+        def _read() -> dict[str, Any]:
+            readers: dict[str, Any] = {
+                "google_calendar": GoogleCalendarConnector(self._user_id).get_status,
+                "gmail": GmailConnector(self._user_id).get_status,
+                "notion": NotionConnector(self._user_id).get_status,
+            }
+            connectors: dict[str, Any] = {}
+            for name, read_status in readers.items():
+                try:
+                    status = read_status()
+                except Exception as exc:
+                    # One unreachable provider must not blank the whole answer. Say so
+                    # for that connector and keep reporting the others truthfully.
+                    logger.warn(
+                        "Tool: connector status read failed",
+                        {"connector": name, "user_id": self._user_id, "error": str(exc)},
+                    )
+                    connectors[name] = {"state": "unknown", "error": True}
+                    continue
+                entry: dict[str, Any] = {
+                    "state": _state(status),
+                    "connected_at": status.get("connected_at"),
+                }
+                account = status.get("workspace_name") or status.get("email_address")
+                if account:
+                    entry["account"] = account
+                if status.get("last_error"):
+                    entry["last_error"] = status["last_error"]
+                connectors[name] = entry
+            return connectors
+
+        connectors = await _run(_read)
+        connected = sorted(
+            name for name, entry in connectors.items() if entry["state"] == "connected"
+        )
+        # Log the shape of every answer, not just the failures. "Nothing is connected"
+        # is a real answer AND the signature of a broken read, and the two are
+        # indistinguishable from the caller's side: both return three not_connected
+        # rows. Recording the per-connector state on every call is what makes a support
+        # report ("Buddy says I'm not connected to Notion") checkable after the fact
+        # instead of a reproduction attempt.
+        logger.info(
+            "Tool: connectors listed",
+            {
+                "user_id": self._user_id,
+                "states": {name: entry["state"] for name, entry in connectors.items()},
+                "connected_count": len(connected),
+                "read_errors": sorted(
+                    name for name, entry in connectors.items() if entry.get("error")
+                ),
+            },
+        )
+        return {"connectors": connectors, "connected": connected}
 
     # Agent configuration — lets users configure agents through chat
     async def _configure_agent(self, inp: dict[str, Any]) -> ToolResult:

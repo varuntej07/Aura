@@ -42,7 +42,12 @@ from .request_guards import require_user
 
 
 class ResolveBody(BaseModel):
-    spoken_destination: str = Field(min_length=1, max_length=300)
+    # Empty is a real, meaningful value: it means the user asked for something to
+    # go into Notion without naming a database, which resolve_destination answers
+    # with outcome="unspecified" plus their actual titles to choose from. It used
+    # to be rejected here, so a caller with nothing to send had to invent a name,
+    # and the invented name came back as a database to create.
+    spoken_destination: str = Field(default="", max_length=300)
 
 
 class WriteBody(BaseModel):

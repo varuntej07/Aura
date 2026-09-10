@@ -28,7 +28,19 @@ from .interview import VoiceSessionState
 # prompt. Warmth needs sampling room; tool-call correctness is carried by the
 # strict schemas, not a cold temperature.
 VOICE_GENERATION_TEMPERATURE = 0.7
-VOICE_MAX_OUTPUT_TOKENS = 16_384
+# Do not lower this to fight verbosity or help-desk register. That is the exact
+# experiment the paragraph above records: 0.2 produced MORE help-desk phrasing, not
+# less, because a cold temperature collapses onto the base model's most likely voice
+# and for a gpt-4.1-class model that voice IS the help desk. Register is fixed in
+# prompts.py (_SPOKEN_DELIVERY and VOICE_TURN_CLOSING_CHECK), never here.
+
+# Not a brevity control, and lowering it to enforce short replies would break the
+# card path outright. Tool-call arguments are billed as output tokens, and an armed
+# turn carries the WHOLE artifact through them (tool_choice="required" plus
+# ArtifactBody.body at artifact_contract.py:47, max_length=32_000 chars, roughly
+# 8k tokens). A cap tight enough to shorten speech truncates a draft mid-sentence
+# instead. Reply length is a prompt rule; this is only a runaway ceiling.
+VOICE_MAX_OUTPUT_TOKENS = 8_384
 
 
 def build_stt_pipeline() -> lk_stt.FallbackAdapter:

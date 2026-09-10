@@ -872,9 +872,13 @@ async def _synthesize_note(
     caveat_block = ("\n".join(caveats) + "\n\n") if caveats else ""
 
     prompt = f"Meeting title: {title or '(untitled)'}\n\n{caveat_block}Transcript:\n{transcript}"
+    # expert(): meeting-note synthesis is background work with no one waiting,
+    # and the note is a durable deliverable the user rereads; judgment quality
+    # is worth the tier. temperature is dropped on the Sonnet primary and only
+    # applies to the Gemini fallback hops.
     note = cast(
         MeetingNote,
-        await get_model_provider().balanced(
+        await get_model_provider().expert(
             prompt,
             system=_SYSTEM_PROMPT,
             response_model=MeetingNote,

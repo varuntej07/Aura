@@ -48,6 +48,33 @@ SLOW_TOOL_THINKING_PHRASES: dict[str, list[str]] = {
         "got it, setting up the research",
         "on it, scoping that research now",
     ],
+    # The four below were missing while their tools were already declared HIGH or
+    # MEDIUM latency in the voice registry, and the gap is not cosmetic:
+    # research_to_notion makes TWO sequential backend calls (resolve the
+    # destination, then start the run), each with a 20s timeout, so a slow turn
+    # was up to forty seconds of complete dead air with nothing spoken before,
+    # during, or after. verify_tool_filler_coverage now fails loudly on this
+    # instead of leaving it to be found in a transcript.
+    "research_to_notion": [
+        "nice, let me get that research going",
+        "on it, lining that up for your Notion",
+    ],
+    "deliver_research_to_notion": [
+        "cool, saving that over now",
+        "on it, putting that into Notion",
+    ],
+    "save_to_notion": [
+        "sure, saving that for you",
+        "one sec, putting that in Notion",
+    ],
+    "track_topic": [
+        "ooh yeah, let me start watching that",
+        "on it, setting that up to track",
+    ],
+    "update_calendar_event": [
+        "sure, moving that around",
+        "one sec, updating your calendar",
+    ],
 }
 
 

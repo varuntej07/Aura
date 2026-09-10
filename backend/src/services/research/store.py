@@ -2583,6 +2583,144 @@ async def fail_stage(
     return await asyncio.to_thread(_run)
 
 
+async def bind_delivery(
+    uid: str,
+    run_id: str,
+    *,
+    delivery: dict[str, str],
+    correlation_id: str = "",
+) -> tuple[bool, str, str]:
+    """Bind a Notion destination to a finished run and enqueue its delivery.
+
+    Returns ``(bound, reason, stage_id)``. ``reason`` names the refusal so the caller
+    can say something true out loud rather than failing silently.
+
+    ``DELIVERY`` is otherwise written only at creation, and stays immutable after: the
+    rule is that changing a destination is a new run, never an edit. That rule is kept
+    here exactly as written. What this fills is the case it never covered, where a run
+    has NO destination because it was never asked for one. A run started with
+    start_research and later "put that in my Notion CRM" had no path at all: the only
+    tool that could reach Notion started a SECOND research run, so the user paid twice
+    and got two briefs for one request.
+
+    Every other precondition is deferred to ``may_run_post_terminal``, the same gate the
+    delivery stage itself is admitted through, so a cancelled, failed, still-running or
+    being-deleted run is refused by one rule rather than two that can drift apart.
+    """
+    now_iso = datetime.now(UTC).isoformat()
+
+    def _run() -> tuple[bool, str, str]:
+        # Imported inside the function: registry imports the stage modules, which
+        # import this module, so a module-level import would close the cycle.
+        from .stages.registry import may_run_post_terminal
+
+        db = admin_firestore()
+        run_ref = _run_ref(uid, run_id)
+        transaction = db.transaction()
+
+        # Every refusal is logged where it is decided, not only where it is spoken.
+        # This path is billing-adjacent: already_bound and not_deliverable are exactly
+        # the cases where a user believes paid research reached their Notion and it did
+        # not. Returning a reason to the caller and writing nothing server-side made a
+        # refused delivery indistinguishable from a delivery nobody requested, and only
+        # the voice worker's own log carried the reason - so a desktop or future client
+        # hitting this route left no trace at all.
+        def _refuse(reason: str, run: dict[str, Any]) -> tuple[bool, str, str]:
+            logger.warn(
+                "research.store: delivery bind refused",
+                {
+                    "uid": uid,
+                    "run_id": run_id,
+                    "reason": reason,
+                    "state": str(run.get(F.STATE) or ""),
+                    "bound_database": str(
+                        (run.get(F.DELIVERY) or {}).get("database_name") or ""
+                    ),
+                    "correlation_id": correlation_id,
+                },
+            )
+            return False, reason, ""
+
+        @gcloud_firestore.transactional
+        def _execute(txn: Any) -> tuple[bool, str, str]:
+            snap = run_ref.get(transaction=txn)
+            if not snap.exists:
+                return _refuse("not_found", {})
+            run = snap.to_dict() or {}
+            if run.get(F.DELIVERY):
+                return _refuse("already_bound", run)
+            deletion_active = _deletion_active(_read_deletion_receipt(txn, uid, run_id))
+            if not may_run_post_terminal(
+                F.STAGE_NOTION_DELIVER, run, deletion_active=deletion_active
+            ):
+                # Distinguished so the caller can say "it is still running" rather
+                # than the generic refusal a user cannot act on.
+                state = str(run.get(F.STATE) or "")
+                return _refuse(
+                    "still_running" if state not in F.TERMINAL_STATES else "not_deliverable",
+                    run,
+                )
+
+            wave = int(run.get(F.WAVE, 0) or 0)
+            expires_at = str(run.get(F.EXPIRES_AT, ""))
+            # ordinal "rebind" keeps this out of the id space finalize would have used
+            # for the same wave, so a run that later reaches finalize cannot collide
+            # with it and abort on _txn_create.
+            stage_id = stage_id_for(F.STAGE_NOTION_DELIVER, run_id, wave, "rebind")
+            sequence = int(run.get(F.AUDIT_SEQUENCE, 0)) + 1
+            txn.update(
+                run_ref,
+                {
+                    F.DELIVERY: dict(delivery),
+                    F.AUDIT_SEQUENCE: sequence,
+                    F.UPDATED_AT: now_iso,
+                },
+            )
+            _create_job_triplet(
+                txn,
+                uid=uid,
+                run_id=run_id,
+                stage_id=stage_id,
+                stage_kind=F.STAGE_NOTION_DELIVER,
+                wave=wave,
+                ordinal="rebind",
+                payload={"terminal_state": str(run.get(F.STATE) or "")},
+                now_iso=now_iso,
+                expires_at=expires_at,
+                correlation_id=correlation_id,
+                causation_id=run_id,
+            )
+            _audit_event(
+                txn,
+                uid=uid,
+                run_id=run_id,
+                sequence=sequence,
+                event_type="delivery_bound",
+                occurred_at=now_iso,
+                expires_at=expires_at,
+                prior_state=str(run.get(F.STATE) or ""),
+                next_state=str(run.get(F.STATE) or ""),
+                reason_code="",
+                correlation_id=correlation_id,
+            )
+            logger.info(
+                "research.store: delivery bound",
+                {
+                    "uid": uid,
+                    "run_id": run_id,
+                    "stage_id": stage_id,
+                    "state": str(run.get(F.STATE) or ""),
+                    "database_name": delivery.get("database_name", ""),
+                    "correlation_id": correlation_id,
+                },
+            )
+            return True, "", stage_id
+
+        return _execute(transaction)
+
+    return await asyncio.to_thread(_run)
+
+
 async def request_cancel(
     uid: str, run_id: str, *, correlation_id: str = ""
 ) -> tuple[str, list[str]]:

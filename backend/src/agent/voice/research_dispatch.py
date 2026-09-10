@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -45,9 +46,23 @@ _POLL_INTERVAL_S = 10.0
 # longer leash for transient backend blips before the run is dropped.
 _POLL_404_EVICT_AFTER = 2
 _POLL_ERROR_EVICT_AFTER = 6
-# Coalescing floor between spoken progress updates. Terminal and question
-# events bypass it: those are the two things the user is actually waiting on.
+# Coalescing floor between non-urgent spoken notes (today only the stall note).
+# Terminal and question events bypass it: those are the two things the user is
+# actually waiting on.
 _MIN_NARRATION_GAP_S = 20.0
+# A run whose state_revision has not advanced for this long earns one spoken
+# "taking longer than usual" note. Checkpoint narration (clarification,
+# terminal receipt, stall) replaced the old per-revision progress notes: a
+# healthy run advancing through its stages is not news the user needs read to
+# them, and a stalled one is.
+_STALL_NOTE_AFTER_S = 180.0
+
+# States where the run has a result (or never will); everything else is live.
+_RESULT_TERMINAL_STATES = ("ready", "partial", "failed", "cancelled")
+# Rehydration ignores non-terminal runs that stopped updating longer ago than
+# this: the framer deadline terminalizes real runs well inside it, so an older
+# row is a corpse, and re-tracking it would poll a dead run for the session.
+_REHYDRATE_MAX_AGE = timedelta(hours=24)
 # Polls to keep waiting for notion_deliver's receipt after the run goes
 # result-terminal before narrating without one. 30 x 10s = 5 minutes, which
 # covers the deliver stage's own retry backoff (Cloud Tasks min 10s, max 300s
@@ -56,16 +71,21 @@ _DELIVERY_RESULT_WAIT_POLLS = 30
 
 _FAILURE_LINE = "I couldn't start that research - try again?"
 _RECONNECT_LINE = "Your Notion connection needs a refresh - reconnect it from the dashboard first."
+_DELIVER_FAILURE_LINE = "I couldn't save that research to Notion - try again?"
 
-# Spoken labels for engine states. Typed field -> fixed phrase; nothing
-# model-generated and nothing content-derived.
-_STATE_LABELS = {
-    "planning": "planning it out",
-    "queued": "queued up",
-    "searching": "searching sources",
-    "reading": "reading sources",
-    "verifying": "verifying what it found",
-    "synthesizing": "writing it up",
+# Each engine refusal is a different fact, and only one of them is "try again".
+# Keyed on the reason the engine returns, never on anything the user said.
+_DELIVER_REFUSALS = {
+    "still_running": (
+        "That research is still going. Ask me again once it's done and I'll put it in Notion."
+    ),
+    "already_bound": (
+        "That one's already headed to Notion - I can't change where it lands once it's set."
+    ),
+    "not_deliverable": (
+        "There's nothing to save from that run - want me to research it fresh into Notion?"
+    ),
+    "not_found": "I can't find that research run any more.",
 }
 
 
@@ -79,6 +99,13 @@ class ResearchDispatchResult:
     database_name: str | None = None
     candidates: list[tuple[str, str]] = field(default_factory=list)
     proposed_create_name: str | None = None
+    # True only on a cache replay: this exact confirmation was already spoken
+    # for this finalized message. The per-message cache dedups the backend
+    # dispatch, and used to hand the identical line back to the verbatim speech
+    # path, which spoke it again word for word. Carried on the result so the
+    # tool wrapper can drop `render: verbatim` for the replay alone and leave
+    # every first-time envelope exactly as it was.
+    already_spoken: bool = False
 
 
 # The spoken halves of the ask/propose outcomes; the decision tree itself is
@@ -88,6 +115,10 @@ _DESTINATION_COPY = DestinationCopy(
     propose_format=(
         "I don't see a database like that in your Notion. "
         "Want me to create one called {name} for the results?"
+    ),
+    unspecified_format="Where in Notion should the results go - {titles}?",
+    unnamed_format=(
+        "You don't have any Notion databases yet - what should I call one for the results?"
     ),
 )
 
@@ -286,6 +317,132 @@ async def dispatch_research_to_notion(
     return ResearchDispatchResult(spoken_confirmation=spoken)
 
 
+async def deliver_existing_run_to_notion(
+    *,
+    uid: str,
+    session_id: str,
+    firebase_id_token: str,
+    run_id: str,
+    destination: str,
+    confirmed_data_source_id: str = "",
+    confirmed_database_name: str = "",
+    create_database_named: str = "",
+) -> ResearchDispatchResult:
+    """Send a research run that ALREADY EXISTS into Notion.
+
+    The destination half is resolved by the same two helpers dispatch_research_to_notion
+    uses, so disambiguation, the propose-create round trip and the misheard-name rules
+    behave identically no matter which of the two the model picked. Only the last step
+    differs: this binds the destination onto a finished run instead of creating one.
+
+    Without this the only way to reach Notion was to start a NEW run, so "put that
+    research in my CRM" a minute after the brief landed silently paid for the same
+    work twice.
+    """
+    if create_database_named:
+        try:
+            data_source_id, database_name = await create_database_backend(
+                name=create_database_named,
+                firebase_id_token=firebase_id_token,
+                session_id=session_id,
+                timeout_s=_DISPATCH_TIMEOUT_S,
+            )
+        except ReauthorizationRequired:
+            return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
+        except Exception as exc:
+            logger.warn(
+                "research_dispatch: deliver database create failed",
+                {"user_id": uid, "session_id": session_id, "error": str(exc)},
+            )
+            return ResearchDispatchResult(
+                spoken_confirmation="I couldn't create that database in Notion - try again?"
+            )
+    else:
+        resolved: dict | None = None
+        if not confirmed_data_source_id:
+            try:
+                resolved = await resolve_spoken_destination(
+                    destination=destination,
+                    firebase_id_token=firebase_id_token,
+                    session_id=session_id,
+                    timeout_s=_DISPATCH_TIMEOUT_S,
+                )
+            except ReauthorizationRequired:
+                return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
+            except Exception as exc:
+                logger.warn(
+                    "research_dispatch: deliver destination resolve failed",
+                    {"user_id": uid, "session_id": session_id, "error": str(exc)},
+                )
+                return ResearchDispatchResult(spoken_confirmation=_DELIVER_FAILURE_LINE)
+        decision = decide_destination(
+            resolved,
+            destination=destination,
+            confirmed_data_source_id=confirmed_data_source_id,
+            confirmed_database_name=confirmed_database_name,
+            copy=_DESTINATION_COPY,
+        )
+        if decision.question is not None:
+            return ResearchDispatchResult(
+                spoken_confirmation=decision.question,
+                candidates=decision.candidates,
+                proposed_create_name=decision.proposed_create_name,
+            )
+        data_source_id = decision.data_source_id
+        database_name = decision.database_name
+
+    if not data_source_id:
+        return ResearchDispatchResult(spoken_confirmation=_DELIVER_FAILURE_LINE)
+
+    resolved_name = database_name or "Notion"
+    try:
+        response = await _backend_request(
+            "POST",
+            f"/research/{run_id}/deliver",
+            firebase_id_token=firebase_id_token,
+            session_id=session_id,
+            json_body={
+                "data_source_id": data_source_id,
+                "database_name": resolved_name,
+                "correlation_id": f"voice:{session_id}",
+            },
+        )
+    except Exception as exc:
+        logger.warn(
+            "research_dispatch: deliver request failed",
+            {"session_id": session_id, "run_id": run_id, "error": str(exc)},
+        )
+        return ResearchDispatchResult(spoken_confirmation=_DELIVER_FAILURE_LINE)
+
+    if response.status_code != 200:
+        # The engine names its refusals; each one is a different true sentence, and
+        # the wrong one here is Buddy promising a save that will never happen.
+        reason = ""
+        try:
+            reason = str((response.json() or {}).get("error") or "")
+        except Exception:
+            reason = ""
+        logger.info(
+            "research_dispatch: deliver refused",
+            {
+                "session_id": session_id,
+                "run_id": run_id,
+                "status": response.status_code,
+                "reason": reason,
+            },
+        )
+        return ResearchDispatchResult(
+            spoken_confirmation=_DELIVER_REFUSALS.get(reason, _DELIVER_FAILURE_LINE)
+        )
+
+    return ResearchDispatchResult(
+        spoken_confirmation=f"Saving that research into {resolved_name} now.",
+        dispatched=True,
+        run_id=run_id,
+        database_name=resolved_name,
+    )
+
+
 async def cancel_research_run(
     *, session_id: str, firebase_id_token: str, run_id: str
 ) -> bool:
@@ -339,6 +496,69 @@ async def answer_research_run(
     return response.status_code == 200
 
 
+async def fetch_resumable_research_runs(
+    *,
+    session_id: str,
+    firebase_id_token: str,
+) -> list[tuple[str, str, str]]:
+    """(run_id, database_name, request) for the user's live Notion-bound runs.
+
+    Session-start rehydration: a user who hung up mid-run and came back had no
+    narrator tracking the run, so the "saved to X" receipt never fired for
+    them. Newest first, capped by the list route's own limit. Only runs WITH a
+    delivery binding are returned - the narrator exists to receipt Notion-bound
+    work, and tracking an unbound run would misreport it at terminal. [] on any
+    failure: rehydration is best-effort and a failed read must cost nothing.
+    """
+    try:
+        response = await _backend_request(
+            "GET",
+            "/research?limit=10",
+            firebase_id_token=firebase_id_token,
+            session_id=session_id,
+            timeout_s=_POLL_TIMEOUT_S,
+        )
+    except Exception as exc:
+        logger.warn(
+            "research_dispatch: rehydration list failed",
+            {"session_id": session_id, "error": str(exc)},
+        )
+        return []
+    if response.status_code != 200:
+        return []
+    try:
+        items = list((response.json() or {}).get("items") or [])
+    except Exception:
+        return []
+    now = datetime.now(timezone.utc)
+    runs: list[tuple[str, str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("state") or "") in _RESULT_TERMINAL_STATES:
+            continue
+        delivery = dict(item.get("delivery") or {})
+        run_id = str(item.get("run_id") or "")
+        if not delivery or not run_id:
+            continue
+        updated_raw = str(item.get("updated_at") or "")
+        if updated_raw:
+            try:
+                updated_at = datetime.fromisoformat(updated_raw)
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                if now - updated_at > _REHYDRATE_MAX_AGE:
+                    continue
+            except ValueError:
+                pass  # unparseable timestamps do not disqualify a live state
+        runs.append((
+            run_id,
+            str(delivery.get("database_name") or "your Notion"),
+            str(item.get("request") or ""),
+        ))
+    return runs
+
+
 @dataclass(slots=True)
 class PendingVoiceQuestion:
     run_id: str
@@ -373,6 +593,15 @@ class RunNarrator:
         # run_id -> last narrated state_revision
         self._revisions: dict[str, int] = {}
         self._active_runs: dict[str, str] = {}  # run_id -> database_name
+        # run_id -> the request text captured at track(), so the disambiguation
+        # question ("which one - X or Y?") can name runs the way the user did.
+        self._descriptions: dict[str, str] = {}
+        # run_id -> monotonic time of the last observed revision advance, and
+        # the runs that already got their one stall note. One note per run:
+        # a genuinely stuck run has its own retry deadline server-side, and
+        # repeating "still slow" every three minutes is nagging, not news.
+        self._last_advance_at: dict[str, float] = {}
+        self._stall_noted: set[str] = set()
         # run_id -> consecutive failed polls; a run that never answers is
         # evicted so a corpse does not get polled every 10s for the session.
         self._poll_failures: dict[str, int] = {}
@@ -386,11 +615,21 @@ class RunNarrator:
     def active_run_ids(self) -> list[str]:
         return list(self._active_runs)
 
-    def track(self, run_id: str, database_name: str) -> None:
+    def run_descriptions(self) -> dict[str, str]:
+        """Active run_id -> the request text it was tracked with ("" if unknown)."""
+        return {
+            run_id: self._descriptions.get(run_id, "")
+            for run_id in self._active_runs
+        }
+
+    def track(self, run_id: str, database_name: str, description: str = "") -> None:
         if self._closed or not run_id:
             return
         self._active_runs[run_id] = database_name
         self._revisions.setdefault(run_id, -1)
+        if description:
+            self._descriptions.setdefault(run_id, description)
+        self._last_advance_at.setdefault(run_id, time.monotonic())
         self._wake.set()
         if self._task is None:
             self._task = asyncio.create_task(
@@ -401,6 +640,9 @@ class RunNarrator:
         self._active_runs.pop(run_id, None)
         self._poll_failures.pop(run_id, None)
         self._delivery_waits.pop(run_id, None)
+        self._descriptions.pop(run_id, None)
+        self._last_advance_at.pop(run_id, None)
+        self._stall_noted.discard(run_id)
         if self.pending_question and self.pending_question.run_id == run_id:
             self.pending_question = None
 
@@ -474,15 +716,56 @@ class RunNarrator:
             projection = response.json()
             revision = int(projection.get("state_revision") or 0)
             if revision <= self._revisions.get(run_id, -1):
+                await self._maybe_note_stall(run_id)
                 continue
+            self._last_advance_at[run_id] = time.monotonic()
             self._revisions[run_id] = revision
             await self._narrate(run_id, projection)
+
+    def _spoken_run_name(self, run_id: str) -> str:
+        """"the research on <request>" when a description exists, else generic.
+
+        Naming the run matters the moment two are live: on 2026-09-09 an
+        unnamed "research could not be completed" line was followed, one turn
+        later, by the model denying that any research it knew about had
+        failed. The request text is spoken as data, never matched on.
+        """
+        description = " ".join(self._descriptions.get(run_id, "").split())[:80]
+        if description:
+            return f"the research on {description}"
+        return "the background research"
+
+    async def _maybe_note_stall(self, run_id: str) -> None:
+        """One "taking longer than usual" note per run whose revision stalls.
+
+        Marked noted only after the note was actually spoken: _speak suppresses
+        non-urgent lines during ownership handoffs and inside the narration
+        gap, and a suppressed note must retry on a later poll rather than be
+        silently spent.
+        """
+        if run_id in self._stall_noted:
+            return
+        last_advance = self._last_advance_at.get(run_id)
+        if last_advance is None:
+            return
+        if (time.monotonic() - last_advance) < _STALL_NOTE_AFTER_S:
+            return
+        spoke = await self._speak(
+            f"Tell the user briefly, in your own words: {self._spoken_run_name(run_id)} "
+            "is still working, just taking longer than usual.",
+            urgent=False,
+        )
+        if spoke:
+            self._stall_noted.add(run_id)
 
     async def _narrate(self, run_id: str, projection: dict) -> None:
         state = str(projection.get("state") or "")
         database_name = self._active_runs.get(run_id) or str(
             (projection.get("delivery") or {}).get("database_name") or "your Notion"
         )
+        # Captured BEFORE the terminal branch's forget(), which evicts the
+        # description this is built from.
+        run_name = self._spoken_run_name(run_id)
 
         if state == "awaiting_clarification":
             pending = dict(projection.get("pending_question") or {})
@@ -500,7 +783,7 @@ class RunNarrator:
                 f"option {index + 1}: {choice}" for index, choice in enumerate(choices)
             )
             await self._speak(
-                "The background research hit a question and is paused on it. "
+                f"{run_name[:1].upper()}{run_name[1:]} hit a question and is paused on it. "
                 f"Ask the user, in your own words: {question_text}"
                 + (f" The options are {numbered}." if numbered else "")
                 + " They can answer, or say to just use your best judgment.",
@@ -508,7 +791,7 @@ class RunNarrator:
             )
             return
 
-        if state in ("ready", "partial", "failed", "cancelled"):
+        if state in _RESULT_TERMINAL_STATES:
             delivery_result = dict(projection.get("delivery_result") or {})
             if (
                 state in ("ready", "partial")
@@ -531,58 +814,83 @@ class RunNarrator:
             self.forget(run_id)
             if state == "cancelled":
                 return  # the user did this; telling them is noise
+            binding = ""
             if delivery_result.get("page_id"):
                 line = (
-                    f"The research is done and saved to {database_name} in their Notion"
+                    f"{run_name[:1].upper()}{run_name[1:]} is done and saved to "
+                    f"{database_name} in their Notion"
                     + (" with some gaps noted" if state == "partial" else "")
                     + "."
                 )
             elif state == "failed":
-                line = "The background research could not be completed. The details are in the app."
+                line = (
+                    f"{run_name[:1].upper()}{run_name[1:]} could not be completed. "
+                    "The details are in the app."
+                )
+                # The sentence whose absence produced the 2026-09-09 denial:
+                # one turn after this receipt, the model claimed no research
+                # had failed, holding only stale "started" envelopes.
+                binding = (
+                    " Only this one failed: do not claim any other research "
+                    "run failed, and do not say this one is still running."
+                )
             elif not delivery_result:
                 # No delivery receipt AND no failure entry: the run went
                 # terminal on a path that never reached the deliver stage
                 # (e.g. a fail-derived partial). Saying "saving failed" here
                 # would blame Notion for an attempt that never happened.
                 line = (
-                    "The research finished with partial results - the brief is in the app."
+                    f"{run_name[:1].upper()}{run_name[1:]} finished with partial "
+                    "results - the brief is in the app."
                 )
             else:
                 line = (
-                    "The research finished, but saving it to Notion failed - "
-                    "the brief is in the app."
+                    f"{run_name[:1].upper()}{run_name[1:]} finished, but saving it "
+                    "to Notion failed - the brief is in the app."
                 )
             await self._speak(
-                f"Tell the user briefly, in your own words: {line}", urgent=True
+                f"Tell the user briefly, in your own words: {line}{binding}",
+                urgent=True,
             )
             return
 
-        label = _STATE_LABELS.get(state)
-        if label is None:
-            return
-        source_count = int(projection.get("source_count") or 0)
-        detail = f", {source_count} sources so far" if source_count else ""
+        # Routine state advances (planning, searching, reading, ...) are
+        # deliberately not narrated. Checkpoint policy: the clarification and
+        # terminal branches above, plus the stall note in _poll_once, are the
+        # only interruptions a healthy run earns.
+
+    async def announce(self, line: str) -> None:
+        """Speak a receipt for an action whose own turn was cancelled.
+
+        A user barging in mid-dispatch cancels the reply generation, but the
+        write is shielded and still lands, so the run really did start and the
+        turn that would have said so is gone. Without this the user is never
+        told about work they authorized and are paying for. Routed through the
+        same boundary-waiting path as progress narration, so it can never talk
+        over them.
+        """
         await self._speak(
-            "Give the user a one-sentence progress note in your own words: "
-            f"the background research is {label}{detail}.",
-            urgent=False,
+            f"Tell the user briefly, in your own words: {line}", urgent=True
         )
 
-    async def _speak(self, instructions: str, *, urgent: bool) -> None:
+    async def _speak(self, instructions: str, *, urgent: bool) -> bool:
+        """True only when the narration was actually generated, so callers with
+        one-shot notes (the stall note) can retry a suppressed line later."""
         if self._closed:
-            return
+            return False
         if not urgent and (time.monotonic() - self._last_spoken_at) < _MIN_NARRATION_GAP_S:
-            return
+            return False
         if not buddy_owns_conversation(self._session):
-            return
+            return False
         # A proactive nudge must never talk over the user; wait out both sides.
         await await_turn_boundary(self._session, require_user_idle=True)
         if self._closed or not buddy_owns_conversation(self._session):
-            return
+            return False
         try:
             speech = self._session.generate_reply(instructions=instructions)
             await speech
             self._last_spoken_at = time.monotonic()
+            return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -590,3 +898,4 @@ class RunNarrator:
                 "research_narrator: narration failed",
                 {"session_id": self._session_id, "error": str(exc)},
             )
+            return False

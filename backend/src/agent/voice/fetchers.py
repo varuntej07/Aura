@@ -16,6 +16,7 @@ from ...services.chat_completion.handoff_store import read_handoff_turns
 from ...services.firebase import admin_firestore
 from ...services.memory import graph_fields as GF
 from ...services.memory.salience import normalized_graph_salience
+from ...services.safety.age_band import resolve_age_band
 from ...services.user_aura_schema import interest_prompt_lines
 from .text_sanitizer import sanitize_for_speech
 
@@ -45,6 +46,11 @@ async def fetch_user_profile(user_id: str) -> dict[str, str]:
             "name": (data.get("display_name") or data.get("name") or "").strip() or "there",
             "timezone": (data.get("timezone") or "UTC").strip() or "UTC",
             "voice_id": str(settings.get("tts_voice_id") or "").strip(),
+            # Derived here rather than in a second read: this call already holds
+            # the whole user document, and the session gather it belongs to runs
+            # under a hard 1.5s ceiling that a separate round trip would eat
+            # into. Stored as a string because this projection is a dict[str, str].
+            "age_band": resolve_age_band(data).band.value,
         }
     return await asyncio.to_thread(_read)
 
