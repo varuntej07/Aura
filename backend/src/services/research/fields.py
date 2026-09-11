@@ -164,6 +164,12 @@ CREDIT_WEIGHT = "credit_weight"
 # the receipt, never the intent, so "saved" is only ever claimed after proof.
 DELIVERY = "delivery"
 DELIVERY_RESULT = "delivery_result"
+# Set at create time when the caller intends a Notion destination but has not
+# settled which one yet, so research can start while the user is still being
+# asked. Carries only the spoken hint, never an id: it is an intent marker, not
+# a binding. A later /deliver writes DELIVERY, which stays immutable as before.
+# Rehydration reads this to re-offer the question in the next session.
+DELIVERY_REQUESTED = "delivery_requested"
 BRIEF = "brief"
 GAPS = "gaps"
 EVIDENCE_AS_OF = "evidence_as_of"

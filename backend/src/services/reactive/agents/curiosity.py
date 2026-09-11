@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from ....lib.logger import logger
 from ....prompts import (
     ACCOUNTABILITY_JUDGE_SYSTEM_PROMPT,
+    THREAD_FRAMER_REPLAN_FEEDBACK_PREFIX,
     THREAD_FRAMER_REPLAN_INSTRUCTION,
     THREAD_FRAMER_SYSTEM_PROMPT,
     accountability_judge_user_prompt,
@@ -101,6 +102,7 @@ async def _judge_accountability_voice(body: str) -> tuple[bool, str]:
                 system=ACCOUNTABILITY_JUDGE_SYSTEM_PROMPT,
                 response_model=_AccountabilityVoiceJudgment,
                 temperature=0.0,
+                attempt_timeout_s=1.5,
             ),
             timeout=_ACCOUNTABILITY_JUDGE_TIMEOUT_S,
         )
@@ -249,7 +251,11 @@ class CuriosityThreadFollowUpAgent:
                 thread=cp.thread,
                 framing_ctx=cp.framing_ctx,
                 local_date=cp.local_date,
-                extra_instruction=cp.extra_instruction + THREAD_FRAMER_REPLAN_INSTRUCTION,
+                extra_instruction=(
+                    cp.extra_instruction + THREAD_FRAMER_REPLAN_INSTRUCTION
+                    + THREAD_FRAMER_REPLAN_FEEDBACK_PREFIX
+                    + json.dumps({"reason": verdict.reason, "detail": verdict.detail})
+                ),
             ))
         # EMPTY / anything else: nothing useful to broaden for a single-thread frame.
         return None

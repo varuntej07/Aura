@@ -146,6 +146,45 @@ def may_run_post_terminal(
     return False
 
 
+def finalize_successor(run: dict[str, object]) -> str:
+    """Which stage follows finalize for THIS run document.
+
+    Pure, and called from inside the advance transaction rather than from
+    finalize's own body. finalize reads the run outside any transaction, so a
+    destination bound while the run was still working could land between that
+    read and the commit, and the run would go down the notify path with a
+    delivery binding nobody ever acted on.
+    """
+    return F.STAGE_NOTION_DELIVER if run.get(F.DELIVERY) else F.STAGE_NOTIFY_RESULT
+
+
+def may_bind_delivery_now(
+    run: dict[str, object], *, deletion_active: bool = False
+) -> str:
+    """Whether a Notion destination may be bound to this run, and how.
+
+    Returns "bind_now" (the run is result-terminal, so the delivery stage is
+    created immediately), "bind_pending" (the run is still working, so only the
+    binding is recorded and finalize picks it up), or "refuse:<reason>".
+
+    A still-working run used to be refused outright, which is what forced the
+    voice side to settle Notion BEFORE starting research: the user had to answer
+    a database question before any work could begin, and an unanswered question
+    meant no run at all.
+    """
+    if run.get(F.CANCEL_REQUESTED_AT):
+        return "refuse:not_deliverable"
+    if str(run.get(F.DELETION_STATE) or "") or deletion_active:
+        return "refuse:not_deliverable"
+    if may_run_post_terminal(F.STAGE_NOTION_DELIVER, run, deletion_active=deletion_active):
+        return "bind_now"
+    if str(run.get(F.STATE) or "") in F.TERMINAL_STATES:
+        # Terminal but not deliverable: failed or cancelled. There is no brief
+        # to write, and no later stage will create one.
+        return "refuse:not_deliverable"
+    return "bind_pending"
+
+
 def get_stage(stage_kind: str) -> StageFn:
     """Resolve one stage body, or raise. Never falls back to a default."""
     try:

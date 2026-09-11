@@ -316,6 +316,7 @@ class FirestoreResearchEngine:
         self, uid: str, spec: dict[str, Any], *, client_run_id: str
     ) -> RunHandle:
         delivery_spec = spec.get("delivery")
+        requested_spec = spec.get("delivery_requested")
         creation = await store.create_run(
             uid,
             client_run_id=client_run_id,
@@ -324,6 +325,9 @@ class FirestoreResearchEngine:
             origin_surface=str(spec.get("origin_surface", "dashboard")),
             correlation_id=str(spec.get("correlation_id", "")),
             delivery=dict(delivery_spec) if isinstance(delivery_spec, dict) else None,
+            delivery_requested=(
+                dict(requested_spec) if isinstance(requested_spec, dict) else None
+            ),
         )
         # A replayed creation has already been delivered once; re-dispatching is safe
         # (dispatch_job skips a fresh in-flight row) but pointless, so skip it.
@@ -385,16 +389,28 @@ class FirestoreResearchEngine:
                 await self._deliver(uid, (admission.first_stage_id,))
             return await self.status(uid, run_id)
         if kind == "deliver":
-            # Late-bind a Notion destination onto a run that finished without one, and
-            # dispatch the delivery immediately. store.bind_delivery owns every
+            # Late-bind a Notion destination onto a run, and dispatch the delivery
+            # immediately when there is one to dispatch. store.bind_delivery owns every
             # precondition, including the one that keeps an already-bound destination
-            # immutable, so this branch only has to dispatch what it reserved.
+            # immutable, so this branch only has to dispatch what it reserved. A run
+            # that is STILL WORKING binds with no stage_id: the destination is recorded
+            # and finalize creates the delivery stage, so there is nothing to deliver
+            # here yet.
             bound, reason, stage_id = await store.bind_delivery(
                 uid,
                 run_id,
                 delivery={
                     "data_source_id": str(signal.get("data_source_id", "")),
                     "database_name": str(signal.get("database_name", "")),
+                    # Present only when the user named a database that does not
+                    # exist yet. The deliver stage creates it under its own
+                    # receipt, so the binding stays immutable and a retry cannot
+                    # mint a second database.
+                    **(
+                        {"create_database_named": str(signal["create_database_named"])}
+                        if signal.get("create_database_named")
+                        else {}
+                    ),
                 },
                 correlation_id=str(signal.get("correlation_id", "")),
             )
@@ -407,7 +423,8 @@ class FirestoreResearchEngine:
                     {"user_id": uid, "run_id": run_id, "reason": reason},
                 )
                 raise ValueError(reason or "delivery_refused")
-            await self._deliver(uid, (stage_id,))
+            if stage_id:
+                await self._deliver(uid, (stage_id,))
             return await self.status(uid, run_id)
         if kind == "delete":
             from . import deletion as deletion_mod

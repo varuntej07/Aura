@@ -266,13 +266,8 @@ async def frame_notification(
             system=system_prompt,
             response_model=FramedNotification,
             temperature=0.6,
-            # Tell the provider the clock it is actually running against. The
-            # delivery caller wraps this in a 10s wait_for, but without this the
-            # chain budgets _TIMEOUT_S (90s) per attempt and skips bounded
-            # backoff, so one slow model eats the whole budget on attempt one and
-            # the fallbacks never get a turn. One second of headroom leaves the
-            # outer wait_for as the backstop rather than the primary cutoff.
-            attempt_timeout_s=_DELIVERY_FRAME_TIMEOUT_S - 1.0,
+            # Reserve time for all three providers inside the delivery deadline.
+            attempt_timeout_s=(_DELIVERY_FRAME_TIMEOUT_S - 1.0) / 3,
         )
         framed = cast(FramedNotification, result)
         return _normalise(framed, candidate, breaking_news=breaking_news)

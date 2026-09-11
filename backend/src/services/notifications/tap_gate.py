@@ -165,7 +165,8 @@ async def passes(proposal: NotificationProposal) -> tuple[bool, str]:
     try:
         raw = await asyncio.wait_for(
             get_model_provider().cheap(
-                prompt, system=TAP_GATE_SYSTEM_PROMPT, temperature=0.0
+                prompt, system=TAP_GATE_SYSTEM_PROMPT, temperature=0.0,
+                attempt_timeout_s=4.0,
             ),
             timeout=_TAP_GATE_TIMEOUT_S,
         )

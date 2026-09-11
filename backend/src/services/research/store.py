@@ -32,7 +32,7 @@ import asyncio
 import hashlib
 import random
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -718,6 +718,7 @@ async def create_run(
     origin_surface: str = "dashboard",
     correlation_id: str = "",
     delivery: dict[str, str] | None = None,
+    delivery_requested: dict[str, str] | None = None,
 ) -> RunCreation:
     """Create a draft run and its scope-check job, idempotently. Debits NO credit.
 
@@ -725,6 +726,11 @@ async def create_run(
     spoken words, and is immutable afterwards: changing the destination is a
     new run, never an edit. finalize routes a run holding it through the
     notion_deliver stage instead of straight to notify_result.
+
+    ``delivery_requested`` is the other half: the caller wants Notion but has
+    not settled WHICH database, so the run starts now and the destination is
+    bound by a later /deliver. It is an intent marker carrying only the spoken
+    hint, and it never decides where anything is written.
 
     Draft creation deliberately runs entitlement-free and credit-free. It exists so the
     user gets an acknowledgement in under a second and so the scope check itself
@@ -765,6 +771,11 @@ async def create_run(
                     F.PRESET: preset,
                     F.ORIGIN_SURFACE: origin_surface,
                     **({F.DELIVERY: dict(delivery)} if delivery else {}),
+                    **(
+                        {F.DELIVERY_REQUESTED: dict(delivery_requested)}
+                        if delivery_requested
+                        else {}
+                    ),
                     F.REQUEST_REVISION: 0,
                     F.CURRENT_PLAN_VERSION: 0,
                     F.ADMITTED_PLAN_VERSION: 0,
@@ -1897,6 +1908,26 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
             )
             _retire_outbox(txn, lease.uid, lease.stage_id, now_iso)
 
+            # The finalize successor is decided HERE, from the in-transaction read of
+            # the run, not from the read finalize's own body made outside any
+            # transaction. A Notion destination bound while the run was still working
+            # lands as a plain DELIVERY write with no job, so a stale successor would
+            # send a bound run down the notify path and nothing would ever deliver it.
+            next_jobs = tuple(result.next_jobs)
+            if (
+                lease.stage_kind == F.STAGE_FINALIZE
+                and result.kind is StageResultKind.TERMINAL
+            ):
+                from .stages.registry import finalize_successor
+
+                successor = finalize_successor(run)
+                next_jobs = tuple(
+                    replace(job, stage_kind=successor)
+                    if job.stage_kind in (F.STAGE_NOTION_DELIVER, F.STAGE_NOTIFY_RESULT)
+                    else job
+                    for job in next_jobs
+                )
+
             run_updates: dict[str, Any] = dict(result.run_updates)
             run_updates.update(
                 {
@@ -1955,8 +1986,8 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
                 # transition here would let a phase-four regression hide behind a green
                 # phase-two inspection.
                 run_updates[F.PROCESSING_STAGE] = lease.stage_kind
-            elif result.next_jobs:
-                run_updates[F.PROCESSING_STAGE] = result.next_jobs[0].stage_kind
+            elif next_jobs:
+                run_updates[F.PROCESSING_STAGE] = next_jobs[0].stage_kind
             txn.update(run_ref, run_updates)
 
             # Updates to documents that already exist (a source row the search wave
@@ -1986,9 +2017,7 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
                 # Deriving it from lease.wave + 1 instead would silently disagree with a
                 # child that names its own wave, and complete_child would then look for
                 # a coordinator that does not exist, so the join could never fire.
-                child_wave = (
-                    result.next_jobs[0].wave if result.next_jobs else lease.wave + 1
-                )
+                child_wave = next_jobs[0].wave if next_jobs else lease.wave + 1
                 wave_id = f"w{child_wave}"
                 join_job_id = stage_id_for(F.STAGE_READ_JOIN, lease.run_id, child_wave)
                 _txn_create(
@@ -2009,7 +2038,7 @@ async def advance(lease: StageLease, result: StageResult) -> AdvanceOutcome:
                 )
 
             created: list[str] = list(clarify_notify_created)
-            for job in result.next_jobs:
+            for job in next_jobs:
                 next_stage_id = stage_id_for(
                     job.stage_kind, lease.run_id, job.wave, job.ordinal
                 )
@@ -2612,7 +2641,7 @@ async def bind_delivery(
     def _run() -> tuple[bool, str, str]:
         # Imported inside the function: registry imports the stage modules, which
         # import this module, so a module-level import would close the cycle.
-        from .stages.registry import may_run_post_terminal
+        from .stages.registry import may_bind_delivery_now
 
         db = admin_firestore()
         run_ref = _run_ref(uid, run_id)
@@ -2647,19 +2676,19 @@ async def bind_delivery(
             if not snap.exists:
                 return _refuse("not_found", {})
             run = snap.to_dict() or {}
-            if run.get(F.DELIVERY):
+            existing = dict(run.get(F.DELIVERY) or {})
+            if existing:
+                if existing == dict(delivery):
+                    # The identical binding arriving twice is a retry, not a
+                    # conflict. Refusing it made a dropped response look like a
+                    # failure to the caller, which then told the user their
+                    # research was not going to Notion when it already was.
+                    return True, "already_bound_same", ""
                 return _refuse("already_bound", run)
             deletion_active = _deletion_active(_read_deletion_receipt(txn, uid, run_id))
-            if not may_run_post_terminal(
-                F.STAGE_NOTION_DELIVER, run, deletion_active=deletion_active
-            ):
-                # Distinguished so the caller can say "it is still running" rather
-                # than the generic refusal a user cannot act on.
-                state = str(run.get(F.STATE) or "")
-                return _refuse(
-                    "still_running" if state not in F.TERMINAL_STATES else "not_deliverable",
-                    run,
-                )
+            decision = may_bind_delivery_now(run, deletion_active=deletion_active)
+            if decision.startswith("refuse"):
+                return _refuse(decision.split(":", 1)[-1] or "not_deliverable", run)
 
             wave = int(run.get(F.WAVE, 0) or 0)
             expires_at = str(run.get(F.EXPIRES_AT, ""))
@@ -2668,6 +2697,45 @@ async def bind_delivery(
             # with it and abort on _txn_create.
             stage_id = stage_id_for(F.STAGE_NOTION_DELIVER, run_id, wave, "rebind")
             sequence = int(run.get(F.AUDIT_SEQUENCE, 0)) + 1
+            if decision == "bind_pending":
+                # The run is still working. Record the destination and create NO
+                # job: finalize's successor is chosen from this same run document
+                # inside the advance transaction, and Firestore orders the two
+                # transactions on that document, so exactly one of them creates
+                # the delivery stage. This is what lets research start before the
+                # user has decided where the results go.
+                txn.update(
+                    run_ref,
+                    {
+                        F.DELIVERY: dict(delivery),
+                        F.AUDIT_SEQUENCE: sequence,
+                        F.UPDATED_AT: now_iso,
+                    },
+                )
+                _audit_event(
+                    txn,
+                    uid=uid,
+                    run_id=run_id,
+                    sequence=sequence,
+                    event_type="delivery_bound_pending",
+                    occurred_at=now_iso,
+                    expires_at=expires_at,
+                    prior_state=str(run.get(F.STATE) or ""),
+                    next_state=str(run.get(F.STATE) or ""),
+                    reason_code="",
+                    correlation_id=correlation_id,
+                )
+                logger.info(
+                    "research.store: delivery bound while running",
+                    {
+                        "uid": uid,
+                        "run_id": run_id,
+                        "state": str(run.get(F.STATE) or ""),
+                        "database_name": delivery.get("database_name", ""),
+                        "correlation_id": correlation_id,
+                    },
+                )
+                return True, "bound_pending", ""
             txn.update(
                 run_ref,
                 {
