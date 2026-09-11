@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # Deepgram STT
     DEEPGRAM_API_KEY: str = ""
 
+    # Meta Model API, server-side meeting transcription only.
+    MODEL_API_KEY: str = ""
+
     # Cartesia TTS
     CARTESIA_API_KEY: str = ""
 
@@ -145,7 +148,12 @@ class Settings(BaseSettings):
     # frontier providers'); Haiku keeps the fallback leg, where its per-session
     # prompt cache stays warm. Groq models have no vision: a screen_sight turn
     # skips them and runs the fallback chain (see interview_companion handler).
-    INTERVIEW_ANSWER_PRIMARY_MODEL: str = "moonshotai/kimi-k2-instruct"
+    # gpt-oss-120b replaced kimi-k2-instruct on 2026-09-11: Groq retired every
+    # Kimi id (404 model_not_found on each probe), so every interview turn had
+    # been silently riding the Haiku fallback. Probed at 0.35-0.75s for a full
+    # 60-token answer with reasoning_effort=low; the model reasons before it
+    # writes, so model_provider's groq leg sets that effort for gpt-oss ids.
+    INTERVIEW_ANSWER_PRIMARY_MODEL: str = "openai/gpt-oss-120b"
     INTERVIEW_ANSWER_FALLBACK_MODEL: str = "claude-haiku-4-5-20251001"
     INTERVIEW_ANSWER_FIRST_TOKEN_TIMEOUT_S: float = 2.0
     # Sized for full spoken-script answers, which are longer than the keyword

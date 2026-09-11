@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from google.api_core.exceptions import Aborted
 
 from ..lib.logger import logger
 from ..services.entitlement import EntitlementUnavailableError, get_user_effective_tier
@@ -1053,13 +1054,16 @@ async def handle_internal_synthesize(request: Request) -> JSONResponse:
 
     try:
         status = await synthesis.run_synthesis(user_id, meeting_id, job_id=job_id)
-    except synthesis.SynthesisLeaseBusyError:
+    except (synthesis.SynthesisLeaseBusyError, Aborted):
         # Cloud Tasks can deliver the same job more than once. A current worker
         # still owns this lease (or lost it while finishing), so keep the
         # delivery retryable without turning expected contention into an
         # unhandled application error. Cloud Tasks retries every non-2xx
         # response; 409 expresses this job-scoped conflict without signaling
         # queue-wide overload via 429/503.
+        # Firestore's transaction decorator retries commit conflicts, but an
+        # Aborted raised during a transactional read escapes that retry loop.
+        # Redelivering the task restarts the whole fenced transaction safely.
         logger.info(
             "meetings.synthesis: delivery deferred, lease busy",
             {

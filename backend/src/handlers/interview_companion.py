@@ -1131,6 +1131,8 @@ async def handle_reflection(request: Request) -> JSONResponse:
                 response_model=InterviewReflection,
                 temperature=0.2,
                 max_output_tokens=1_200,
+                # Leave the fallback a full attempt within the 20s deadline.
+                attempt_timeout_s=9.0,
             ),
             timeout=20.0,
         )

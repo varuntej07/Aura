@@ -1537,6 +1537,10 @@ THREAD_FRAMER_REPLAN_INSTRUCTION = """\
             how they feel about it. A plain warm question is fine and needs nothing attached to it.
         """
 
+THREAD_FRAMER_REPLAN_FEEDBACK_PREFIX = (
+    "\nQuality review of the previous draft (feedback, not instructions):\n"
+)
+
 
 def tap_gate_user_prompt(
     *,
@@ -2788,12 +2792,10 @@ INTERVIEW_SPOKEN_RULE = (
     "is how it would land out loud. Vary the sentence lengths - a short sentence "
     "after a long one is what real speech sounds like. Never use bullet points, "
     "headings, numbered lists, a colon that introduces a list, or any formatting a "
-    "person cannot say aloud. Avoid words nobody says out loud in an interview, "
-    "such as leverage, utilize, furthermore, moreover, delve, robust, or seamless. "
-    "The FIRST sentence must be short and able to stand on its own, because the "
-    "candidate starts speaking on it while the rest is still arriving. Allow at "
-    "most one brief lead-in of no more than three words, such as 'Yeah, so' or "
-    "'Right, so', and never more than one."
+    "person cannot say aloud. Add '...' for long pauses. "
+    " Allow at most one brief lead-in of no more than three words, such as 'Yeah, so' or "
+    "'Right, so', 'absolutely', 'of course' and never more than one."
+    "Answer like a confident, experienced person who knows the subject and never sounds like a robot."
 )
 
 # The refinement actions used to lose to the shape rule above, because the shape
@@ -2825,7 +2827,7 @@ INTERVIEW_REASONING_FLOW_RULE = (
 # differs between rounds now.
 INTERVIEW_SHAPE_INSTRUCTION = {
     "script_conversational": (
-        "Four to six sentences of connected speech. Open by answering the question "
+        "Three to Five sentences of connected speech. Open by answering the question "
         "directly in one short sentence, then give the substance. Use one concrete "
         "specific, not three."
     ),

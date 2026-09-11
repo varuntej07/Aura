@@ -529,6 +529,7 @@ class ModelProvider:
         response_model: type[T] | None = None,
         temperature: float = 0.5,
         max_output_tokens: int | None = None,
+        attempt_timeout_s: float | None = None,
     ) -> str | T:
         """Mid-tier reasoning. Use for: tool-calling background tasks, structured
         output that needs mild reasoning. Currently routes to Claude Haiku.
@@ -540,18 +541,27 @@ class ModelProvider:
         logger.debug("ModelProvider.balanced", {
             "model": model_id, "prompt_len": len(prompt), "images": len(images or []),
         })
-        return await self._call(
-            model_id=model_id,
-            fallback_chain=[settings.TIER_BALANCED_FALLBACK],
-            caller="balanced",
-            prompt=prompt,
-            system=system,
-            tools=tools,
-            images=images,
-            response_model=response_model,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
+        timeout_token = (
+            _attempt_timeout.set(float(attempt_timeout_s))
+            if attempt_timeout_s is not None
+            else None
         )
+        try:
+            return await self._call(
+                model_id=model_id,
+                fallback_chain=[settings.TIER_BALANCED_FALLBACK],
+                caller="balanced",
+                prompt=prompt,
+                system=system,
+                tools=tools,
+                images=images,
+                response_model=response_model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
+        finally:
+            if timeout_token is not None:
+                _attempt_timeout.reset(timeout_token)
 
     async def stream_text(
         self,
@@ -698,13 +708,17 @@ class ModelProvider:
 
         if provider == "groq":
             # OpenAI-compatible surface on Groq's endpoint. No cache_control
-            # markers and no reasoning_effort: kimi/llama ids reject the OpenAI
-            # parameter, and Groq prefill is fast enough that re-sending the
+            # markers, and Groq prefill is fast enough that re-sending the
             # stable prefix per turn costs little. Same ordering rule as the
             # legs above so any provider-side prefix caching sees an identical
             # head. Vision is unsupported here; callers route image turns to a
             # vision-capable model (the interview handler filters Groq ids out
             # of its chain when a screen frame is attached).
+            #
+            # reasoning_effort only for gpt-oss ids: they reason before the
+            # first visible token, and at the default effort that burst is most
+            # of the TTFT this leg exists to cut. Other Groq ids (llama, and the
+            # kimi ids before Groq retired them) reject the parameter outright.
             if images:
                 recording.finish(success=False, error_type="NotImplementedError")
                 _emit_usage(model_id, None)
@@ -716,6 +730,9 @@ class ModelProvider:
             if effective_system:
                 messages.append({"role": "system", "content": effective_system})
             messages.append({"role": "user", "content": prompt})
+            groq_kwargs: dict[str, Any] = {}
+            if model_id.startswith("openai/gpt-oss"):
+                groq_kwargs["reasoning_effort"] = "low"
             raw_usage = None
             try:
                 stream = await self._get_groq_client().chat.completions.create(
@@ -725,6 +742,7 @@ class ModelProvider:
                     max_completion_tokens=max(1, int(max_output_tokens or 2048)),
                     stream=True,
                     stream_options={"include_usage": True},
+                    **groq_kwargs,
                 )
                 async for chunk in stream:
                     usage = getattr(chunk, "usage", None)
@@ -817,9 +835,14 @@ class ModelProvider:
         except BaseException as exc:
             recording.finish(success=False, error_type=type(exc).__name__)
             raise
-        recording.finish(tokens=openai_usage_tokens(getattr(completion, "usage", None)))
         choices = getattr(completion, "choices", None) or []
         text = getattr(getattr(choices[0], "message", None), "content", None) if choices else None
+        usable = isinstance(text, str) and bool(text.strip())
+        recording.finish(
+            tokens=openai_usage_tokens(getattr(completion, "usage", None)),
+            success=usable,
+            error_type=None if usable else "EmptyPolishOutput",
+        )
         return text or ""
 
     async def expert(

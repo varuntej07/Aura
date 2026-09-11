@@ -22,7 +22,17 @@ from ...lib.logger import logger
 from ...prompts import MEETING_NOTE_SYSTEM_PROMPT
 from ..entitlement import get_user_effective_tier
 from ..model_provider import get_model_provider
-from . import deepgram, evidence, gcs_audio, notifications, openai_stt, quality, store, transcript
+from . import (
+    deepgram,
+    evidence,
+    gcs_audio,
+    muse,
+    notifications,
+    openai_stt,
+    quality,
+    store,
+    transcript,
+)
 from . import fields as F
 
 # One segment is 5 minutes; 3 in flight keeps a 4-hour meeting under ~10
@@ -344,7 +354,7 @@ async def _transcribe_segments(
     segments: list[dict[str, Any]],
     prior_attempts: dict[str, Any],
 ) -> tuple[list[transcript.SegmentTranscript], list[dict[str, Any]], bool]:
-    """Verify, transcribe (Deepgram primary, OpenAI fallback), and persist an
+    """Verify, transcribe (Muse, Deepgram, OpenAI), and persist an
     immutable attempt for every segment, resuming past segments that already
     succeeded on a prior job attempt.
 
@@ -356,6 +366,11 @@ async def _transcribe_segments(
     results: list[transcript.SegmentTranscript] = []
     attempt_pointers: list[dict[str, Any]] = []
     forced_english_attempted = False
+    meeting_vad_ms = sum(
+        int(row["audio_metrics"]["mic_vad_speech_ms"])
+        + int(row["audio_metrics"]["system_vad_speech_ms"])
+        for row in segments
+    )
     for segment in segments:
         seq = int(segment["seq"])
         prior = prior_attempts.get(str(seq)) or {}
@@ -391,10 +406,39 @@ async def _transcribe_segments(
             )
         try:
             try:
-                result = await deepgram.transcribe_segment(audio)
+                try:
+                    if meeting_vad_ms >= quality.TIMING_GATE_SPEECH_MS:
+                        # The public Muse batch contract has no word timestamps.
+                        # Avoid billing for output this policy cannot accept.
+                        raise muse.MuseOutputError("Muse lacks required word timing evidence")
+                    result = await muse.transcribe_segment(audio, segment_seq=seq)
+                    segment_vad_ms = int(segment["audio_metrics"]["mic_vad_speech_ms"]) + int(
+                        segment["audio_metrics"]["system_vad_speech_ms"]
+                    )
+                    if not result.utterances and segment_vad_ms >= quality.EMPTY_WITH_SPEECH_MS:
+                        raise muse.MuseOutputError("Muse returned empty output for energetic audio")
+                    for metric, count in (
+                        ("mic_vad_speech_ms", result.mic_words),
+                        ("system_vad_speech_ms", result.loopback_words),
+                    ):
+                        if (
+                            int(segment["audio_metrics"][metric]) >= quality.ONE_SIDED_SPEECH_MS
+                            and count < quality.ONE_SIDED_MIN_WORDS
+                        ):
+                            raise muse.MuseOutputError("Muse missed a speech-bearing channel")
+                except muse.MuseError as muse_exc:
+                    await _persist_provider_error(
+                        lease, seq=seq, segment=segment, error=muse_exc,
+                    )
+                    logger.warn(
+                        "meetings.synthesis: Muse unavailable or unusable, using Deepgram",
+                        {"meeting_id": lease.meeting_id, "seq": seq,
+                         "error_type": type(muse_exc).__name__},
+                    )
+                    result = await deepgram.transcribe_segment(audio)
             except deepgram.DeepgramError as exc:
                 logger.warn(
-                    "meetings.synthesis: primary STT failed, using OpenAI fallback",
+                    "meetings.synthesis: Deepgram failed, using OpenAI fallback",
                     {
                         "meeting_id": lease.meeting_id,
                         "capture_run_id": lease.capture_run_id,

@@ -431,10 +431,13 @@ async def handle_polish(request: Request) -> JSONResponse:
         # Type only, never the message: a protocol error can echo the request,
         # which carries both the key header and the transcript.
         logger.warn("dictation: polish call failed", {"error_type": type(exc).__name__})
-        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+        # Match Desktop's existing fallback without losing the caller's text or
+        # spending another provider attempt after its insertion deadline.
+        return no_store_json({"text": text})
 
     if not formatted.strip():
-        return JSONResponse({"error": "Formatting is unavailable."}, status_code=503)
+        logger.warn("dictation: empty polish output, preserving input", {})
+        return no_store_json({"text": text})
 
     return no_store_json({"text": formatted})
 

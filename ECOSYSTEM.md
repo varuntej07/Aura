@@ -217,6 +217,12 @@ releasing the desktop consumer: the previous desktop build carried a bundled
 on-device model and this one has nothing to fall back on. Dictation now
 requires a signed-in user and a network, which the on-device version did not.
 
+`POST /dictation/polish` preserves its no-store `{"text": str}` response. If
+the polishing provider fails or returns empty output, the backend returns the
+submitted text unchanged and records a warning without transcript content.
+This matches Desktop's existing raw-text fallback within the same insertion
+deadline; HTTP 200 means usable text, not proof that formatting was applied.
+
 ### 5c. Opt-in dictation training traces (desktop REST -> backend corpus)
 
 The `modelId` and `sherpaVersion` fields in the trace payload now carry the
