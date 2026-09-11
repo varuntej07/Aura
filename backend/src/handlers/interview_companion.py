@@ -768,7 +768,7 @@ async def _answer_deltas(
         cache_prefix=f"{stable_system}\n\n{_answer_cache_prefix(payload)}",
         images=images,
         temperature=_answer_temperature(payload.action),
-        max_output_tokens=650,
+        max_output_tokens=900,
         caller="interview_companion_answer",
     ):
         buffer += chunk.replace("\r", "")
