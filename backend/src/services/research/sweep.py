@@ -1,11 +1,13 @@
 """Crash recovery. Firestore is the truth; every delivery mechanism is a hint.
 
-Five independent passes, each per-run isolated so one poisoned run can never abort
-recovery for everyone else. This is the analogue of ``_run_meeting_job_sweep``,
-registered at the ``now_minute % 5 == 4`` scheduler slot (``handlers/scheduler.py``,
+Independent passes, each per-run isolated so one poisoned run can never abort recovery
+for everyone else. This is the analogue of ``_run_meeting_job_sweep``, registered at the
+``now_minute % 5 == 4`` scheduler slot (``handlers/scheduler.py``,
 ``_run_research_sweep``); the COLLECTION_GROUP indexes its passes filter on exist and
 are READY in the juno-2ea45 project (verified 2026-09-07, they are hand-managed via
-gcloud, not a checked-in firestore.indexes.json).
+gcloud, not a checked-in firestore.indexes.json). Pass F added a filter pair
+(``state``, ``created_at``) that needs its own composite index; it logs
+``research_preadmission_query_failed`` and nothing else breaks if that index is absent.
 
 The passes, and the exact failure each one exists to undo:
 
@@ -14,6 +16,9 @@ The passes, and the exact failure each one exists to undo:
   C  clarification expiry   a parked run nobody ever answered
   D  stuck fan-out          a child that will never complete, so the join never fires
   E  deletion drain         a deletion receipt that stopped partway
+  F  preadmission expiry    a run that died before admission, so it never had a wall
+                            clock: deadline_at is written only by admit_run and the
+                            engine's expiry check short-circuits on an empty value
 
 Pass B is the one that must be read carefully. Clearing a dead lease is not enough: the
 retry has to mint a NEW Cloud Task name, because Cloud Tasks reserves a completed task's
@@ -25,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from google.cloud import firestore as gcloud_firestore
@@ -47,6 +52,12 @@ CLARIFICATION_LIMIT = 50
 COORD_LIMIT = 50
 DELETION_LIMIT = 20
 PROJECT_RECEIPT_LIMIT = 50
+PREADMISSION_LIMIT = 50
+
+# How long a run may sit before admission before the sweep calls it dead. A quick run's
+# ENTIRE wall clock is 240s and its per-stage bound is 150s, so 900s is well past any
+# legitimate planning, including the classifier's own retry with backoff.
+PREADMISSION_MAX_AGE_S = 900
 
 
 @dataclass
@@ -63,6 +74,7 @@ class SweepReport:
     deletions_advanced: int = 0
     deletions_completed: int = 0
     project_receipts_settled: int = 0
+    preadmission_expired: int = 0
     errors: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -76,6 +88,7 @@ class SweepReport:
             "deletions_advanced": self.deletions_advanced,
             "deletions_completed": self.deletions_completed,
             "project_receipts_settled": self.project_receipts_settled,
+            "preadmission_expired": self.preadmission_expired,
             "errors": self.errors,
         }
 
@@ -92,6 +105,7 @@ async def run_sweep(*, limit: int = OUTBOX_LIMIT) -> SweepReport:
         ("coords", _pass_stuck_fanout(report, now)),
         ("deletions", _pass_deletions(report)),
         ("project_receipts", _pass_project_receipts(report)),
+        ("preadmission", _pass_stuck_preadmission(report, now)),
     ):
         try:
             await coro
@@ -169,6 +183,86 @@ async def _pass_stale_stages(report: SweepReport, now: datetime) -> None:
             report.stale_stages_recovered += 1
         elif recovered:
             report.stale_stages_terminal += 1
+
+
+async def _pass_stuck_preadmission(report: SweepReport, now: datetime) -> None:
+    """F. Fail runs that never reached admission and so never had a wall clock.
+
+    Every other pass looks at stages, coords, clarifications or outbox rows. None of
+    them looks at RUNS, and ``deadline_at`` is written only by ``admit_run``, so a run
+    that died before admission had no timeout anywhere in the system. That is how a
+    rejected plan write turned into a run reporting "planning" for eleven minutes with
+    nothing on screen and nothing in any state field to explain it.
+
+    This is the net, not the fix: the commit-failure handler in ``engine.advance`` and
+    the auto-admission refusal cap both bound their own paths. This one catches the case
+    neither can see, where the run's stage triplet is gone or already terminal while the
+    run itself never moved.
+    """
+    cutoff_iso = (now - timedelta(seconds=PREADMISSION_MAX_AGE_S)).isoformat()
+
+    def _query() -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        query = (
+            admin_firestore()
+            .collection_group(F.SUBCOLLECTION)
+            .where(F.STATE, "in", [F.STATE_PLANNING, F.STATE_QUEUED])
+            .where(F.CREATED_AT, "<=", cutoff_iso)
+            .limit(PREADMISSION_LIMIT)
+        )
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            # Cheap pre-filters only. expire_preadmission_run re-checks all of these
+            # transactionally, because this query is eventually consistent.
+            if str(data.get(F.DEADLINE_AT) or ""):
+                continue
+            if data.get(F.HIDDEN_AT) or data.get(F.DELETION_STATE):
+                continue
+            try:
+                uid = snap.reference.parent.parent.id
+            except Exception:
+                continue
+            rows.append((uid, snap.id))
+        return rows
+
+    try:
+        candidates = await asyncio.to_thread(_query)
+    except Exception as exc:
+        # A missing composite index fails here and nowhere else. Named explicitly so it
+        # reads as "this pass is not running" rather than one more generic sweep error.
+        logger.error(
+            "research.sweep: preadmission query failed, runs are unbounded before admission",
+            {"error": str(exc), "error_code": "research_preadmission_query_failed",
+             "needs_index": f"{F.SUBCOLLECTION} (collection group) on state, created_at",
+             "alert": True},
+        )
+        raise
+
+    for uid, run_id in candidates:
+        try:
+            expired, created = await store.expire_preadmission_run(
+                uid, run_id, max_age_s=PREADMISSION_MAX_AGE_S
+            )
+        except Exception as exc:
+            report.errors += 1
+            logger.error(
+                "research.sweep: preadmission expiry failed",
+                {"run_id": run_id, "error": str(exc)},
+            )
+            continue
+        if not expired:
+            continue
+        report.preadmission_expired += 1
+        # Delivered now rather than next tick: the user has already waited out the whole
+        # window, and a terminal notification five minutes later is a worse apology.
+        for created_id in created:
+            try:
+                await tasks_mod.dispatch_job(uid, created_id)
+            except Exception as exc:
+                logger.warn(
+                    "research.sweep: dispatch of preadmission notify failed, left due",
+                    {"run_id": run_id, "stage_id": created_id, "error": str(exc)},
+                )
 
 
 async def _recover_stage(

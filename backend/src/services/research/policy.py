@@ -42,6 +42,7 @@ trail answering "why did this brief demand three sources" without re-running any
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from typing import Any
 
 from .policy_table import (
     GENERIC_POLICY_ID,
@@ -225,3 +226,27 @@ def compose(
             hint for row in rows for hint in row.query_shape_hints
         ),
     )
+
+
+def persisted(policy: SourcePolicy) -> dict[str, Any]:
+    """The wire form of a composed policy, safe to write to Firestore.
+
+    ``required_source_class_groups`` is the one field whose plain dump is illegal:
+    Firestore refuses an array that holds another array as a direct element, and a
+    conjunction of disjunctions is exactly that. Seven of the fourteen table rows
+    carry a non-empty value, so every pricing, regulatory, scientific, clinical,
+    financial, logistics or consumer-purchase run was failing its plan commit with
+    "400 Property effective_policy contains an invalid nested entity" and dying at
+    classify_plan with nothing to show for it.
+
+    Wrapping each group in a map is what makes it legal. An array inside a MAP inside
+    an array is fine, which the same plan document already proves: its sub_questions
+    carry entity_bindings in exactly that shape and commit without complaint. The
+    semantics are untouched, only the encoding, and verify.py decodes both forms.
+    """
+    data = policy.model_dump(mode="json")
+    data["required_source_class_groups"] = [
+        {"any_of": [str(item) for item in group]}
+        for group in policy.required_source_class_groups
+    ]
+    return data

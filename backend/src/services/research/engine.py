@@ -301,6 +301,10 @@ class FirestoreResearchEngine:
         # Paid access and the daily user credit cap are durable product refusals. A
         # competing run or an unavailable entitlement/meter can clear later, so those
         # retain the marker and the sweep retries without charging in the meantime.
+        # "Can clear later" is not "retry forever": record_auto_admission_refusal counts
+        # the deferrals and goes terminal at AUTO_ADMIT_REFUSAL_CAP, because the
+        # competing run it waits on is itself counted by the one-run bound, so two
+        # wedged runs could otherwise lock a user out of research permanently.
         terminal = admission.code in {F.RESEARCH_PAID_CODE, F.RESEARCH_CAP_CODE}
         refused = await store.record_auto_admission_refusal(
             uid,
@@ -328,6 +332,10 @@ class FirestoreResearchEngine:
             delivery_requested=(
                 dict(requested_spec) if isinstance(requested_spec, dict) else None
             ),
+            # The same string the caller fed client_run_id_for. Empty for surfaces with
+            # no stable per-conversation scope (the dashboard), which then behave
+            # exactly as before.
+            dedup_scope=str(spec.get("dedup_scope", "")),
         )
         # A replayed creation has already been delivered once; re-dispatching is safe
         # (dispatch_job skips a fresh in-flight row) but pointless, so skip it.
@@ -640,7 +648,36 @@ class FirestoreResearchEngine:
                     retryable=False,
                 )
 
-            advanced = await store.advance(lease, result)
+            try:
+                advanced = await store.advance(lease, result)
+            except Exception as exc:
+                # The commit, not the body. This was the one path out of advance with no
+                # handler, so a refused write (a Firestore 400 on an illegal shape, a 409
+                # on contention) escaped as a bare 500 with nothing recorded: no failure
+                # code, no state change, and a run left sitting in its current stage until
+                # the attempt cap eventually noticed minutes later. Retryable, so
+                # contention still gets its backoff while a deterministic refusal dies at
+                # the cap carrying a code that says what actually happened.
+                logger.error(
+                    "research.engine: stage commit failed",
+                    {"run_id": lease.run_id, "stage_id": lease.stage_id,
+                     "stage_kind": lease.stage_kind, "error": str(exc),
+                     "error_code": F.FAIL_COMMIT_REJECTED},
+                )
+                failed = await self._fail_and_deliver(
+                    lease,
+                    error_code=F.FAIL_COMMIT_REJECTED,
+                    retryable=True,
+                    spent_actuals=dict(ctx.spent),
+                    spent_cost_microusd=ctx.spent_cost_microusd,
+                    spent_cost_known=ctx.spent_cost_known,
+                )
+                await _settle(None)
+                return StepOutcome(
+                    disposition=failed.outcome,
+                    stage_kind=lease.stage_kind,
+                    retryable=False,
+                )
             await _settle(int(result.cost_microusd) if result.cost_known else None)
             await self._deliver(uid, advanced.created_job_ids)
             if (

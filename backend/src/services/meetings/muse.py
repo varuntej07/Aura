@@ -151,8 +151,8 @@ def _parse_channel(
 
 
 async def transcribe_segment(audio: bytes, *, segment_seq: int) -> transcript.SegmentTranscript:
-    if not settings.MODEL_API_KEY.strip():
-        raise MuseError("MODEL_API_KEY is not configured")
+    if not settings.META_MUSE_API_KEY.strip():
+        raise MuseError("META_MUSE_API_KEY is not configured")
     channels, duration_ms = await asyncio.to_thread(_encode_channels, audio)
     result = transcript.SegmentTranscript(
         provider="meta", model=_MODEL, parser_version=_PARSER,
@@ -162,7 +162,7 @@ async def transcribe_segment(audio: bytes, *, segment_seq: int) -> transcript.Se
     # Sequential channels bound concurrency and preserve completed channel work
     # across the request-local retries. Durable recovery stays segment-scoped.
     async with httpx.AsyncClient(
-        headers={"Authorization": f"Bearer {settings.MODEL_API_KEY.strip()}"},
+        headers={"Authorization": f"Bearer {settings.META_MUSE_API_KEY.strip()}"},
         timeout=httpx.Timeout(120, connect=10), follow_redirects=False,
     ) as client:
         for channel, wav in enumerate(channels):

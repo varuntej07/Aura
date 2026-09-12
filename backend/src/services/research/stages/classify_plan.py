@@ -20,6 +20,7 @@ from ....lib.logger import logger
 from ...model_provider import get_model_provider
 from .. import fields as F
 from ..budget import MAX_CLARIFICATION_ROUNDS
+from ..firestore_shape import assert_firestore_safe
 from .. import policy as policy_mod
 from ..llm_models import ClassificationResult, ClassifiedSubQuestion
 from ..metering import (
@@ -157,6 +158,32 @@ async def run(ctx: StageContext) -> StageResult:
     # create-only write in the advance transaction refuses the duplicate outright.
     plan_version = round_index + 1
     entities = [plain_text(item, max_chars=120) for item in parsed.entities][:12]
+    # The table shape, if this request is a collection. Normalized here rather
+    # than trusted as returned: duplicate columns would collide as Notion
+    # properties, and "Name"/"Sources" are ours, created for every table.
+    output_schema: dict[str, object] = {}
+    if parsed.output_schema is not None:
+        seen_columns: set[str] = set()
+        columns: list[dict[str, str]] = []
+        for column in parsed.output_schema.columns:
+            column_name = plain_text(column.name, max_chars=60)
+            key = column_name.casefold()
+            if not column_name or key in seen_columns or key in ("name", "sources", "source"):
+                continue
+            seen_columns.add(key)
+            columns.append({
+                "name": column_name,
+                "type": str(column.type),
+                "description": plain_text(column.description, max_chars=200),
+            })
+            if len(columns) >= 12:
+                break
+        if columns:
+            output_schema = {
+                "entity_label": plain_text(parsed.output_schema.entity_label, max_chars=60)
+                or "Item",
+                "columns": columns,
+            }
     plan = {
         "plan_version": plan_version,
         "request_revision": round_index,
@@ -171,9 +198,15 @@ async def run(ctx: StageContext) -> StageResult:
         "sub_questions": _sub_questions(parsed.sub_questions, parsed.objective, entities),
         "seed_queries": [plain_text(item, max_chars=200) for item in parsed.seed_queries][:12],
         "assumptions": [plain_text(item, max_chars=300) for item in parsed.assumptions][:6],
-        "effective_policy": effective_policy.model_dump(mode="json"),
+        "output_schema": output_schema,
+        "effective_policy": policy_mod.persisted(effective_policy),
         "risk_flags": [plain_text(item, max_chars=64) for item in parsed.risk_flags][:6],
     }
+    # Checked HERE, not left to the commit. A shape Firestore refuses raises out of
+    # store.advance, which sits outside the engine's stage-failure handler, so it
+    # becomes an unattributed 500 and the run stalls in planning until the attempt cap
+    # notices. Raising from the body gets the normal recorded failure instead.
+    assert_firestore_safe(plan, path="plan")
 
     if parsed.needs_clarification and parsed.question:
         # Park and ask, up to budget.MAX_CLARIFICATION_ROUNDS (this is the only

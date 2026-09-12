@@ -84,7 +84,10 @@ from ..services.product_knowledge import (
     lookup_product_knowledge,
     voice_capability_digest,
 )
-from ..shared.capability_claims import log_false_capability_claims
+from ..shared.capability_claims import (
+    detect_unbacked_research_claims,
+    log_false_capability_claims,
+)
 from ..shared.tools import (
     GET_AURA_PRODUCT_INFO_TOOL_DEFINITION,
     assert_strict_tool_schema,
@@ -143,14 +146,16 @@ from .voice.notion_capture import (
     execute_notion_capture,
     execute_notion_undo,
 )
+from .voice import research_coordinator
 from .voice.research_dispatch import (
     ResearchDispatchResult,
     RunNarrator,
     answer_research_run,
     cancel_research_run,
     deliver_existing_run_to_notion,
-    dispatch_research_to_notion,
     fetch_resumable_research_runs,
+    resolve_destination,
+    start_unbound_run,
 )
 from .voice.screen_saves import SaveScreenItemResult, save_screen_capture
 from .voice.speculation import SpeculationDecision, TurnMutations, decide, is_reusable
@@ -480,12 +485,17 @@ class BuddyAgent(agents.Agent):
         self._research_dispatch_lock = asyncio.Lock()
         self._research_dispatch_results: dict[str, ResearchDispatchResult] = {}
         self._research_candidates: dict[str, str] = {}
-        # The create name this session actually OFFERED out loud. The confirm
-        # turn used to create a database named from whatever `destination` the
-        # model re-supplied on that second call, which nothing checked against
-        # the name the user had just agreed to, so a yes could create a
-        # database they never heard named.
-        self._research_proposed_create_name = ""
+        # The one open research job: its run id, the destination question that
+        # is still open, and how many times it was asked. This is the state the
+        # model used to be expected to carry in a `create_confirmed` argument,
+        # which is how a user could say yes and be asked the identical question
+        # three more times while nothing was running. See research_coordinator.
+        self._research_job: research_coordinator.ResearchJob | None = None
+        # The capture tool's own offered name, kept separate from research's:
+        # the confirm turn used to create a database named from whatever
+        # `destination` the model re-supplied, which nothing checked against
+        # the name the user had just agreed to.
+        self._notion_proposed_create_name = ""
         # Delivery of an EXISTING run gets its own lock and cache. Sharing
         # research_to_notion's would let one finalized message's cached dispatch
         # answer the other tool's call, and the two say different things.
@@ -1822,8 +1832,13 @@ class BuddyAgent(agents.Agent):
         for another AI, a coding agent, or a video/UGC generator, and multi-step
         guidance. Use it whenever
         reading the full answer aloud would be hard to follow or impossible to
-        copy. It is also mandatory when the user corrects you for speaking such
-        content. The card is ephemeral, has a copy button, and never executes,
+        copy. It is also mandatory when the user corrects you for READING SUCH
+        CONTENT ALOUD. Frustration on its own is not that correction: an annoyed
+        user who wants an action taken wants the action, not a card about it.
+        Never use it for research results, findings, or anything the user asked
+        to be put in Notion; that is research_to_notion, and a card there is a
+        substitute for the work, not a delivery of it.
+        The card is ephemeral, has a copy button, and never executes,
         sends, or persists its content. Never use it for an email reply or DM.
         Never use it as a substitute for a real action: when the user asks to
         create a calendar event, a reminder, or a tracker, call that action
@@ -2605,17 +2620,30 @@ class BuddyAgent(agents.Agent):
                 create_confirmed=create_confirmed,
             ),
         )
-        asked_question = bool(result.candidates or result.proposed_create_name)
+        asked_question = result.asked_question or bool(
+            result.candidates or result.proposed_create_name
+        )
         # `then` is the only field in the Action Truth envelope that binds the NEXT
         # utterance, and this tool used to omit it entirely. On 2026-09-08 a free
         # user's run was refused with the correct line already in `say`
         # ("Background research needs a paid plan..."), and Buddy said research was
         # in progress four separate times instead. `render: verbatim` alone was not
         # enough; the refusal branch is the one that most needs a binding.
-        if result.dispatched:
+        # Both can be true at once: the propose-create path starts the run AND asks
+        # which database to use. `dispatched` alone winning meant that turn was told
+        # "say that and stop" with no binding against calling a research tool again,
+        # and the answering turn started a SECOND run. deliver_research_to_notion has
+        # always ordered these correctly; this is the same test.
+        if result.dispatched and not asked_question:
             then = "Say that and stop. Do not add findings, progress, or timing you were not given."
         elif asked_question:
-            then = "Ask that and wait for their answer before calling this again."
+            then = (
+                "Ask that and wait for their answer. The run is already going, so do "
+                "not start another one: answer with this same tool, never by starting "
+                "new research."
+                if result.dispatched
+                else "Ask that and wait for their answer before calling this again."
+            )
         else:
             then = (
                 "Say that verbatim. Nothing was started, so do not say research is "
@@ -2774,8 +2802,10 @@ class BuddyAgent(agents.Agent):
                 create_confirmed=create_confirmed,
             ),
         )
-        asked_question = bool(result.candidates or result.proposed_create_name)
-        if result.dispatched:
+        asked_question = result.asked_question or bool(
+            result.candidates or result.proposed_create_name
+        )
+        if result.dispatched and not asked_question:
             then = (
                 "Say that and stop. The write is in flight, not finished, so do not "
                 "say it is saved or name a page until the runtime tells you it landed."
@@ -3019,9 +3049,17 @@ class BuddyAgent(agents.Agent):
                 firebase_id_token=self._firebase_id_token,
             )
             self._research_narrator = narrator
-        for run_id, database_name, description in runs:
+        for run_id, database_name, description, is_bound in runs:
             if not self._last_research_run_id:
                 self._last_research_run_id = run_id
+            if not is_bound:
+                # The user asked for Notion last session and never picked a
+                # database. The run kept working; rebuild the job so the
+                # question can be re-offered instead of silently dropped.
+                if self._research_job is None:
+                    job = research_coordinator.start(description)
+                    self._research_job = research_coordinator.run_started(job, run_id)
+                continue
             narrator.track(run_id, database_name, description=description)
         logger.info(
             "VoiceResearch: rehydrated narration for in-flight runs",
@@ -3060,18 +3098,35 @@ class BuddyAgent(agents.Agent):
         confirmed_database_id: str,
         create_confirmed: bool,
     ) -> ResearchDispatchResult:
-        """Dispatch one authorized research run exactly once per finalized message."""
+        """Start the run and settle its destination CONCURRENTLY, exactly once.
+
+        The old order was resolve-then-start, so an unanswered database question
+        meant no run existed at all. Now the run starts first and the question is
+        asked against a run that is already working, which is also what makes
+        "it's running" a true sentence when Buddy says it.
+        """
         confirmed_name = ""
         if confirmed_database_id:
             confirmed_name = self._research_candidates.get(confirmed_database_id, "")
             if not confirmed_name:
                 confirmed_database_id = ""
 
+        job = self._research_job
+        if job is not None and job.awaiting_answer and job.run_id:
+            # The user is answering the question this session already asked. Any
+            # of the Notion tools may carry that answer, and it must never start
+            # a second run or re-ask.
+            return await self._bind_open_destination(
+                job,
+                destination=destination,
+                confirmed_database_id=confirmed_database_id,
+                confirmed_name=confirmed_name,
+                create_confirmed=create_confirmed,
+            )
+
         def _on_result(result: ResearchDispatchResult) -> None:
             if result.candidates:
                 self._research_candidates = dict(result.candidates)
-            if result.proposed_create_name:
-                self._research_proposed_create_name = result.proposed_create_name
             if result.dispatched and result.run_id:
                 self._last_research_run_id = result.run_id
                 narrator = self._research_narrator
@@ -3095,21 +3150,12 @@ class BuddyAgent(agents.Agent):
             cache=self._research_dispatch_results,
             tool_name="research_to_notion",
             call_id_prefix="research-dispatch",
-            coro_factory=lambda: dispatch_research_to_notion(
-                uid=self._user_id,
-                session_id=self._session_id,
-                firebase_id_token=self._firebase_id_token,
+            coro_factory=lambda: self._start_and_settle_destination(
                 request=request,
                 destination=destination,
-                confirmed_data_source_id=confirmed_database_id,
-                confirmed_database_name=confirmed_name,
-                create_database_named=(
-                    # The name they said yes to, not the one the model re-sends
-                    # on the confirm turn. Nothing used to check the two matched.
-                    (self._research_proposed_create_name or destination)
-                    if create_confirmed
-                    else ""
-                ),
+                confirmed_database_id=confirmed_database_id,
+                confirmed_name=confirmed_name,
+                create_confirmed=create_confirmed,
             ),
             success_of=lambda result: result.dispatched,
             fallback_factory=lambda: ResearchDispatchResult(
@@ -3125,6 +3171,221 @@ class BuddyAgent(agents.Agent):
                 "say": result.spoken_confirmation,
             },
         )
+
+    async def _start_and_settle_destination(
+        self,
+        *,
+        request: str,
+        destination: str,
+        confirmed_database_id: str,
+        confirmed_name: str,
+        create_confirmed: bool,
+    ) -> ResearchDispatchResult:
+        """POST /research and resolve the spoken destination at the same time."""
+        job = research_coordinator.start(request)
+        started, outcome = await asyncio.gather(
+            start_unbound_run(
+                uid=self._user_id,
+                session_id=self._session_id,
+                firebase_id_token=self._firebase_id_token,
+                request=request,
+                destination_hint=destination,
+            ),
+            resolve_destination(
+                uid=self._user_id,
+                session_id=self._session_id,
+                firebase_id_token=self._firebase_id_token,
+                destination=destination,
+                confirmed_data_source_id=confirmed_database_id,
+                confirmed_database_name=confirmed_name,
+            ),
+        )
+        if not started.dispatched or not started.run_id:
+            # Refused (daily cap, paid plan, one run at a time). There is no run,
+            # so there is nothing to ask a database question about: asking one
+            # here is how a user ends up naming a database for research that was
+            # never going to happen.
+            return started
+        job = research_coordinator.run_started(job, started.run_id)
+        self._research_job = job
+
+        if outcome.reauth:
+            job, line = research_coordinator.ask(
+                job,
+                kind=research_coordinator.KIND_REAUTH,
+                question=(
+                    "It's running. Your Notion connection needs a refresh though - "
+                    "reconnect it from the dashboard and I'll put the results there."
+                ),
+            )
+            self._research_job = job
+            return ResearchDispatchResult(
+                spoken_confirmation=line or "It's running. I'll keep the results in the app.",
+                dispatched=True,
+                run_id=started.run_id,
+                asked_question=bool(line),
+            )
+
+        decision = outcome.decision
+        if decision is None:
+            return ResearchDispatchResult(
+                spoken_confirmation=(
+                    "It's running. I couldn't reach your Notion just now, so the "
+                    "results stay in the app unless you name a database."
+                ),
+                dispatched=True,
+                run_id=started.run_id,
+            )
+
+        if decision.question is not None:
+            kind = (
+                research_coordinator.KIND_ASK
+                if decision.candidates
+                else research_coordinator.KIND_PROPOSE_CREATE
+                if decision.proposed_create_name
+                else research_coordinator.KIND_UNNAMED
+            )
+            if create_confirmed and decision.proposed_create_name:
+                # They already said to create it, in the same breath as the
+                # request ("research X into a new database called Y"). Asking
+                # anyway is the loop this whole change exists to remove.
+                job = research_coordinator.run_started(job, started.run_id)
+                self._research_job = job
+                return await self._bind_open_destination(
+                    research_coordinator.ask(
+                        job,
+                        kind=kind,
+                        question=decision.question,
+                        proposed_name=decision.proposed_create_name,
+                    )[0],
+                    destination=destination,
+                    confirmed_database_id="",
+                    confirmed_name="",
+                    create_confirmed=True,
+                )
+            job, line = research_coordinator.ask(
+                job,
+                kind=kind,
+                question=f"It's running. {decision.question}",
+                candidates=tuple(decision.candidates),
+                proposed_name=decision.proposed_create_name or "",
+            )
+            self._research_job = job
+            if line is None:
+                # Asked its allowed number of times already. Stop asking and say
+                # what is true: the work is happening and the brief is in the app.
+                return ResearchDispatchResult(
+                    spoken_confirmation=(
+                        "It's running - I'll keep the results in the app, and you "
+                        "can tell me a database any time."
+                    ),
+                    dispatched=True,
+                    run_id=started.run_id,
+                )
+            return ResearchDispatchResult(
+                spoken_confirmation=line,
+                dispatched=True,
+                run_id=started.run_id,
+                asked_question=True,
+                candidates=list(decision.candidates),
+                proposed_create_name=decision.proposed_create_name,
+            )
+
+        bound = await deliver_existing_run_to_notion(
+            uid=self._user_id,
+            session_id=self._session_id,
+            firebase_id_token=self._firebase_id_token,
+            run_id=started.run_id,
+            destination=destination,
+            confirmed_data_source_id=decision.data_source_id,
+            confirmed_database_name=decision.database_name,
+        )
+        if bound.dispatched:
+            self._research_job = research_coordinator.bound(
+                job, bound.database_name or "", pending_delivery=True
+            )
+            return replace(bound, run_id=started.run_id)
+        # The run is real even though the binding failed, and saying otherwise
+        # would deny work the user is paying for.
+        return ResearchDispatchResult(
+            spoken_confirmation=(
+                f"It's running. {bound.spoken_confirmation}"
+            ),
+            dispatched=True,
+            run_id=started.run_id,
+        )
+
+    async def _bind_open_destination(
+        self,
+        job: research_coordinator.ResearchJob,
+        *,
+        destination: str,
+        confirmed_database_id: str,
+        confirmed_name: str,
+        create_confirmed: bool,
+    ) -> ResearchDispatchResult:
+        """Answer the destination question this session already asked.
+
+        Reached from every Notion tool, because the live failure was the model
+        answering with a DIFFERENT tool than the one that asked.
+        """
+        pending = job.pending
+        spoken_name = " ".join((destination or "").split())
+        picked_existing = bool(confirmed_database_id)
+        create_named = ""
+        if not picked_existing:
+            choice = research_coordinator.DestinationChoice(
+                kind=research_coordinator.CHOICE_CREATE,
+                name=spoken_name if create_confirmed else "",
+            )
+            create_named = research_coordinator.create_name_for(job, choice)
+            if not create_named:
+                create_named = spoken_name
+        if not picked_existing and not create_named:
+            # Nothing usable in the answer. Re-ask once; the coordinator refuses
+            # a third ask and varies the wording on the second.
+            job, line = research_coordinator.ask(
+                job,
+                kind=pending.kind if pending else research_coordinator.KIND_UNNAMED,
+                question=pending.question if pending else "",
+                candidates=pending.candidates if pending else (),
+                proposed_name=pending.proposed_name if pending else "",
+            )
+            self._research_job = job
+            return ResearchDispatchResult(
+                spoken_confirmation=line
+                or "It's still running - the results are in the app unless you name a database.",
+                dispatched=True,
+                run_id=job.run_id,
+                asked_question=bool(line),
+            )
+
+        result = await deliver_existing_run_to_notion(
+            uid=self._user_id,
+            session_id=self._session_id,
+            firebase_id_token=self._firebase_id_token,
+            run_id=job.run_id,
+            destination=destination,
+            confirmed_data_source_id=confirmed_database_id,
+            confirmed_database_name=confirmed_name,
+            create_database_named="" if picked_existing else create_named,
+        )
+        if result.dispatched:
+            self._research_job = research_coordinator.bound(
+                job, result.database_name or create_named, pending_delivery=True
+            )
+        logger.info(
+            "VoiceResearch: answered the open destination question",
+            {
+                "session_id": self._session_id,
+                "user_id": self._user_id,
+                "run_id": job.run_id,
+                "asked_count": pending.asked_count if pending else 0,
+                "picked_existing": picked_existing,
+                "bound": result.dispatched,
+            },
+        )
+        return replace(result, run_id=job.run_id)
 
     async def _execute_research_delivery(
         self,
@@ -3145,8 +3406,6 @@ class BuddyAgent(agents.Agent):
         def _on_result(result: ResearchDispatchResult) -> None:
             if result.candidates:
                 self._research_candidates = dict(result.candidates)
-            if result.proposed_create_name:
-                self._research_proposed_create_name = result.proposed_create_name
             # Re-track, exactly as the dispatch twin above does. Without this a run
             # that finished BEFORE a destination was bound is never polled again:
             # RunNarrator.forget() evicts a run the moment it goes result-terminal, so
@@ -3187,7 +3446,12 @@ class BuddyAgent(agents.Agent):
                 create_database_named=(
                     # The name they said yes to, not the one the model re-sends
                     # on the confirm turn. Nothing used to check the two matched.
-                    (self._research_proposed_create_name or destination)
+                    research_coordinator.create_name_for(
+                        self._research_job or research_coordinator.start(""),
+                        research_coordinator.DestinationChoice(
+                            kind=research_coordinator.CHOICE_CREATE, name=destination
+                        ),
+                    )
                     if create_confirmed
                     else ""
                 ),
@@ -3273,6 +3537,8 @@ class BuddyAgent(agents.Agent):
                     candidate.data_source_id: candidate.title
                     for candidate in result.candidates
                 }
+            if result.proposed_create_name:
+                self._notion_proposed_create_name = result.proposed_create_name
             if result.saved and result.idempotency_key:
                 self._last_notion_receipt_key = result.idempotency_key
 
@@ -3291,7 +3557,14 @@ class BuddyAgent(agents.Agent):
                 destination=destination,
                 confirmed_data_source_id=confirmed_database_id,
                 confirmed_database_name=confirmed_name,
-                create_database_named=(destination if create_confirmed else ""),
+                create_database_named=(
+                    # The name this tool OFFERED, not the one the model re-sends
+                    # on the confirm turn, so a yes cannot create a database
+                    # under a name the user never heard.
+                    (self._notion_proposed_create_name or destination)
+                    if create_confirmed
+                    else ""
+                ),
                 structured_text=structured_text,
                 structured_snapshot_id=structured_snapshot_id,
                 jpeg_bytes=frame.jpeg_bytes if frame is not None else None,
@@ -3436,9 +3709,25 @@ class BuddyAgent(agents.Agent):
         # when STT mangled the verb. The opening turn is the model's call via
         # present_visible_artifact, which is a registered tool it can select.
         artifact_session = self._artifact_session
+        # A research or Notion turn is never a card turn. An open card session
+        # arms every following turn, and an armed turn MUST end in a tool call,
+        # so the forced call became speak_only("I'll get the research running")
+        # while nothing had been dispatched. Those turns exist to run an action;
+        # a card about the action is a substitute for doing it.
+        committed_capability = (
+            self._finalized_tool_selection.active_capability
+            if self._finalized_tool_selection is not None
+            else None
+        )
+        action_turn = committed_capability in (
+            Capability.RESEARCH_WRITE,
+            Capability.RESEARCH_READ,
+            Capability.NOTION_CAPTURE,
+        )
         wants_artifact = (
             self._launch_surface is VoiceSurface.DESKTOP
             and artifact_session.is_open
+            and not action_turn
         )
         armed = bool(finalized and wants_artifact)
         # speak_only exists only for armed turns. On every other turn Buddy
@@ -3786,13 +4075,36 @@ class BuddyAgent(agents.Agent):
         # Log-only, after the words are already on their way to TTS. Voice is where a
         # false product claim does the most damage, because it sounds like Buddy simply
         # knows. Nothing here alters speech; it makes the failure countable.
+        spoken_text = "".join(spoken_parts)
         log_false_capability_claims(
-            "".join(spoken_parts),
+            spoken_text,
             exposed_tools=frozenset(execution_policy.allowed_tools),
             surface=str(self._launch_surface),
             user_id=self._user_id,
             session_id=self._session_id,
         )
+        # "I'll get the research running right now", said three times, with no
+        # tool call behind any of them. Unlike a product claim this one HAS a
+        # runtime oracle: either a run id exists or it does not. So this is not
+        # log-only. The correction is queued through the narrator, which waits
+        # for a turn boundary rather than talking over the user.
+        research_claims = detect_unbacked_research_claims(spoken_text)
+        if research_claims and not research_coordinator.may_claim_running(
+            self._research_job
+        ):
+            logger.warn(
+                "buddy_unbacked_research_claim",
+                {
+                    "session_id": self._session_id,
+                    "user_id": self._user_id,
+                    "sentence": research_claims[0].sentence,
+                    "claim_count": len(research_claims),
+                    "has_job": self._research_job is not None,
+                },
+            )
+            self._announce_cancelled_action(
+                "Correction: nothing is running yet - say the word and I'll start it."
+            )
 
     @staticmethod
     def _turn_instruction(
@@ -3958,23 +4270,28 @@ class BuddyAgent(agents.Agent):
                 "content_chars": len(body),
             },
         )
+        published = ack == SPOKEN_ARTIFACT_READY
         if self._turn_metrics is not None:
             self._turn_metrics.note_artifact(
                 turn_index=self._action_telemetry.turn_index,
                 signal="intent",
                 kind=kind,
-                published=ack == SPOKEN_ARTIFACT_READY,
+                published=published,
             )
-        if ack == SPOKEN_ARTIFACT_READY:
+        if published:
             # A backstop-diverted card opens the session too. The model failed
             # to call the tool on this turn, which makes the NEXT turn the one
             # most likely to be a revision, and it must not be left unarmed.
-            self._artifact_session.open(
+            is_revision = self._artifact_session.open(
                 capability=Capability.VISIBLE_ARTIFACT,
                 kind=kind,
                 title=title,
                 body=body,
             )
+            # Rotate the wording, exactly as the tool path does. This fallback
+            # spoke the one fixed line every time, so two diverted turns in a
+            # row said "Done, it's on your screen." word for word.
+            ack = self._artifact_session.next_ack(is_revision=is_revision)
         for pending in held:
             # Content-bearing items are what we are replacing, so only the
             # bookkeeping chunks (ids, usage) survive the divert.

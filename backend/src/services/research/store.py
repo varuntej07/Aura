@@ -53,6 +53,23 @@ LEASE_MARGIN_S = 120
 # max_attempts rather than inventing a second retry philosophy.
 STAGE_ATTEMPT_CAP = 2
 
+# How many times the sweep may re-offer a run for automatic admission before giving up.
+# A competing run or an unavailable meter is genuinely transient, so those refusals are
+# not terminal - but "not terminal" was also unbounded, and the one-run-per-user bound
+# counts runs in planning and queued, so a single wedged run could defer its successor
+# forever and that successor then blocked every later run in turn. Twelve is an hour at
+# the five-minute sweep interval: long enough for any real transient, short enough that
+# a user is never permanently locked out of research.
+AUTO_ADMIT_REFUSAL_CAP = 12
+
+# How long after a run starts a second tool call under the same caller scope is treated
+# as the same user intent rather than a new request. Sized against how a voice turn
+# actually behaves: parallel tool calls land within a couple of seconds, and a model
+# re-reaching for a second tool after narrating the first took 12 seconds in the case
+# this exists for. Two minutes covers that with room, and is far under the time it takes
+# a user to think up a genuinely different question and say it out loud.
+SCOPE_COLLAPSE_WINDOW_S = 120
+
 
 # --- references ------------------------------------------------------------------
 
@@ -124,6 +141,22 @@ def _deletions_ref(uid: str) -> Any:
         .collection(F.PARENT_COLLECTION)
         .document(uid)
         .collection(F.DELETIONS_SUBCOLLECTION)
+    )
+
+
+def _scope_ref(uid: str, dedup_scope: str) -> Any:
+    """The most recent run started under one caller scope (a voice session, a chat message).
+
+    A pointer document rather than a query, because this is read inside create_run's
+    transaction and a prefix-plus-state-plus-recency query would need its own composite
+    index to do what one direct get does for free.
+    """
+    return (
+        admin_firestore()
+        .collection(F.PARENT_COLLECTION)
+        .document(uid)
+        .collection(F.SCOPE_SUBCOLLECTION)
+        .document(hashlib.sha256(dedup_scope.encode("utf-8")).hexdigest()[:32])
     )
 
 
@@ -709,6 +742,85 @@ def _create_job_triplet(
 # --- run creation ----------------------------------------------------------------
 
 
+def _collapse_onto_scope(
+    txn: Any,
+    *,
+    uid: str,
+    scope_ref: Any,
+    incoming_run_id: str,
+    cutoff_iso: str,
+    delivery: dict[str, str] | None,
+    delivery_requested: dict[str, str] | None,
+    now_iso: str,
+) -> RunCreation | None:
+    """The prior run for this caller scope, if this create should join it instead.
+
+    None means "no collapse, create normally". Everything here is a READ plus at most
+    one update to the prior run, so it can run inside create_run's transaction before
+    any of that function's writes.
+
+    The delivery adoption is the point, not an extra. Collapsing without it is the
+    failure ``run_identity`` was written to stop: the caller is told its run started,
+    it holds a run id that has no Notion destination, and the brief is finished and
+    filed nowhere. Only an UNBOUND prior run adopts, because a bound destination is
+    immutable everywhere else in this module and a collapse must not be the one place
+    that quietly rewrites it.
+    """
+    scope_snap = scope_ref.get(transaction=txn)
+    if not scope_snap.exists:
+        return None
+    pointer = scope_snap.to_dict() or {}
+    prior_run_id = str(pointer.get(F.RUN_ID) or "")
+    if not prior_run_id or prior_run_id == incoming_run_id:
+        return None
+    if str(pointer.get(F.CREATED_AT) or "") < cutoff_iso:
+        return None
+
+    prior_ref = _run_ref(uid, prior_run_id)
+    prior_snap = prior_ref.get(transaction=txn)
+    if not prior_snap.exists:
+        return None
+    prior = prior_snap.to_dict() or {}
+    if str(prior.get(F.STATE) or "") not in F.ACTIVE_STATES:
+        # A finished run cannot absorb a new request, and must not: the user would be
+        # told research started and then handed something answered before they asked.
+        return None
+    if prior.get(F.HIDDEN_AT) or prior.get(F.DELETION_STATE):
+        return None
+
+    if prior.get(F.DELIVERY) and (delivery or delivery_requested):
+        # The prior run's destination is SETTLED, and settled destinations are
+        # immutable everywhere in this module. Joining it would hand the caller a run
+        # it cannot bind, so this is a genuinely different request: let it have its
+        # own run rather than fail its bind later.
+        return None
+
+    already_bound = bool(prior.get(F.DELIVERY)) or bool(prior.get(F.DELIVERY_REQUESTED))
+    if not already_bound and (delivery or delivery_requested):
+        txn.update(
+            prior_ref,
+            {
+                **({F.DELIVERY: dict(delivery)} if delivery else {}),
+                **(
+                    {F.DELIVERY_REQUESTED: dict(delivery_requested)}
+                    if delivery_requested and not delivery
+                    else {}
+                ),
+                F.UPDATED_AT: now_iso,
+            },
+        )
+
+    return RunCreation(
+        run_id=prior_run_id,
+        state=str(prior.get(F.STATE, F.STATE_PLANNING)),
+        replayed=True,
+        # Empty on purpose. The prior run already owns its classifier stage, and
+        # engine.start skips dispatch on a replay, so naming the incoming run's stage
+        # id here would point at a stage document that was never created.
+        first_stage_id="",
+    )
+
+
 async def create_run(
     uid: str,
     *,
@@ -719,6 +831,7 @@ async def create_run(
     correlation_id: str = "",
     delivery: dict[str, str] | None = None,
     delivery_requested: dict[str, str] | None = None,
+    dedup_scope: str = "",
 ) -> RunCreation:
     """Create a draft run and its scope-check job, idempotently. Debits NO credit.
 
@@ -731,6 +844,17 @@ async def create_run(
     not settled WHICH database, so the run starts now and the destination is
     bound by a later /deliver. It is an intent marker carrying only the spoken
     hint, and it never decides where anything is written.
+
+    ``dedup_scope`` is the caller's stable per-conversation prefix, the same string
+    that goes into ``client_run_id_for``. The deterministic client_run_id only
+    replays an identical retry of ONE tool, because ``run_identity`` puts the tool
+    name in the digest on purpose. That leaves the case where a single user turn
+    fires two DIFFERENT tools at one intent: start_research and research_to_notion
+    12 seconds apart produced two runs, the unbound one did all the work, and the
+    one carrying the Notion destination died on its own unrelated fault with
+    nothing to deliver. The scope collapses those onto one run and MOVES the
+    delivery intent onto it, which is the part the pre-run_identity code got wrong
+    when it collapsed them by dropping the second tool's binding instead.
 
     Draft creation deliberately runs entitlement-free and credit-free. It exists so the
     user gets an acknowledgement in under a second and so the scope check itself
@@ -761,6 +885,25 @@ async def create_run(
                     replayed=True,
                     first_stage_id=first_stage_id,
                 )
+
+            # Every read happens before the first write, which a Firestore transaction
+            # requires, so the scope lookup sits here rather than beside its write below.
+            scope_ref = _scope_ref(uid, dedup_scope) if dedup_scope else None
+            if scope_ref is not None:
+                collapsed = _collapse_onto_scope(
+                    txn,
+                    uid=uid,
+                    scope_ref=scope_ref,
+                    incoming_run_id=run_id,
+                    cutoff_iso=(
+                        now - timedelta(seconds=SCOPE_COLLAPSE_WINDOW_S)
+                    ).isoformat(),
+                    delivery=delivery,
+                    delivery_requested=delivery_requested,
+                    now_iso=now_iso,
+                )
+                if collapsed is not None:
+                    return collapsed
 
             txn.set(
                 run_ref,
@@ -808,6 +951,18 @@ async def create_run(
                     F.EXPIRES_AT: expires_at,
                 },
             )
+            if scope_ref is not None:
+                # Overwritten rather than created-once: the pointer names the LATEST run
+                # for this scope, so a genuinely new request later in the same session
+                # (past the window, or after the first run finished) starts clean.
+                txn.set(
+                    scope_ref,
+                    {
+                        F.RUN_ID: run_id,
+                        F.CREATED_AT: now_iso,
+                        F.EXPIRES_AT: expires_at,
+                    },
+                )
             _create_job_triplet(
                 txn,
                 uid=uid,
@@ -1354,20 +1509,31 @@ async def record_auto_admission_refusal(
             ):
                 return AutoAdmissionRefusal(state)
 
-            if not terminal and str(run.get(F.FAILURE_CODE) or "") == error_code:
+            # Counted whether or not anything else about the run changes, because the
+            # count is the only thing that ends the loop. A deferral used to write
+            # nothing on the second and later passes, so "retry forever" had no ceiling
+            # and no evidence it was happening.
+            refusals = int(run.get(F.AUTO_ADMIT_REFUSALS, 0)) + 1
+            give_up = terminal or refusals >= AUTO_ADMIT_REFUSAL_CAP
+
+            if not give_up and str(run.get(F.FAILURE_CODE) or "") == error_code:
+                # Deliberately not touching updated_at: nothing about this run advanced,
+                # and a status read should not look like progress.
+                txn.update(run_ref, {F.AUTO_ADMIT_REFUSALS: refusals})
                 return AutoAdmissionRefusal(state)
 
             sequence = int(run.get(F.AUDIT_SEQUENCE, 0)) + 1
-            next_state = F.STATE_FAILED if terminal else F.STATE_QUEUED
+            next_state = F.STATE_FAILED if give_up else F.STATE_QUEUED
             updates: dict[str, Any] = {
                 F.STATE: next_state,
                 F.FAILURE_CODE: error_code,
+                F.AUTO_ADMIT_REFUSALS: refusals,
                 F.STATE_REVISION: gcloud_firestore.Increment(1),
                 F.AUDIT_SEQUENCE: sequence,
                 F.UPDATED_AT: now_iso,
             }
             created_job_ids: tuple[str, ...] = ()
-            if terminal:
+            if give_up:
                 updates.update({
                     F.PROCESSING_STAGE: "",
                     F.AUTO_ADMIT_REQUESTED: False,
@@ -1393,7 +1559,7 @@ async def record_auto_admission_refusal(
                 run_id=run_id,
                 sequence=sequence,
                 event_type=(
-                    "auto_admission_refused" if terminal else "auto_admission_deferred"
+                    "auto_admission_refused" if give_up else "auto_admission_deferred"
                 ),
                 occurred_at=now_iso,
                 expires_at=str(run.get(F.EXPIRES_AT) or ""),
@@ -1404,6 +1570,101 @@ async def record_auto_admission_refusal(
                 correlation_id=correlation_id,
             )
             return AutoAdmissionRefusal(next_state, created_job_ids)
+
+        return _execute(transaction)
+
+    return await asyncio.to_thread(_run)
+
+
+async def expire_preadmission_run(
+    uid: str,
+    run_id: str,
+    *,
+    max_age_s: int,
+    correlation_id: str = "",
+) -> tuple[bool, tuple[str, ...]]:
+    """Fail a run that never reached admission and so never had a wall clock.
+
+    ``deadline_at`` is written in exactly one place, ``admit_run``, and the engine's
+    wall-clock check short-circuits on an empty value. A run that dies before admission
+    therefore has no timeout of any kind, and no other sweep pass looks at runs: they
+    look at stages, coords, clarifications and outbox rows. So a run could sit in
+    ``planning`` indefinitely while the user was told "it's running".
+
+    Re-checks every precondition inside the transaction rather than trusting the query,
+    because the query is eventually consistent and a run that got admitted in the
+    meantime now has real work in flight that this must not kill.
+
+    Returns (expired, created_job_ids).
+    """
+    now = datetime.now(UTC)
+    now_iso = now.isoformat()
+    cutoff_iso = (now - timedelta(seconds=max_age_s)).isoformat()
+
+    def _run() -> tuple[bool, tuple[str, ...]]:
+        db = admin_firestore()
+        run_ref = _run_ref(uid, run_id)
+        transaction = db.transaction()
+
+        @gcloud_firestore.transactional
+        def _execute(txn: Any) -> tuple[bool, tuple[str, ...]]:
+            snap = run_ref.get(transaction=txn)
+            if not snap.exists:
+                return (False, ())
+            run = snap.to_dict() or {}
+            state = str(run.get(F.STATE) or "")
+            if state not in (F.STATE_PLANNING, F.STATE_QUEUED):
+                return (False, ())
+            # Admitted means it has a real wall clock now; that mechanism owns it.
+            if str(run.get(F.DEADLINE_AT) or ""):
+                return (False, ())
+            if int(run.get(F.ADMITTED_PLAN_VERSION, 0)) > 0:
+                return (False, ())
+            if str(run.get(F.CREATED_AT) or now_iso) > cutoff_iso:
+                return (False, ())
+            if run.get(F.HIDDEN_AT) or run.get(F.DELETION_STATE):
+                return (False, ())
+
+            sequence = int(run.get(F.AUDIT_SEQUENCE, 0)) + 1
+            txn.update(
+                run_ref,
+                {
+                    F.STATE: F.STATE_FAILED,
+                    F.FAILURE_CODE: F.FAIL_PREADMISSION_EXPIRED,
+                    F.PROCESSING_STAGE: "",
+                    F.AUTO_ADMIT_REQUESTED: False,
+                    F.STATE_REVISION: gcloud_firestore.Increment(1),
+                    F.AUDIT_SEQUENCE: sequence,
+                    F.UPDATED_AT: now_iso,
+                },
+            )
+            notify_id = create_terminal_notify_job(
+                txn,
+                uid=uid,
+                run_id=run_id,
+                terminal_state=F.STATE_FAILED,
+                wave=0,
+                now_iso=now_iso,
+                expires_at=str(run.get(F.EXPIRES_AT) or ""),
+                correlation_id=correlation_id,
+                causation_id=f"preadmission-expiry:{run_id}",
+                plan_version=int(run.get(F.CURRENT_PLAN_VERSION, 0)),
+            )
+            _audit_event(
+                txn,
+                uid=uid,
+                run_id=run_id,
+                sequence=sequence,
+                event_type="preadmission_expired",
+                occurred_at=now_iso,
+                expires_at=str(run.get(F.EXPIRES_AT) or ""),
+                prior_state=state,
+                next_state=F.STATE_FAILED,
+                reason_code=F.FAIL_PREADMISSION_EXPIRED,
+                plan_version=int(run.get(F.CURRENT_PLAN_VERSION, 0)),
+                correlation_id=correlation_id,
+            )
+            return (True, (notify_id,))
 
         return _execute(transaction)
 

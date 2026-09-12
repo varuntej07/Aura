@@ -238,6 +238,77 @@ def _supplemental_section(
     }
 
 
+def _render_rows(
+    model_rows: Any,
+    claims: dict[str, dict[str, Any]],
+    table_schema: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Render table rows from stored claims. Same rule as _render_statements.
+
+    The model selected which claims fill which cell; every visible value here
+    comes from the claim's own normalized value or its rendered text. A cell
+    citing nothing that resolves is left EMPTY and reported as a gap, because a
+    guessed cell in a table reads as established fact.
+    """
+    columns = list(table_schema.get("columns") or [])
+    if not columns:
+        return [], []
+    rendered: list[dict[str, Any]] = []
+    gaps: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in model_rows or ():
+        title_claim = claims.get(str(getattr(row, "title_claim_id", "")))
+        if title_claim is None:
+            continue
+        title = " ".join(str(title_claim.get("subject") or "").split())[:200]
+        if not title or title.casefold() in seen:
+            continue
+        values: dict[str, str] = {}
+        sources: list[str] = []
+        for cell in getattr(row, "cells", ()) or ():
+            index = int(getattr(cell, "column_index", -1))
+            if index < 0 or index >= len(columns):
+                continue
+            column_name = str(columns[index].get("name") or "")
+            if not column_name or column_name in values:
+                continue
+            cited = [
+                claims[claim_id]
+                for claim_id in getattr(cell, "claim_ids", ()) or ()
+                if claim_id in claims
+            ]
+            value = ""
+            for claim in cited:
+                value = " ".join(
+                    str(claim.get("value_normalized") or claim.get("text") or "").split()
+                )[:300]
+                if value:
+                    break
+            if not value:
+                continue
+            values[column_name] = value
+            for claim in cited:
+                for evidence in list(claim.get("evidence") or ())[:2]:
+                    url = str(dict(evidence or {}).get("url") or "")
+                    if url and url not in sources:
+                        sources.append(url)
+        if not values:
+            continue
+        for column in columns:
+            column_name = str(column.get("name") or "")
+            if column_name and column_name not in values:
+                gaps.append({
+                    "sub_question_id": "",
+                    "reason": F.FAIL_NO_SOURCE_FOUND,
+                    "detail": f"{title} / {column_name} unverified",
+                })
+        seen.add(title.casefold())
+        rendered.append({"title": title, "values": values, "sources": sources[:4]})
+        if len(rendered) >= 20:
+            break
+    return rendered, gaps[:40]
+
+
 async def run(ctx: StageContext) -> StageResult:
     # Imported inside the function, not at module scope: store imports stages.base,
     # so a module-level import here would close a cycle (store -> stages -> registry
@@ -250,6 +321,9 @@ async def run(ctx: StageContext) -> StageResult:
     hard_recency = bool(recency.get("hard"))
     min_domains = int(policy.get("min_corroboration", 1) or 1)
     sections_wanted = tuple(policy.get("output_sections") or ("Summary",))
+    # Set by the planner only when the request is a collection ("compare these",
+    # "build me a CRM of"). Empty means a narrative brief, which is the default.
+    table_schema = dict(plan.get("output_schema") or {})
 
     mode = str(ctx.payload.get("mode") or "full")
     stored_claims = await store.list_documents(ctx.uid, ctx.run_id, F.CLAIMS_SUBCOLLECTION)
@@ -373,6 +447,7 @@ async def run(ctx: StageContext) -> StageResult:
                 sections=sections_wanted,
                 claims=prompt_claims,
                 unanswered=unanswered,
+                output_schema=table_schema or None,
             ),
             system=SYNTHESIZE_SYSTEM,
             response_model=Brief,
@@ -490,7 +565,22 @@ async def run(ctx: StageContext) -> StageResult:
         # ship a high-risk answer bare.
         disclaimers = [DISCLAIMER_TEXT["general_information"]]
 
+    table_rows, row_gaps = _render_rows(brief.rows, known, table_schema)
+    gaps.extend(row_gaps)
+
     document = {
+        # The table half of the answer, when the request asked for a collection.
+        # Carried on the brief so the delivery stage needs no second read, and
+        # empty for every narrative run, which keeps today's shape unchanged.
+        "rows": table_rows,
+        "table": (
+            {
+                "entity_label": str(table_schema.get("entity_label") or "Item"),
+                "columns": list(table_schema.get("columns") or []),
+            }
+            if table_rows
+            else {}
+        ),
         "executive_summary": executive_summary,
         "executive_summary_claim_ids": summary_ids,
         "sections": sections,

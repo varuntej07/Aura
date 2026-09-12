@@ -21,8 +21,9 @@ excerpt" true.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .models import EntityBinding, ScopeDimension
 from .policy_table import SourceClass
@@ -59,6 +60,161 @@ class ClassifiedSubQuestion(BaseModel):
     must_answer: bool = False
     entity_bindings: list[EntityBinding] = Field(default_factory=list, max_length=4)
 
+    @field_validator("entity_bindings", mode="before")
+    @classmethod
+    def _drop_overlong_bindings(cls, value: Any) -> Any:
+        """Too many bindings means UNBOUND, not a failed run.
+
+        A binding is a promise that ONE excerpt establishes a relationship
+        between every entity named in it, so five or more is never satisfiable:
+        no single quote covers seven vendors. The cap says so, but the Anthropic
+        strict schema strips maxItems into the description (see
+        _anthropic_strict_schema), leaving it advisory to the model and enforced
+        only here at parse time.
+
+        That combination killed a live run: a comparison request that named no
+        vendors made the classifier invent ten entities and bind five to seven of
+        them to every sub-question, and the whole classification was rejected
+        twice. Dropping the list marks the sub-question unbound, which
+        entity_binding_status already handles as a visible gap. The research
+        still runs; the alternative was no research at all.
+        """
+        if isinstance(value, list) and len(value) > 4:
+            return []
+        return value
+
+
+class ColumnType(StrEnum):
+    """Notion property types a research column may use.
+
+    Closed on purpose, and narrower than Notion's own set: every type here can
+    be filled from a claim's normalized value without inventing structure. No
+    relation, rollup, formula or people column, because those reference things
+    outside the run.
+    """
+
+    RICH_TEXT = "rich_text"
+    NUMBER = "number"
+    SELECT = "select"
+    CHECKBOX = "checkbox"
+    URL = "url"
+    DATE = "date"
+
+
+_COLUMN_TYPES = frozenset(item.value for item in ColumnType)
+
+
+class ColumnSpec(BaseModel):
+    """One column of a table answer."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    type: ColumnType
+    # What belongs in the column, for the synthesis stage. Never shown to the user.
+    description: str = Field(default="", max_length=200)
+
+
+# Type names a model reaches for that are not our enum. Only the Anthropic hop
+# enforces the enum natively; a fallback hop can answer with "text" or "boolean"
+# and, with extra="forbid", that would fail the WHOLE classification and kill the
+# run over a formatting detail. The table is a nice-to-have; the research is the
+# product, so these coerce instead of raising.
+_COLUMN_TYPE_SYNONYMS: dict[str, str] = {
+    "text": "rich_text",
+    "string": "rich_text",
+    "str": "rich_text",
+    "richtext": "rich_text",
+    "rich text": "rich_text",
+    "longtext": "rich_text",
+    "title": "rich_text",
+    "boolean": "checkbox",
+    "bool": "checkbox",
+    "yes_no": "checkbox",
+    "integer": "number",
+    "int": "number",
+    "float": "number",
+    "decimal": "number",
+    "currency": "number",
+    "price": "number",
+    "percent": "number",
+    "link": "url",
+    "uri": "url",
+    "website": "url",
+    "datetime": "date",
+    "timestamp": "date",
+    "option": "select",
+    "enum": "select",
+    "category": "select",
+    "multi_select": "select",
+}
+
+
+class OutputSchema(BaseModel):
+    """The shape of an answer that is a COLLECTION rather than a narrative.
+
+    "Compare the realtime speech APIs on price and latency" and "build me a CRM
+    of these companies" are the same shape: one row per thing, the same columns
+    for each. Without this the run could only ever produce one prose page, which
+    is what a user asking for a table in Notion did not get.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entity_label: str = Field(min_length=1, max_length=60)
+    columns: list[ColumnSpec] = Field(min_length=1, max_length=12)
+
+    @field_validator("columns", mode="before")
+    @classmethod
+    def _coerce_columns(cls, value: Any) -> Any:
+        """Map near-miss type names onto the enum, and drop what cannot be fixed.
+
+        Deliberately lenient, and only here. Everywhere else in this module a
+        malformed field means a retry, because the field carries evidence. A
+        column type carries none: it decides which Notion property a verified
+        value lands in, and getting it wrong costs a nicer cell, not a truth.
+        """
+        if not isinstance(value, list):
+            return value
+        cleaned: list[Any] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            column = dict(item)
+            raw_type = str(column.get("type") or "").strip().casefold().replace("-", "_")
+            if raw_type not in _COLUMN_TYPES:
+                mapped = _COLUMN_TYPE_SYNONYMS.get(raw_type)
+                if mapped is None and raw_type:
+                    # An unrecognised name still describes SOMETHING the planner
+                    # wanted in a column. Text holds any value we can render.
+                    mapped = "rich_text"
+                column["type"] = mapped or "rich_text"
+            else:
+                column["type"] = raw_type
+            if not str(column.get("name") or "").strip():
+                continue
+            cleaned.append(column)
+        return cleaned
+
+
+# Caps that bound HOW MUCH WORK the run does, not what is true. Every one of them
+# is stripped from the wire schema (_anthropic_strict_schema folds maxItems into
+# the description), so the model receives them as prose and routinely returns one
+# item too many. Rejecting the whole classification over a thirteenth sub-question
+# throws away a complete, paid-for response and killed live runs; trimming
+# enforces the same ceiling exactly. Module scope, not a class attribute: a
+# leading-underscore attribute on a pydantic model is a private-attribute
+# descriptor, so the classmethod would read the descriptor, not this dict.
+_CLASSIFICATION_LIST_CAPS: dict[str, int] = {
+    "profile_ids": 3,
+    "entities": 12,
+    "criteria": 10,
+    "sub_questions": 12,
+    "seed_queries": 12,
+    "assumptions": 6,
+    "risk_flags": 6,
+}
+
 
 class ClassificationResult(BaseModel):
     """The classifier's whole output. One call, no tools, no domain names, no topics.
@@ -88,6 +244,51 @@ class ClassificationResult(BaseModel):
     # Non-empty risk flags floor the composed risk class at medium and force a
     # disclaimer, regardless of which rows were named. A novel topic gets MORE caution.
     risk_flags: list[str] = Field(default_factory=list, max_length=6)
+
+    # Set ONLY when the answer is a collection of comparable things. None means a
+    # narrative brief, which stays the default: a question with one answer forced
+    # into a one-row table is worse than a paragraph.
+    output_schema: OutputSchema | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _trim_overlong_lists(cls, data: Any) -> Any:
+        """Cut surplus items rather than failing. Order is the model's priority."""
+        if not isinstance(data, dict):
+            return data
+        trimmed: dict[str, Any] | None = None
+        for name, cap in _CLASSIFICATION_LIST_CAPS.items():
+            value = data.get(name)
+            if isinstance(value, list) and len(value) > cap:
+                if trimmed is None:
+                    trimmed = dict(data)
+                trimmed[name] = value[:cap]
+        return trimmed if trimmed is not None else data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unusable_output_schema(cls, data: Any) -> Any:
+        """A malformed table shape costs the TABLE, never the whole run.
+
+        Every other field here is load bearing: an invalid one means a retry,
+        because the run cannot proceed without it. This one can be thrown away
+        and the run still answers the question as a brief. Failing the whole
+        classification over it was a real outage shape, since only the Anthropic
+        hop enforces the schema natively and a fallback hop can answer with a
+        column type that is not in the enum.
+        """
+        if not isinstance(data, dict):
+            return data
+        raw = data.get("output_schema")
+        if raw is None:
+            return data
+        try:
+            OutputSchema.model_validate(raw)
+        except Exception:
+            cleaned = dict(data)
+            cleaned["output_schema"] = None
+            return cleaned
+        return data
 
     # True only when a missing field would change what gets researched, not merely
     # sharpen it. A run that can proceed on stated assumptions should proceed.
@@ -292,6 +493,29 @@ class BriefSection(BaseModel):
     statements: list[FactualStatement] = Field(min_length=1, max_length=20)
 
 
+class TableCell(BaseModel):
+    """One cell, as a selection of stored claims. No value text, by design."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    column_index: int = Field(ge=0, le=11)
+    claim_ids: list[str] = Field(min_length=1, max_length=2)
+
+
+class TableRow(BaseModel):
+    """One row of a table answer.
+
+    ``title_claim_id`` names the claim whose SUBJECT labels the row, so even the
+    row's name is rendered from verified text rather than written by the model.
+    A row is dropped entirely when that claim does not resolve.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    title_claim_id: str = Field(min_length=1, max_length=64)
+    cells: list[TableCell] = Field(default_factory=list, max_length=12)
+
+
 class Brief(BaseModel):
     """The finished artifact. Bounded so it cannot approach Firestore's 1 MB limit."""
 
@@ -310,3 +534,7 @@ class Brief(BaseModel):
         default_factory=list, max_length=6
     )
     sections: list[BriefSection] = Field(default_factory=list, max_length=12)
+    # Filled only when the plan carried an output_schema. Same discipline as the
+    # sections: the model selects claims, code renders every visible value, so a
+    # table cell is as attributable as a sentence.
+    rows: list[TableRow] = Field(default_factory=list, max_length=20)

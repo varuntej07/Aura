@@ -31,6 +31,7 @@ from ...services.research.run_identity import client_run_id_for, retry_salted
 from ..voice.interview.models import buddy_owns_conversation
 from .notion_backend import (
     DestinationCopy,
+    DestinationDecision,
     ReauthorizationRequired,
     create_database_backend,
     decide_destination,
@@ -76,6 +77,9 @@ _DELIVER_FAILURE_LINE = "I couldn't save that research to Notion - try again?"
 # Each engine refusal is a different fact, and only one of them is "try again".
 # Keyed on the reason the engine returns, never on anything the user said.
 _DELIVER_REFUSALS = {
+    # Kept for an older backend that still refuses a running run. The current
+    # engine binds one instead (store.bind_delivery -> bound_pending), which is
+    # what lets the destination be settled while the research works.
     "still_running": (
         "That research is still going. Ask me again once it's done and I'll put it in Notion."
     ),
@@ -97,6 +101,11 @@ class ResearchDispatchResult:
     dispatched: bool = False
     run_id: str | None = None
     database_name: str | None = None
+    # True when this result's line is a QUESTION about the destination. Needed
+    # since a run can now be started AND still be asking where to put the
+    # results, so `dispatched` alone no longer tells the two apart, and an
+    # "unnamed" question carries neither candidates nor a proposed name.
+    asked_question: bool = False
     candidates: list[tuple[str, str]] = field(default_factory=list)
     proposed_create_name: str | None = None
     # True only on a cache replay: this exact confirmation was already spoken
@@ -213,6 +222,46 @@ async def dispatch_research_to_notion(
     if not data_source_id:
         return ResearchDispatchResult(spoken_confirmation=_FAILURE_LINE)
 
+    run_id, refusal = await _create_research_run(
+        uid=uid,
+        session_id=session_id,
+        firebase_id_token=firebase_id_token,
+        cleaned_request=cleaned_request,
+        delivery_binding={
+            "data_source_id": data_source_id,
+            "database_name": database_name or "Notion",
+        },
+        destination_hint="",
+    )
+    if refusal:
+        return ResearchDispatchResult(spoken_confirmation=refusal)
+    return ResearchDispatchResult(
+        spoken_confirmation=(
+            f"On it. I'll research that and save it to {database_name or 'your Notion'}, "
+            "and keep you posted."
+        ),
+        dispatched=True,
+        run_id=run_id,
+        database_name=database_name,
+    )
+
+
+async def _create_research_run(
+    *,
+    uid: str,
+    session_id: str,
+    firebase_id_token: str,
+    cleaned_request: str,
+    delivery_binding: dict[str, str] | None,
+    destination_hint: str,
+) -> tuple[str, str]:
+    """Create (or replay) the durable run. Returns (run_id, spoken_refusal).
+
+    Exactly one of the two is non-empty. ``delivery_binding`` is a settled
+    destination; ``destination_hint`` is the other case, where the user wants
+    Notion and has not chosen a database yet, so the run starts NOW and a later
+    bind decides where it lands.
+    """
     # Run identity via the shared helper: the tool name is part of the id so
     # the same request text spoken to start_research and research_to_notion in
     # one session can never collapse onto one run doc (that collision silently
@@ -222,37 +271,44 @@ async def dispatch_research_to_notion(
         tool_name="research_to_notion",
         request_text=cleaned_request,
     )
-    delivery_binding = {
-        "data_source_id": data_source_id,
-        "database_name": database_name or "Notion",
+    body: dict[str, object] = {
+        "request": cleaned_request,
+        "depth": "quick",
+        "client_run_id": client_run_id,
+        "origin_surface": "voice",
+        # Catches what the tool name in the id deliberately cannot: one turn firing
+        # start_research AND this tool at the same intent. The store collapses them
+        # onto one run and moves the delivery intent across.
+        "dedup_scope": f"voice:{session_id}",
     }
+    if delivery_binding:
+        body["delivery"] = dict(delivery_binding)
+    else:
+        body["delivery_requested"] = {"destination_hint": destination_hint}
 
     response = await _backend_request(
         "POST",
         "/research",
         firebase_id_token=firebase_id_token,
         session_id=session_id,
-        json_body={
-            "request": cleaned_request,
-            "depth": "quick",
-            "client_run_id": client_run_id,
-            "origin_surface": "voice",
-            "delivery": delivery_binding,
-        },
+        json_body=body,
     )
     if response.status_code == 200:
         # 200 (not 202) means the deterministic id REPLAYED an existing run.
-        # A replay is only acceptable when that run is alive and bound to the
-        # same destination; a terminal run or one missing this delivery
-        # binding must restart under a salted id, or Buddy says "on it" while
-        # nothing will ever deliver.
+        # A replay is only acceptable when that run is still alive. With a
+        # binding it must also be bound to the SAME destination, or Buddy says
+        # "on it" while nothing will ever deliver. An unbound start has no such
+        # requirement: binding is exactly what happens next, and a run already
+        # carrying a destination is a run that is already going where it should.
         payload = response.json()
         replayed_state = str(payload.get("state") or "")
         replayed_delivery = dict(payload.get("delivery") or {})
-        if (
-            replayed_state in ("failed", "cancelled")
-            or replayed_delivery.get("data_source_id") != data_source_id
-        ):
+        unusable = replayed_state in ("failed", "cancelled") or (
+            delivery_binding is not None
+            and replayed_delivery.get("data_source_id")
+            != delivery_binding.get("data_source_id")
+        )
+        if unusable:
             logger.info(
                 "research_dispatch: replayed run unusable, restarting salted",
                 {
@@ -267,26 +323,19 @@ async def dispatch_research_to_notion(
                 "/research",
                 firebase_id_token=firebase_id_token,
                 session_id=session_id,
-                json_body={
-                    "request": cleaned_request,
-                    "depth": "quick",
-                    "client_run_id": retry_salted(client_run_id),
-                    "origin_surface": "voice",
-                    "delivery": delivery_binding,
-                },
+                # Scope dropped along with the id. A salted retry exists precisely
+                # because the run we would otherwise join is dead or bound somewhere
+                # else, so collapsing onto it again is the one thing it must not do.
+                json_body=dict(
+                    body,
+                    client_run_id=retry_salted(client_run_id),
+                    dedup_scope="",
+                ),
             )
 
     if response.status_code in (200, 202):
         payload = response.json()
-        return ResearchDispatchResult(
-            spoken_confirmation=(
-                f"On it. I'll research that and save it to {database_name or 'your Notion'}, "
-                "and keep you posted."
-            ),
-            dispatched=True,
-            run_id=str(payload.get("run_id") or ""),
-            database_name=database_name,
-        )
+        return str(payload.get("run_id") or ""), ""
 
     detail: dict = {}
     try:
@@ -314,7 +363,94 @@ async def dispatch_research_to_notion(
         "research_dispatch: run create refused",
         {"user_id": uid, "session_id": session_id, "status": response.status_code, "code": code},
     )
-    return ResearchDispatchResult(spoken_confirmation=spoken)
+    return "", spoken
+
+
+async def start_unbound_run(
+    *,
+    uid: str,
+    session_id: str,
+    firebase_id_token: str,
+    request: str,
+    destination_hint: str = "",
+) -> ResearchDispatchResult:
+    """Start research immediately, with the Notion destination still open.
+
+    This is the half that stopped the user's research from ever starting. The
+    old path resolved the destination FIRST, so a database question meant no
+    run at all: the user answered the same question three times and nothing was
+    running behind any of it. Ordering it this way makes "it's running" true
+    before Buddy says it, and the destination is bound while the work proceeds.
+    """
+    cleaned_request = " ".join((request or "").split())
+    if not cleaned_request or len(cleaned_request) > 2_000:
+        return ResearchDispatchResult(spoken_confirmation=_FAILURE_LINE)
+    run_id, refusal = await _create_research_run(
+        uid=uid,
+        session_id=session_id,
+        firebase_id_token=firebase_id_token,
+        cleaned_request=cleaned_request,
+        delivery_binding=None,
+        destination_hint=" ".join((destination_hint or "").split())[:120],
+    )
+    if refusal:
+        return ResearchDispatchResult(spoken_confirmation=refusal)
+    return ResearchDispatchResult(
+        spoken_confirmation="Research is running.",
+        dispatched=True,
+        run_id=run_id,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationOutcome:
+    """A resolve attempt: a decision, or the reason there is none."""
+
+    decision: DestinationDecision | None = None
+    reauth: bool = False
+    failed: bool = False
+
+
+async def resolve_destination(
+    *,
+    uid: str,
+    session_id: str,
+    firebase_id_token: str,
+    destination: str,
+    confirmed_data_source_id: str = "",
+    confirmed_database_name: str = "",
+) -> DestinationOutcome:
+    """Resolve spoken words to a database, or to the question worth asking.
+
+    Split out of dispatch so it can run CONCURRENTLY with the run create rather
+    than gating it.
+    """
+    resolved: dict | None = None
+    if not confirmed_data_source_id:
+        try:
+            resolved = await resolve_spoken_destination(
+                destination=destination,
+                firebase_id_token=firebase_id_token,
+                session_id=session_id,
+                timeout_s=_DISPATCH_TIMEOUT_S,
+            )
+        except ReauthorizationRequired:
+            return DestinationOutcome(reauth=True)
+        except Exception as exc:
+            logger.warn(
+                "research_dispatch: destination resolve failed",
+                {"user_id": uid, "session_id": session_id, "error": str(exc)},
+            )
+            return DestinationOutcome(failed=True)
+    return DestinationOutcome(
+        decision=decide_destination(
+            resolved,
+            destination=destination,
+            confirmed_data_source_id=confirmed_data_source_id,
+            confirmed_database_name=confirmed_database_name,
+            copy=_DESTINATION_COPY,
+        )
+    )
 
 
 async def deliver_existing_run_to_notion(
@@ -339,49 +475,24 @@ async def deliver_existing_run_to_notion(
     research in my CRM" a minute after the brief landed silently paid for the same
     work twice.
     """
-    if create_database_named:
-        try:
-            data_source_id, database_name = await create_database_backend(
-                name=create_database_named,
-                firebase_id_token=firebase_id_token,
-                session_id=session_id,
-                timeout_s=_DISPATCH_TIMEOUT_S,
-            )
-        except ReauthorizationRequired:
-            return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
-        except Exception as exc:
-            logger.warn(
-                "research_dispatch: deliver database create failed",
-                {"user_id": uid, "session_id": session_id, "error": str(exc)},
-            )
-            return ResearchDispatchResult(
-                spoken_confirmation="I couldn't create that database in Notion - try again?"
-            )
-    else:
-        resolved: dict | None = None
-        if not confirmed_data_source_id:
-            try:
-                resolved = await resolve_spoken_destination(
-                    destination=destination,
-                    firebase_id_token=firebase_id_token,
-                    session_id=session_id,
-                    timeout_s=_DISPATCH_TIMEOUT_S,
-                )
-            except ReauthorizationRequired:
-                return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
-            except Exception as exc:
-                logger.warn(
-                    "research_dispatch: deliver destination resolve failed",
-                    {"user_id": uid, "session_id": session_id, "error": str(exc)},
-                )
-                return ResearchDispatchResult(spoken_confirmation=_DELIVER_FAILURE_LINE)
-        decision = decide_destination(
-            resolved,
+    # Bound below by the resolve branch. Both stay empty on the create path,
+    # where the destination does not exist yet and the delivery stage makes it.
+    data_source_id = ""
+    database_name = ""
+    if not create_database_named:
+        outcome = await resolve_destination(
+            uid=uid,
+            session_id=session_id,
+            firebase_id_token=firebase_id_token,
             destination=destination,
             confirmed_data_source_id=confirmed_data_source_id,
             confirmed_database_name=confirmed_database_name,
-            copy=_DESTINATION_COPY,
         )
+        if outcome.reauth:
+            return ResearchDispatchResult(spoken_confirmation=_RECONNECT_LINE)
+        if outcome.decision is None:
+            return ResearchDispatchResult(spoken_confirmation=_DELIVER_FAILURE_LINE)
+        decision = outcome.decision
         if decision.question is not None:
             return ResearchDispatchResult(
                 spoken_confirmation=decision.question,
@@ -391,10 +502,10 @@ async def deliver_existing_run_to_notion(
         data_source_id = decision.data_source_id
         database_name = decision.database_name
 
-    if not data_source_id:
+    if not data_source_id and not create_database_named:
         return ResearchDispatchResult(spoken_confirmation=_DELIVER_FAILURE_LINE)
 
-    resolved_name = database_name or "Notion"
+    resolved_name = database_name or create_database_named or "Notion"
     try:
         response = await _backend_request(
             "POST",
@@ -404,6 +515,16 @@ async def deliver_existing_run_to_notion(
             json_body={
                 "data_source_id": data_source_id,
                 "database_name": resolved_name,
+                # The database is created by the DELIVERY STAGE, under its own
+                # receipt, instead of here. Creating it in the worker meant a
+                # retried turn could mint a second database, and it put a new
+                # database in the user's workspace even for a run that later
+                # failed with nothing to write.
+                **(
+                    {"create_database_named": create_database_named}
+                    if create_database_named and not data_source_id
+                    else {}
+                ),
                 "correlation_id": f"voice:{session_id}",
             },
         )
@@ -435,8 +556,22 @@ async def deliver_existing_run_to_notion(
             spoken_confirmation=_DELIVER_REFUSALS.get(reason, _DELIVER_FAILURE_LINE)
         )
 
+    # A run that is still working binds its destination and delivers at the end,
+    # so "saving now" would be false. The projection says which case this is.
+    still_working = True
+    try:
+        still_working = (
+            str((response.json() or {}).get("state") or "")
+            not in _RESULT_TERMINAL_STATES
+        )
+    except Exception:
+        still_working = False
     return ResearchDispatchResult(
-        spoken_confirmation=f"Saving that research into {resolved_name} now.",
+        spoken_confirmation=(
+            f"Got it. The results go into {resolved_name} when it's done."
+            if still_working
+            else f"Saving that research into {resolved_name} now."
+        ),
         dispatched=True,
         run_id=run_id,
         database_name=resolved_name,
@@ -500,14 +635,15 @@ async def fetch_resumable_research_runs(
     *,
     session_id: str,
     firebase_id_token: str,
-) -> list[tuple[str, str, str]]:
-    """(run_id, database_name, request) for the user's live Notion-bound runs.
+) -> list[tuple[str, str, str, bool]]:
+    """(run_id, database_name, request, bound) for the user's live Notion runs.
 
     Session-start rehydration: a user who hung up mid-run and came back had no
     narrator tracking the run, so the "saved to X" receipt never fired for
     them. Newest first, capped by the list route's own limit. Only runs WITH a
-    delivery binding are returned - the narrator exists to receipt Notion-bound
-    work, and tracking an unbound run would misreport it at terminal. [] on any
+    delivery binding, or a recorded intent to pick one, are returned: the first
+    so the narrator can receipt it, the second so the coordinator can re-offer
+    the question that was never answered. ``bound`` says which. [] on any
     failure: rehydration is best-effort and a failed read must cost nothing.
     """
     try:
@@ -531,7 +667,7 @@ async def fetch_resumable_research_runs(
     except Exception:
         return []
     now = datetime.now(timezone.utc)
-    runs: list[tuple[str, str, str]] = []
+    runs: list[tuple[str, str, str, bool]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -539,7 +675,12 @@ async def fetch_resumable_research_runs(
             continue
         delivery = dict(item.get("delivery") or {})
         run_id = str(item.get("run_id") or "")
-        if not delivery or not run_id:
+        # A run with no binding but a recorded INTENT is the new case: the user
+        # asked for Notion, hung up before choosing a database, and the run kept
+        # going. It is returned so the coordinator can re-offer the question;
+        # a run with neither is not this narrator's business.
+        wanted = bool(item.get("delivery_requested"))
+        if not run_id or not (delivery or wanted):
             continue
         updated_raw = str(item.get("updated_at") or "")
         if updated_raw:
@@ -555,6 +696,7 @@ async def fetch_resumable_research_runs(
             run_id,
             str(delivery.get("database_name") or "your Notion"),
             str(item.get("request") or ""),
+            bool(delivery),
         ))
     return runs
 
@@ -815,7 +957,7 @@ class RunNarrator:
             if state == "cancelled":
                 return  # the user did this; telling them is noise
             binding = ""
-            if delivery_result.get("page_id"):
+            if delivery_result.get("page_id") or delivery_result.get("rows_written"):
                 line = (
                     f"{run_name[:1].upper()}{run_name[1:]} is done and saved to "
                     f"{database_name} in their Notion"
@@ -834,11 +976,22 @@ class RunNarrator:
                     " Only this one failed: do not claim any other research "
                     "run failed, and do not say this one is still running."
                 )
+            elif not dict(projection.get("delivery") or {}):
+                # Finished with no destination ever bound. Common now that a run
+                # starts before the user picks a database: they may still be
+                # deciding, or they declined. Reporting this as "partial results"
+                # was wrong for a READY run, and reporting it as a Notion failure
+                # would blame a write nobody ever asked for.
+                line = (
+                    f"{run_name[:1].upper()}{run_name[1:]} is done"
+                    + (" with some gaps noted" if state == "partial" else "")
+                    + " - the brief is in the app."
+                )
             elif not delivery_result:
-                # No delivery receipt AND no failure entry: the run went
-                # terminal on a path that never reached the deliver stage
-                # (e.g. a fail-derived partial). Saying "saving failed" here
-                # would blame Notion for an attempt that never happened.
+                # Bound, but the run went terminal on a path that never reached
+                # the deliver stage (e.g. a fail-derived partial). Saying
+                # "saving failed" would blame Notion for an attempt that never
+                # happened.
                 line = (
                     f"{run_name[:1].upper()}{run_name[1:]} finished with partial "
                     "results - the brief is in the app."

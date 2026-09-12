@@ -54,8 +54,8 @@ class Settings(BaseSettings):
     # Deepgram STT
     DEEPGRAM_API_KEY: str = ""
 
-    # Meta Model API, server-side meeting transcription only.
-    MODEL_API_KEY: str = ""
+    # Meta Muse batch STT (api.meta.ai), server-side meeting transcription only.
+    META_MUSE_API_KEY: str = ""
 
     # Cartesia TTS
     CARTESIA_API_KEY: str = ""

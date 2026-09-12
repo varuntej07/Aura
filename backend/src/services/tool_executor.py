@@ -1714,7 +1714,16 @@ class ToolExecutor:
         else:
             client_run_id = random_client_run_id()
         engine = get_research_engine()
-        spec = {"request": request, "preset": depth, "origin_surface": self._created_via}
+        spec = {
+            "request": request,
+            "preset": depth,
+            "origin_surface": self._created_via,
+            # Same scope research_to_notion sends. The tool name keeps the two ids
+            # disjoint, which is right for a retry and wrong for one turn that fires
+            # both tools: that produced two runs, and the Notion binding landed on
+            # only one of them. The scope is what joins them back up.
+            "dedup_scope": self._client_message_id or "",
+        }
         handle = await engine.start(self._user_id, spec, client_run_id=client_run_id)
 
         if handle.replayed and handle.state in (
@@ -1726,8 +1735,13 @@ class ToolExecutor:
             # run under a nonce-salted identity. Accidental duplicate calls with
             # identical args in the same turn are already absorbed by the outer
             # tool receipt before reaching this method.
+            # Scope dropped with the id: the whole point of salting is to get away
+            # from the run the deterministic path found, so re-joining it by scope
+            # would defeat the restart.
             handle = await engine.start(
-                self._user_id, spec, client_run_id=retry_salted(client_run_id)
+                self._user_id,
+                dict(spec, dedup_scope=""),
+                client_run_id=retry_salted(client_run_id),
             )
 
         if handle.replayed and handle.state in (

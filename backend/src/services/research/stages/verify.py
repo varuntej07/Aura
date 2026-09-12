@@ -218,7 +218,10 @@ def _policy_shortfalls(
     # concatenates groups precisely so that composing two policies is STRICTER than
     # either, which a flattened union would silently invert.
     for group in policy.get("required_source_class_groups") or ():
-        wanted = _classes_from(group)
+        # Groups persist as {"any_of": [...]} because Firestore refuses an array
+        # directly inside an array; the bare list is the older, unwritable form and
+        # is still read so a plan from either encoding verifies the same way.
+        wanted = _classes_from(group.get("any_of") if isinstance(group, dict) else group)
         if wanted and not (classes & wanted):
             shortfalls.append(
                 "missing_" + "_or_".join(sorted(item.value for item in wanted))

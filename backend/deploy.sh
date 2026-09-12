@@ -14,6 +14,7 @@
 #   gcloud secrets create livekit-api-secret --project=<PROJECT_ID>
 #   gcloud secrets create deepgram-api-key --project=<PROJECT_ID>
 #   gcloud secrets create deepgram-dictation-api-key --project=<PROJECT_ID>
+#   gcloud secrets create meta-model-api-key --project=<PROJECT_ID>          # meetings: Meta Muse batch STT (META_MUSE_API_KEY)
 #   gcloud secrets create juno-groq-api-key --project=<PROJECT_ID>           # dictation polish: AI transcript cleanup
 #   gcloud secrets create cartesia-api-key --project=<PROJECT_ID>
 #   gcloud secrets create juno-google-client-id --project=<PROJECT_ID>
@@ -322,6 +323,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-secrets="LIVEKIT_API_SECRET=livekit-api-secret:latest" \
   --set-secrets="DEEPGRAM_API_KEY=deepgram-api-key:latest" \
   --set-secrets="DEEPGRAM_DICTATION_API_KEY=deepgram-dictation-api-key:latest" \
+  --set-secrets="META_MUSE_API_KEY=meta-model-api-key:latest" \
   --set-secrets="GROQ_API_KEY=juno-groq-api-key:latest" \
   --set-secrets="CARTESIA_API_KEY=cartesia-api-key:latest" \
   --set-secrets="GOOGLE_CLIENT_ID=juno-google-client-id:latest" \

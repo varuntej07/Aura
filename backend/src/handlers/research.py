@@ -69,6 +69,10 @@ def _projection(detail: dict[str, Any]) -> dict[str, Any]:
         # these to speak a truthful "saved to X" only after the page exists.
         "delivery": dict(run.get(F.DELIVERY) or {}),
         "delivery_result": dict(run.get(F.DELIVERY_RESULT) or {}),
+        # Intent, not a binding: the caller wanted Notion and had not chosen a
+        # database yet. The voice worker reads it on reconnect to re-offer the
+        # question for a run that is still unbound.
+        "delivery_requested": dict(run.get(F.DELIVERY_REQUESTED) or {}),
         "gaps": list(run.get(F.GAPS) or []),
         "source_count": int(run.get(F.SOURCE_COUNT, 0)),
         "claim_count": int(run.get(F.CLAIM_COUNT, 0)),
@@ -144,13 +148,28 @@ async def handle_create(request: Request) -> JSONResponse:
         if not data_source_id or len(data_source_id) > 64 or len(database_name) > 300:
             return JSONResponse({"error": "Invalid delivery binding."}, status_code=400)
         delivery = {"data_source_id": data_source_id, "database_name": database_name}
+    # The caller wants Notion but has not settled which database yet. Recorded as
+    # intent only, so the run starts now and a later /deliver binds the real
+    # destination. Never a substitute for DELIVERY: nothing is written from this.
+    delivery_requested: dict[str, str] | None = None
+    raw_requested = body.get("delivery_requested")
+    if isinstance(raw_requested, dict) and not delivery:
+        hint = " ".join(str(raw_requested.get("destination_hint") or "").split())[:120]
+        delivery_requested = {"destination_hint": hint}
+    # The caller's stable per-conversation prefix, so two different tools firing at one
+    # user intent join one run instead of racing. Bounded and optional: a surface that
+    # sends nothing keeps exactly the old behaviour.
+    dedup_scope = str(body.get("dedup_scope") or "").strip()[:128]
     spec: dict[str, object] = {
         "request": text,
         "preset": preset,
         "origin_surface": str(body.get("origin_surface") or "dashboard"),
+        "dedup_scope": dedup_scope,
     }
     if delivery:
         spec["delivery"] = delivery
+    if delivery_requested is not None:
+        spec["delivery_requested"] = delivery_requested
     handle = await get_research_engine().start(
         uid,
         spec,
@@ -226,6 +245,24 @@ async def handle_signal(request: Request, run_id: str, kind: str) -> JSONRespons
         signal.update({"plan_version": int(body.get("plan_version") or 0), "preset": "quick"})
     elif kind == "deliver":
         data_source_id = str(body.get("data_source_id") or "").strip()
+        # A destination the user named but that does not exist yet. The database is
+        # created by the delivery stage under its own receipt rather than here, so a
+        # retried or duplicated signal cannot mint two databases, and a run bound
+        # this way still starts (and keeps running) while the name is settled.
+        create_named = " ".join(str(body.get("create_database_named") or "").split())[:200]
+        if not data_source_id and create_named:
+            signal.update({
+                "create_database_named": create_named,
+                "database_name": create_named,
+            })
+            try:
+                status = await get_research_engine().signal(uid, run_id, signal)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if not status.found:
+                return JSONResponse({"error": "Not found."}, status_code=404)
+            detail = await get_research_engine().detail(uid, run_id)
+            return JSONResponse(_projection(detail or {"run": {}}))
         if not data_source_id:
             # Rejected before the engine sees it, so nothing downstream would record
             # this. A caller that keeps sending an empty destination looks identical to

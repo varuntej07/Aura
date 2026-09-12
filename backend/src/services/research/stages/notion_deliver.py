@@ -21,7 +21,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ....lib.logger import logger
-from ...notion.write import NotionRequestRejected, write_research_brief
+from ...notion.write import (
+    NotionRequestRejected,
+    create_database_for_run,
+    write_research_brief,
+    write_research_rows,
+)
 from ...notion_connector import NotionReauthorizationRequired
 from .. import fields as F
 from .base import NextJob, StageContext, StageResult, StageResultKind
@@ -57,6 +62,56 @@ async def run(ctx: StageContext) -> StageResult:
     delivery = dict(run_doc.get(F.DELIVERY) or {})
     data_source_id = str(delivery.get("data_source_id") or "")
     database_name = str(delivery.get("database_name") or "")
+    create_named = str(delivery.get("create_database_named") or "")
+    # Read before the create below, because a table answer decides the schema of
+    # the database we are about to make.
+    brief = dict(run_doc.get(F.BRIEF) or {})
+    request_text = str(run_doc.get(F.REQUEST_TEXT) or "")
+    rows = list(brief.get("rows") or [])
+    columns = list(dict(brief.get("table") or {}).get("columns") or [])
+    if not data_source_id and create_named:
+        # The user named a database that did not exist when they said it. It is
+        # created HERE rather than at bind time so nothing is added to their
+        # workspace for a run that later failed, and so the create carries a
+        # receipt: the binding on the run stays immutable either way.
+        try:
+            data_source_id, database_name = await create_database_for_run(
+                uid=ctx.uid,
+                run_id=ctx.run_id,
+                name=create_named,
+                columns=tuple(columns) if rows else (),
+            )
+        except NotionReauthorizationRequired:
+            logger.warn(
+                "research.notion_deliver: database create blocked on reauthorization",
+                {"user_id": ctx.uid, "run_id": ctx.run_id},
+            )
+            return _result(
+                ctx,
+                delivery_result={
+                    "failed": F.FAIL_DELIVERY_REAUTH,
+                    "database_name": create_named,
+                },
+                outputs={"delivered": False, "reason": "reauthorization_required"},
+            )
+        except NotionRequestRejected as exc:
+            logger.error(
+                "research.notion_deliver: database create rejected as invalid",
+                {
+                    "user_id": ctx.uid,
+                    "run_id": ctx.run_id,
+                    "status": exc.status_code,
+                    "code": exc.code,
+                },
+            )
+            return _result(
+                ctx,
+                delivery_result={
+                    "failed": F.FAIL_DELIVERY_REJECTED,
+                    "database_name": create_named,
+                },
+                outputs={"delivered": False, "reason": "database_create_rejected"},
+            )
     if not data_source_id:
         # finalize only routes here when DELIVERY exists, so this is drift,
         # not a user outcome. Complete with a failed receipt; retrying cannot
@@ -78,13 +133,42 @@ async def run(ctx: StageContext) -> StageResult:
             outputs={"delivered": False, "reason": "cancelled"},
         )
 
-    brief = dict(run_doc.get(F.BRIEF) or {})
-    request_text = str(run_doc.get(F.REQUEST_TEXT) or "")
-
     try:
         from ...notion.schema import data_source_schema
 
         schema = await data_source_schema(ctx.uid, data_source_id)
+        if rows and columns:
+            # A table answer: one page per row, mapped onto whatever columns the
+            # destination actually has. The narrative brief stays in the app; a
+            # summary written as a row would be a fake entity in the user's own
+            # data, breaking every sort and filter over it.
+            rows_written, rows_failed = await write_research_rows(
+                uid=ctx.uid,
+                data_source_id=data_source_id,
+                rows=rows,
+                columns=columns,
+                run_id=ctx.run_id,
+                schema=schema,
+            )
+            if rows_written == 0:
+                # Nothing landed. Raising retries under the attempt cap rather
+                # than recording a delivery that did not happen.
+                raise RuntimeError("notion_deliver: no rows written")
+            return _result(
+                ctx,
+                delivery_result={
+                    "database_name": database_name,
+                    "rows_written": rows_written,
+                    "rows_failed": rows_failed,
+                    "partial": bool(rows_failed),
+                    "delivered_at": datetime.now(UTC).isoformat(),
+                },
+                outputs={
+                    "delivered": True,
+                    "rows_written": rows_written,
+                    "rows_failed": rows_failed,
+                },
+            )
         write_result = await write_research_brief(
             uid=ctx.uid,
             data_source_id=data_source_id,

@@ -41,6 +41,10 @@ SUBCOLLECTION = "research_runs"
 JOBS_SUBCOLLECTION = "research_jobs"
 JOB_OUTBOX_SUBCOLLECTION = "research_job_outbox"
 DELETIONS_SUBCOLLECTION = "research_deletions"
+# One pointer per caller scope (a voice session, a chat message) at the most recent run
+# started under it, so a second tool firing for the same user intent collapses onto the
+# first run instead of racing it. Carries no user content, only a run id and a stamp.
+SCOPE_SUBCOLLECTION = "research_scopes"
 
 # Run-owned subcollections.
 LEDGER_SUBCOLLECTION = "ledger"
@@ -138,6 +142,9 @@ CURRENT_PLAN_VERSION = "current_plan_version"
 # user actually confirmed.
 ADMITTED_PLAN_VERSION = "admitted_plan_version"
 AUTO_ADMIT_REQUESTED = "auto_admit_requested"
+# How many times the sweep has re-offered this run for admission and been refused.
+# Bounds a refusal the engine treats as transient; see store.AUTO_ADMIT_REFUSAL_CAP.
+AUTO_ADMIT_REFUSALS = "auto_admit_refusals"
 CLARIFICATION_ANSWERS = "clarification_answers"
 PENDING_QUESTION = "pending_question"
 PENDING_QUESTION_EXPIRES_AT = "pending_question_expires_at"
@@ -382,6 +389,13 @@ FAIL_ENTITY_BINDING = "entity_binding_unverified"
 FAIL_SOURCE_POLICY_UNMET = "source_policy_unmet"
 FAIL_DEPTH_NOT_AVAILABLE = "depth_not_available"
 FAIL_PROVIDER_UNAVAILABLE = "provider_unavailable"
+# The stage body produced a result and the transaction that would persist it was
+# refused. Kept distinct from provider_unavailable because nothing external was at
+# fault and the evidence, if any, was already gathered and paid for.
+FAIL_COMMIT_REJECTED = "commit_rejected"
+# A run that never reached admission and therefore never had a wall clock. Only the
+# pre-admission sweep writes this.
+FAIL_PREADMISSION_EXPIRED = "preadmission_expired"
 # Research finished but the Notion delivery could not land (dead token, schema
 # refusal, repeated provider failure). The run's terminal state is unchanged -
 # the brief exists and the user keeps it; only the delivery is what failed.

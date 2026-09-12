@@ -157,6 +157,53 @@ def detect_false_capability_claims(
     return claims
 
 
+UNBACKED_RESEARCH = "unbacked_research"
+
+# "I'll get the research running right now", "I've started that research",
+# "the background agent is going". Buddy's OWN words only; user speech is never
+# passed here, and a question ("should I start researching that?") is not a claim.
+_RESEARCH_NOUN = re.compile(
+    r"\bresearch(?:ing)?\b|\blook(?:ing)?\s+into\b|\bdig(?:ging)?\s+into\b|"
+    r"\bbackground\s+(?:agent|run|task|work)\b",
+    re.I,
+)
+_STARTED_CLAIM = re.compile(
+    r"\bi(?:'|’)?(?:ve|m| have| am)?\s*(?:just\s+)?"
+    r"(?:started|kicked off|spun up|fired off|launched|set (?:it|that) going)\b|"
+    r"\b(?:it|that|the run)(?:'|’)?s?\s+(?:now\s+)?"
+    r"(?:running|underway|in progress|going|started)\b|"
+    r"\bis\s+(?:now\s+)?(?:running|underway|in progress)\b|"
+    r"\bon it\b|"
+    r"\bi(?:'|’)?ll\s+(?:get|start|kick|run)\b[^.!?]{0,40}?"
+    r"\b(?:running|started|going|now)\b",
+    re.I,
+)
+
+
+def detect_unbacked_research_claims(text: str) -> list[CapabilityClaim]:
+    """Sentences where Buddy says research is running or starting.
+
+    The caller decides whether each is TRUE, by asking whether a run id exists.
+    This split is deliberate: the regex knows what a claim looks like and the
+    coordinator knows what actually happened, and only the second is authority.
+
+    The bug this exists for: with a card session armed, the forced tool call
+    became ``speak_only("I'll get the research running right now")`` three turns
+    in a row while nothing had been dispatched. Nothing errored, nothing logged,
+    and the user waited for a run that did not exist.
+    """
+    claims: list[CapabilityClaim] = []
+    for sentence in _SENTENCE_SPLIT.split((text or "").strip()):
+        stripped = sentence.strip()
+        if not stripped or stripped.endswith("?"):
+            continue
+        if _RESEARCH_NOUN.search(stripped) and _STARTED_CLAIM.search(stripped):
+            claims.append(
+                CapabilityClaim(verdict=UNBACKED_RESEARCH, sentence=stripped)
+            )
+    return claims
+
+
 def log_false_capability_claims(
     text: str,
     *,

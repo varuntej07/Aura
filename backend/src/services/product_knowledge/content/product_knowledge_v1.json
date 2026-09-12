@@ -706,8 +706,8 @@
       "title": "Background research availability",
       "summary": "Background research is a durable run that keeps working after Aura is closed, and it needs a paid plan.",
       "answers": {
-        "voice": "Yes, I can research in the background. I keep working after this call ends and after you close Aura, then send you a sourced brief, and I can write it into a Notion database if you name one. It needs a paid plan though, so I can’t start one on the free plan.",
-        "chat": "**Background research** is a durable run rather than a chat answer: Buddy keeps working after you end the call or quit Aura, then delivers a sourced brief with citations. Name a Notion database and the brief is written straight into it. It **requires a paid plan** and cannot be started on the free plan; each paid plan includes a set number of research runs per day. Only the quick depth exists today, deep research has not been released."
+        "voice": "Yes. It starts right away and keeps working after this call ends, then I send you a sourced brief. If you want it in Notion, I sort out which database while it's already running, and a comparison lands as a table. It needs a paid plan though, so I can’t start one on the free plan.",
+        "chat": "**Background research** is a durable run rather than a chat answer: Buddy keeps working after you end the call or quit Aura, then delivers a sourced brief with citations. The run starts immediately, and if you want it in Notion the destination is settled while the research is already going, so choosing a database never holds it up. A request that compares things is written as a **table**, one row per item with a column per attribute; anything else is written as a brief. It **requires a paid plan** and cannot be started on the free plan; each paid plan includes a set number of research runs per day. Only the quick depth exists today, deep research has not been released."
       },
       "surfaces": ["all"],
       "platforms": ["all"],
