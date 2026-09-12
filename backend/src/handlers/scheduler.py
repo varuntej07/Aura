@@ -198,6 +198,23 @@ async def _run_daily_briefing() -> None:
     await _run_isolated("scheduler: daily briefing tick failed", run_briefing_tick)
 
 
+async def _run_llm_batch() -> None:
+    """Generic LLM batch queue: cut new provider jobs, advance open ones.
+
+    Not tied to any one feature — ``job_kind`` routes results to whichever
+    subsystem enqueued them, so this single gate serves every batch consumer.
+
+    Minute 17 shares the tick only with the ``% 5 == 2`` meeting-job sweep
+    (minute 22 would additionally carry the ``% 15 == 7`` trial-lifecycle pass).
+    Firing hourly is cheap: the engine self-gates on whether the pending queue is
+    worth cutting a job from, and each open job carries its own polling backoff,
+    so most ticks do nothing but two small reads.
+    """
+    from ..services.llm_batch.poller import run_batch_tick
+
+    await _run_isolated("scheduler: llm batch tick failed", run_batch_tick)
+
+
 async def _sweep_expired_candidates() -> None:
     """Delete expired content-pool candidates, on a 15-minute gate.
 
@@ -699,6 +716,15 @@ async def handle_scheduler_tick() -> dict[str, Any]:
         # reliably allowed to finish. Same reasoning as the dictation reconciliation.
         if now_minute % 5 == 4:
             await _run_research_sweep()
+
+        # AWAITED for the same reason as the research sweep above, and one more:
+        # submitting a batch job SPENDS MONEY. If Cloud Run suspends CPU between
+        # the provider accepting a job and us recording it, the compensating
+        # cancel never runs and we have paid for results nothing will collect.
+        # Most ticks here do nothing (the queue self-gates on whether a job is
+        # worth cutting, and each open job carries its own polling backoff).
+        if now_minute == 17:
+            await _run_llm_batch()
 
         # Await this too: it now REPAIRS (redelivers stranded jobs, stamps
         # stalled meetings) rather than only counting, and a detached task can be

@@ -33,6 +33,21 @@ GetBetterEventType = Literal[
     "buddy_chat_started",
 ]
 
+# Readers classify events through these sets rather than re-listing the values,
+# so adding or renaming a member of the Literal above cannot silently stop
+# matching somewhere else. Hand-copying the vocabulary is exactly how `unsaved`
+# and `uncompleted` came to be treated as positive signal: a story the user saved
+# and then UNSAVED still read as "this resonated".
+#
+# The negations are subtracted at read time rather than listed as "negative"
+# events, because the activity log is append-only — both the save and the later
+# unsave are present, so the retraction has to cancel the original.
+RESONANCE_EVENTS: frozenset[str] = frozenset(
+    {"saved", "completed", "shared", "buddy_chat_started"}
+)
+RESONANCE_RETRACTIONS: dict[str, str] = {"unsaved": "saved", "uncompleted": "completed"}
+OPEN_EVENTS: frozenset[str] = frozenset({"opened", "related_opened"})
+
 
 class GetBetterIdea(BaseModel):
     """One canonical, shareable story.
