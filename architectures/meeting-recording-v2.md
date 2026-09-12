@@ -213,6 +213,81 @@ only the failed segment. Raw and normalized provider evidence is create-only at:
 transcripts/v2/{uid}/{meeting_id}/attempts/{attempt_id}/segments/{seq}.json
 ```
 
+### Turn grouping (`meeting-transcript-v3`)
+
+Providers split an utterance on a short pause, so one speaker's paragraph arrives
+as many fragments and the other channel's "Mhmm." lands between them. Measured on
+an 18-minute capture: 314 utterances, 137 of them three words or fewer. Displaying
+those raw reads as if the conversation were out of order even when every timestamp
+is correct.
+
+`_group_turns` in `synthesis.py` merges them with three structural rules that read
+timing and channel only, never the words (the keyword-matching ban applies to
+display decisions too, and the insight model still never authors transcript text):
+consecutive same-speaker utterances join into one turn; a gap longer than
+`_PARAGRAPH_GAP_S` starts a new one so its timestamp still means something; and an
+utterance no longer than `_BACKCHANNEL_MAX_S` whose speaker hands the floor back
+within `_RESUME_WINDOW_S` is folded out of the turn it interrupted, so an
+acknowledgement no longer cuts a sentence in half.
+
+The fold is bounded by `_FOLD_MAX_LAG_S`: past it the turn is split instead of
+running on. Unbounded, a long turn dragged an exchange with a third participant
+behind it and read WORSE than no grouping - the bound was added from observed
+output, not reasoning. Emitted turns stay in ascending start order; nothing is
+dropped, reworded, or reattributed.
+
+Turns now carry `start_s`/`end_s`, and WebVTT keeps its fine-grained cues from the
+ungrouped utterances. `turn_count` in `meeting-quality-v1` counts grouped turns, so
+it is lower than before; `long_meeting_implausibly_short` still holds, with less
+margin. Notes published before v3 carry no timings, and every reader treats both
+fields as optional rather than backfilling them.
+
+### Muse primary and fallback (local implementation, not production-verified)
+
+Provider order is Meta Muse (`muse-voice-transcribe-1.0`), Deepgram Nova-3,
+then OpenAI Whisper. The Muse adapter follows Meta's official
+[batch recipe](https://github.com/meta-models/meta-model-cookbook/tree/main/06_muse_voice/01_voice_api_fundamentals)
+and [retry guidance](https://github.com/meta-models/meta-model-cookbook/blob/main/01_api_fundamentals/09_error_handling.ipynb).
+It posts multipart `request` JSON and `audio` WAV to
+`https://api.meta.ai/v1/asr/transcribe` with server-side Bearer authentication.
+`META_MUSE_API_KEY` is the credential setting, mounted from the Secret Manager
+secret `meta-model-api-key`; never send it to Desktop.
+
+Each source channel is converted in memory to a separate mono 16-bit 16 kHz WAV.
+The source FLAC and receipts are unchanged. Uploads are limited to 10 minutes
+and 32 MB per channel, with two attempts on network/429/5xx failures, a
+180-second total deadline per channel, and bounded jittered backoff. Other
+HTTP failures go directly to fallback. A process death can still rebill a
+segment whose result was not durably committed; no provider billing idempotency
+is assumed. A Meta `sessionId` is correlation, not speaker continuity.
+
+Microphone turns retain `You`; remote labels include their segment number.
+Speaker A in one request must not be identified as Speaker A in another.
+No names or cross-segment voice identities are inferred. Public Meta guidance
+only claims diarization for non-overlapping speech.
+
+The adapter requires finite start/end times, matching decoded duration, and
+agreement between the transcript and its turns. The public example establishes
+`startMs` but does not establish `endMs`; accepting `endMs` is a strict candidate
+contract requiring authenticated validation. Missing end times trigger fallback,
+never fabricated timestamps. The public recipe does not establish word timings.
+For meetings reaching the existing five-minute VAD timing threshold, the worker
+bypasses the Muse request and falls back to Deepgram before spending on output
+this adapter cannot supply with word evidence. This intentionally
+preserves `meeting-quality-v1`; it is NOT a completed long-meeting migration.
+Empty energetic audio and missing speech-bearing channels also trigger fallback.
+Successful prior segments still resume without re-transcription.
+
+The credential is now configured: `meta-model-api-key` holds one enabled version
+and `deploy.sh` mounts it as `META_MUSE_API_KEY`. Everything else about this
+provider is still unvalidated. Verify the authenticated voice reference
+(currently login-protected), confirm account retention/rate limits and the real
+response schema, and exercise a candidate revision before promoting traffic. Do
+not run a live rollout on the strength of cookbook examples or local checks.
+Never put a raw credential in a deploy command or source.
+Rollback uses the previous backend revision; there is no feature flag or client
+contract migration.
+
 Revision artifacts are create-only under:
 
 ```text

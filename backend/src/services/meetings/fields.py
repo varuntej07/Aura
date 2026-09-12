@@ -60,6 +60,11 @@ NOTE = "note"
 NOTE_TRANSCRIPT = "transcript"
 TRANSCRIPT_SPEAKER = "speaker"
 TRANSCRIPT_TEXT = "text"
+# Absolute meeting-relative seconds for the turn, carried since
+# meeting-transcript-v3. Notes published before v3 have neither field, so
+# every reader treats them as optional.
+TRANSCRIPT_START_S = "start_s"
+TRANSCRIPT_END_S = "end_s"
 EXPIRES_AT = "expires_at"
 COMPLETE_REASON = "complete_reason"
 MANIFEST_SHA256 = "manifest_sha256"
@@ -249,7 +254,7 @@ DISPATCH_NEVER = "9999-12-31T00:00:00+00:00"
 
 MEETING_SCHEMA_VERSION = 2
 MANIFEST_SCHEMA_VERSION = 2
-TRANSCRIPT_SCHEMA_VERSION = "meeting-transcript-v2"
+TRANSCRIPT_SCHEMA_VERSION = "meeting-transcript-v3"
 PROVIDER_ATTEMPT_SCHEMA_VERSION = "meeting-provider-attempt-v2"
 
 # One table drives BOTH the artifact writes and the Firestore pointer

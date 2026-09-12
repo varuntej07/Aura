@@ -48,6 +48,22 @@ _TRANSCRIBE_CONCURRENCY = 3
 _TRANSCRIPT_HEAD_CHARS = 90_000
 _TRANSCRIPT_TAIL_CHARS = 30_000
 
+# Turn grouping thresholds (see _group_turns). An utterance no longer than
+# _BACKCHANNEL_MAX_S whose speaker hands the floor straight back inside
+# _RESUME_WINDOW_S is folded out of the turn it interrupted; the same speaker
+# resuming after more than _PARAGRAPH_GAP_S of silence starts a new turn so the
+# turn's timestamp stays meaningful. Timing and channel only - never the words.
+_BACKCHANNEL_MAX_S = 2.0
+_RESUME_WINDOW_S = 2.0
+_PARAGRAPH_GAP_S = 8.0
+# How far a folded interjection may be displaced. Without this the turn it
+# interrupted can run on for another half minute and drag an exchange with a
+# third person out of order behind it - measured on a real 18-minute capture,
+# where an unbounded fold read worse than no fold at all. Past the bound the
+# turn is split instead, so the interjection lands within _FOLD_MAX_LAG_S of
+# when it was actually said.
+_FOLD_MAX_LAG_S = 10.0
+
 # Lives in prompts.py (every prompt in one home); aliased for local use.
 _SYSTEM_PROMPT = MEETING_NOTE_SYSTEM_PROMPT
 
@@ -175,6 +191,98 @@ def _speaker_label(channel: int, override: str | None) -> str:
     if channel == transcript.LOOPBACK_CHANNEL:
         return "Others"
     return ""
+
+
+def _resumes_within(
+    utterances: list[tuple[float, float, int, str | None, str]],
+    index: int,
+    *,
+    speaker: str,
+    after_s: float,
+) -> bool:
+    """Does ``speaker`` pick up again within the resume window after ``after_s``?
+
+    The scan stops at the first utterance past the window, so it reads only the
+    handful of utterances sharing those two seconds, not the tail of the meeting.
+    """
+    for start, _end, channel, override, _text in utterances[index + 1 :]:
+        if start > after_s + _RESUME_WINDOW_S:
+            return False
+        if _speaker_label(channel, override) == speaker:
+            return True
+    return False
+
+
+def _group_turns(
+    utterances: list[tuple[float, float, int, str | None, str]],
+) -> list[dict[str, Any]]:
+    """Group time-ordered utterances into turns a person can read.
+
+    Providers split on a short pause, so one speaker's paragraph arrives as many
+    fragments and the other channel's "Mhmm." lands between them - which used to
+    cut a sentence in half every time someone acknowledged it. Three structural
+    rules fix that, and all three read timing and channel only: they never look
+    at what was said, so no phrase can ever be treated as an acknowledgement.
+
+    Nothing is dropped, reworded, or reattributed. A folded interjection keeps
+    its own turn and its own timestamps; it just moves after the turn it
+    interrupted, by at most the length of that turn.
+    """
+    turns: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    def _turn(start: float, end: float, speaker: str, text: str) -> dict[str, Any]:
+        return {
+            F.TRANSCRIPT_SPEAKER: speaker,
+            F.TRANSCRIPT_TEXT: text,
+            F.TRANSCRIPT_START_S: round(start, 3),
+            F.TRANSCRIPT_END_S: round(end, 3),
+        }
+
+    def _close() -> None:
+        nonlocal current
+        if current is not None:
+            turns.append(current)
+            current = None
+        # Interjections follow the turn they interrupted, in their own order.
+        turns.extend(held)
+        held.clear()
+
+    for index, (start, end, channel, override, text) in enumerate(utterances):
+        speaker = _speaker_label(channel, override)
+        if current is not None and speaker == current[F.TRANSCRIPT_SPEAKER]:
+            if (
+                start - current[F.TRANSCRIPT_END_S] <= _PARAGRAPH_GAP_S
+                and (not held or start - held[0][F.TRANSCRIPT_END_S] <= _FOLD_MAX_LAG_S)
+            ):
+                current[F.TRANSCRIPT_TEXT] += f" {text}"
+                current[F.TRANSCRIPT_END_S] = round(max(end, current[F.TRANSCRIPT_END_S]), 3)
+                continue
+            # A long silence, or a turn running so far past a folded
+            # interjection that holding it any longer would misplace it: end the
+            # block here. The same speaker simply continues in the next one.
+            _close()
+        elif (
+            current is not None
+            and end - start <= _BACKCHANNEL_MAX_S
+            and _resumes_within(
+                utterances,
+                index,
+                speaker=current[F.TRANSCRIPT_SPEAKER],
+                after_s=end,
+            )
+        ):
+            # Short, and the floor goes straight back: an interjection over
+            # someone still talking, not a change of speaker. A longer one is a
+            # real interruption and still ends the turn below.
+            held.append(_turn(start, end, speaker, text))
+            continue
+        else:
+            _close()
+        current = _turn(start, end, speaker, text)
+    _close()
+    return turns
 
 
 def _vtt_timestamp(seconds: float) -> str:
@@ -543,12 +651,16 @@ def _merge_turns(
 ) -> tuple[
     list[tuple[float, float, int, str | None, str]],
     list[dict[str, Any]],
-    list[dict[str, str]],
+    list[dict[str, Any]],
     str | None,
     str,
 ]:
-    """Merge per-segment transcripts into absolute-time utterances, speaker
-    turns, the dominant language, and the flat transcript text."""
+    """Merge per-segment transcripts into absolute-time utterances, grouped
+    speaker turns, the dominant language, and the flat transcript text.
+
+    The utterance list stays fine-grained for WebVTT cues; only the turns are
+    grouped, and the flat text is built from those turns so the note model reads
+    the same paragraphs the user does."""
     utterances: list[tuple[float, float, int, str | None, str]] = []
     transcript_rows: list[dict[str, Any]] = []
     languages: Counter[str] = Counter()
@@ -567,19 +679,10 @@ def _merge_turns(
                     utterance.text,
                 )
             )
-    utterances.sort(key=lambda row: row[0])
-    turns: list[dict[str, str]] = []
-    for _, _, channel, override, text in utterances:
-        speaker = _speaker_label(channel, override)
-        if turns and turns[-1][F.TRANSCRIPT_SPEAKER] == speaker:
-            turns[-1][F.TRANSCRIPT_TEXT] += f" {text}"
-        else:
-            turns.append(
-                {
-                    F.TRANSCRIPT_SPEAKER: speaker,
-                    F.TRANSCRIPT_TEXT: text,
-                }
-            )
+    # Channel breaks ties so two utterances stamped at the same instant order
+    # the same way on every run.
+    utterances.sort(key=lambda row: (row[0], row[1], row[2]))
+    turns = _group_turns(utterances)
     language = languages.most_common(1)[0][0] if languages else None
     transcript_text = "\n".join(
         f"{turn[F.TRANSCRIPT_SPEAKER]}: {turn[F.TRANSCRIPT_TEXT]}"
@@ -596,7 +699,7 @@ async def _render_artifacts(
     revision: int,
     title: str,
     language: str | None,
-    turns: list[dict[str, str]],
+    turns: list[dict[str, Any]],
     transcript_rows: list[dict[str, Any]],
     utterances: list[tuple[float, float, int, str | None, str]],
     attempt_pointers: list[dict[str, Any]],

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from math import isfinite
 from typing import Any
 
 from fastapi import Request
@@ -131,10 +132,7 @@ def _note_response(note: Any, *, include_transcript: bool) -> dict[str, Any] | N
         raw_turns = note.get(F.NOTE_TRANSCRIPT)
         response[F.NOTE_TRANSCRIPT] = (
             [
-                {
-                    F.TRANSCRIPT_SPEAKER: turn[F.TRANSCRIPT_SPEAKER],
-                    F.TRANSCRIPT_TEXT: turn[F.TRANSCRIPT_TEXT],
-                }
+                _turn_response(turn)
                 for turn in raw_turns
                 if isinstance(turn, dict)
                 and isinstance(turn.get(F.TRANSCRIPT_SPEAKER), str)
@@ -144,6 +142,24 @@ def _note_response(note: Any, *, include_transcript: bool) -> dict[str, Any] | N
             else []
         )
     return response
+
+
+def _turn_response(turn: dict[str, Any]) -> dict[str, Any]:
+    """One transcript turn, with its timings when the note carries them.
+
+    Timings arrived with meeting-transcript-v3; notes published before it have
+    none, so the fields are omitted rather than faked with a zero the client
+    would render as 00:00.
+    """
+    row: dict[str, Any] = {
+        F.TRANSCRIPT_SPEAKER: turn[F.TRANSCRIPT_SPEAKER],
+        F.TRANSCRIPT_TEXT: turn[F.TRANSCRIPT_TEXT],
+    }
+    for field in (F.TRANSCRIPT_START_S, F.TRANSCRIPT_END_S):
+        value = turn.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value):
+            row[field] = float(value)
+    return row
 
 
 def _meeting_response(
