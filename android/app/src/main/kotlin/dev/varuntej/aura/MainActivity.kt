@@ -18,6 +18,7 @@ import dev.varuntej.aura.diagnostics.StartupForensics
 import dev.varuntej.aura.diagnostics.StartupTrace
 import dev.varuntej.aura.keyboard.KeyboardCredentialStore
 import dev.varuntej.aura.keyboard.KeyboardVoiceHandoff
+import dev.varuntej.aura.update.AppUpdateBridge
 import dev.varuntej.aura.widget.VoiceWidgetProvider
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -25,6 +26,15 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.concurrent.Executors
 
 class MainActivity : FlutterFragmentActivity() {
+
+    private var appUpdateBridge: AppUpdateBridge? = null
+
+    /** Google Play's update-consent activity, registered before Activity startup. */
+    private val appUpdateLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { activityResult ->
+        appUpdateBridge?.onUpdateFlowResult(activityResult.resultCode)
+    }
 
     /** The tone-picker call waiting on a result, if the picker is open. */
     private var pendingTonePick: MethodChannel.Result? = null
@@ -151,6 +161,13 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        appUpdateBridge?.dispose()
+        appUpdateBridge = AppUpdateBridge(
+            activity = this,
+            messenger = flutterEngine.dartExecutor.binaryMessenger,
+            updateLauncher = appUpdateLauncher,
+        )
 
         // Alarms. Dart owns the network half (fetching the schedule, flushing
         // acks); Kotlin owns the schedule itself, because it is the only half
@@ -312,6 +329,11 @@ class MainActivity : FlutterFragmentActivity() {
         widgetMethodChannel?.invokeMethod("onLaunchAction", action)
     }
 
+    override fun onResume() {
+        super.onResume()
+        appUpdateBridge?.onResume()
+    }
+
     // MainActivity is exported, so any app can put an arbitrary EXTRA_LAUNCH_ACTION on its launch
     // intent. Only forward values we actually handle, so an unrecognized string never reaches the
     // Flutter launch-action handler.
@@ -347,6 +369,8 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        appUpdateBridge?.dispose()
+        appUpdateBridge = null
         keyboardBridgeExecutor.shutdown()
         super.onDestroy()
     }

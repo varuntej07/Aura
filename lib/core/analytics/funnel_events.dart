@@ -183,6 +183,12 @@ class FunnelEvents {
   static const String desktopClientDesktopUpdateCheckFailed = 'desktop_update_check_failed';
   static const String desktopClientDesktopUpdateInstallStarted = 'desktop_update_install_started';
   static const String desktopClientDesktopUpdateInstallResult = 'desktop_update_install_result';
+  static const String mobileUpdateAvailable = 'mobile_update_available';
+  static const String mobileUpdatePrompted = 'mobile_update_prompted';
+  static const String mobileUpdatePromptResult = 'mobile_update_prompt_result';
+  static const String mobileUpdateDownloaded = 'mobile_update_downloaded';
+  static const String mobileUpdateInstallStarted = 'mobile_update_install_started';
+  static const String mobileUpdateFailed = 'mobile_update_failed';
   static const String desktopClientDesktopPermissionResult = 'desktop_permission_result';
   static const String desktopClientFeedbackSubmitted = 'feedback_submitted';
   static const String desktopClientDesktopHeartbeat = 'desktop_heartbeat';

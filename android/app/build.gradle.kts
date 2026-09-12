@@ -107,6 +107,9 @@ dependencies {
     // fragment activity base makes the ComponentActivity API available.
     implementation("androidx.activity:activity-ktx:1.12.4")
     implementation("androidx.fragment:fragment:1.7.1")
+    // Flexible in-app updates. Google Play owns availability, consent, download,
+    // signature validation, and installation; Aura only surfaces the user prompt.
+    implementation("com.google.android.play:app-update:2.1.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     // EncryptedSharedPreferences for the Buddy Keyboard credential bridge: the app
     // writes a revocable keyboard credential the IME (same UID, separate process)
