@@ -45,6 +45,20 @@
       ]
     },
     {
+      "collectionGroup": "rituals",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "next_fire_at",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "chat_turns",
       "queryScope": "COLLECTION_GROUP",
       "fields": [

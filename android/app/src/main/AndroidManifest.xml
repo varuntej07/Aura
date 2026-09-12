@@ -54,6 +54,16 @@
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="aura" android:host="checkout"/>
             </intent-filter>
+            <!-- aura://connectors deep link: the OAuth callback hands the user
+                 back after authorizing a connector in the browser, so the app can
+                 refetch /connectors instead of leaving a stale card. Registered
+                 per host like the two above; the scheme alone is not enough. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="aura" android:host="connectors"/>
+            </intent-filter>
             <!-- https App Link to the same voice entry, verified by
                  /.well-known/assetlinks.json on auravoiceapp.com, so a shared link opens
                  Buddy voice directly instead of a browser. -->
