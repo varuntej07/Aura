@@ -229,6 +229,20 @@ async def _requeue_stuck_reminders() -> None:
     )
 
 
+async def _sweep_unarmed_rituals() -> None:
+    """Re-arm recurring rituals that lost their next occurrence.
+
+    A ritual normally re-arms inline right after its occurrence is delivered, so
+    this only ever catches the cases that path cannot: an instance killed between
+    the send and the re-arm, or an arming that threw. Without it a series stops
+    silently and looks to the user exactly like the feature being deleted.
+    Isolated and fire-and-forget like every other piggybacked sweep.
+    """
+    from ..services.rituals import sweep_unarmed_rituals
+
+    await _run_isolated("scheduler: ritual re-arm sweep failed", sweep_unarmed_rituals)
+
+
 async def _run_tracking_checkpoints() -> None:
     """Topic-tracking checkpoint due-scan. Fire-and-forget so the tick returns its 200
     before any fetch/LLM work runs. The due-query is cheap and returns nothing most
@@ -622,6 +636,14 @@ async def handle_scheduler_tick() -> dict[str, Any]:
         # Cheap indexed query, empty on almost every run. Fire-and-forget.
         if now_minute % 5 == 3:
             asyncio.create_task(_requeue_stuck_reminders())
+
+        # Ritual re-arm recovery, once an hour at minute 33. Delivery itself needs
+        # no sweep: a ritual occurrence IS a reminder, so the every-minute scan
+        # above already fires it on time. This only repairs a series whose inline
+        # re-arm was lost. Minute 33 is not collision-free (no minute is) — it
+        # shares the tick with the %5==3 pair, both light and fire-and-forget.
+        if now_minute == 33:
+            asyncio.create_task(_sweep_unarmed_rituals())
 
         # Topic-tracking checkpoint due-scan, EVERY minute (like the reminder scan) so
         # a pre/live/post update fires near its exact moment. The due-query is cheap and

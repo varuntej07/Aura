@@ -189,6 +189,16 @@ class FunnelEvents {
   static const String desktopClientDesktopStartupDiagnosticsSent = 'desktop_startup_diagnostics_sent';
   static const String desktopClientClientLog = 'client_log';
 
+  // Home deck. Every one of these carries propDeckCardKind: without the kind
+  // there is no way to tell which catalog entries earn their slot, which is the
+  // whole question the deck exists to answer.
+  static const String deckCardThrown = 'deck_card_thrown';
+  static const String deckCardOpened = 'deck_card_opened';
+  static const String deckCardConfirmed = 'deck_card_confirmed';
+  static const String deckCardFailed = 'deck_card_failed';
+  static const String deckCardDismissed = 'deck_card_dismissed';
+  static const String propDeckCardKind = 'deck_card_kind';
+
   // Breakdown keys stamped by the desktop client.
   static const String propDesktopWindowLabel = 'window_label';
   static const String propDesktopInstallId = 'install_id';

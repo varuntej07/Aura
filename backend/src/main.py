@@ -184,12 +184,21 @@ from .handlers.research import (
 from .handlers.reminders import (
     handle_acknowledge_alarm,
     handle_alarm_feature_interest,
+    handle_create_reminder,
     handle_get_alarm_routine,
     handle_list_alarms,
     handle_morning_brief,
     handle_put_alarm_routine,
     handle_wake_clip,
 )
+from .handlers.home_status import handle_home_status
+from .handlers.rituals import (
+    handle_create_ritual,
+    handle_delete_ritual,
+    handle_list_rituals,
+    handle_update_ritual,
+)
+from .handlers.trackers import handle_create_tracker
 from .handlers.pairing import (
     handle_pair_claim,
     handle_pair_start,
@@ -1025,6 +1034,49 @@ async def reminders_ack_endpoint(request: Request, reminder_id: str) -> JSONResp
 @app.post("/feedback/alarm-interest")
 async def alarm_feature_interest_endpoint(request: Request) -> JSONResponse:
     return await handle_alarm_feature_interest(request)
+
+
+# Home-deck direct creation. A card creates the thing it promises the moment it is
+# confirmed, instead of opening a chat and asking the model to run a tool, so what
+# the user tapped is exactly what happened. See handlers/rituals.py.
+@app.post("/reminders")
+async def reminders_create_endpoint(request: Request) -> JSONResponse:
+    return await handle_create_reminder(request)
+
+
+@app.post("/trackers")
+async def trackers_create_endpoint(request: Request) -> JSONResponse:
+    return await handle_create_tracker(request)
+
+
+# Everything the home screen's status pills need, in one cheap call. Four
+# separate reads on app open would be four round-trips for one strip of text.
+@app.get("/home/status")
+async def home_status_endpoint(request: Request) -> JSONResponse:
+    return await handle_home_status(request)
+
+
+# Recurring rituals. Each occurrence is an ordinary reminder document, so delivery
+# rides the every-minute due scan and the committed notification lane that already
+# exist; these routes only manage the series. See services/rituals.py.
+@app.post("/rituals")
+async def rituals_create_endpoint(request: Request) -> JSONResponse:
+    return await handle_create_ritual(request)
+
+
+@app.get("/rituals")
+async def rituals_list_endpoint(request: Request) -> JSONResponse:
+    return await handle_list_rituals(request)
+
+
+@app.patch("/rituals/{ritual_id}")
+async def rituals_update_endpoint(request: Request, ritual_id: str) -> JSONResponse:
+    return await handle_update_ritual(request, ritual_id)
+
+
+@app.delete("/rituals/{ritual_id}")
+async def rituals_delete_endpoint(request: Request, ritual_id: str) -> JSONResponse:
+    return await handle_delete_ritual(request, ritual_id)
 
 
 # Post-alarm morning routine: config the alarm page / Routines editor round-

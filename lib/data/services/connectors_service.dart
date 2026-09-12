@@ -82,4 +82,39 @@ class ConnectorsService {
       GmailConnectorStatus.fromJson,
     );
   }
+
+  // Notion
+  //
+  // Unlike the two above, Notion is authorized in the browser: the backend mints
+  // a ten-minute attempt and hands back a URL, and the provider redirects to
+  // aura://connectors/complete when the user is done. No token ever reaches the
+  // phone, so there is no scope list here.
+
+  /// Starts a browser authorization and returns the URL to open.
+  Future<Result<String>> startNotionOAuth() {
+    return _apiClient.post(
+      '/connectors/oauth/authorize',
+      const {'connector': 'notion'},
+      (json) => json['authorization_url'] as String? ?? '',
+    );
+  }
+
+  /// Re-enables a connector whose tokens are still on file. Fails with a 409
+  /// carrying `reauthorization_required` when they are not, which is the caller's
+  /// signal to send the user through [startNotionOAuth] instead.
+  Future<Result<NotionConnectorStatus>> enableNotion() {
+    return _apiClient.post(
+      '/connectors/notion/enable',
+      const {},
+      NotionConnectorStatus.fromJson,
+    );
+  }
+
+  Future<Result<NotionConnectorStatus>> disableNotion() {
+    return _apiClient.post(
+      '/connectors/notion/disable',
+      const {},
+      NotionConnectorStatus.fromJson,
+    );
+  }
 }

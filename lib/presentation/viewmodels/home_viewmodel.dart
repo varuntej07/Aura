@@ -61,6 +61,24 @@ class HomeViewModel extends SafeChangeNotifier {
   DateTime? _sessionStartedAt; // for the ended-call duration
   VoiceSessionEndedSummary? _endedSummary;
 
+  /// Buddy has not said or done anything yet and it has been long enough that
+  /// the user is wondering. Drives the "still picking up" banner.
+  ///
+  /// Deliberately NOT a failure: the service already kills a genuinely dead
+  /// session at 20s (`agent_join_timeout`). This only offers a way out earlier,
+  /// because `session.ready` fires when the ROOM connects, not when Buddy joins,
+  /// so the orb sits there looking live while nobody is on the other end. If the
+  /// agent turns up while the banner is showing, the banner just goes away.
+  bool _connectStalled = false;
+  Timer? _connectStallTimer;
+
+  /// How long someone will stare at a live-looking orb before it reads as broken.
+  /// Measured healthy first audio is 2-5s (see VoiceSessionService), so this sits
+  /// past the normal case without waiting for the 20s hard timeout.
+  static const Duration _connectStallAfter = Duration(seconds: 7);
+
+  bool get connectStalled => _connectStalled;
+
   // Deep-link routing callbacks set by HomeScreen — keeps GoRouter out of VM.
   void Function(EngagementTapPayload)? onEngagementTap;
   void Function(SignalNotificationTapPayload)? onSignalNotificationTap;
@@ -138,6 +156,7 @@ class HomeViewModel extends SafeChangeNotifier {
     _voiceTranscript.clear();
     _sessionStartedAt = DateTime.now();
     _endedSummary = null;
+    _armConnectStallTimer();
     safeNotifyListeners();
 
     // Create a Drift session to persist voice messages so they appear in
@@ -183,6 +202,41 @@ class HomeViewModel extends SafeChangeNotifier {
         safeNotifyListeners();
       },
     );
+  }
+
+  void _armConnectStallTimer() {
+    _connectStallTimer?.cancel();
+    _connectStalled = false;
+    _connectStallTimer = Timer(_connectStallAfter, () {
+      if (_voiceStatus == VoiceSessionStatus.disconnected ||
+          _voiceStatus == VoiceSessionStatus.ended ||
+          _voiceStatus == VoiceSessionStatus.error) {
+        return;
+      }
+      _connectStalled = true;
+      safeNotifyListeners();
+    });
+  }
+
+  /// Buddy showed a sign of life. Called from every event that proves an agent is
+  /// actually on the other end, rather than from `session.ready`, which only
+  /// proves the room exists.
+  void _clearConnectStall() {
+    _connectStallTimer?.cancel();
+    _connectStallTimer = null;
+    if (!_connectStalled) return;
+    _connectStalled = false;
+    safeNotifyListeners();
+  }
+
+  /// Hang up whatever is half-connected and dial again. The old session must be
+  /// closed first or the service holds a room that never got an agent.
+  Future<void> restartSession() async {
+    final userId = _currentUserId;
+    _clearConnectStall();
+    await endSession();
+    if (userId == null || userId.isEmpty) return;
+    await startSession(userId);
   }
 
   Future<void> stopSession() async {
@@ -275,6 +329,9 @@ class HomeViewModel extends SafeChangeNotifier {
         safeNotifyListeners();
 
       case 'session.state':
+        // Any state report is the agent talking about itself, so it is on the
+        // other end. `session.ready` above is not: that is only the room.
+        _clearConnectStall();
         final s = event.payload?['state'] as String?;
         if (s == 'listening') {
           _voiceStatus = VoiceSessionStatus.listening;
@@ -289,6 +346,7 @@ class HomeViewModel extends SafeChangeNotifier {
         safeNotifyListeners();
 
       case 'assistant.text.delta':
+        _clearConnectStall();
         _voiceStatus = VoiceSessionStatus.speaking;
         _liveTranscript = event.text ?? '';
         _updateOrInsertTranscriptEntry(
@@ -361,6 +419,7 @@ class HomeViewModel extends SafeChangeNotifier {
         }
 
       case 'error':
+        _clearConnectStall();
         _error = AppException.unexpected(
           _toVoiceErrorMessage(
             code: event.payload?['code'] as String?,
@@ -372,6 +431,9 @@ class HomeViewModel extends SafeChangeNotifier {
         safeNotifyListeners();
 
       case 'session.error':
+        // The service's own 20s timeout landing. Its error copy replaces the
+        // banner rather than stacking with it.
+        _clearConnectStall();
         _error = AppException.unexpected(
           _toVoiceErrorMessage(
             code: event.payload?['code'] as String?,
@@ -488,6 +550,9 @@ class HomeViewModel extends SafeChangeNotifier {
   }
 
   void _resetVoiceState() {
+    _connectStallTimer?.cancel();
+    _connectStallTimer = null;
+    _connectStalled = false;
     _voiceStatus = VoiceSessionStatus.disconnected;
     _micState = MicState.idle;
     _voiceMessageSequence = 0;
@@ -545,6 +610,7 @@ class HomeViewModel extends SafeChangeNotifier {
 
   @override
   void dispose() {
+    _connectStallTimer?.cancel();
     _voiceEventSub?.cancel();
     _engagementTapSub?.cancel();
     _signalTapSub?.cancel();

@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/app_colors.dart';
 import '../../../data/models/connector_models.dart';
+import '../../../data/services/deep_link_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/connectors_viewmodel.dart';
 import '../../widgets/error_display.dart';
@@ -18,10 +22,23 @@ class ConnectorsScreen extends StatefulWidget {
   State<ConnectorsScreen> createState() => _ConnectorsScreenState();
 }
 
-class _ConnectorsScreenState extends State<ConnectorsScreen> {
+class _ConnectorsScreenState extends State<ConnectorsScreen>
+    with WidgetsBindingObserver {
+  StreamSubscription<String>? _deepLinkSub;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // The browser hop for Notion leaves the app entirely. Coming back is the
+    // signal that something may have changed, whichever way the user returns:
+    // the deep link, the back button, or the app switcher. The deep link below
+    // only makes it immediate, it is not load-bearing on its own, because an
+    // expired attempt renders a terminal page and emits no link at all.
+    _deepLinkSub = DeepLinkService.instance.launchActions.listen((action) {
+      if (action != DeepLinkService.launchActionConnectorsRefresh) return;
+      _reload();
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Skip the backend load for a logged-out guest — it would just 401 and
       // surface an error. The build gates the body to a sign-in prompt instead.
@@ -29,6 +46,46 @@ class _ConnectorsScreenState extends State<ConnectorsScreen> {
       if (context.read<AuthViewModel>().user == null) return;
       context.read<ConnectorsViewModel>().load();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _reload();
+  }
+
+  void _reload() {
+    if (!mounted) return;
+    if (context.read<AuthViewModel>().user == null) return;
+    unawaited(context.read<ConnectorsViewModel>().load());
+  }
+
+  /// Notion is the one connector authorized in a browser rather than natively,
+  /// so the screen owns the hop out. The ViewModel decides whether a hop is even
+  /// needed: when tokens are still on file it just re-enables and returns null.
+  Future<void> _connectNotion(ConnectorsViewModel vm) async {
+    final url = await vm.connectNotion();
+    if (!mounted || url == null) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // No browser, or the launch was refused. The card stays as it was and the
+      // user can tap again; silently doing nothing would look like a dead button.
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Couldn't open Notion. Try again in a moment."),
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _deepLinkSub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   @override
@@ -94,10 +151,11 @@ class _ConnectorsScreenState extends State<ConnectorsScreen> {
                 subtitle: 'Let Buddy add and check off your tasks.',
               ),
               const SizedBox(height: 16),
-              const _ComingSoonConnectorCard(
-                iconAsset: 'assets/icons/notion.png',
-                title: 'Notion',
-                subtitle: 'Capture notes and pull in your pages.',
+              _NotionCard(
+                status: vm.notion,
+                busy: vm.isMutating,
+                onConnect: () => _connectNotion(vm),
+                onDisconnect: vm.disconnectNotion,
               ),
               const SizedBox(height: 16),
               const _ComingSoonConnectorCard(
@@ -388,6 +446,164 @@ class _GmailCard extends StatelessWidget {
   static String? _formatDateTime(DateTime? value) {
     if (value == null) return null;
     return DateFormat('MMM d, h:mm a').format(value.toLocal());
+  }
+}
+
+/// Notion. The only connector here authorized in a browser rather than through
+/// native sign-in, so it carries a button instead of a switch: a switch implies
+/// the change happens on the spot, and this one leaves the app.
+class _NotionCard extends StatelessWidget {
+  final NotionConnectorStatus status;
+  final bool busy;
+  final Future<void> Function() onConnect;
+  final Future<void> Function() onDisconnect;
+
+  const _NotionCard({
+    required this.status,
+    required this.busy,
+    required this.onConnect,
+    required this.onDisconnect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final connectedLabel = _formatDateTime(status.connectedAt);
+    final needsReauth = status.needsReauthorization;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(5),
+                  child: Image.asset('assets/icons/notion.png'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Notion',
+                      style: TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    // Says only what the phone actually does. Saving notes by
+                    // voice is desktop-only (ECOSYSTEM.md contract 7d), so it is
+                    // deliberately not promised here.
+                    Text(
+                      'Send research briefs straight into your workspace.',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _NotionAction(
+                busy: busy,
+                connected: status.enabled,
+                needsReauth: needsReauth,
+                onConnect: onConnect,
+                onDisconnect: onDisconnect,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _MetaRow(
+            label: 'Workspace',
+            value: status.workspaceName ?? 'Not connected',
+          ),
+          _MetaRow(
+            label: 'Connected',
+            value: connectedLabel ?? 'Not connected yet',
+          ),
+          if (status.lastError != null && status.lastError!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                needsReauth
+                    ? 'Notion needs you to authorize again.'
+                    : status.lastError!,
+                style: const TextStyle(
+                  color: AppColors.warning,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  static String? _formatDateTime(DateTime? value) {
+    if (value == null) return null;
+    return DateFormat('MMM d, h:mm a').format(value.toLocal());
+  }
+}
+
+class _NotionAction extends StatelessWidget {
+  final bool busy;
+  final bool connected;
+  final bool needsReauth;
+  final Future<void> Function() onConnect;
+  final Future<void> Function() onDisconnect;
+
+  const _NotionAction({
+    required this.busy,
+    required this.connected,
+    required this.needsReauth,
+    required this.onConnect,
+    required this.onDisconnect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (busy) {
+      return const SizedBox(
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    final label = connected && !needsReauth
+        ? 'Disconnect'
+        : needsReauth
+            ? 'Reconnect'
+            : 'Connect';
+    final destructive = connected && !needsReauth;
+    return TextButton(
+      onPressed: () => destructive ? onDisconnect() : onConnect(),
+      style: TextButton.styleFrom(
+        foregroundColor: destructive ? AppColors.error : AppColors.accent,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+      ),
+    );
   }
 }
 

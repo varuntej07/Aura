@@ -25,6 +25,17 @@ class DeepLinkService {
   /// the app; the only action is an entitlement refetch, no navigation.
   static const String launchActionEntitlementRefresh = 'entitlement_refresh';
 
+  /// `aura://connectors/complete`: a connector finished authorizing in the
+  /// browser. Like checkout, the only action is a refetch.
+  ///
+  /// The link carries `outcome=success|cancelled|failed`, which is deliberately
+  /// ignored: the backend has already written the integration document by the
+  /// time it redirects, so `GET /connectors` is the truth and the query string is
+  /// only a hint. It is also not guaranteed to arrive at all (an expired attempt
+  /// renders a terminal page and emits no link), which is why the connectors
+  /// screen refetches on resume regardless.
+  static const String launchActionConnectorsRefresh = 'connectors_refresh';
+
   // Visible for tests (so a fake AppLinks can be injected).
   @visibleForTesting
   AppLinks appLinks = AppLinks();
@@ -81,6 +92,9 @@ class DeepLinkService {
   static String? actionForUri(Uri uri) {
     if (uri.scheme == 'aura' && uri.host == 'checkout') {
       return launchActionEntitlementRefresh;
+    }
+    if (uri.scheme == 'aura' && uri.host == 'connectors') {
+      return launchActionConnectorsRefresh;
     }
     final isAuraScheme = uri.scheme == 'aura' && uri.host == 'voice';
     // A trailing slash (.../voice/) yields an empty final segment; drop it so the

@@ -35,9 +35,21 @@ class TestSuggestionPillsAgent:
     async def test_generate_buddy_pills_writes_buddy_set(self):
         from src.services.daily_notification.suggestion_pills_agent import SuggestionPillsAgent
 
+        from src.services.daily_notification.home_deck import HomeDeckBundle
+
+        # The pills now ride along with the home deck in one structured call, so
+        # the fake answers with the bundle the agent asks for rather than the raw
+        # JSON string the pills-only call used to return.
         model = MagicMock()
         model.balanced = AsyncMock(
-            return_value='["help me prep for my interview", "hold me to the gym today", "recommend me a sci-fi book"]'
+            return_value=HomeDeckBundle(
+                cards=[],
+                pills=[
+                    "help me prep for my interview",
+                    "hold me to the gym today",
+                    "recommend me a sci-fi book",
+                ],
+            )
         )
         doc_ref = MagicMock()
         db = MagicMock()

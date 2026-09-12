@@ -89,6 +89,11 @@ class _ChatScreenState extends State<ChatScreen> {
             await chatVm.loadTrackerContext(
               openingMessage: extra.openingMessage,
             );
+          case NotificationChatOrigin.deck:
+            // Home-deck talk card: Buddy opens, the user answers if they want to.
+            await chatVm.loadDeckTalkContext(
+              openingMessage: extra.openingMessage,
+            );
           case NotificationChatOrigin.alarm:
             // "I'm up" on a ringing alarm. Buddy opens on what they asked to be
             // woken for, so the wake-up becomes a conversation rather than a

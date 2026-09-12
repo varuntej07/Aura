@@ -8,6 +8,7 @@ import '../../core/network/api_response.dart';
 import '../models/chat_attachment.dart';
 import '../models/daily_briefing.dart';
 import '../models/get_better_feed.dart';
+import '../models/home_status.dart';
 import 'chat_service_provider.dart';
 
 // SSE stream events
@@ -301,6 +302,79 @@ class BackendApiService implements ChatServiceProvider {
       '/chat/buddy-pills/refresh',
       const {},
       (json) => json,
+    );
+  }
+
+  /// Creates a recurring ritual from a confirmed home-deck card.
+  ///
+  /// [clientRitualId] is generated on the device and becomes the document id, so
+  /// a double-tapped confirm addresses the same ritual instead of scheduling two
+  /// daily pushes. The schedule is sent structured because the user picked it
+  /// from chips; the server still owns the timezone and the fire instant.
+  Future<Result<Map<String, dynamic>>> createRitual({
+    required String clientRitualId,
+    required String contentKind,
+    required String title,
+    required Map<String, dynamic> schedule,
+  }) async {
+    return _apiClient.post(
+      '/rituals',
+      {
+        'client_ritual_id': clientRitualId,
+        'content_kind': contentKind,
+        'title': title,
+        'schedule': schedule,
+      },
+      (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
+    );
+  }
+
+  /// Everything the home status pills need, in one call: whether today's briefing
+  /// is ready, how many reminders land today, and the rituals and topics already
+  /// running. Returns null on any failure so the home screen simply shows no
+  /// pills rather than an error.
+  Future<HomeStatus?> fetchHomeStatus() async {
+    final result = await _apiClient.get<HomeStatus>(
+      '/home/status',
+      HomeStatus.fromJson,
+    );
+    return result.when(success: (status) => status, failure: (_) => null);
+  }
+
+  /// Stops a ritual repeating, including the occurrence already armed for it.
+  Future<Result<Map<String, dynamic>>> deleteRitual(String ritualId) async {
+    return _apiClient.delete('/rituals/$ritualId', (json) => json);
+  }
+
+  /// Creates one plain reminder from a confirmed home-deck card. Never an alarm:
+  /// the loud tier stays something the user asks for deliberately.
+  Future<Result<Map<String, dynamic>>> createDeckReminder({
+    required String clientReminderId,
+    required String message,
+    required Map<String, dynamic> localTime,
+  }) async {
+    return _apiClient.post(
+      '/reminders',
+      {
+        'client_reminder_id': clientReminderId,
+        'message': message,
+        'local_time': localTime,
+      },
+      (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
+    );
+  }
+
+  /// Subscribes the user to a topic Buddy follows. Returns immediately: the
+  /// server skips the inline research pass for this path so the confirm button
+  /// is not holding a finger for several seconds.
+  Future<Result<Map<String, dynamic>>> createTracker(String request) async {
+    return _apiClient.post(
+      '/trackers',
+      {'request': request},
+      (json) => json,
+      timeout: AppConstants.apiWriteTimeout,
     );
   }
 

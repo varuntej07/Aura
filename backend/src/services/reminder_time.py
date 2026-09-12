@@ -229,6 +229,166 @@ def _valid_local_candidates(local_wall_time: datetime, timezone_name: str) -> li
     return candidates
 
 
+def _first_valid_instant_after_gap(
+    local_wall_time: datetime,
+    timezone_name: str,
+) -> datetime | None:
+    """Walk forward minute by minute out of a daylight-saving gap.
+
+    A ritual asked for 02:30 every day still has to fire on the night the clocks
+    jump 02:00 -> 03:00. Skipping the day is a silent disappearance, which reads
+    to the user as the feature breaking, so the occurrence lands on the first
+    local instant that actually exists (03:00). Bounded at four hours: no real
+    transition is larger, and an unbounded walk would spin.
+    """
+    for offset_minutes in range(1, 241):
+        shifted = local_wall_time + timedelta(minutes=offset_minutes)
+        candidates = _valid_local_candidates(shifted, timezone_name)
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def resolve_local_clock_time(
+    *,
+    hour: int,
+    minute: int,
+    day_offset: int,
+    timezone_name: str,
+    after: datetime | None = None,
+) -> ParsedReminderTime:
+    """Resolve a structured one-shot time (a tapped card's chosen clock) to an instant.
+
+    The natural-language path stays in [parse_reminder_when]; this exists because a
+    card hands over ``{hour, minute, day_offset}`` that a person chose from chips,
+    so there is nothing to interpret and nothing to get ambiguously wrong.
+
+    A time already past today rolls to tomorrow rather than failing: the user tapped
+    "3:00 pm" at four o'clock meaning the next one, and an error there would read as
+    the card being broken.
+    """
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError("That clock time isn't valid. Use a 24-hour hour and minute.")
+    if not 0 <= day_offset <= 30:
+        raise ValueError("Pick a day within the next month.")
+
+    try:
+        resolved_timezone = resolve_timezone(timezone_name)
+    except TimezoneResolutionError as exc:
+        raise ValueError(
+            "I need your current timezone before I can set this safely. "
+            "Refresh your device timezone, then try again."
+        ) from exc
+
+    boundary = after or _utc_now()
+    local_boundary = boundary.astimezone(resolved_timezone.zone)
+
+    for extra_days in range(0, 3):
+        local_date = local_boundary.date() + timedelta(days=day_offset + extra_days)
+        local_wall_time = datetime.combine(local_date, time(hour, minute))
+        candidates = _valid_local_candidates(
+            local_wall_time,
+            resolved_timezone.canonical_name,
+        )
+        if not candidates:
+            shifted = _first_valid_instant_after_gap(
+                local_wall_time,
+                resolved_timezone.canonical_name,
+            )
+            if shifted is None:
+                continue
+            candidates = [shifted]
+        local_time = candidates[0]
+        trigger_at = local_time.astimezone(UTC)
+        if trigger_at > boundary:
+            return ParsedReminderTime(
+                trigger_at,
+                local_time,
+                resolved_timezone.canonical_name,
+            )
+
+    raise ValueError("That time has already passed. Pick another one.")
+
+
+def next_ritual_fire_at(
+    *,
+    freq: str,
+    hour: int,
+    minute: int,
+    weekdays: list[int] | None,
+    timezone_name: str,
+    after: datetime | None = None,
+) -> ParsedReminderTime:
+    """Resolve the next occurrence of a recurring ritual against the user's local clock.
+
+    Deliberately a sibling of [parse_reminder_when] rather than an extension of
+    it: that parser's refusal to accept any recurrence grammar is what keeps
+    one-shot reminders unambiguous, and loosening it to serve rituals would put
+    every reminder at risk. Rituals never go through natural language at all —
+    the card hands over a structured schedule, so there is nothing to parse.
+
+    [weekdays] is 0=Monday through 6=Sunday, matching `datetime.weekday()`.
+    """
+    normalized_freq = freq.strip().lower()
+    if normalized_freq not in {"daily", "weekly"}:
+        raise ValueError("A ritual repeats either daily or weekly.")
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError("That clock time isn't valid. Use a 24-hour hour and minute.")
+
+    days = sorted({int(day) for day in (weekdays or [])})
+    if normalized_freq == "weekly":
+        if not days or any(day < 0 or day > 6 for day in days):
+            raise ValueError("A weekly ritual needs at least one weekday from Monday to Sunday.")
+    elif days:
+        raise ValueError("A daily ritual doesn't take specific weekdays.")
+
+    try:
+        resolved_timezone = resolve_timezone(timezone_name)
+    except TimezoneResolutionError as exc:
+        raise ValueError(
+            "I need your current timezone before I can set this safely. "
+            "Refresh your device timezone, then try again."
+        ) from exc
+
+    boundary = after or _utc_now()
+    local_boundary = boundary.astimezone(resolved_timezone.zone)
+
+    # A year of lookahead covers every weekly pattern; anything beyond it means
+    # the schedule itself is unsatisfiable rather than merely far away.
+    for day_offset in range(0, 371):
+        local_date = local_boundary.date() + timedelta(days=day_offset)
+        if normalized_freq == "weekly" and local_date.weekday() not in days:
+            continue
+
+        local_wall_time = datetime.combine(local_date, time(hour, minute))
+        candidates = _valid_local_candidates(
+            local_wall_time,
+            resolved_timezone.canonical_name,
+        )
+        if candidates:
+            # Ambiguous hour (clocks fall back): take the earlier of the two
+            # instants so the ritual fires once, not twice on the same date.
+            local_time = candidates[0]
+        else:
+            shifted = _first_valid_instant_after_gap(
+                local_wall_time,
+                resolved_timezone.canonical_name,
+            )
+            if shifted is None:
+                continue
+            local_time = shifted
+
+        trigger_at = local_time.astimezone(UTC)
+        if trigger_at > boundary:
+            return ParsedReminderTime(
+                trigger_at,
+                local_time,
+                resolved_timezone.canonical_name,
+            )
+
+    raise ValueError("That schedule never comes around. Check the days and time.")
+
+
 def parse_reminder_when(when: str, timezone_name: str) -> ParsedReminderTime:
     """Resolve one complete natural-language expression against the user's local clock."""
     value = " ".join(when.strip().split())

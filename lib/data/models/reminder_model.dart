@@ -35,6 +35,15 @@ class ReminderModel {
   final DateTime? firedAt;
   final DateTime? dismissedAt;
 
+  /// Set when this reminder is one occurrence of a recurring ritual. Empty for
+  /// every ordinary reminder, including every document written before rituals
+  /// existed, so the absence of it is the normal case and never an error.
+  final String ritualId;
+
+  /// How the series repeats, for the "Repeats daily at 8:00" line. Empty unless
+  /// [ritualId] is set.
+  final String ritualSummary;
+
   const ReminderModel({
     required this.id,
     required this.message,
@@ -46,9 +55,14 @@ class ReminderModel {
     this.tier = ReminderTier.reminder,
     this.firedAt,
     this.dismissedAt,
+    this.ritualId = '',
+    this.ritualSummary = '',
   });
 
   bool get isAlarm => tier == ReminderTier.alarm;
+
+  /// True when stopping this needs to stop the whole series, not just this one.
+  bool get isRitualOccurrence => ritualId.isNotEmpty;
 
   // Sentinel used by copyWith to distinguish "not provided" from explicit null.
   static const Object _absent = Object();
@@ -72,8 +86,12 @@ class ReminderModel {
     DateTime? createdAt,
     Object? firedAt = _absent,
     Object? dismissedAt = _absent,
+    String? ritualId,
+    String? ritualSummary,
   }) {
     return ReminderModel(
+      ritualId: ritualId ?? this.ritualId,
+      ritualSummary: ritualSummary ?? this.ritualSummary,
       id: id ?? this.id,
       message: message ?? this.message,
       triggerAt: triggerAt ?? this.triggerAt,
@@ -118,6 +136,8 @@ class ReminderModel {
       dismissedAt: json['dismissed_at'] != null
           ? DateTime.parse(json['dismissed_at'] as String)
           : null,
+      ritualId: json['ritual_id'] as String? ?? '',
+      ritualSummary: json['ritual_summary'] as String? ?? '',
     );
   }
 
@@ -132,5 +152,7 @@ class ReminderModel {
         'created_at': createdAt.toUtc().toIso8601String(),
         'fired_at': firedAt?.toUtc().toIso8601String(),
         'dismissed_at': dismissedAt?.toUtc().toIso8601String(),
+        if (ritualId.isNotEmpty) 'ritual_id': ritualId,
+        if (ritualSummary.isNotEmpty) 'ritual_summary': ritualSummary,
       };
 }

@@ -7,8 +7,10 @@ import 'package:provider/provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../data/models/reminder_model.dart';
 import '../../../data/services/alarm_service.dart';
+import '../../../data/services/backend_api_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
 import '../../viewmodels/reminders_viewmodel.dart';
+import '../../widgets/flash_alert.dart';
 import '../../widgets/sign_in_required_view.dart';
 
 /// Full-page reminders list, accessible from Settings → Reminders.
@@ -280,9 +282,35 @@ class _ReminderTileState extends State<_ReminderTile> {
   /// checked / strikethrough animation play before the list restructures.
   bool _completing = false;
 
+  /// True while the "stop repeating" call is in flight.
+  bool _stoppingRitual = false;
+
   bool get _showAsCompleted => widget.isCompleted || _completing;
 
-  // Tap handlers 
+  // Tap handlers
+
+  /// Ends the whole series, not just this occurrence.
+  ///
+  /// The server also cancels the occurrence it has already armed, which is the
+  /// part that matters: stopping a ritual has to mean nothing arrives tomorrow,
+  /// not that today's copy was tidied up.
+  Future<void> _handleStopRepeating() async {
+    if (_stoppingRitual) return;
+    setState(() => _stoppingRitual = true);
+    final api = context.read<BackendApiService>();
+    final result = await api.deleteRitual(widget.reminder.ritualId);
+    if (!mounted) return;
+    result.when(
+      success: (_) {
+        showFlashAlert(context, "Stopped. That one won't come back.");
+        widget.onComplete?.call();
+      },
+      failure: (_) {
+        setState(() => _stoppingRitual = false);
+        showFlashAlert(context, "Couldn't stop it just now. Try again.");
+      },
+    );
+  }
 
   Future<void> _handleComplete() async {
     if (_completing || widget.onComplete == null) return;
@@ -407,6 +435,54 @@ class _ReminderTileState extends State<_ReminderTile> {
                       ],
                     ],
                   ),
+                  // A ritual occurrence says it is one of a series, and offers the
+                  // only control that actually ends it. Without this the user can
+                  // complete today's and still be woken by it tomorrow, with
+                  // nowhere in the app to say stop.
+                  if (widget.reminder.isRitualOccurrence && !widget.isCompleted) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.repeat_rounded,
+                          size: 13,
+                          color: AppColors.textTertiary,
+                        ),
+                        const SizedBox(width: 5),
+                        Expanded(
+                          child: Text(
+                            widget.reminder.ritualSummary.isEmpty
+                                ? 'Repeats'
+                                : widget.reminder.ritualSummary,
+                            style: const TextStyle(
+                              color: AppColors.textTertiary,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: _stoppingRitual ? null : _handleStopRepeating,
+                          behavior: HitTestBehavior.opaque,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
+                            child: Text(
+                              _stoppingRitual ? 'Stopping' : 'Stop repeating',
+                              style: TextStyle(
+                                color: _stoppingRitual
+                                    ? AppColors.textTertiary
+                                    : AppColors.accentDark,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),

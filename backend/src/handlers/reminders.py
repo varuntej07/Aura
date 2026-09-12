@@ -40,6 +40,7 @@ from ..services import alarm_routine, alarm_sync, alarm_tones, alarm_voice
 from ..services.feedback.feedback_capture import capture_feedback
 from ..services.feedback.feedback_schema import FeedbackReport
 from ..services.firebase import admin_firestore
+from ..services.reminder_time import resolve_local_clock_time
 from ..services.request_auth import resolve_user_id_from_request
 
 # How far ahead a device arms alarms. Android's alarm table is a finite shared
@@ -101,6 +102,125 @@ async def handle_alarm_feature_interest(request: Request) -> JSONResponse:
     if not captured:
         return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
     return JSONResponse({"ok": True})
+
+
+async def handle_create_reminder(request: Request) -> JSONResponse:
+    """POST /reminders — create one plain reminder from a tapped home-deck card.
+
+    Until now every reminder was authored by the `set_reminder` tool, because every
+    reminder came from something the user said. A card is different: the time was
+    chosen from chips, so there is no language to interpret, and sending it through
+    a chat turn to have the model re-derive what the user already picked would cost
+    a turn and could get it wrong.
+
+    Deliberately always the quiet tier. A deck card never arms a device alarm: the
+    loud tier is a promise someone makes deliberately, not something a tap on a
+    suggestion should be able to do.
+    """
+    user_id = resolve_user_id_from_request(request)
+    if not user_id:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Invalid request."}, status_code=400)
+
+    reminder_id = str(body.get("client_reminder_id") or "").strip()
+    if (
+        not reminder_id
+        or len(reminder_id) > 64
+        or not all(ch.isalnum() or ch in "-_" for ch in reminder_id)
+    ):
+        return JSONResponse({"error": "Invalid request."}, status_code=400)
+
+    message = " ".join(str(body.get("message") or "").strip().split())[:500]
+    local_time = body.get("local_time")
+    if not message or not isinstance(local_time, dict):
+        return JSONResponse({"error": "Invalid request."}, status_code=400)
+
+    ref = (
+        admin_firestore()
+        .collection("users")
+        .document(user_id)
+        .collection("reminders")
+        .document(reminder_id)
+    )
+    existing = await asyncio.to_thread(ref.get)
+    if existing.exists:
+        # A double-tapped card addresses the same document, so the second confirm
+        # reports the first one's outcome instead of scheduling a duplicate.
+        stored = existing.to_dict() or {}
+        return JSONResponse({
+            "reminder_id": reminder_id,
+            "trigger_at": stored.get("trigger_at", ""),
+            "local_time": stored.get("local_time", ""),
+            "created": False,
+        })
+
+    try:
+        timezone_name = await _reminder_timezone(user_id)
+        parsed = resolve_local_clock_time(
+            hour=int(local_time.get("hour", -1)),
+            minute=int(local_time.get("minute", -1)),
+            day_offset=int(local_time.get("day_offset", 0)),
+            timezone_name=timezone_name,
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.error("reminders: deck create failed", {
+            "user_id": user_id, "reminder_id": reminder_id, "error": str(exc),
+        })
+        return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
+
+    now_iso = datetime.now(UTC).isoformat()
+    document = {
+        "id": reminder_id,
+        "message": message,
+        "trigger_at": parsed.utc.isoformat(),
+        "status": "pending",
+        "tier": alarm_sync.TIER_REMINDER,
+        "local_time": parsed.local.replace(tzinfo=None).isoformat(),
+        "timezone": parsed.timezone,
+        "created_via": "deck",
+        "snooze_count": 0,
+        "created_at": now_iso,
+    }
+    try:
+        await asyncio.to_thread(ref.set, document)
+    except Exception as exc:
+        logger.error("reminders: deck write failed", {
+            "user_id": user_id, "reminder_id": reminder_id, "error": str(exc),
+        })
+        return JSONResponse({"error": "Temporarily unavailable"}, status_code=503)
+
+    return JSONResponse(
+        {
+            "reminder_id": reminder_id,
+            "trigger_at": document["trigger_at"],
+            "local_time": document["local_time"],
+            "created": True,
+        },
+        status_code=201,
+    )
+
+
+async def _reminder_timezone(user_id: str) -> str:
+    """The zone the client wrote at sign-in. Never read from the request body."""
+    def _fetch() -> str | None:
+        snap = admin_firestore().collection("users").document(user_id).get()
+        value = (snap.to_dict() or {}).get("timezone")
+        return value.strip() if isinstance(value, str) else None
+
+    timezone_name = await asyncio.to_thread(_fetch)
+    if not timezone_name:
+        raise ValueError(
+            "I need your current timezone before I can set this safely. "
+            "Refresh your device timezone, then try again."
+        )
+    return timezone_name
 
 
 async def handle_get_alarm_routine(request: Request) -> JSONResponse:

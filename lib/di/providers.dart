@@ -36,6 +36,7 @@ import '../data/services/store_purchase_service.dart';
 import '../data/services/subscription_service.dart';
 import '../presentation/viewmodels/auth_viewmodel.dart';
 import '../presentation/viewmodels/connectors_viewmodel.dart';
+import '../presentation/viewmodels/home_deck_viewmodel.dart';
 import '../presentation/viewmodels/home_viewmodel.dart';
 import '../presentation/viewmodels/reminders_viewmodel.dart';
 import '../presentation/viewmodels/settings_viewmodel.dart';
@@ -201,6 +202,15 @@ List<SingleChildWidget> buildProviders(SharedPreferences prefs) {
         notificationService: notificationService,
         appFeedbackService: appFeedbackService,
         buddyPillsRefresher: buddyPillsRefresher,
+      ),
+    ),
+    // The home deck is its own ViewModel rather than fields on HomeViewModel,
+    // which is scoped to live voice-session state: a deck fetch or a failed card
+    // must never be able to disturb a call.
+    ChangeNotifierProvider<HomeDeckViewModel>(
+      create: (_) => HomeDeckViewModel(
+        repository: agentSuggestionPillsRepository,
+        api: backendApiService,
       ),
     ),
     ChangeNotifierProvider<SettingsViewModel>(

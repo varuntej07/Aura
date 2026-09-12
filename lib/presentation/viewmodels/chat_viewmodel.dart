@@ -796,6 +796,33 @@ abstract class ChatViewModel extends SafeChangeNotifier {
     await _refreshSessions();
   }
 
+  /// Opens the chat a home-deck talk card started. Seeds Buddy's opener and
+  /// stops there.
+  ///
+  /// Deliberately the same shape as [loadTrackerContext] rather than the
+  /// send-on-open shape of [startGetBetterConversation]: a deck card is a
+  /// suggestion the user accepted, not a message they wrote, so nothing is sent
+  /// on their behalf. It carries no funnel attribution because a card tap is not
+  /// a notification tap, and borrowing the icebreaker funnel would corrupt it.
+  Future<void> loadDeckTalkContext({required String openingMessage}) async {
+    _messages.clear();
+    _error = null;
+
+    if (openingMessage.isNotEmpty) {
+      final msg = ChatMessageModel(
+        id: _uuid.v4(),
+        text: openingMessage,
+        isUser: false,
+        timestamp: DateTime.now(),
+        channel: ChatMessageChannel.text,
+        sessionId: _currentSessionId,
+      );
+      await _persistMessage(msg);
+    }
+    _setState(ViewState.loaded);
+    await _refreshSessions();
+  }
+
   // Subclass hooks
 
   /// Inserts [msg] at the front of the in-memory message list without

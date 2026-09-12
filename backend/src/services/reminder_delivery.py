@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 from ..lib.logger import logger
-from . import alarm_sync
+from . import alarm_sync, rituals
 from .notification_rewriter import rewrite_reminder_notification
 from .notifications import orchestrator
 from .notifications.proposal import (
@@ -107,14 +107,23 @@ async def deliver_due_reminder(
             return DeliveryOutcome()
 
         raw_message = str(data.get("message", "Reminder due now"))
-        copy = await rewrite_reminder_notification(raw_message)
-        body = copy.body
         is_alarm = alarm_sync.is_alarm(data)
-        # An alarm keeps a stable, unmistakable title: someone half asleep at
-        # 6am needs to recognise it instantly, not read a witty subject line.
-        # A plain reminder takes the framed title when there is one, so the
-        # bold line names the actual thing instead of the word "Reminder".
-        title = "Buddy Alarm" if is_alarm else (copy.title or "Buddy Reminder")
+        is_ritual = bool(data.get("ritual_id"))
+        if data.get("skip_copy_rewrite"):
+            # A ritual occurrence already carries its finished copy, written when
+            # the occurrence was armed. Running it through the rewriter would cost
+            # a second model call on the delivery path and can move half a
+            # punchline into the title.
+            body = raw_message
+            title = str(data.get("ritual_title") or "Buddy")
+        else:
+            copy = await rewrite_reminder_notification(raw_message)
+            body = copy.body
+            # An alarm keeps a stable, unmistakable title: someone half asleep at
+            # 6am needs to recognise it instantly, not read a witty subject line.
+            # A plain reminder takes the framed title when there is one, so the
+            # bold line names the actual thing instead of the word "Reminder".
+            title = "Buddy Alarm" if is_alarm else (copy.title or "Buddy Reminder")
 
         # Committed lane: the user asked for this, so the orchestrator sends
         # it inline (freshness n/a, dedup handled by the atomic claim above).
@@ -138,7 +147,11 @@ async def deliver_due_reminder(
                     # rewriter may have moved half the instruction into the
                     # title, which the tap path discards. The raw message is
                     # the only fire-time text that is never LLM-generated.
-                    "opening_chat_message": f"Reminder: {raw_message}",
+                    # A ritual's text IS Buddy talking, so it opens the chat as
+                    # itself; prefixing "Reminder:" onto a joke reads as a bug.
+                    "opening_chat_message": (
+                        raw_message if is_ritual else f"Reminder: {raw_message}"
+                    ),
                     "created_via": str(data.get("created_via", "voice")),
                     "tier": alarm_sync.normalize_tier(data.get("tier")),
                     # For an alarm this push is a BACKSTOP, not the
@@ -183,6 +196,12 @@ async def deliver_due_reminder(
 
         if decision.disposition == Disposition.SEND and decision.transport_accepted:
             await asyncio.to_thread(mark_reminder_fired, user_id, reminder_id)
+            # Re-arm a recurring ritual only once the push was actually accepted
+            # and the occurrence is marked fired. Arming tomorrow's occurrence any
+            # earlier would advance the series past a send that never happened;
+            # a crash between here and the write is repaired by the hourly sweep.
+            if is_ritual:
+                await rituals.on_occurrence_fired(user_id, data)
             logger.info("Reminder transport accepted", {
                 "user_id": user_id,
                 "reminder_id": reminder_id,

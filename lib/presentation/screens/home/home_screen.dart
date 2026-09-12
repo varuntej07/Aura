@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -12,6 +13,7 @@ import '../../../data/local/app_database.dart';
 import '../../../data/models/subscription_plan.dart';
 import '../../../data/models/voice_models.dart';
 import '../../../data/repositories/agent_suggestion_pills_repository.dart';
+import '../../../data/repositories/auth_repository.dart';
 import '../../../data/repositories/chat_repository.dart';
 import '../../../data/services/alarm_routine_service.dart';
 import '../../../data/services/alarm_service.dart';
@@ -27,12 +29,16 @@ import '../../../data/services/voice_launcher_bridge.dart';
 import '../../../data/services/deep_link_service.dart';
 import '../../../core/network/connectivity_service.dart';
 import '../../viewmodels/auth_viewmodel.dart';
+import '../../viewmodels/home_deck_viewmodel.dart';
 import '../../viewmodels/home_viewmodel.dart';
 import '../../viewmodels/notification_chat_seed.dart';
 import '../../viewmodels/text_chat_viewmodel.dart';
 import '../chat/embedded_chat_panel.dart';
 import '../settings/settings_screen.dart';
+import '../../widgets/animated_headline.dart';
 import '../../widgets/flash_alert.dart';
+import '../../widgets/home_status_pills.dart';
+import '../../widgets/orb_card_deck.dart';
 import '../../widgets/show_sign_in_pill.dart';
 import '../../widgets/voice_sphere.dart';
 
@@ -51,12 +57,20 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   late final Animation<double> _breathAnimation;
   late final AnimationController _rippleController;
   late final Animation<double> _rippleAnimation;
+  // One-shot, fired per card the deck throws. Unlike breath and ripple it does
+  // not repeat, so it costs nothing between throws and there is no loop to
+  // restart (or accidentally re-run) when the drawer closes.
+  late final AnimationController _emitController;
   late final PageController _pageController;
   late final TextChatViewModel _textChatViewModel;
   bool _textChatViewModelCreated = false;
   _HomeMode _mode = _HomeMode.voice;
   StreamSubscription<String>? _launchActionSub;
   StreamSubscription<String>? _deepLinkSub;
+  late final AuthViewModel _authViewModel;
+  /// The uid whose startup work has already been kicked off, so it runs once
+  /// per signed-in user no matter how many times auth notifies.
+  String? _startedForUid;
 
   @override
   void initState() {
@@ -77,7 +91,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _rippleAnimation = Tween<double>(begin: 1.0, end: 1.5).animate(
       CurvedAnimation(parent: _rippleController, curve: Curves.easeOut),
     );
+    _emitController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 320),
+    );
     _pageController = PageController();
+
+    // The router sends us to /home while the auth stream is still in flight, so
+    // on a cold start the first frame has no uid at all. Sampling it once there
+    // silently skipped the deck load, the voice prewarm and the wake word for
+    // the whole session: the home screen rendered a greeting and nothing else.
+    // Everything that needs a user now starts on the first frame that HAS one.
+    _authViewModel = context.read<AuthViewModel>();
+    _authViewModel.addListener(_handleAuthChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final uid = context.read<AuthViewModel>().user?.uid;
@@ -198,12 +224,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       _deepLinkSub =
           DeepLinkService.instance.launchActions.listen(_handleLaunchAction);
 
-      if (uid != null && uid.isNotEmpty) {
-        // Warm the voice stack before the user taps the mic. Fire-and-forget so
-        // it never blocks wake-word init or the first frame.
-        unawaited(vm.prewarmVoice());
-        await vm.initWakeWord(uid);
-      }
+      await _startForUser(uid);
 
       // ... then replay a cold-launch tap captured before Dart started (app was
       // killed when the widget was tapped). Runs after prewarm so the connection
@@ -222,6 +243,29 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         _handleLaunchAction(pendingLink);
       }
     });
+  }
+
+  void _handleAuthChanged() {
+    unawaited(_startForUser(_authViewModel.user?.uid));
+  }
+
+  /// Everything that cannot run without a signed-in user. Idempotent per uid, so
+  /// it is safe to call from both the first frame and every later auth change.
+  Future<void> _startForUser(String? uid) async {
+    if (!mounted || uid == null || uid.isEmpty) return;
+    if (_startedForUid == uid) return;
+    _startedForUid = uid;
+
+    // Load the deck first and fire-and-forget: it renders from cache on the
+    // very next frame, so the orb can start throwing while the rest warms up.
+    // Sequenced before the awaited wake-word init deliberately, or the first
+    // card would wait on it.
+    unawaited(context.read<HomeDeckViewModel>().load(uid));
+    final vm = context.read<HomeViewModel>();
+    // Warm the voice stack before the user taps the mic. Fire-and-forget so
+    // it never blocks wake-word init or the first frame.
+    unawaited(vm.prewarmVoice());
+    await vm.initWakeWord(uid);
   }
 
   @override
@@ -246,13 +290,41 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _authViewModel.removeListener(_handleAuthChanged);
     _launchActionSub?.cancel();
     _deepLinkSub?.cancel();
     _breathController.dispose();
     _rippleController.dispose();
+    _emitController.dispose();
     _pageController.dispose();
     _textChatViewModel.dispose();
     super.dispose();
+  }
+
+  /// The orb squashes as each card leaves it.
+  void _handleDeckEmit() {
+    if (!mounted) return;
+    _emitController.forward(from: 0);
+  }
+
+  /// A talk card opens chat with Buddy speaking first, and nothing else. No
+  /// message is sent on the user's behalf: the card said what it would do, and
+  /// starting a conversation is all it does.
+  void _handleDeckTalk(String openingMessage) {
+    context.push(
+      '/chat/new',
+      extra: NotificationChatSeed(
+        origin: NotificationChatOrigin.deck,
+        openingMessage: openingMessage,
+      ),
+    );
+  }
+
+  void _handleDeckNavigate(String route) => context.push(route);
+
+  void _handleDeckCreated(String message) {
+    if (!mounted) return;
+    showFlashAlert(context, message);
   }
 
   Future<void> _handleMicTap() async {
@@ -460,6 +532,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           FocusScope.of(context).unfocus();      // Drops the keyboard so opening the drawer
           _breathController.stop();
           _rippleController.stop();
+          // The emit impulse is stopped but never restarted on close: it is a
+          // one-shot per thrown card, and replaying it would squash the orb for
+          // a card that landed minutes ago.
+          _emitController.stop();
         } else {
           _breathController.repeat(reverse: true);
           _rippleController.repeat();
@@ -520,7 +596,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     _VoicePanel(
                       breathAnimation: _breathAnimation,
                       rippleAnimation: _rippleAnimation,
+                      emitAnimation: _emitController,
                       onMicTap: _handleMicTap,
+                      onDeckEmit: _handleDeckEmit,
+                      onDeckTalk: _handleDeckTalk,
+                      onDeckNavigate: _handleDeckNavigate,
+                      onDeckCreated: _handleDeckCreated,
                     ),
                     ChangeNotifierProvider.value(
                       value: _textChatViewModel,
@@ -626,21 +707,59 @@ class _HomeModeButton extends StatelessWidget {
 class _VoicePanel extends StatelessWidget {
   final Animation<double> breathAnimation;
   final Animation<double> rippleAnimation;
+  final Animation<double> emitAnimation;
   final VoidCallback onMicTap;
+  final VoidCallback onDeckEmit;
+  final void Function(String openingMessage) onDeckTalk;
+  final void Function(String route) onDeckNavigate;
+  final void Function(String message) onDeckCreated;
 
   const _VoicePanel({
     required this.breathAnimation,
     required this.rippleAnimation,
+    required this.emitAnimation,
     required this.onMicTap,
+    required this.onDeckEmit,
+    required this.onDeckTalk,
+    required this.onDeckNavigate,
+    required this.onDeckCreated,
   });
+
+  /// "Afternoon, Sam." — or just "Good afternoon." when there is no real name.
+  ///
+  /// A placeholder-named account must never be greeted as "User": the account
+  /// creation path stores that literal string when nobody supplied a name
+  /// (`AuthRepository.placeholderDisplayName`), so it is treated as absent here.
+  String _greetingLine(BuildContext context) {
+    final hour = DateTime.now().hour;
+    final band = hour < 12
+        ? 'Morning'
+        : hour < 17
+            ? 'Afternoon'
+            : 'Evening';
+    final stored = context.watch<AuthViewModel>().user?.displayName.trim() ?? '';
+    final hasName =
+        stored.isNotEmpty && stored != AuthRepository.placeholderDisplayName;
+    if (!hasName) return 'Good ${band.toLowerCase()}.';
+    return '$band, ${stored.split(' ').first}.';
+  }
 
   @override
   Widget build(BuildContext context) {
     final bottomReserve = MediaQuery.of(context).viewPadding.bottom + 48;
+    // The greeting block is shorter when there are no pills to show, so the deck
+    // starts higher rather than leaving a hole under the greeting.
+    final deckTop =
+        context.watch<HomeDeckViewModel>().status.isEmpty ? 128.0 : 178.0;
 
     return Consumer<HomeViewModel>(
       builder: (context, vm, _) {
         final endedSummary = vm.endedSummary;
+        // The deck only exists while the orb is idle: during a call this band
+        // belongs to the live transcript, and cards over a conversation would be
+        // both unreadable and rude.
+        final showDeck =
+            vm.micState == MicState.idle && endedSummary == null;
         return Stack(
           children: [
             Positioned(
@@ -656,6 +775,15 @@ class _VoicePanel extends StatelessWidget {
                 ),
               ),
             ),
+            // Buddy has not picked up yet. Sits above everything because the
+            // alternative is the user staring at an orb that looks live.
+            if (vm.connectStalled)
+              Positioned(
+                top: 8,
+                left: 20,
+                right: 20,
+                child: _VoiceStallBanner(onRestart: vm.restartSession),
+              ),
             // "Voice chat ended" rating card, pinned on top
             if (endedSummary != null)
               Positioned(
@@ -670,6 +798,56 @@ class _VoicePanel extends StatelessWidget {
                   onAutoDismiss: vm.dismissEndedSummary,
                 ),
               ),
+            // Greeting and status pills: who Buddy is talking to, and what is
+            // already running for them. Hidden during a call for the same reason
+            // the deck is: that space becomes the live transcript.
+            if (showDeck)
+              Positioned(
+                top: 28,
+                left: 0,
+                right: 0,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(24, 0, 24, 0),
+                      child: AnimatedHeadline(
+                        text: _greetingLine(context),
+                        alignment: WrapAlignment.center,
+                        style: const TextStyle(
+                          fontFamily: 'Outfit',
+                          fontSize: 30,
+                          height: 1.1,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.5,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 22),
+                    HomeStatusPills(
+                      onNavigate: onDeckNavigate,
+                      onOpenTracker: onDeckTalk,
+                    ),
+                  ],
+                ),
+              ),
+            // The card layer sits BEFORE the orb in the stack, so the orb paints
+            // over it. That ordering is what sells a card coming out of the orb's
+            // surface rather than sliding out from behind it.
+            if (showDeck)
+              Positioned(
+                top: deckTop,
+                left: 0,
+                right: 0,
+                bottom: bottomReserve + 128,
+                child: OrbCardDeck(
+                  onEmit: onDeckEmit,
+                  onStartTalk: onDeckTalk,
+                  onNavigate: onDeckNavigate,
+                  onCreated: onDeckCreated,
+                ),
+              ),
             Positioned(
               left: 0,
               right: 0,
@@ -680,6 +858,7 @@ class _VoicePanel extends StatelessWidget {
                   voiceStatus: vm.voiceStatus,
                   breathAnimation: breathAnimation,
                   rippleAnimation: rippleAnimation,
+                  emitAnimation: emitAnimation,
                   onTap: onMicTap,
                 ),
               ),
@@ -691,6 +870,65 @@ class _VoicePanel extends StatelessWidget {
   }
 }
 
+/// "Buddy didn't pick up." Shown while a call is still waiting on the agent.
+///
+/// Not a FlashAlert: that auto-dismisses in two seconds and carries no action,
+/// and the whole point here is the way out.
+class _VoiceStallBanner extends StatelessWidget {
+  final Future<void> Function() onRestart;
+
+  const _VoiceStallBanner({required this.onRestart});
+
+  @override
+  Widget build(BuildContext context) {
+    return FauxGlassCard(
+      borderRadius: 18,
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      borderColor: AppColors.premium.withValues(alpha: 0.32),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Text(
+              "Buddy hasn't picked up yet.",
+              style: TextStyle(
+                fontFamily: 'Outfit',
+                fontSize: 14.5,
+                height: 1.3,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textPrimary,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          GestureDetector(
+            onTap: () => unawaited(onRestart()),
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+              decoration: BoxDecoration(
+                color: AppColors.accent.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(30),
+                border: Border.all(
+                  color: AppColors.accent.withValues(alpha: 0.38),
+                ),
+              ),
+              child: Text(
+                'Start again',
+                style: TextStyle(
+                  fontFamily: 'Outfit',
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.accentDark,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // Voice button
 
 class _VoiceButton extends StatefulWidget {
@@ -698,6 +936,10 @@ class _VoiceButton extends StatefulWidget {
   final VoiceSessionStatus voiceStatus;
   final Animation<double> breathAnimation;
   final Animation<double> rippleAnimation;
+  /// Runs 0 -> 1 once per card the deck throws, so the orb can squash and
+  /// stretch as it flicks each one out. Multiplied into the scale the orb
+  /// already computes; it never replaces the breath or the active pulse.
+  final Animation<double> emitAnimation;
   final VoidCallback onTap;
 
   const _VoiceButton({
@@ -705,6 +947,7 @@ class _VoiceButton extends StatefulWidget {
     required this.voiceStatus,
     required this.breathAnimation,
     required this.rippleAnimation,
+    required this.emitAnimation,
     required this.onTap,
   });
 
@@ -758,7 +1001,11 @@ class _VoiceButtonState extends State<_VoiceButton> {
         mainAxisSize: MainAxisSize.min,
         children: [
           AnimatedBuilder(
-            animation: Listenable.merge([widget.breathAnimation, widget.rippleAnimation]),
+            animation: Listenable.merge([
+              widget.breathAnimation,
+              widget.rippleAnimation,
+              widget.emitAnimation,
+            ]),
             builder: (_, _) {
               final isActive = widget.micState != MicState.idle;
               // Idle: slow gentle breath. Active: noticeably larger + a fast pulse.
@@ -769,8 +1016,16 @@ class _VoiceButtonState extends State<_VoiceButton> {
               } else {
                 scale = widget.breathAnimation.value;
               }
+              // Throwing a card: compress first (anticipation), then stretch as it
+              // leaves. Done with a transform rather than a new shader uniform, so
+              // the live voice path and voice_sphere.frag are untouched.
+              final emit = widget.emitAnimation.value;
+              final impulse = math.sin(emit * math.pi);
+              final anticipation = emit < 0.4 ? impulse : 0.0;
+              final release = emit >= 0.4 ? impulse : 0.0;
               return Transform.scale(
-                scale: scale,
+                scaleX: scale * (1 + 0.10 * anticipation - 0.06 * release),
+                scaleY: scale * (1 - 0.14 * anticipation + 0.08 * release),
                 // Glowing sphere — the speech orb
                 child: VoiceSphere(
                   intensity: _intensityOf(widget.micState),

@@ -82,13 +82,57 @@ class GmailConnectorStatus {
   }
 }
 
+/// Notion, which unlike Calendar and Gmail is authorized in a browser rather than
+/// through native Google Sign-In, so the phone never sees a token.
+class NotionConnectorStatus {
+  final bool enabled;
+
+  /// Tokens are still on file, so re-enabling does not need a fresh browser trip.
+  final bool canReconnect;
+  final String? workspaceName;
+  final DateTime? connectedAt;
+  final String? lastError;
+
+  const NotionConnectorStatus({
+    required this.enabled,
+    required this.canReconnect,
+    required this.workspaceName,
+    required this.connectedAt,
+    required this.lastError,
+  });
+
+  /// The literal the backend writes when Notion's tokens stopped working and the
+  /// user has to authorize again (`notion_connector.py`).
+  static const String reauthorizationRequiredError =
+      'Notion authorization is required.';
+
+  bool get needsReauthorization => lastError == reauthorizationRequiredError;
+
+  factory NotionConnectorStatus.fromJson(Map<String, dynamic> json) {
+    return NotionConnectorStatus(
+      enabled: json['enabled'] as bool? ?? false,
+      canReconnect: json['can_reconnect'] as bool? ?? false,
+      workspaceName: json['workspace_name'] as String?,
+      connectedAt: _parseDateTime(json['connected_at'] as String?),
+      lastError: json['last_error'] as String?,
+    );
+  }
+
+  static DateTime? _parseDateTime(String? value) {
+    if (value == null || value.isEmpty) return null;
+    return DateTime.tryParse(value);
+  }
+}
+
 class ConnectorsCatalog {
   final GoogleCalendarConnectorStatus googleCalendar;
   final GmailConnectorStatus gmail;
+  final NotionConnectorStatus notion;
 
   const ConnectorsCatalog({
     required this.googleCalendar,
     required this.gmail,
+    required this.notion,
   });
 
   factory ConnectorsCatalog.fromJson(Map<String, dynamic> json) {
@@ -98,6 +142,11 @@ class ConnectorsCatalog {
       ),
       gmail: GmailConnectorStatus.fromJson(
         json['gmail'] as Map<String, dynamic>? ?? const {},
+      ),
+      // Defaulted like its siblings: a backend that predates the block leaves
+      // the card disconnected rather than breaking the screen.
+      notion: NotionConnectorStatus.fromJson(
+        json['notion'] as Map<String, dynamic>? ?? const {},
       ),
     );
   }

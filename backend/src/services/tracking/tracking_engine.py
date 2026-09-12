@@ -1061,7 +1061,13 @@ async def _ensure_pulse(topic_key: str, *, interval_seconds: int, now: datetime)
     await store.create_checkpoint_if_absent(cp)
 
 
-async def provision_tracker(user_id: str, request: str, *, created_via: str = "text") -> dict:
+async def provision_tracker(
+    user_id: str,
+    request: str,
+    *,
+    created_via: str = "text",
+    inline_research: bool | None = None,
+) -> dict:
     """Research a topic and subscribe the user. Reuses an existing shared
     ``tracked_topics`` doc when one already covers the same public event (so two
     users on one event share research). Research runs under a bounded wait so the
@@ -1085,8 +1091,14 @@ async def provision_tracker(user_id: str, request: str, *, created_via: str = "t
     # (next_reconcile_at = now); the every-15-min reconcile re-researches and lays the
     # fixtures, and the pulse heartbeat drives updates in the meantime. Text chat keeps
     # the full inline research. Both share the identical minimal-topic construction.
+    # A home-deck card confirms under a finger, so it passes inline_research=False
+    # and takes the same minimal-topic path voice already uses. Left as None by every
+    # existing caller, which preserves the current voice/text split exactly.
+    if inline_research is None:
+        inline_research = created_via != "voice"
+
     research = None
-    if created_via != "voice":
+    if inline_research:
         try:
             research = await asyncio.wait_for(
                 research_topic(request, models=models, now=now),
