@@ -328,7 +328,7 @@ async def _run_proactive_drain() -> None:
             try:
                 # The drain makes per-user LLM calls (tap gate, rewriter); attribute
                 # their spend to that user in the per-user cost ledger.
-                with bind_llm_user(uid):
+                with bind_llm_user(uid, feature="reactive_orchestration"):
                     await orchestrator.drain_user_queue(uid)
             except Exception as exc:
                 logger.warn("scheduler: proactive drain per-user failed", {

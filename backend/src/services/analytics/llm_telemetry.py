@@ -65,22 +65,45 @@ _trace_context: ContextVar[dict[str, str]] = ContextVar(
 # inert when unset so no existing caller changes behaviour.
 _current_llm_uid: ContextVar[str] = ContextVar("llm_current_uid", default="")
 
+# WHICH FEATURE the LLM calls in the current async context belong to.
+#
+# `caller` is the model TIER or path (cheap / balanced / expert / chat), which
+# answers "which model served this" but not "what was this for". Every background
+# agent reaches the same tier, so briefing, icebreakers, the signal engine, memory
+# extraction and the tap gate all collapse into one `llm:cheap` bucket and a cost
+# dashboard cannot tell them apart. This is the missing dimension.
+#
+# Same ContextVar mechanism as _current_llm_uid above, and for the same reason: it
+# survives the retry and fallback hops inside model_provider without threading an
+# argument through every tier signature, and it is inert when unset.
+_current_llm_feature: ContextVar[str] = ContextVar("llm_current_feature", default="")
+
 
 @contextmanager
-def bind_llm_user(uid: str) -> Iterator[None]:
-    """Attribute every LLM call made inside this block to ``uid``.
+def bind_llm_user(uid: str, feature: str = "") -> Iterator[None]:
+    """Attribute every LLM call made inside this block to ``uid``, and optionally
+    to a ``feature``.
 
     Used by per-user BACKGROUND work, which has no request to carry the id. An explicit
     ``uid=`` on start_llm_generation still wins, so chat and voice are unaffected.
+
+    ``feature`` is the PRODUCT surface the work belongs to (briefing, signal_engine,
+    icebreaker, research, dictation_polish), as distinct from ``caller``, which is the
+    model tier that served it. Both are needed: the tier answers "which model", the
+    feature answers "what for". Either argument may be passed alone.
     """
-    if not uid:
+    if not uid and not feature:
         yield
         return
-    token = _current_llm_uid.set(uid)
+    uid_token = _current_llm_uid.set(uid) if uid else None
+    feature_token = _current_llm_feature.set(feature) if feature else None
     try:
         yield
     finally:
-        _current_llm_uid.reset(token)
+        if feature_token is not None:
+            _current_llm_feature.reset(feature_token)
+        if uid_token is not None:
+            _current_llm_uid.reset(uid_token)
 
 
 @dataclass(frozen=True)
@@ -179,12 +202,22 @@ class _Recording:
         tokens: dict[str, int] | None = None,
         success: bool = True,
         error_type: str | None = None,
+        usage_details: dict[str, int] | None = None,
+        cost_usd: float | None = None,
     ) -> None:
         """``tokens`` uses Langfuse usage-detail names directly: ``input``,
         ``output``, and optionally ``cache_read_input_tokens`` /
         ``cache_creation_input_tokens`` (Anthropic cache pricing keys on these
         exact names). Idempotent: a second finish() is a no-op, so a call site
-        may finish on success and again in a broad error handler safely."""
+        may finish on success and again in a broad error handler safely.
+
+        ``usage_details`` is the non-token escape hatch, used ONLY when ``tokens``
+        is absent: the speech legs bill per audio second and per character, units
+        the token ledger cannot price, so they pass their own names here with an
+        explicit ``cost_usd``. Keeping them out of ``tokens`` is deliberate, because
+        ``tokens`` is what drives the per-user Firestore spend ledger and the
+        reactive cost cap that reads it.
+        """
         if self._finished:
             return
         self._finished = True
@@ -209,6 +242,12 @@ class _Recording:
                     update_kwargs["usage_details"] = {
                         key: int(value or 0) for key, value in tokens.items()
                     }
+                elif usage_details:
+                    update_kwargs["usage_details"] = {
+                        key: int(value or 0) for key, value in usage_details.items()
+                    }
+                if cost_usd is not None:
+                    update_kwargs["cost_details"] = {"total": float(cost_usd)}
                 self._observation.update(**update_kwargs)
             except Exception as exc:
                 logger.debug(
@@ -248,6 +287,7 @@ def start_llm_generation(
     provider: str,
     caller: str,
     uid: str | None = None,
+    feature: str | None = None,
 ) -> _Recording | _NoopRecording:
     """Open one generation for one provider API attempt. ``caller`` is the tier
     or path label the ops dashboard groups by (cheap / balanced / expert /
@@ -270,6 +310,11 @@ def start_llm_generation(
         }
         if uid:
             metadata["uid"] = uid
+        # Explicit argument beats the ambient bind_llm_user binding, which in turn
+        # beats nothing; a feature already in the trace context (chat) wins over both.
+        resolved_feature = feature or _current_llm_feature.get("")
+        if resolved_feature and "feature" not in metadata:
+            metadata["feature"] = resolved_feature
         observation = _start_observation(
             client,
             name=f"llm:{caller}",

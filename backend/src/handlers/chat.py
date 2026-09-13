@@ -865,6 +865,7 @@ async def handle_chat_stream(event: dict[str, Any]) -> StreamingResponse:
             client_message_id=client_message_id,
             session_id=session_id,
             surface="chat",
+            feature="chat",
             prompt_version="chat-v1",
         )
         try:

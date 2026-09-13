@@ -415,7 +415,7 @@ async def handle_polish(request: Request) -> JSONResponse:
     try:
         # bind_llm_user makes the per-user cost ledger fire for this call -
         # the exact spend the old handler-local httpx call kept invisible.
-        with bind_llm_user(uid):
+        with bind_llm_user(uid, feature="dictation_polish"):
             formatted = await get_model_provider().polish(
                 text,
                 system=system,

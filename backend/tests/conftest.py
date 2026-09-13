@@ -17,6 +17,26 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+# Cut the test suite off from live Langfuse BEFORE any src module imports the
+# telemetry client. A real backend/.env carries working LANGFUSE keys, and only
+# test_llm_telemetry.py blanked them, so every other test that exercised an LLM
+# path shipped its mocks to the production project: 29,879 observations there
+# carry fixture uids ("u1", "uid-1") and raw MagicMock reprs 17-19KB long, under
+# models like "claude-bogus". That noise is indistinguishable from real spend in
+# a cost dashboard, and each mock repr is a paid ingestion unit.
+#
+# Module level, not an autouse fixture, and it resets the memoised globals as well
+# as the settings: llm_telemetry._client is built once and cached, so a client
+# constructed before a fixture ran would survive any later settings edit.
+from src.config.settings import settings as _settings  # noqa: E402
+from src.services.analytics import llm_telemetry as _llm_telemetry  # noqa: E402
+
+_settings.LANGFUSE_PUBLIC_KEY = ""
+_settings.LANGFUSE_SECRET_KEY = ""
+_llm_telemetry._client = None
+_llm_telemetry._init_attempted = False
+
+
 @pytest.fixture(autouse=True)
 def mock_firebase_app():
     """Prevent real Firebase SDK initialization across every test."""

@@ -57,7 +57,7 @@ async def run_orchestrate(
     try:
         # Attribute every LLM call this pass makes to this user, so background agent
         # spend lands in the per-user ledger the same way chat already does.
-        with bind_llm_user(user_id):
+        with bind_llm_user(user_id, feature="reactive_orchestration"):
             return await _drain_and_dispatch(
                 user_id,
                 transient_events=transient_events,

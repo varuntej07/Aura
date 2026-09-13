@@ -2,9 +2,9 @@
 
 Every range selector in the UI, every `?range=` query parameter, and every
 provider that converts a range into a day count used to carry its own copy of
-this table (four independent copies: app.py's valid-range set, panels.py's
-day map, cost_provider's day map, langfuse_provider's RANGE_DAYS). Adding a
-range meant finding all four, and a miss fails silently by clamping to 7d.
+this table (app.py's valid-range set, panels.py's day map, and cost_provider's
+day map). Adding a range meant finding each one, and a miss fails silently by
+clamping to 7d.
 
 One table, one clamp, one converter.
 """

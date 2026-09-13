@@ -30,6 +30,8 @@
 #   gcloud secrets create juno-dodo-webhook-secret --project=<PROJECT_ID>    # billing: Dodo webhook signature secret (whsec_...)
 #   gcloud secrets create juno-notion-client-id --project=<PROJECT_ID>       # notion connector: OAuth client id (bare UUID)
 #   gcloud secrets create juno-notion-client-secret --project=<PROJECT_ID>   # notion connector: OAuth client secret (secret_...)
+#   gcloud secrets create juno-langfuse-public-key --project=<PROJECT_ID>   # LLM observability: both keys unset = silent no-op, so a
+#   gcloud secrets create juno-langfuse-secret-key --project=<PROJECT_ID>   # missing pair loses ALL backend traces with no error
 #
 # Writing a secret VALUE: pipe the bare credential in with no trailing newline
 # and nothing else. Do not paste an `echo -n "..."` line into the value itself,
@@ -343,6 +345,9 @@ gcloud run deploy "${SERVICE_NAME}" \
   --set-env-vars="POSTHOG_HOST=https://us.i.posthog.com" \
   --set-env-vars="TELEGRAM_FEEDBACK_CHAT_ID=8599918865" \
   --set-secrets="TELEGRAM_BOT_TOKEN=juno-telegram-bot-token:latest" \
+  --set-secrets="LANGFUSE_PUBLIC_KEY=juno-langfuse-public-key:latest" \
+  --set-secrets="LANGFUSE_SECRET_KEY=juno-langfuse-secret-key:latest" \
+  --set-env-vars="LANGFUSE_HOST=https://hipaa.cloud.langfuse.com" \
   --set-env-vars="DODO_API_BASE=${DODO_API_BASE}" \
   --set-env-vars="DODO_PRODUCT_COMPANION_MONTHLY=${DODO_PRODUCT_COMPANION_MONTHLY}" \
   --set-env-vars="DODO_PRODUCT_COMPANION_YEARLY=${DODO_PRODUCT_COMPANION_YEARLY}" \

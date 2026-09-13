@@ -27,6 +27,10 @@ from ...prompts import (
 )
 from ...services import voice_action_receipts
 from ...services.analytics.llm_telemetry import start_llm_generation
+from ...services.analytics.speech_pricing import (
+    estimate_stt_microusd,
+    estimate_tts_microusd,
+)
 from .action_policy import tool_output_succeeded
 from .capabilities import VOICE_TOOL_REGISTRY, ToolEffect
 from .errors import classify_pipeline_error, publish_client_error
@@ -180,6 +184,10 @@ class VoiceSessionRecorder:
         # running totals every turn); flushed to Langfuse once at session close
         # as one per-session generation per model.
         self._model_usage_totals: dict[str, dict] = {}
+        # Same shape, for the STT and TTS legs. Separate from the LLM dict because
+        # these bill per audio second and per character, not per token, and must not
+        # reach the per-user token ledger or the reactive cost cap that reads it.
+        self._speech_usage_totals: dict[str, dict] = {}
         # Explicit FallbackAdapter availability transitions, timestamped. Usage
         # totals say WHAT served; these say WHEN a leg failed and recovered,
         # which is the difference between inferring degradation and observing it.
@@ -634,7 +642,11 @@ class VoiceSessionRecorder:
         usage = getattr(ev, "usage", None)
         model_usage = getattr(usage, "model_usage", None) or []
         for mu in model_usage:
-            if getattr(mu, "type", "") != "llm_usage":
+            usage_type = getattr(mu, "type", "")
+            if usage_type in ("stt_usage", "tts_usage"):
+                self._note_speech_usage(usage_type, mu)
+                continue
+            if usage_type != "llm_usage":
                 continue
             input_tokens = getattr(mu, "input_tokens", 0)
             cached_tokens = getattr(mu, "input_cached_tokens", 0)
@@ -670,6 +682,63 @@ class VoiceSessionRecorder:
             if model:
                 # Overwrite, never add: these are running totals for the session.
                 self._model_usage_totals[model] = usage_totals
+
+    def _note_speech_usage(self, usage_type: str, mu) -> None:  # type: ignore[misc]
+        """Accumulate one STT or TTS running total, keyed by leg and model.
+
+        LiveKit re-emits CUMULATIVE per-model totals after every turn, exactly like
+        the llm_usage branch above, so these overwrite rather than add.
+        """
+        model = str(getattr(mu, "model", "") or "")
+        provider = str(getattr(mu, "provider", "") or "")
+        if not model and not provider:
+            return
+        leg = "stt" if usage_type == "stt_usage" else "tts"
+        totals = {
+            "leg": leg,
+            "provider": provider,
+            "audio_seconds": float(getattr(mu, "audio_duration", 0.0) or 0.0),
+            "characters": int(getattr(mu, "characters_count", 0) or 0),
+        }
+        self._speech_usage_totals[f"{leg}:{model or provider}"] = {**totals, "model": model}
+
+    @property
+    def speech_usage_totals(self) -> dict[str, dict]:
+        """Final cumulative per-leg, per-model speech usage for this session."""
+        return {key: dict(totals) for key, totals in self._speech_usage_totals.items()}
+
+    def _record_session_speech_usage(self) -> None:
+        """Emit one Langfuse observation per speech leg with the session FINAL
+        totals, alongside the LLM ones.
+
+        Deepgram and Cartesia were previously invisible to every cost view, so voice
+        looked far cheaper than it is: on a cascading pipeline the speech legs are a
+        real share of per-minute cost. Priced here rather than by Langfuse because
+        Langfuse infers cost from a TOKEN table and these bill per audio minute and
+        per character, so the cost is passed explicitly.
+
+        Best-effort, same as the LLM sibling: telemetry never blocks session close.
+        """
+        for totals in self._speech_usage_totals.values():
+            leg = str(totals.get("leg") or "")
+            provider = str(totals.get("provider") or "")
+            model = str(totals.get("model") or "")
+            audio_seconds = float(totals.get("audio_seconds") or 0.0)
+            characters = int(totals.get("characters") or 0)
+            if leg == "stt":
+                micro = estimate_stt_microusd(provider, audio_seconds)
+                usage = {"seconds": int(round(audio_seconds))}
+            else:
+                micro = estimate_tts_microusd(provider, characters)
+                usage = {"characters": characters, "seconds": int(round(audio_seconds))}
+            recording = start_llm_generation(
+                model=model or provider,
+                provider=provider,
+                caller=f"voice_{leg}",
+                feature="voice",
+                uid=self._user_id,
+            )
+            recording.finish(usage_details=usage, cost_usd=micro / 1_000_000)
 
     def _on_false_interruption(self, ev) -> None:  # type: ignore[misc]
         # Observability only, no behavior change. Counts how often a detected
@@ -737,6 +806,7 @@ class VoiceSessionRecorder:
                 name=f"voice-client-error-close-{self._session_id[:8]}",
             )
         self._record_session_llm_usage()
+        self._record_session_speech_usage()
         if self._tool_observer is not None:
             self._tool_observer.close_voice_context()
         self.done.set()
@@ -801,6 +871,7 @@ class VoiceSessionRecorder:
                 model=model,
                 provider=totals.get("provider", ""),
                 caller="voice_session",
+                feature="voice",
                 uid=self._user_id,
             )
             cached = int(totals.get("cached_tokens", 0) or 0)

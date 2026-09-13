@@ -107,7 +107,7 @@ async def run_briefing_tick(
     async def _process_with_semaphore(user_id: str) -> None:
         async with semaphore:
             try:
-                with bind_llm_user(user_id):
+                with bind_llm_user(user_id, feature="daily_briefing"):
                     await _process_one_user(user_id, models, summary, force=force)
             except Exception as exc:
                 # One user's failure is fully contained — never abort the tick.

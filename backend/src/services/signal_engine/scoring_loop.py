@@ -291,7 +291,7 @@ async def run_tick() -> TickSummary:
     async def _score_with_semaphore(user_id: str) -> None:
         async with semaphore:
             try:
-                with bind_llm_user(user_id):
+                with bind_llm_user(user_id, feature="signal_engine"):
                     await _score_one_user(
                         user_id, models, summary, breaking_candidates, breaking_frame_cache,
                     )
